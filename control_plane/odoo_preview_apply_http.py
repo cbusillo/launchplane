@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import base64
 import binascii
 import hashlib
+import re
 from pathlib import Path
 from typing import Any, cast
 
@@ -17,7 +18,7 @@ from control_plane import runtime_environments as control_plane_runtime_environm
 from control_plane import runtime_platform_credentials
 from control_plane.preview_source import PreviewSourceDecision
 
-from control_plane.clean_testing_snapshot import preview_snapshot
+from control_plane.clean_testing_snapshot import CleanTestingSnapshot, preview_snapshot
 from control_plane.odoo_testing_restore import preflight_fresh_testing_intent
 from control_plane.integration_readback import INTEGRATION_FAMILIES
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
@@ -63,6 +64,7 @@ from control_plane.contracts.preview_mutation_request import (
 )
 from control_plane.contracts.odoo_stable_target_replacement import (
     apply_artifact_odoo_version,
+    artifact_odoo_version,
     LAUNCHPLANE_REQUIRED_ODOO_MODULES,
     merge_odoo_install_modules,
 )
@@ -227,6 +229,7 @@ def _build_odoo_preview_apply_inputs(
     profile: LaunchplaneProductProfileRecord,
     request: OdooPreviewApplyInputsRequest,
     database_url: str | None,
+    previously_issued_plan: OdooPreviewApplyInputsResult | None = None,
 ) -> OdooPreviewApplyInputsResult:
     result = build_odoo_preview_apply_inputs(
         control_plane_root=control_plane_root,
@@ -247,19 +250,27 @@ def _build_odoo_preview_apply_inputs(
     if profile.preview.clean_testing_snapshot:
         if request.fishbowl_source is not None:
             raise ValueError("Snapshot previews cannot connect to an import source.")
+        target_version = artifact_odoo_version(request.manifest)
+        _preview_odoo_major(target_version)
         retained = preview_has_completed_restore(
             record_store=record_store,
             profile=profile,
             plan=result.dry_run_plan,
             pr_number=request.pr_number,
+            artifact_manifest=request.manifest,
         )
         if not retained:
             snapshot = preview_snapshot(cast(Any, record_store), profile)
+            source_version = _preview_snapshot_base_version(
+                record_store, snapshot, previously_issued_plan
+            )
+            _require_preview_source_major(source_version, target_version)
             result = result.model_copy(
                 update={
+                    "clean_snapshot_base_version": source_version,
                     "dry_run_plan": result.dry_run_plan.model_copy(
                         update={"clean_snapshot": snapshot}
-                    )
+                    ),
                 }
             )
     if request.fishbowl_source is not None:
@@ -295,6 +306,54 @@ def _build_odoo_preview_apply_inputs(
             "fishbowl_source_sha256": environment.fishbowl_source_sha256,
         }
     )
+
+
+def _preview_odoo_major(version: str) -> str:
+    from control_plane.odoo_copy_aggregates import BASE_VERSION_PATTERN
+
+    if len(version) > 64 or re.fullmatch(BASE_VERSION_PATTERN, version) is None:
+        raise OdooPreviewPlanProvenanceError(
+            code="odoo_preview_source_version_unavailable",
+            message="Ordinary preview requires verified source and artifact versions. "
+            "Use a versioned build and a qualified matching testing capture.",
+        )
+    return version.split(".", 1)[0]
+
+
+def _require_preview_source_major(source_version: str, target_version: str) -> None:
+    if _preview_odoo_major(source_version) != _preview_odoo_major(target_version):
+        raise OdooPreviewPlanProvenanceError(
+            code="odoo_preview_source_major_mismatch",
+            message="Ordinary preview cannot migrate its source database. "
+            "Publish a qualified matching testing capture through the existing refresh/rebuild path; "
+            "use the explicit migration path to prepare an older source first.",
+        )
+
+
+def _preview_snapshot_base_version(
+    store: object,
+    snapshot: CleanTestingSnapshot,
+    previously_issued_plan: OdooPreviewApplyInputsResult | None,
+) -> str:
+    from control_plane.odoo_snapshot_version import read_snapshot_metadata
+    from control_plane.odoo_runtime_reads import OdooRuntimeReadError
+
+    if (
+        previously_issued_plan is not None
+        and previously_issued_plan.dry_run_plan.clean_snapshot == snapshot
+        and previously_issued_plan.clean_snapshot_base_version
+    ):
+        return previously_issued_plan.clean_snapshot_base_version
+    try:
+        return read_snapshot_metadata(
+            store=cast(Any, store), snapshot=snapshot
+        ).recorded_base_version
+    except (ValueError, FileNotFoundError, OdooRuntimeReadError) as error:
+        raise OdooPreviewPlanProvenanceError(
+            code="odoo_preview_source_version_unavailable",
+            message="The selected immutable snapshot version could not be verified. "
+            "Keep the existing source and retry after its archive reader is available.",
+        ) from error
 
 
 def build_odoo_preview_plan_id(*, scope: str, idempotency_key: str) -> str:
@@ -431,6 +490,9 @@ def refresh_odoo_preview_issued_plan(
             code="odoo_preview_plan_not_issued",
             message="Odoo preview apply requires service-issued plan provenance.",
         )
+    validate_odoo_preview_issued_plan(
+        plan_id=provenance.plan_id, issued_plan=issued_plan, request=request
+    )
     resolved_observed_at = observed_at or datetime.now(timezone.utc)
     if resolved_observed_at.tzinfo is None:
         raise ValueError("Odoo preview plan validation requires a timezone-aware timestamp.")
@@ -452,6 +514,7 @@ def refresh_odoo_preview_issued_plan(
             profile=profile,
             request=issued_plan.plan_request,
             database_url=database_url,
+            previously_issued_plan=issued_plan,
         )
     except (FileNotFoundError, PreviewImportSourceError, click.ClickException) as error:
         raise OdooPreviewPlanProvenanceError(
@@ -772,6 +835,7 @@ def preview_has_completed_restore(
     profile: LaunchplaneProductProfileRecord,
     plan: OdooPreviewDokployDryRunPlan,
     pr_number: int,
+    artifact_manifest: ArtifactIdentityManifest | None = None,
 ) -> bool:
     store = cast(Any, record_store)
     preview = find_preview_record(
@@ -843,6 +907,21 @@ def preview_has_completed_restore(
                     )
                 )
             ):
+                if profile.preview.clean_testing_snapshot and artifact_manifest is not None:
+                    from control_plane.preview_reservation_recovery import original_preview_intent
+
+                    try:
+                        original = original_preview_intent(operation, profile=profile, store=store)
+                    except ValueError as error:
+                        raise OdooPreviewPlanProvenanceError(
+                            code="odoo_preview_source_version_unavailable",
+                            message="The retained copy lacks verified original artifact provenance. "
+                            "Preserve its data and inspect its completed operation.",
+                        ) from error
+                    _require_preview_source_major(
+                        artifact_odoo_version(original.issued_plan.plan_request.manifest),
+                        artifact_odoo_version(artifact_manifest),
+                    )
                 return True
     if profile.preview.clean_testing_snapshot and not any(
         item.state in {"ready", "superseded"} for item in generations

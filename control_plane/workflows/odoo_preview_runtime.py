@@ -238,6 +238,11 @@ class OdooPreviewApplyInputsResult(BaseModel):
     runtime_plan: OdooPreviewRuntimePlan
     dry_run_plan: OdooPreviewDokployDryRunPlan
     plan_provenance: OdooPreviewApplyPlanProvenance | None = None
+    clean_snapshot_base_version: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     # Template-lane integration credentials the preview receives blank because no
     # key-safety rule allows them on previews. Key names only, never values.
     omitted_integration_credential_keys: tuple[str, ...] = ()

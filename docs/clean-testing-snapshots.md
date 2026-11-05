@@ -100,6 +100,44 @@ lookup, including before the product has published its first snapshot. There
 is no production or live-testing fallback. The preview and snapshot must be on
 the same execution server; cross-host transport is not implied.
 
+Ordinary snapshot previews require the selected artifact's recorded Odoo major
+to match the source database. Planning reads the installed base version with
+the existing immutable archive decoder and binds it into the issued plan.
+Apply reuses that fingerprinted evidence only while the complete snapshot
+binding still matches; a different source requires its own read. An unavailable
+archive reader, malformed base version or unversioned artifact refuses with
+`odoo_preview_source_version_unavailable`. A cross-major source refuses with
+`odoo_preview_source_major_mismatch` before target changes or registry work.
+The archive utility uses the testing database container's PostgreSQL tools, so
+that utility must be available for a new source read. Existing issued metadata
+is not a claim that migration or preparation completed.
+
+A completed retained preview keeps its database and filestore. Before ordinary
+refresh, its completed original operation must verify the previous artifact's
+major against the new artifact; unknown original provenance refuses rather than
+replacing data or inferring compatibility. Same-major refreshes preserve the
+copy and do not select a newer snapshot. Driver upstream restores and explicit
+upgrade rehearsals keep their existing migration contracts.
+
+To supply a matching source, use the existing qualified testing refresh/rebuild
+and capture publication path above. A saved database file is not a published
+`CleanTestingSnapshot`. For OPW, [the migration batch](https://github.com/cbusillo/odoo-tenant-opw/issues/314)
+owns the future target20 logical database plus full merged filestore output.
+That output follows migration and is not an input prerequisite to the batch
+that creates it. The programme lead coordinates its subsequent qualified source
+binding and admitted testing refresh/rebuild/capture. The existing operation
+completion publishes the capture through `completed_operation_snapshot`; normal
+preview planning can then select it. The assigned preview agent owns all
+actual preview effects.
+
+The existing upstream contract reads a PostgreSQL database and its matching
+filestore from recorded source coordinates; it does not select a saved dump
+path. If the batch returns only exported files, making that output available
+through the qualified existing source binding remains an explicit lead-owned
+gap. This source correction neither supplies that binding nor completes the
+migration, publication or staff-testing event. It adds no archive import or
+publication mode, and no source or profile is changed to use it.
+
 The copy receives no source SSH mount or upstream connection. Private-port
 preview renders also omit the host-gateway alias; runtime inspection rejects
 host aliases before copying. Its schedule
