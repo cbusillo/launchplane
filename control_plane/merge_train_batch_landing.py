@@ -25,6 +25,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
 from control_plane.merge_train_batch_candidate import (
     MergeTrainBatchCandidateRecordStore,
     read_merge_train_batch_candidate_record,
+    merge_train_batch_refs_in_use,
 )
 from control_plane.merge_admission import (
     GuardedMergeAdmission,
@@ -386,6 +387,7 @@ def _execute_land_mode(
             landing_plan.candidate_sha,
         )
     candidate_ref_cleanup_result = _cleanup_merge_train_batch_candidate_ref(
+        candidate_store=candidate_store,
         github_client=github_client,
         landing_plan=landing_plan,
         request_trace_id=trace_id,
@@ -504,10 +506,13 @@ def _read_and_validate_stack_record(
 
 def _cleanup_merge_train_batch_candidate_ref(
     *,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
     github_client: GitHubMergeTrainClient,
     landing_plan: MergeTrainBatchLandingPlan,
     request_trace_id: str,
 ) -> dict[str, object]:
+    if merge_train_batch_refs_in_use(record_store=candidate_store, candidate=landing_plan):
+        return {"candidate_ref_cleanup_status": "retained"}
     try:
         deleted = github_client.cleanup_batch_candidate_ref(landing_plan=landing_plan)
         retained = any(

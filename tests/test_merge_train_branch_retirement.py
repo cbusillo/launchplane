@@ -225,7 +225,10 @@ class MergeTrainBranchRetirementTests(unittest.TestCase):
         branch = plan.candidate_ref.removeprefix("refs/heads/")
         self.provider.pulls = [{"state": "open", "head": {"ref": branch}, "base": {"ref": "other"}}]
         result = _cleanup_merge_train_batch_candidate_ref(
-            github_client=self.client, landing_plan=plan, request_trace_id="retained-fixture"
+            candidate_store=Mock(list_merge_train_batch_candidate_records=Mock(return_value=())),
+            github_client=self.client,
+            landing_plan=plan,
+            request_trace_id="retained-fixture",
         )
         self.assertEqual(result["candidate_ref_cleanup_status"], "retained")
         self.assertIn(plan.candidate_ref, self.provider.refs)
@@ -282,6 +285,7 @@ class MergeTrainBranchRetirementTests(unittest.TestCase):
             created_at=self.candidate.updated_at,
         )
         result = _cleanup_merge_train_batch_candidate_ref(
+            candidate_store=Mock(list_merge_train_batch_candidate_records=Mock(return_value=())),
             github_client=self.client,
             landing_plan=plan,
             request_trace_id="retained-construction",

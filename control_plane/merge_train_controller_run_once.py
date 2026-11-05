@@ -87,6 +87,7 @@ from control_plane.merge_train_batch_pull_request import (
 from control_plane.merge_train_batch_candidate import (
     MergeTrainBatchCandidateBaseHistoryReadStore,
     MergeTrainBatchCandidateRecordStore,
+    merge_train_batch_refs_in_use,
     merge_train_snapshot_has_stack_topology,
 )
 from control_plane.merge_train_batch_landing import (
@@ -7335,22 +7336,9 @@ def _cleanup_service_batch_refs(
     candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
     lease: MergeTrainControllerLeaseContext,
 ) -> str:
-    references = merge_train_batch_refs(candidate)
-    if candidate.candidate_ref not in references:
+    if merge_train_batch_refs_in_use(record_store=candidate_store, candidate=candidate):
         return "retained"
-    for record in candidate_store.list_merge_train_batch_candidate_records(
-        repository=candidate.repository, status="active"
-    ):
-        other = record.candidate
-        if isinstance(candidate, MergeTrainBatchLandingPlan) and (
-            other.batch_id == candidate.batch_id
-            and other.base_branch == candidate.base_branch
-            and other.policy_sha256 == candidate.policy_sha256
-            and (not other.candidate_sha or other.candidate_sha == candidate.candidate_sha)
-        ):
-            continue
-        if set(references).intersection((other.candidate_ref, *merge_train_batch_refs(other))):
-            return "retained"
+    references = merge_train_batch_refs(candidate)
     lease.checkpoint()
     deleted = github_client.cleanup_batch_candidate_ref(landing_plan=candidate)
     if any(

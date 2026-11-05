@@ -1,4 +1,5 @@
 from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_record
 from tests.support.auth import scoped_agent_test
 from contextlib import nullcontext
 from datetime import datetime, timezone
@@ -691,6 +692,12 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
         )
 
     async def test_lands_existing_plan_and_cleans_candidate_ref(self) -> None:
+        await self._check_landing_ref_cleanup(protect_running=False)
+
+    async def test_direct_landing_keeps_refs_used_by_another_active_candidate(self) -> None:
+        await self._check_landing_ref_cleanup(protect_running=True)
+
+    async def _check_landing_ref_cleanup(self, *, protect_running: bool) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
@@ -723,6 +730,20 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
                         "candidate_record_id": passed_candidate_record.record_id,
                     },
                 )
+                if protect_running:
+                    running = passed_candidate_record.candidate.model_copy(
+                        update={
+                            "candidate_sha": "another-running-candidate",
+                            "status": "ready_for_checks",
+                        }
+                    )
+                    store.write_merge_train_batch_candidate_record(
+                        build_merge_train_batch_candidate_record(
+                            candidate=running,
+                            source="test:running-candidate",
+                            updated_at=running.updated_at,
+                        )
+                    )
                 response = await _post_merge_train_batch_landing_run_once(
                     app,
                     {
@@ -738,7 +759,10 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["result"]["mode"], "land")
-        self.assertEqual(response.json()["result"]["candidate_ref_cleanup_status"], "deleted")
+        self.assertEqual(
+            response.json()["result"]["candidate_ref_cleanup_status"],
+            "retained" if protect_running else "deleted",
+        )
         self.assertEqual(
             response.json()["result"]["landing_plan"]["entries"][0]["status"], "merged"
         )
