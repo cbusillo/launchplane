@@ -1090,6 +1090,24 @@ class ParameterPresenceTests(unittest.TestCase):
         self.connector = self.enterContext(
             patch.object(reads, "connect_runtime", return_value=self.fixture.connection)
         )
+        self.container_config = {
+            "Image": identity.image_reference,
+            "Labels": {
+                "com.docker.compose.project": self.fixture.connection.app_name,
+                "com.docker.compose.service": "web",
+            },
+            "Env": [
+                "PLATFORM_INSTANCE=testing",
+                RUNTIME_IDENTITY_ENV_KEY + "=" + identity.model_dump_json(),
+            ],
+        }
+        self.provider = self.enterContext(
+            patch.object(
+                api,
+                "dokploy_request",
+                return_value={"Config": self.container_config, "State": {"Running": True}},
+            )
+        )
         self.remote = self.enterContext(
             patch.object(presence, "_read_remote", side_effect=self.observe)
         )
@@ -1185,6 +1203,24 @@ class ParameterPresenceTests(unittest.TestCase):
         ):
             self.assertEqual(self.read().runtime, "unknown")
 
+    def test_changed_observed_artifact_or_image_refuses_before_host_transport(self) -> None:
+        for field, value in (
+            ("artifact_id", "other-artifact"),
+            ("image_reference", "ghcr.io/example/site@sha256:" + "e" * 64),
+        ):
+            with self.subTest(field=field):
+                changed = self.fixture.identity.model_copy(update={field: value})
+                self.container_config["Env"] = [
+                    "PLATFORM_INSTANCE=testing",
+                    RUNTIME_IDENTITY_ENV_KEY + "=" + changed.model_dump_json(),
+                ]
+                result = self.read()
+                self.assertEqual(result.failure_stage, "runtime_inspection")
+                self.assertEqual(result.runtime, "unknown")
+                self.assertIsNone(result.presence)
+                self.assertIsNone(result.evidence)
+        self.remote.assert_not_called()
+
     def test_unavailable_or_unselected_outputs_never_expose_values_or_false_absence(self) -> None:
         observations: tuple[dict[str, object], ...] = (
             {"runtime": "unknown"},
@@ -1219,24 +1255,41 @@ class ParameterPresenceTests(unittest.TestCase):
             self.assertEqual(self.read().runtime, "unknown")
             self.assertNotIn(PRIVATE, repr(logger.call_args_list))
 
-    def test_host_checks_resource_drift_and_discards_unselected_child_output(self) -> None:
+    def test_observed_identity_reaches_real_host_with_stamped_inventory_and_strict_checks(
+        self,
+    ) -> None:
         import base64
         import sys
 
         from dataclasses import replace
 
+        inventory_identity = self.fixture.identity.model_copy(update={"deployed_at": STAMP})
         self.fixture.connection = replace(
             self.fixture.connection,
-            evidence=self.fixture.connection.evidence.model_copy(update={"container_id": "c" * 64}),
+            selection=reads.OdooRuntimeSelection(
+                inventory_identity, self.fixture.connection.selection.base_url
+            ),
+            evidence=self.fixture.connection.evidence.model_copy(
+                update={"identity": inventory_identity}
+            ),
+        )
+        self.fixture.store.read_environment_inventory.return_value = (
+            self.fixture.inventory.model_copy(update={"runtime_identity": inventory_identity})
         )
         self.connector.return_value = self.fixture.connection
-        self.assertEqual(self.read().runtime, "verified")
-        spec = self.remote.call_args.kwargs["payload"]
-        program = self.remote.call_args.kwargs["program"]
-        identity = spec["identity"]
-        container = spec["container"]
         selected = self.observed
-        for failure in ("none", "container", "image", "foreign_output", "stderr", "timeout"):
+        container = self.fixture.connection.evidence.container_id
+        image_reference = self.fixture.identity.image_reference
+        for failure in (
+            "none",
+            "container",
+            "image",
+            "artifact",
+            "changed_image",
+            "foreign_output",
+            "stderr",
+            "timeout",
+        ):
             with self.subTest(failure=failure):
                 inspections = 0
 
@@ -1244,20 +1297,21 @@ class ParameterPresenceTests(unittest.TestCase):
                     nonlocal inspections
                     if command[:2] == ["docker", "inspect"]:
                         inspections += 1
+                        config = json.loads(json.dumps(self.container_config))
+                        if failure == "artifact":
+                            changed = self.fixture.identity.model_copy(
+                                update={"artifact_id": "other-artifact"}
+                            )
+                            config["Env"] = [
+                                "PLATFORM_INSTANCE=testing",
+                                RUNTIME_IDENTITY_ENV_KEY + "=" + changed.model_dump_json(),
+                            ]
+                        if failure == "changed_image":
+                            config["Image"] = "ghcr.io/example/site@sha256:" + "e" * 64
                         raw = {
                             "Id": container,
                             "Image": "sha256:" + "d" * 64,
-                            "Config": {
-                                "Image": identity["image_reference"],
-                                "Labels": {
-                                    "com.docker.compose.project": spec["project"],
-                                    "com.docker.compose.service": "web",
-                                },
-                                "Env": [
-                                    "PLATFORM_INSTANCE=testing",
-                                    RUNTIME_IDENTITY_ENV_KEY + "=" + json.dumps(identity),
-                                ],
-                            },
+                            "Config": config,
                             "State": {
                                 "Running": True,
                                 "Pid": 13 if failure == "container" and inspections > 1 else 12,
@@ -1274,7 +1328,7 @@ class ParameterPresenceTests(unittest.TestCase):
                                         "Id": command[-1],
                                         "RepoDigests": []
                                         if failure == "image"
-                                        else [identity["image_reference"]],
+                                        else [image_reference],
                                     }
                                 ]
                             ),
@@ -1295,34 +1349,39 @@ class ParameterPresenceTests(unittest.TestCase):
                         stderr=PRIVATE,
                     )
 
-                with (
-                    patch.object(
-                        sys,
-                        "argv",
-                        ["host", base64.b64encode(json.dumps(spec).encode()).decode(), "FRAME:"],
-                    ),
-                    patch("subprocess.run", side_effect=run),
-                    contextlib.redirect_stdout(io.StringIO()) as output,
-                    contextlib.redirect_stderr(io.StringIO()) as errors,
-                ):
-                    exec(program, {})
-                result = json.loads(output.getvalue().removeprefix("FRAME:"))["result"]
-                self.assertEqual(
-                    result.get("runtime"), "verified" if failure == "none" else "unknown"
-                )
+                def remote(**kwargs: Any) -> None:
+                    spec = base64.b64encode(json.dumps(kwargs["payload"]).encode()).decode()
+                    with (
+                        patch.object(sys, "argv", ["host", spec, "FRAME:"]),
+                        patch("subprocess.run", side_effect=run),
+                        contextlib.redirect_stdout(io.StringIO()) as output,
+                        contextlib.redirect_stderr(io.StringIO()) as errors,
+                    ):
+                        exec(kwargs["program"], {})
+                    self.assertNotIn(PRIVATE, output.getvalue() + errors.getvalue())
+                    kwargs["receive"](json.loads(output.getvalue().removeprefix("FRAME:")))
+
+                self.remote.side_effect = remote
+                result = self.read()
+                self.assertEqual(result.runtime, "verified" if failure == "none" else "unknown")
                 if failure == "none":
-                    self.assertEqual(result, selected)
+                    self.assertEqual(result.presence.model_dump(), selected["presence"])
+                    self.assertEqual(
+                        result.evidence.identity, self.fixture.connection.selection.identity
+                    )
                 else:
-                    self.assertNotIn("presence", result)
+                    self.assertIsNone(result.presence)
                     stages = {
                         "container": "drift",
                         "image": "host_inspection",
+                        "artifact": "host_inspection",
+                        "changed_image": "host_inspection",
                         "foreign_output": "result_validation",
                         "stderr": "host_execution",
                         "timeout": "host_execution",
                     }
-                    self.assertEqual(result["failure_stage"], stages[failure])
-                self.assertNotIn(PRIVATE, output.getvalue() + errors.getvalue())
+                    self.assertEqual(result.failure_stage, stages[failure])
+                self.assertNotIn(PRIVATE, result.model_dump_json())
 
 
 class ParameterPresenceHttpTests(unittest.IsolatedAsyncioTestCase):
