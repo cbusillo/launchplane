@@ -64,7 +64,7 @@ def read_shared_source_changes(
         before_selectors, after_selectors = {}, {}
         unexplained.append("Shared release input source selection is UNKNOWN or ambiguous.")
     reviews = []
-    for key in sorted(before_selectors.keys() | after_selectors.keys()):
+    for key in sorted(after_selectors):
         if before_selectors.get(key) != after_selectors.get(key):
             unexplained.append(
                 f"Shared release input {key} changed its source selection without review coverage."

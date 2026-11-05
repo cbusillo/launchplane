@@ -537,6 +537,37 @@ class SharedReleaseReviewTests(unittest.TestCase):
         self.set_sources("testing", "d" * 40)
         self.assertFalse(self.review().approved)
 
+    def test_pinning_floating_sources_uses_complete_shared_commit_coverage(self) -> None:
+        artifact = self.store.read_artifact_manifest("artifact-testing")
+        for selectors in (artifact.addon_selectors[:1], ()):
+            with self.subTest(selectors=selectors):
+                self.store.write_artifact_manifest(
+                    artifact.model_copy(update={"addon_selectors": selectors})
+                )
+                review = self.review()
+                assert review.checklist is not None
+                self.assertTrue(review.checklist_complete)
+                self.assertFalse(review.approved)
+                self.assertEqual(
+                    {source.repository for source in review.checklist.shared_sources},
+                    {source.repository for source in artifact.addon_sources},
+                )
+
+    def test_pinned_sources_cannot_waive_incomplete_shared_review(self) -> None:
+        artifact = self.store.read_artifact_manifest("artifact-testing")
+        self.store.write_artifact_manifest(artifact.model_copy(update={"addon_selectors": ()}))
+        for failure in ("fail", "uncovered", "notes", "status"):
+            with self.subTest(failure=failure):
+                self.github = SharedGitHub()
+                setattr(
+                    self.github,
+                    failure,
+                    "" if failure == "notes" else "diverged" if failure == "status" else True,
+                )
+                review = self.review()
+                self.assertFalse(review.checklist_complete)
+                self.assertFalse(review.approved)
+
     def test_added_removed_selected_or_ambiguous_sources_remain_blocked(self) -> None:
         original = self.store.read_artifact_manifest("artifact-testing")
         for updates in (
