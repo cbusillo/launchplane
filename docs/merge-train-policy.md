@@ -1633,6 +1633,19 @@ after its checks pass and before any admission; an unresolved thread there,
 such as a code-scanning finding on the combined change, blocks with
 `batch_pull_request_conversations_unresolved` instead of a refused merge.
 
+Code-scanning rules are separate from required status checks. After a conclusive
+HTTP 405 or 409 merge rejection, the GitHub adapter diagnoses a missing required
+scan only for the same open head reported as blocked. It reads the active
+branch's required scanning tools and the exact head's native results from
+`github-advanced-security`. Running checks or unreadable evidence retain the
+original refusal; a check from another app cannot supply the native result.
+For a managed batch, `required_code_scanning_missing` closes that batch with
+the reason and makes its landing plan stale through the existing failure path.
+Later passes re-plan instead of retrying that batch's merge. Source PRs remain
+open, and the next candidate still needs every protected-branch gate. An
+individual source-PR landing reports the same diagnosis without closing it.
+This recovery neither requests a scan nor changes GitHub's rules or findings.
+
 ## Example Policy Entries
 
 The example below is documentation/import material only. It is not packaged as a

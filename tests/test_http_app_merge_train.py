@@ -2848,6 +2848,87 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(payloads[4]["result"]["landing_plan"]["entries"][0]["status"], "merged")
 
+    async def test_missing_code_scanning_closes_batch_without_retrying_its_merge(self) -> None:
+        attempts: list[int] = []
+        closed: list[tuple[str, str]] = []
+
+        class MissingScanClient(_FakeMergeTrainGitHubClient):
+            def ensure_batch_pull_request(self, **kwargs: Any) -> int:
+                return 99
+
+            def close_batch_pull_request(self, **kwargs: Any) -> None:
+                closed.append((kwargs["candidate"].candidate_sha, kwargs["reason"]))
+
+            def land_batch_candidate(self, **kwargs: Any) -> Any:
+                attempts.append(kwargs["landing_plan"].candidate_pull_request_number)
+                raise MergeTrainGitHubMergeRejectedError(
+                    pull_request_number=99,
+                    observed_merge_state="blocked",
+                    missing_required_code_scanning=True,
+                )
+
+        with (
+            TemporaryDirectory() as directory,
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
+            patch(
+                "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ),
+            patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                MissingScanClient,
+            ),
+        ):
+            state_dir = Path(directory) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            repository = "cbusillo/sellyouroutboard"
+            request = {
+                "schema_version": 1,
+                "repository": repository,
+                "base_branch": "main",
+                "mutate": True,
+            }
+            for _ in range(4):
+                await _post_merge_train_controller_run_once(app, request)
+            response = await _post_merge_train_controller_run_once(
+                app, request, idempotency_key="missing-scan"
+            )
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(
+                response.json()["result"]["error"]["code"], "required_code_scanning_missing"
+            )
+            replay = await _post_merge_train_controller_run_once(
+                app, request, idempotency_key="missing-scan"
+            )
+            self.assertTrue(replay.json()["replayed"])
+            for _ in range(3):
+                await _post_merge_train_controller_run_once(app, request)
+            self.assertEqual(attempts, [99])
+            self.assertTrue(closed)
+            self.assertIn("code-scanning", closed[0][1])
+            plans = store.list_merge_train_batch_landing_plan_records(
+                repository=repository, base_branch="main"
+            )
+            self.assertFalse(
+                any(
+                    entry.status == "merged"
+                    for record in plans
+                    for entry in record.landing_plan.entries
+                )
+            )
+            self.assertTrue(
+                any(
+                    all(entry.status == "stale" for entry in record.landing_plan.entries)
+                    for record in plans
+                )
+            )
+
     async def test_stale_landing_returns_accepted_result_and_replays_idempotently(self) -> None:
         class PartialLandingThenStale(_StaleLandingMergeTrainGitHubClient):
             def land_batch_candidate(self, **kwargs: Any) -> Any:

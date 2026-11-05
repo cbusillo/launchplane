@@ -245,7 +245,14 @@ class MergeTrainGitHubCandidateEntryConflictError(MergeTrainGitHubStaleHeadError
 class MergeTrainGitHubMergeRejectedError(MergeTrainGitHubError):
     """A conclusive merge refusal with bounded, separately observed diagnosis."""
 
-    def __init__(self, *, pull_request_number: int, observed_merge_state: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        pull_request_number: int,
+        observed_merge_state: str = "",
+        missing_required_code_scanning: bool = False,
+        status_code: int = 405,
+    ) -> None:
         self.pull_request_number = pull_request_number
         # GitHub's mergeable_state for the same open head, when it could be read.
         self.observed_merge_state = observed_merge_state
@@ -253,7 +260,13 @@ class MergeTrainGitHubMergeRejectedError(MergeTrainGitHubError):
             "behind": "head_behind_base",
             "blocked": "merge_blocked",
         }.get(observed_merge_state, "unconfirmed")
+        if missing_required_code_scanning:
+            self.refusal_diagnosis = "required_code_scanning_missing"
         diagnosis = {
+            "required_code_scanning_missing": (
+                "A required code-scanning result is missing for this PR head. "
+                "Close the batch so the train re-plans before another merge attempt."
+            ),
             "head_behind_base": (
                 "The same PR head is behind its base; refresh the source PR branches and let "
                 "the train build a fresh candidate before another attempt."
@@ -265,8 +278,8 @@ class MergeTrainGitHubMergeRejectedError(MergeTrainGitHubError):
             ),
         }.get(self.refusal_diagnosis, "Reread the PR's merge requirements before another attempt.")
         super().__init__(
-            f"GitHub refused to merge PR #{pull_request_number} (HTTP 405). {diagnosis}",
-            status_code=405,
+            f"GitHub refused to merge PR #{pull_request_number} (HTTP {status_code}). {diagnosis}",
+            status_code=status_code,
         )
 
 
@@ -3236,9 +3249,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 body={"sha": expected_head_sha, "merge_method": merge_method},
             )
         except MergeTrainGitHubError as error:
-            if error.status_code != 405:
+            if error.status_code not in {405, 409}:
                 raise
             observed_merge_state = ""
+            missing_required_code_scanning = False
             try:
                 observed = self.transport.request(
                     method="GET",
@@ -3257,9 +3271,22 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     and isinstance(merge_state, str)
                 ):
                     observed_merge_state = merge_state.strip().lower()
+                    if observed_merge_state == "blocked":
+                        try:
+                            missing_required_code_scanning = _missing_required_code_scanning_result(
+                                transport=self.transport,
+                                repository_path=repository_path,
+                                observed=observed,
+                            )
+                        except MergeTrainGitHubError:
+                            missing_required_code_scanning = False
+            if error.status_code == 409 and not missing_required_code_scanning:
+                raise
             raise MergeTrainGitHubMergeRejectedError(
                 pull_request_number=pull_request_number,
                 observed_merge_state=observed_merge_state,
+                missing_required_code_scanning=missing_required_code_scanning,
+                status_code=error.status_code,
             ) from error
         if not isinstance(payload, dict):
             raise MergeTrainGitHubError(
@@ -5549,6 +5576,44 @@ def _base_branch_identity(
     )
 
 
+def _missing_required_code_scanning_result(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    observed: dict[str, object],
+) -> bool:
+    base = observed.get("base")
+    if not isinstance(base, dict) or not isinstance(base_ref := base.get("ref"), str):
+        return False
+    policy = _required_ruleset_check_policy(
+        transport=transport,
+        repository_path=repository_path,
+        encoded_base_branch=quote(base_ref, safe=""),
+    )
+    if not policy.code_scanning_tools:
+        return False
+    head = _json_object(observed.get("head"), "GitHub rejected PR head")
+    head_sha = _required_text(head.get("sha"), "GitHub rejected PR head SHA is required.")
+    payload = _list_check_runs(
+        transport=transport,
+        repository_path=repository_path,
+        encoded_head_sha=quote(head_sha, safe=""),
+    )
+    if payload.get("actions_observation_error"):
+        return False
+    checks = cast(list[dict[str, object]], payload["check_runs"])
+    if any(check.get("status") != "completed" for check in checks):
+        return False
+    reported_tools = {
+        check.get("name")
+        for check in checks
+        if isinstance(app := check.get("app"), dict)
+        and app.get("slug") == "github-advanced-security"
+        and check.get("head_sha") == head_sha
+    }
+    return bool(set(policy.code_scanning_tools) - reported_tools)
+
+
 def _required_checks_status(
     *,
     transport: MergeTrainGitHubTransport,
@@ -6112,6 +6177,7 @@ def _first_comment_author(thread: dict[str, object]) -> str:
 class _BranchCheckPolicy:
     checks: tuple[tuple[str, int | None], ...]
     ruleset_strict: bool = False
+    code_scanning_tools: tuple[str, ...] = ()
 
 
 def _required_branch_checks(
@@ -6257,6 +6323,7 @@ def _required_branch_check_policy(
             )
         ),
         ruleset_policy.ruleset_strict,
+        ruleset_policy.code_scanning_tools,
     )
 
 
@@ -6295,8 +6362,20 @@ def _required_ruleset_check_policy(
         page += 1
     checks: dict[tuple[str, int | None], tuple[str, int | None]] = {}
     strict = False
+    code_scanning_tools: set[str] = set()
     for value in rules:
         rule = _json_object(value, "GitHub effective branch rule")
+        if rule.get("type") == "code_scanning":
+            parameters = _json_object(rule.get("parameters"), "GitHub code-scanning parameters")
+            tools = parameters.get("code_scanning_tools")
+            if not isinstance(tools, list):
+                raise MergeTrainGitHubError("GitHub required code-scanning tools must be a list.")
+            for value in tools:
+                tool = _json_object(value, "GitHub required code-scanning tool")
+                code_scanning_tools.add(
+                    _required_text(tool.get("tool"), "GitHub code-scanning tool is required.")
+                )
+            continue
         if rule.get("type") != "required_status_checks":
             continue
         parameters = _json_object(rule.get("parameters"), "GitHub required check rule parameters")
@@ -6325,6 +6404,7 @@ def _required_ruleset_check_policy(
     return _BranchCheckPolicy(
         tuple(checks[key] for key in sorted(checks, key=lambda check: (check[0], check[1] or -1))),
         strict,
+        tuple(sorted(code_scanning_tools)),
     )
 
 
