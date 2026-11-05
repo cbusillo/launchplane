@@ -109,6 +109,15 @@ class OperationSpec:
 
 OPERATION_SPECS = (
     OperationSpec(
+        "GET",
+        "/v1/products/{product}/preview-evidence",
+        "Read exact original intent, retained provider history and optional exact serving-generation probes without admission publication or effect settlement.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
         "POST",
         "/v1/product-profiles/{product}/generic-web-transition",
         "Review shared-web declarations; Director agents may apply preview-only changes on an existing generic-web product, preserving every stable declaration and existing credential gates.",

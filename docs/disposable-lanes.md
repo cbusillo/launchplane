@@ -10,6 +10,12 @@ version is not proof of those facts.
 
 ## Recorded Odoo preview qualification
 
+For observation without admission publication, use the
+[inert exact-original evidence read](preview-workflow-contract.md#inert-exact-original-evidence).
+It shares the existing qualification reader with collection and requires an
+exact original/source/image and optional serving generation. It records no
+safety fact and cannot qualify historical data custody.
+
 The observations route's existing reviewed `collect` mode accepts an owned
 Odoo `preview_id` and its preview slug. It resolves the active serving
 generation, verifies its runtime identity against the immutable issued plan,

@@ -1481,11 +1481,7 @@ def odoo_preview_target_is_quiescent(
             )
         if any(
             dokploy_api.deployment_status(deployment)
-            not in (
-                dokploy_post_deploy.DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
-                | dokploy_post_deploy.DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
-                | {"error", "failed", "fail"}
-            )
+            not in dokploy_post_deploy.DOKPLOY_TERMINAL_DEPLOYMENT_STATUSES
             for deployment in dokploy_api.list_deployments_for_target(
                 host=host,
                 token=token,
