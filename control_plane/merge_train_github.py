@@ -2471,28 +2471,15 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     def cleanup_batch_candidate_ref(
         self,
         *,
-        landing_plan: MergeTrainBatchLandingPlan,
+        landing_plan: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
         effect_executor: MergeTrainSemanticEffectExecutor | None = None,
+        protected_refs: frozenset[str] = frozenset(),
     ) -> bool:
         resolved_effect_executor = effect_executor or self.semantic_effect_executor
-        self.close_landed_candidate_validation_pr(landing_plan=landing_plan)
-        return resolved_effect_executor.delete_candidate_ref(
-            CandidateRefDeleteEffect(
-                lineage=MergeTrainEffectLineage(
-                    repository=landing_plan.repository,
-                    base_branch=landing_plan.base_branch,
-                    batch_id=landing_plan.batch_id,
-                    landing_plan_id=landing_plan.plan_id,
-                ),
-                candidate_ref=landing_plan.candidate_ref,
-            )
-        )
-
-    def close_landed_candidate_validation_pr(
-        self, *, landing_plan: MergeTrainBatchLandingPlan
-    ) -> None:
         if (
-            landing_plan.candidate_pull_request_number is None
+            isinstance(landing_plan, MergeTrainBatchLandingPlan)
+            and landing_plan.candidate_ref not in protected_refs
+            and landing_plan.candidate_pull_request_number is None
             and is_canonical_candidate_ref(landing_plan)
             and self.requires_full_odoo_build(repository=landing_plan.repository)
         ):
@@ -2509,13 +2496,41 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 raise MergeTrainGitHubError(
                     "Candidate validation PR cleanup could not be verified.", status_code=409
                 ) from error
+        canonical_ref = build_merge_train_batch_candidate_ref(
+            repository=landing_plan.repository,
+            base_branch=landing_plan.base_branch,
+            batch_id=landing_plan.batch_id,
+        )
+        if landing_plan.candidate_ref in (
+            canonical_ref,
+            merge_train_construction_ref(canonical_ref),
+        ):
+            return self._cleanup_batch_refs(
+                candidate=landing_plan,
+                protected_refs=protected_refs,
+                effect_executor=resolved_effect_executor,
+            )
+        if isinstance(landing_plan, MergeTrainBatchCandidate):
+            raise MergeTrainGitHubError("Retirement requires a train-owned batch ref.")
+        return resolved_effect_executor.delete_candidate_ref(
+            CandidateRefDeleteEffect(
+                lineage=MergeTrainEffectLineage(
+                    repository=landing_plan.repository,
+                    base_branch=landing_plan.base_branch,
+                    batch_id=landing_plan.batch_id,
+                    landing_plan_id=landing_plan.plan_id,
+                ),
+                candidate_ref=landing_plan.candidate_ref,
+            )
+        )
 
-    def cleanup_retired_batch_refs(
+    def _cleanup_batch_refs(
         self,
         *,
         candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
-        protected_refs: frozenset[str] = frozenset(),
-    ) -> str:
+        protected_refs: frozenset[str],
+        effect_executor: MergeTrainSemanticEffectExecutor,
+    ) -> bool:
         canonical_ref = build_merge_train_batch_candidate_ref(
             repository=candidate.repository,
             base_branch=candidate.base_branch,
@@ -2527,10 +2542,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         repository_path = _repository_path(candidate.repository)
         owner = candidate.repository.split("/", 1)[0]
         deleted = False
-        retained = False
         for reference in references:
             if reference in protected_refs:
-                retained = True
                 continue
             try:
                 payload = _json_object(
@@ -2560,15 +2573,17 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     raise MergeTrainGitHubError("Open PR ref usage is unavailable or incomplete.")
                 in_use = in_use or bool(pulls)
             if in_use:
-                retained = True
                 continue
             identity = _json_object(payload.get("object"), "Retired candidate ref object")
-            removed = self.semantic_effect_executor.delete_candidate_ref(
+            removed = effect_executor.delete_candidate_ref(
                 CandidateRefDeleteEffect(
                     lineage=MergeTrainEffectLineage(
                         repository=candidate.repository,
                         base_branch=candidate.base_branch,
                         batch_id=candidate.batch_id,
+                        landing_plan_id=candidate.plan_id
+                        if isinstance(candidate, MergeTrainBatchLandingPlan)
+                        else "",
                     ),
                     candidate_ref=reference,
                     expected_ref_sha=_required_text(
@@ -2577,7 +2592,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 )
             )
             deleted = deleted or removed
-        return "retained" if retained else "deleted" if deleted else "already_missing"
+        return deleted
 
     def candidate_ref_exists(self, *, repository: str, reference: str) -> bool:
         repository_path = _repository_path(repository)
@@ -3814,6 +3829,10 @@ class LegacyMergeTrainEffectExecutor:
                 "Candidate ref deletion",
             )
             if payload.get("errors"):
+                if not self.client.candidate_ref_exists(
+                    repository=effect.lineage.repository, reference=effect.candidate_ref
+                ):
+                    return False
                 raise _github_graphql_error(payload["errors"])
             data = _json_object(payload.get("data"), "Candidate ref deletion data")
             _json_object(data.get("updateRefs"), "Candidate ref deletion result")

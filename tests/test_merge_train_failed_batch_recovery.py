@@ -1256,7 +1256,16 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(self.provider.body, original_body)
             self.assertTrue(self.provider.closed)
-            self.assertTrue(all(method == "GET" for method, _, _ in self.provider.requests))
+            self.assertFalse(
+                any(method in {"PATCH", "PUT"} for method, _, _ in self.provider.requests)
+            )
+            self.assertTrue(
+                all(
+                    method != "POST" or path == "/graphql"
+                    for method, path, _ in self.provider.requests
+                )
+            )
+            self.assertEqual(self.provider.refs, {})
             check_paths = [path for _, path, _ in self.provider.requests if "/check-runs?" in path]
             self.assertTrue(check_paths)
             self.assertTrue(

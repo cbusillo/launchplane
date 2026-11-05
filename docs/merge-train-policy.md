@@ -2293,10 +2293,11 @@ the cleanup phase and candidate ref intact. The next lease holder resumes that e
 phase before planning new train work.
 
 Service-owned batch retirement uses that same controller lease for branch
-cleanup, including closed, failed, superseded and unpublished candidates, head-check
-reuse, changed-policy landings and externally completed landings. It retires both
+cleanup, after supersession or landing, including unpublished candidates, changed-policy
+landings and externally completed landings. Failed candidates and same-batch
+replacements remain active while their checks or recovery can still use the refs. It retires both
 the exact canonical `launchplane/train/...` ref and its derived
-`launchplane/construct/...` ref. Active records for other batches protect their
+`launchplane/construct/...` ref. Active candidate records protect their
 refs; an open PR using a ref as either head or base also keeps it. Retirement
 closes only the generated PR bound to its candidate, preserving other PRs on
 the same head. Incomplete provider reads stop cleanup. Deletion uses GitHub's

@@ -680,10 +680,41 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
 
     def test_retirement_does_not_dispose_of_an_unrecorded_merge(self) -> None:
         self.provider.merged = True
-        with self.assertRaises(MergeAdmissionReconciliationRequiredError):
+        original = self.provider.pull_request
+        for base_ref in ("main", "another-base"):
+            with self.subTest(base_ref=base_ref):
+
+                def merged(number: int) -> dict[str, object]:
+                    payload = original(number)
+                    base = cast(dict[str, object], payload["base"])
+                    base["ref"] = base_ref
+                    payload["body"] = ""
+                    return payload
+
+                with patch.object(self.provider, "pull_request", side_effect=merged):
+                    with self.assertRaises(MergeAdmissionReconciliationRequiredError):
+                        self.client.close_batch_pull_request(
+                            candidate=self.provider.candidate, reason=_CLOSE_REASON
+                        )
+        self.assertFalse(any(r[0] == "PATCH" for r in self.provider.requests))
+
+    def test_retirement_preserves_another_open_pr_using_the_candidate_head(self) -> None:
+        original = self.provider.pull_request
+
+        def unrelated(number: int) -> dict[str, object]:
+            payload = original(number)
+            payload["body"] = "Another change"
+            base = cast(dict[str, object], payload["base"])
+            base["ref"] = "another-base"
+            return payload
+
+        with patch.object(self.provider, "pull_request", side_effect=unrelated):
             self.client.close_batch_pull_request(
                 candidate=self.provider.candidate, reason=_CLOSE_REASON
             )
+            self.client.cleanup_batch_candidate_ref(landing_plan=self.provider.candidate)
+        self.assertFalse(self.provider.closed)
+        self.assertIn(self.provider.candidate.candidate_ref, self.provider.refs)
         self.assertFalse(any(r[0] == "PATCH" for r in self.provider.requests))
 
     def test_retirement_handles_mutable_batch_pr_drift(self) -> None:

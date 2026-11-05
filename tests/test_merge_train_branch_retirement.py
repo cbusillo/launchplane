@@ -3,8 +3,18 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 from unittest.mock import Mock
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
-from control_plane.merge_train_controller_run_once import _close_service_batch_pull_request
+from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan
+
+from control_plane.merge_train_controller_run_once import (
+    _close_service_batch_pull_request,
+    _supersede_active_merge_train_batch_candidate_records,
+    _resume_merge_train_controller_state,
+    MergeTrainControllerRunOnceEnvelope,
+)
 
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
@@ -79,8 +89,8 @@ class MergeTrainBranchRetirementTests(unittest.TestCase):
                 candidate = self.candidate.model_copy(
                     update={"status": status, "candidate_sha": sha}
                 )
-                self.client.cleanup_retired_batch_refs(candidate=candidate)
-                self.client.cleanup_retired_batch_refs(candidate=candidate)
+                self.client.cleanup_batch_candidate_ref(landing_plan=candidate)
+                self.client.cleanup_batch_candidate_ref(landing_plan=candidate)
                 self.assertEqual(self.provider.refs, {})
 
     def test_open_pr_heads_and_bases_and_running_batches_keep_their_refs(self) -> None:
@@ -97,8 +107,8 @@ class MergeTrainBranchRetirementTests(unittest.TestCase):
                             "base": {"ref": branch if field == "base" else "other"},
                         }
                     ]
-                self.client.cleanup_retired_batch_refs(
-                    candidate=self.candidate,
+                self.client.cleanup_batch_candidate_ref(
+                    landing_plan=self.candidate,
                     protected_refs=frozenset(self.refs) if field == "running" else frozenset(),
                 )
                 self.assertIn(self.refs[0], self.provider.refs)
@@ -110,64 +120,139 @@ class MergeTrainBranchRetirementTests(unittest.TestCase):
             with self.subTest(failure=failure):
                 setattr(self.provider, failure, True)
                 with self.assertRaises(MergeTrainGitHubError):
-                    self.client.cleanup_retired_batch_refs(candidate=self.candidate)
+                    self.client.cleanup_batch_candidate_ref(landing_plan=self.candidate)
                 self.assertEqual(set(self.provider.refs), set(self.refs))
                 setattr(self.provider, failure, False)
 
     def test_changed_tip_cannot_be_deleted_after_qualification(self) -> None:
         self.provider.move_before_delete = True
         with self.assertRaises(MergeTrainGitHubError):
-            self.client.cleanup_retired_batch_refs(candidate=self.candidate)
+            self.client.cleanup_batch_candidate_ref(landing_plan=self.candidate)
         self.assertEqual(self.provider.deleted, [])
         self.assertEqual(set(self.provider.refs), set(self.refs))
+
+    def test_landing_cleanup_uses_the_scoped_executor_for_both_refs(self) -> None:
+        plan = build_merge_train_batch_landing_plan(
+            candidate=self.candidate, merge_method="merge", created_at=self.candidate.updated_at
+        )
+        executor = Mock()
+        executor.delete_candidate_ref.return_value = True
+        self.client.cleanup_batch_candidate_ref(landing_plan=plan, effect_executor=executor)
+        effects = [call.args[0] for call in executor.delete_candidate_ref.call_args_list]
+        self.assertEqual({effect.candidate_ref for effect in effects}, set(self.refs))
+        self.assertTrue(all(effect.lineage.landing_plan_id == plan.plan_id for effect in effects))
+        self.assertTrue(
+            all(
+                effect.expected_ref_sha == self.provider.refs[effect.candidate_ref]
+                for effect in effects
+            )
+        )
 
     def test_non_owned_ref_is_refused_before_provider_calls(self) -> None:
         for reference in ("refs/heads/main", "refs/heads/work/source"):
             with self.subTest(reference=reference):
                 candidate = self.candidate.model_copy(update={"candidate_ref": reference})
                 with self.assertRaises(MergeTrainGitHubError):
-                    self.client.cleanup_retired_batch_refs(candidate=candidate)
+                    self.client.cleanup_batch_candidate_ref(landing_plan=candidate)
                 self.assertEqual(self.provider.deleted, [])
 
-    def test_controller_retires_failed_construction_without_a_candidate_sha(self) -> None:
-        record, _ = _records((_entry(1, 1), _entry(2, 2)), repository="acme/app")
-        record = record.model_copy(
-            update={
-                "candidate": record.candidate.model_copy(
-                    update={"candidate_sha": "", "status": "failed"}
+    def test_terminal_construction_retires_both_refs_after_persisting_supersession(self) -> None:
+        for fail_delete in (False, True):
+            with self.subTest(fail_delete=fail_delete), TemporaryDirectory() as directory:
+                record, _ = _records((_entry(1, 1), _entry(2, 2)), repository="acme/app")
+                record = record.model_copy(
+                    update={
+                        "candidate": record.candidate.model_copy(
+                            update={
+                                "candidate_sha": "",
+                                "candidate_tree_sha": "",
+                                "structural_provenance": None,
+                                "status": "failed",
+                            }
+                        )
+                    }
                 )
-            }
-        )
-        store = Mock()
-        store.list_merge_train_batch_candidate_records.return_value = (record,)
-        _close_service_batch_pull_request(
-            github_client=self.client,
-            candidate_store=store,
-            candidate_record=record,
-            lease=Mock(),
-            reason="construction failed",
-        )
-        self.assertEqual(self.provider.refs, {})
+                store = FilesystemRecordStore(Path(directory))
+                store.write_merge_train_batch_candidate_record(record)
+                self.provider.refs = {ref: "a" * 40 for ref in self.refs}
+                self.provider.fail_delete = fail_delete
+                kwargs: dict[str, Any] = dict(
+                    github_client=self.client,
+                    record_store=store,
+                    repository=record.candidate.repository,
+                    base_branch=record.candidate.base_branch,
+                    batch_id=record.candidate.batch_id,
+                    replacement_record_id=None,
+                    lease=Mock(),
+                )
+                if fail_delete:
+                    with self.assertRaises(MergeTrainGitHubError):
+                        _supersede_active_merge_train_batch_candidate_records(**kwargs)
+                else:
+                    _supersede_active_merge_train_batch_candidate_records(**kwargs)
+                    self.assertEqual(self.provider.refs, {})
+                self.assertEqual(
+                    store.list_merge_train_batch_candidate_records(status="active"), ()
+                )
+                if fail_delete:
+                    self.provider.fail_delete = False
+                    lease = Mock(
+                        record=Mock(
+                            ordinary_job_binding=None,
+                            active_action="reflow_candidate",
+                            active_phase="cleanup_retired_candidate_refs",
+                            reconciliation_detail="",
+                            reconciliation_status="adopted",
+                            active_record_id=record.record_id,
+                        )
+                    )
+                    _resume_merge_train_controller_state(
+                        request=MergeTrainControllerRunOnceEnvelope(
+                            repository=record.candidate.repository, mutate=True
+                        ),
+                        policy_sha256=record.candidate.policy_sha256,
+                        repository_policy=Mock(),
+                        trace_id="resume",
+                        recorded_at=record.updated_at,
+                        github_client=self.client,
+                        candidate_store=store,
+                        landing_store=store,
+                        stack_collapse_store=store,
+                        admission_store=store,
+                        lease=lease,
+                    )
+                    self.assertEqual(self.provider.refs, {})
 
-    def test_controller_preserves_refs_used_by_another_active_batch(self) -> None:
+    def test_failed_batch_and_same_batch_replacement_keep_refs_across_passes(self) -> None:
         record, _ = _records((_entry(1, 1), _entry(2, 2)), repository="acme/app")
         record = record.model_copy(
             update={
                 "candidate": record.candidate.model_copy(
-                    update={"candidate_sha": "", "status": "failed"}
+                    update={"status": "failed", "check_rerun_attempts": {101: 1}}
                 )
             }
         )
-        other = record.model_copy(
-            update={"candidate": record.candidate.model_copy(update={"batch_id": "other-batch"})}
-        )
-        store = Mock()
-        store.list_merge_train_batch_candidate_records.return_value = (record, other)
-        _close_service_batch_pull_request(
-            github_client=self.client,
-            candidate_store=store,
-            candidate_record=record,
-            lease=Mock(),
-            reason="construction failed",
-        )
-        self.assertIn(self.refs[0], self.provider.refs)
+        replacement = record.model_copy(update={"record_id": record.record_id + "-retry"})
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_batch_candidate_record(record)
+            for _ in range(2):
+                _close_service_batch_pull_request(
+                    github_client=self.client,
+                    candidate_record=record,
+                    lease=Mock(),
+                    reason="checks failed",
+                )
+                self.assertEqual(set(self.provider.refs), set(self.refs))
+            store.write_merge_train_batch_candidate_record(replacement)
+            for _ in range(2):
+                _supersede_active_merge_train_batch_candidate_records(
+                    github_client=self.client,
+                    record_store=store,
+                    repository=record.candidate.repository,
+                    base_branch=record.candidate.base_branch,
+                    batch_id=record.candidate.batch_id,
+                    replacement_record_id=replacement.record_id,
+                    lease=Mock(),
+                )
+                self.assertEqual(set(self.provider.refs), set(self.refs))
