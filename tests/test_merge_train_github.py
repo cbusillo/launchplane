@@ -4462,6 +4462,13 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 failed_refresh,
                 CURRENT_HEAD_PREVIEW_FAILED,
             ),
+            (
+                "verification marked a generation ready that never deployed",
+                True,
+                (preview_generation("head-16").model_copy(update={"deploy_status": "fail"}),),
+                None,
+                CURRENT_HEAD_PREVIEW_NOT_SERVED,
+            ),
             ("preview serves the current head", True, (preview_generation("head-16"),), None, ""),
             (
                 "current head served before a same-head refresh failed",

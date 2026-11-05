@@ -273,7 +273,10 @@ def _profile_current_head_preview(
         if head_sha and generation.anchor_summary.head_sha.strip().lower() == head_sha
     )
     if any(
-        generation.state in {"ready", "superseded"} and generation.ready_at.strip()
+        generation.state in {"ready", "superseded"}
+        and generation.ready_at.strip()
+        and generation.deploy_status == "pass"
+        and generation.verify_status == "pass"
         for generation in head_generations
     ):
         return "served"
