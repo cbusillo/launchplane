@@ -90,8 +90,8 @@ class MergeTrainBranchRetirementTests(unittest.TestCase):
                 candidate = self.candidate.model_copy(
                     update={"status": status, "candidate_sha": sha}
                 )
-                self.client.cleanup_batch_candidate_ref(landing_plan=candidate)
-                self.client.cleanup_batch_candidate_ref(landing_plan=candidate)
+                self.assertTrue(self.client.cleanup_batch_candidate_ref(landing_plan=candidate))
+                self.assertFalse(self.client.cleanup_batch_candidate_ref(landing_plan=candidate))
                 self.assertEqual(self.provider.refs, {})
 
     def test_open_pr_heads_and_bases_and_running_batches_keep_their_refs(self) -> None:
