@@ -509,6 +509,9 @@ def _cleanup_merge_train_batch_candidate_ref(
 ) -> dict[str, object]:
     try:
         deleted = github_client.cleanup_batch_candidate_ref(landing_plan=landing_plan)
+        retained = github_client.candidate_ref_exists(
+            repository=landing_plan.repository, reference=landing_plan.candidate_ref
+        )
     except MergeTrainGitHubError as error:
         message = str(error).strip() or "GitHub candidate ref cleanup failed."
         _LOGGER.warning(
@@ -529,5 +532,9 @@ def _cleanup_merge_train_batch_candidate_ref(
             result["candidate_ref_cleanup_github_status_code"] = error.status_code
         return result
     return {
-        "candidate_ref_cleanup_status": "deleted" if deleted else "already_missing",
+        "candidate_ref_cleanup_status": "retained"
+        if retained
+        else "deleted"
+        if deleted
+        else "already_missing",
     }

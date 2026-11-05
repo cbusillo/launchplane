@@ -8,6 +8,7 @@ from pathlib import Path
 
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan
+from control_plane.merge_train_batch_landing import _cleanup_merge_train_batch_candidate_ref
 
 from control_plane.merge_train_controller_run_once import (
     _close_service_batch_pull_request,
@@ -147,6 +148,18 @@ class MergeTrainBranchRetirementTests(unittest.TestCase):
                 for effect in effects
             )
         )
+
+    def test_direct_landing_reports_retained_when_an_open_pr_keeps_its_ref(self) -> None:
+        plan = build_merge_train_batch_landing_plan(
+            candidate=self.candidate, merge_method="merge", created_at=self.candidate.updated_at
+        )
+        branch = plan.candidate_ref.removeprefix("refs/heads/")
+        self.provider.pulls = [{"state": "open", "head": {"ref": branch}, "base": {"ref": "other"}}]
+        result = _cleanup_merge_train_batch_candidate_ref(
+            github_client=self.client, landing_plan=plan, request_trace_id="retained-fixture"
+        )
+        self.assertEqual(result["candidate_ref_cleanup_status"], "retained")
+        self.assertIn(plan.candidate_ref, self.provider.refs)
 
     def test_non_owned_ref_is_refused_before_provider_calls(self) -> None:
         for reference in ("refs/heads/main", "refs/heads/work/source"):
