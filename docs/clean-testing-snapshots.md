@@ -106,8 +106,7 @@ existing immutable archive decoder before target changes or registry work.
 `odoo_preview_source_major_mismatch` refuses incompatible data;
 `odoo_preview_source_version_unavailable` refuses unreadable or unknown evidence.
 Source-read failures use existing event and open-PR sweep recovery, without an
-immediate retry loop. The archive utility requires the testing database container.
-The check adds no plan field and preserves original-bound recovery fingerprints.
+immediate retry loop.
 
 Compatible retained copies keep their data; the completed original's artifact
 version must match the new build. Unversioned builds need a normal versioned
@@ -119,9 +118,7 @@ routes keep their existing contracts.
 A matching source comes through the qualified testing refresh/rebuild and capture
 publication path above, published by `completed_operation_snapshot` at operation
 completion. A saved database file or migration output is not a published
-`CleanTestingSnapshot`, and future output is not an input to its producing batch.
-The existing upstream contract reads a PostgreSQL database and matching filestore,
-not a saved dump path; any required source binding remains a separate event.
+`CleanTestingSnapshot`.
 
 The copy receives no source SSH mount or upstream connection. Private-port
 preview renders also omit the host-gateway alias; runtime inspection rejects

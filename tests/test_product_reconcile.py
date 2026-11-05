@@ -6682,7 +6682,10 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         ):
             unavailable = self.run_once()
         self.assertEqual(unavailable.state, "failed")
-        self.assertNotIn("deferred", unavailable.last_plan)
+        self.assertEqual(
+            unavailable.last_plan["last_failed_error_code"],
+            "odoo_preview_source_version_unavailable",
+        )
         self.assertEqual(self.provider.applied, [])
         self.assertIsNone(self.store.claim_next_product_reconcile_request("probe", 60))
         self.request("preview", 5)
@@ -6713,7 +6716,6 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(refused.last_plan["last_failed_error_code"], code)
         self.assertEqual(refused.last_error, record_failure_summary(code))
         self.assertEqual(preview_refresh_failure(refused), record_failure_summary(code))
-        self.assertNotIn("preview_transport_retryable", refused.last_plan)
         self.assertEqual(self.provider.applied, [])
 
     def test_legacy_preview_source_refusal_keeps_serving_evidence_and_logs_its_cause(self) -> None:

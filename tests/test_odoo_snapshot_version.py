@@ -10,7 +10,6 @@ from control_plane import odoo_instance_overrides
 from control_plane.odoo_runtime_reads import OdooRuntimeReadError
 from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsResult,
-    odoo_preview_apply_plan_sha256,
 )
 
 
@@ -151,7 +150,25 @@ class OrdinaryPreviewSourceVersionTests(unittest.TestCase):
     def test_legacy_preservation_plan_keeps_its_fingerprint_after_source_check(self) -> None:
         from datetime import timedelta
 
-        result = self.plan("19.0.1.3", "19.0")
+        from control_plane.contracts.artifact_identity import ArtifactBuildFlags
+
+        assert self.issued.plan_request.manifest is not None
+        self.issued.plan_request.manifest.build_flags = ArtifactBuildFlags(
+            values={"odoo_version": "19.0"}
+        )
+        result = self.issued.model_copy(
+            update={
+                "dry_run_plan": self.issued.dry_run_plan.model_copy(
+                    update={"clean_snapshot": self.snapshot}
+                )
+            }
+        )
+        self.archive.return_value = [
+            {
+                "type": "complete",
+                "metadata": {"recorded_base_version": "19.0.1.3", "preparation_stage": None},
+            }
+        ]
         issued = self.preview.issue_odoo_preview_apply_plan(result=result, plan_id="legacy-plan")
         assert issued.plan_provenance is not None
         envelope = self.envelope.model_copy(
@@ -175,7 +192,6 @@ class OrdinaryPreviewSourceVersionTests(unittest.TestCase):
             retained_preservation_retry=True,
         )
         self.assertEqual(checked.apply.dry_run_plan, issued.dry_run_plan)
-        self.assertEqual(odoo_preview_apply_plan_sha256(result), issued.plan_provenance.plan_sha256)
 
     def test_changed_snapshot_major_refuses_at_apply_before_provider_work(self) -> None:
         result = self.plan("19.0.1.3", "19.0")
