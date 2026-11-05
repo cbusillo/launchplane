@@ -92,6 +92,9 @@ Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
+For the Director's capture-only permission and its durable authorization checks,
+see [production backups](production-backup-provider.md#service-contract).
+
 Route-binding reconcile admits the Director's existing `local_operator` transport
 to refresh evidence on an exclusively owned declared lane, including production,
 without granting `route_binding.apply`. The request must name the current record

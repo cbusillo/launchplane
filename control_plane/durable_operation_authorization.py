@@ -7,6 +7,7 @@ from typing import Any, Literal
 import click
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.production_backup_gate import PRODUCTION_BACKUP_GATE_EXECUTE_ACTION
 from control_plane.contracts.durable_operation_authorization import (
     RELEASE_DECISION_GRANTS,
     DurableOperationAuthorization,
@@ -23,6 +24,7 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
+    director_agent_identity,
 )
 
 
@@ -63,6 +65,7 @@ class DurableOperationAuthorizationGuard:
     # passes this; every other guard refuses a release decision grant.
     client_release_grant_allows: Callable[[DurableOperationAuthorization], bool] | None = None
     director_testing_rebuild_allows: Callable[[DurableOperationAuthorization], bool] | None = None
+    director_backup_capture_allows: Callable[[DurableOperationAuthorization], bool] | None = None
 
     def authorize_execution(self) -> None:
         try:
@@ -159,6 +162,22 @@ class DurableOperationAuthorizationGuard:
                     ),
                 )
             return
+        if self.authorization.grant == "director_backup_capture":
+            if (
+                policy_record.status != "active"
+                or (
+                    self.authorization.policy_schema_version,
+                    policy_record.policy.schema_version,
+                )
+                not in _DURABLE_OPERATION_POLICY_SCHEMA_TRANSITIONS
+                or self.director_backup_capture_allows is None
+                or not self.director_backup_capture_allows(self.authorization)
+            ):
+                raise DurableOperationAuthorizationDeniedError(
+                    code="operation_authorization_revoked",
+                    message="The configured Director identity no longer covers this capture.",
+                )
+            return
         if not durable_operation_authorization_allows(
             authorization=self.authorization,
             policy_record=policy_record,
@@ -191,6 +210,17 @@ def read_active_authz_policy_record(record_store: object) -> LaunchplaneAuthzPol
     return record
 
 
+def director_backup_capture_allowed(
+    *, identity: LaunchplaneIdentity, action: str, instances: tuple[str, ...]
+) -> bool:
+    return (
+        isinstance(identity, LocalOperatorIdentity)
+        and director_agent_identity(identity)
+        and action == PRODUCTION_BACKUP_GATE_EXECUTE_ACTION
+        and instances == ("prod",)
+    )
+
+
 def capture_durable_operation_authorization(
     *,
     identity: LaunchplaneIdentity,
@@ -214,6 +244,21 @@ def capture_durable_operation_authorization(
     )
     if administrator_authorization is not None:
         return administrator_authorization
+    if director_backup_capture_allowed(identity=identity, action=action, instances=instances):
+        return DurableOperationAuthorization(
+            grant="director_backup_capture",
+            action=action,
+            product=product,
+            context=context,
+            instances=instances,
+            policy_record_id=policy_record.record_id,
+            policy_revision=policy_record.revision,
+            policy_schema_version=policy_schema_version,
+            policy_sha256=policy_record.policy_sha256,
+            policy_source=policy_record.source,
+            authorized_at=authorized_at,
+            caller=durable_operation_caller_identity(identity),
+        )
     target = AuthorizationTarget(scope="instance", instances=instances)
     try:
         managed_rule = require_single_managed_rule_identity(
