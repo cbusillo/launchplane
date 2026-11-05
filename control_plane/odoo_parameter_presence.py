@@ -192,6 +192,7 @@ def read_parameter_presence(
     database_url: str | None,
 ) -> ParameterPresenceResult:
     stage: FailureStage = "authority"
+    # noinspection PyBroadException
     try:
         authority = parameter_authority(store, product, query)
         stage = "runtime_selection"
@@ -255,6 +256,5 @@ def read_parameter_presence(
         if parameter_authority(store, product, query) != authority:
             return ParameterPresenceResult(failure_stage=stage)
         return result.model_copy(update={"evidence": connection.evidence})
-    # noinspection PyBroadExceptionInspection
     except Exception:
         return ParameterPresenceResult(failure_stage=stage)
