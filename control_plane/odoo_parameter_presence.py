@@ -215,6 +215,15 @@ def read_parameter_presence(
             control_plane_root=control_plane_root,
             database_url=database_url,
         )
+        stage = "runtime_inspection"
+        observed = reads.inspect_runtime_container(
+            connection.host,
+            connection.token,
+            connection.server_id,
+            connection.evidence.container_id,
+            connection.app_name,
+            selection.identity,
+        )
         stage = "transport"
         frames: list[dict[str, object]] = []
         _read_remote(
@@ -225,7 +234,7 @@ def read_parameter_presence(
             payload={
                 "project": connection.app_name,
                 "container": connection.evidence.container_id,
-                "identity": identity.model_dump(mode="json"),
+                "identity": json.loads(observed[RUNTIME_IDENTITY_ENV_KEY]),
                 "parameter": query.parameter,
                 "container_program": CONTAINER_PROGRAM.replace(
                     "__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY)

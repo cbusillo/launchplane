@@ -5526,8 +5526,11 @@ is accepted, decrypted or returned.
 
 The service selects the current stable Odoo runtime, checks the expected tuple,
 and uses its existing managed provider transport to inspect the immutable web
-container and image before and after a bounded database read. The existing
-integration readback evaluator compares nonempty values inside PostgreSQL in a
+container and image before and after a bounded database read. The runtime
+inspector validates the embedded identity against the selected inventory;
+its exact observed JSON passes to the strict host and container checks. Inventory
+completion metadata such as `deployed_at` is not substituted for that observation.
+The existing integration readback evaluator compares nonempty values inside PostgreSQL in a
 read-only transaction. Only the selected parameter name, existence/nonempty
 booleans and row count leave the database. A verified result includes the runtime
 identity, target/container evidence and observation time; the response supplies a
