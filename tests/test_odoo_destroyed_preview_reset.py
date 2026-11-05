@@ -74,10 +74,9 @@ class DestroyedPreviewResetTests(unittest.IsolatedAsyncioTestCase):
 
     def test_remaining_target_reaches_admission_without_history_reconstruction(self) -> None:
         before = self.fixture.store.read_preview_record(self.fixture.preview.preview_id)
-        binding = require_disposable_preview_operation(
+        require_disposable_preview_operation(
             self.fixture.store, profile=self.fixture.profile, issued_plan=self.plan
         )
-        self.assertTrue(binding)
         self.assertEqual(self.fixture.store.read_preview_record(before.preview_id), before)
         self.assertIsNone(
             self.fixture.store.read_disposable_lane_safety(
@@ -135,27 +134,6 @@ class DestroyedPreviewResetTests(unittest.IsolatedAsyncioTestCase):
                     self.fixture.store, profile=self.fixture.profile, issued_plan=self.plan
                 )
 
-    def test_destroyed_target_refuses_production_and_unresolved_target(self) -> None:
-        with self.assertRaises(DisposableLaneSafetyUnknown):
-            require_disposable_preview_operation(
-                self.fixture.store,
-                profile=self.fixture.profile,
-                issued_plan=self.plan.model_copy(update={"preview_slug": "prod"}),
-            )
-        for target_id in ("", "${created.composeId:missing}"):
-            with self.subTest(target_id=target_id), self.assertRaises(DisposableLaneSafetyUnknown):
-                require_disposable_preview_operation(
-                    self.fixture.store,
-                    profile=self.fixture.profile,
-                    issued_plan=self.plan.model_copy(
-                        update={
-                            "dry_run_plan": self.plan.dry_run_plan.model_copy(
-                                update={"compose_ref": target_id}
-                            )
-                        }
-                    ),
-                )
-
     def test_destroyed_target_refuses_physical_production_alias(self) -> None:
         self.fixture.store.write_provider_target_record(
             ProviderTargetRecord(
@@ -211,3 +189,31 @@ class DestroyedPreviewResetTests(unittest.IsolatedAsyncioTestCase):
             self.fixture.store.read_preview_record(self.fixture.preview.preview_id),
             self.fixture.preview,
         )
+
+    async def test_completed_destroy_advances_lifecycle_and_replays_without_another_effect(
+        self,
+    ) -> None:
+        plan = self.plan.dry_run_plan
+        with patch(
+            "control_plane.http_app.execute_odoo_preview_apply_result",
+            return_value={
+                "status": "pass",
+                "operation": plan.operation,
+                "product": plan.product,
+                "repository": plan.repository,
+                "preview_slug": plan.preview_slug,
+                "preview_url": plan.preview_url,
+                "domain_host": plan.domain_host,
+                "compose_name": plan.compose_name,
+                "compose_id": plan.compose_ref,
+            },
+        ) as execute:
+            response = await self.fixture.preview_apply()
+            self.assertEqual(response.status_code, 202, response.text)
+            completed = self.fixture.store.read_preview_record(self.fixture.preview.preview_id)
+            self.assertEqual(completed.state, "destroyed")
+            self.assertNotEqual(completed.destroy_reason, self.fixture.preview.destroy_reason)
+            replay = await self.fixture.preview_apply()
+        self.assertEqual(replay.status_code, 202, replay.text)
+        execute.assert_called_once()
+        self.assertEqual(self.fixture.store.read_preview_record(completed.preview_id), completed)

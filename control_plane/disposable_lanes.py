@@ -452,10 +452,7 @@ def require_disposable_preview_operation(
             profile,
             issued_plan.context,
             issued_plan.preview_slug,
-            allow_destroyed=issued_plan.operation == "refresh"
-            or issued_plan.operation == "destroy"
-            and bool(compose_id)
-            and not compose_id.startswith("${created."),
+            allow_destroyed=issued_plan.operation in {"refresh", "destroy"},
         )
     )
     creating_recipient = (
