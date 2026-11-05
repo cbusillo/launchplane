@@ -427,7 +427,7 @@ def read_consumer(
         payload={
             "project": connection.app_name,
             "container": connection.evidence.container_id,
-            "identity": selection.identity.model_dump(mode="json"),
+            "identity": json.loads(before[RUNTIME_IDENTITY_ENV_KEY]),
             "files": files,
             "addons": {
                 **{name: value[0] for name, value in SOURCE_ADDONS.items()},

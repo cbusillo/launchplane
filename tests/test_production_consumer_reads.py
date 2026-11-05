@@ -22,7 +22,9 @@ from control_plane.contracts.production_consumer_reads import (
     ProductionConsumerReview,
     ReviewedOdooConsumer,
 )
-from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
+from control_plane.contracts.runtime_identity import RuntimeIdentity, RUNTIME_IDENTITY_ENV_KEY
+from control_plane.dokploy import api
+from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.production_consumer_programs import (
     CONSUMER_CONTAINER_PROGRAM,
@@ -144,7 +146,7 @@ def build_ssl_context(use_ssl,verify_ssl):
         self.mysql_kwargs = kwargs
         return self.mysql
 
-    def run_container(self, **changes: Any) -> list[dict[str, Any]]:
+    def consumer_spec(self, **changes: Any) -> dict[str, Any]:
         files = {
             name: {
                 str(path): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -191,11 +193,19 @@ def build_ssl_context(use_ssl,verify_ssl):
             **changes,
         }
         self.assertNotIn(PRIVATE, json.dumps(spec))
+        return spec
+
+    def run_container(self, **changes: Any) -> list[dict[str, Any]]:
+        spec = self.consumer_spec(**changes)
         program = CONSUMER_CONTAINER_PROGRAM.replace(
             "__CONFIG_PATH__", repr(str(self.config))
         ).replace("__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY))
+        output = self.execute_consumer(program, json.dumps(spec))
+        return [json.loads(line) for line in output.splitlines()]
+
+    def execute_consumer(self, program: str, payload: str) -> str:
         with (
-            patch.object(sys, "stdin", io.StringIO(json.dumps(spec))),
+            patch.object(sys, "stdin", io.StringIO(payload)),
             patch.dict(os.environ, self.env, clear=True),
             patch("pathlib.Path", side_effect=self.path),
             patch.dict(sys.modules, {"psycopg2": SimpleNamespace(connect=self.pg_connect)}),
@@ -204,7 +214,149 @@ def build_ssl_context(use_ssl,verify_ssl):
         ):
             exec(compile(program, "<consumer>", "exec"), {"__name__": "__main__"})
         self.assertNotIn(PRIVATE, out.getvalue())
-        return [json.loads(line) for line in out.getvalue().splitlines()]
+        return out.getvalue()
+
+
+class ConsumerReadHostTests(ConsumerProgramFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.fixture.identity = self.fixture.identity.model_copy(
+            update={"deployed_at": "2026-11-05T08:00:00Z"}
+        )
+        self.fixture.connection = replace(
+            self.fixture.connection,
+            selection=replace(self.fixture.connection.selection, identity=self.fixture.identity),
+        )
+        self.member = ReviewedOdooConsumer(
+            product=self.fixture.identity.product, environment="prod"
+        )
+        self.source = reader.PublishedConsumerSource(
+            "source",
+            "b" * 64,
+            "probe",
+            ProductionConsumerReview(
+                consumers=(self.member,),
+                coordination_reference="review",
+                required_populated_roles=(ConsumerTableRole.INVOICE_LINE,),
+            ),
+            {},
+            "source-server",
+        )
+        self.authority: dict[str, Any] = {
+            "desired_payload": json.loads(
+                base64.b64decode(self.env["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"])
+            ),
+            "desired_env": {},
+        }
+        parameters = self.authority["desired_payload"]["config_parameters"]
+        self.authority["desired_env"] = {
+            item["value"]["environment_variable"]: self.env[item["value"]["environment_variable"]]
+            for item in parameters
+            if item["value"].get("environment_variable")
+        }
+        self.files = self.consumer_spec()["files"]
+        self.host_mutation = ""
+        self.container_payloads: list[dict[str, Any]] = []
+
+    def child(self, command: list[str], **_kwargs: Any) -> MagicMock:
+        self.assertEqual(command[:3], ["docker", "exec", "-i"])
+        incoming = io.StringIO()
+        read_fd, write_fd = os.pipe()
+        process = MagicMock(returncode=0, stdout=self.enterContext(os.fdopen(read_fd)))
+        process.poll.return_value = 0
+        outgoing = self.enterContext(os.fdopen(write_fd, "w"))
+
+        def run_container() -> None:
+            payload = incoming.getvalue()
+            self.container_payloads.append(json.loads(payload))
+            program = command[-1].replace(repr(ODOO_WEB_CONFIG_PATH), repr(str(self.config)))
+            outgoing.write(self.execute_consumer(program, payload))
+            outgoing.close()
+
+        process.stdin.write.side_effect = incoming.write
+        process.stdin.close.side_effect = run_container
+        return process
+
+    def mysql_one(self) -> Any:
+        if self.sql.startswith("SELECT SLEEP"):
+            return 0, self.container_payloads[-1]["nonce"]
+        return super().mysql_one()
+
+    def inspect_api(self, **_kwargs: Any) -> Any:
+        inspections = self.inspections
+        response = self.subprocess_run(["docker", "inspect"])
+        self.inspections = inspections
+        return json.loads(response.stdout)
+
+    def read_consumer(self) -> ConsumerReadEvidence:
+        def remote(**kwargs: Any) -> None:
+            if self.host_mutation == "resource":
+                kwargs["payload"]["container"] = "e" * 64
+            elif self.host_mutation:
+                kwargs["payload"]["identity"][self.host_mutation] = "foreign"
+            self.payloads.append(kwargs["payload"])
+            encoded = base64.b64encode(json.dumps(kwargs["payload"]).encode()).decode()
+            with (
+                patch.object(sys, "argv", ["host", encoded, "FRAME:"]),
+                patch("subprocess.run", side_effect=self.subprocess_run),
+                patch("subprocess.Popen", side_effect=self.child),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                exec(
+                    compile(kwargs["program"], "<consumer-host>", "exec"), {"__name__": "__main__"}
+                )
+            self.assertNotIn(PRIVATE, output.getvalue())
+            for line in output.getvalue().splitlines():
+                kwargs["receive"](json.loads(line.removeprefix("FRAME:")))
+
+        with (
+            patch.object(reads, "connect_runtime", return_value=self.fixture.connection),
+            patch.object(reader, "consumer_authority", return_value=(self.authority, "authority")),
+            patch.object(reader, "consumer_files", return_value=self.files),
+            patch.object(
+                api,
+                "dokploy_request",
+                side_effect=self.inspect_api,
+            ),
+            patch.object(reads, "assert_selection_current"),
+            patch.object(reader, "witness_source", return_value=True),
+            patch.object(reader, "_read_remote", side_effect=remote),
+        ):
+            return reader.read_consumer(
+                self.fixture.store,
+                self.root,
+                self.member,
+                self.source,
+                self.fixture.connection.selection,
+            )
+
+    def test_completion_stamp_does_not_replace_observed_identity_at_host_or_container(self) -> None:
+        observed = json.loads(self.env[RUNTIME_IDENTITY_ENV_KEY])
+        reads.require_runtime_identity(
+            self.fixture.identity, RuntimeIdentity.model_validate(observed)
+        )
+        result = self.read_consumer()
+        self.assertEqual(result.status, "verified")
+        self.assertEqual(self.payloads[0]["identity"], observed)
+        self.assertEqual(self.container_payloads[0]["identity"], observed)
+        self.assertTrue(self.mysql_queries)
+        self.assertNotIn(PRIVATE, json.dumps(self.payloads))
+
+    def test_changed_source_artifact_image_or_resource_never_executes_container(self) -> None:
+        for field in ("source_git_ref", "artifact_id", "image_reference", "resource"):
+            with self.subTest(field=field):
+                self.host_mutation = field
+                self.assertEqual(self.read_consumer().status, "unknown")
+        self.assertFalse(self.container_payloads)
+        self.mysql.close.assert_not_called()
+
+    def test_host_container_or_image_drift_invalidates_completed_query(self) -> None:
+        for drift in ("container", "image_after"):
+            with self.subTest(drift=drift):
+                self.drift = drift
+                self.inspections = 0
+                self.assertEqual(self.read_consumer().status, "unknown")
+        self.assertEqual(len(self.container_payloads), 2)
 
 
 class ConsumerProgramTests(ConsumerProgramFixture):
@@ -914,7 +1066,11 @@ class ConsumerReadIntegrationTests(unittest.TestCase):
                 ),
             ),
             patch.object(reader, "consumer_files", return_value={}),
-            patch.object(reads, "inspect_runtime_container", return_value={}),
+            patch.object(
+                reads,
+                "inspect_runtime_container",
+                return_value={RUNTIME_IDENTITY_ENV_KEY: fixture.identity.model_dump_json()},
+            ),
             patch.object(reads, "assert_selection_current"),
             patch.object(reader, "witness_source", return_value=True),
             patch.object(reader, "_read_remote", side_effect=remote),
