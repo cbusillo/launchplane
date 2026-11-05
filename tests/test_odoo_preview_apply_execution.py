@@ -293,6 +293,10 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         profile.preview.clean_testing_snapshot = True
         envelope = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
         issued = _issued_plan(envelope)
+        assert issued.plan_request.manifest is not None
+        issued.plan_request.manifest.build_flags = ArtifactBuildFlags(
+            values={"odoo_version": "19.0"}
+        )
         store = Mock(spec=["read_clean_testing_snapshot", "read_odoo_instance_override_record"])
         store.read_odoo_instance_override_record.side_effect = FileNotFoundError
         store.read_clean_testing_snapshot.side_effect = AssertionError(
@@ -499,6 +503,63 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             store.read_idempotency_record_by_id.return_value = operation
             operation.response_payload["result"] = {**result, "module_install_update_evidence": {}}
             self.assertTrue(retained())
+            from control_plane.preview_reservation_recovery import OriginalPreviewIntent
+
+            original_request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+            original_plan = _issued_plan(original_request)
+            original = OriginalPreviewIntent(original_plan, original_request)
+            assert original_request.apply.manifest is not None
+            assert original_plan.plan_request.manifest is not None
+            target = original_request.apply.manifest.model_copy(deep=True)
+            with patch(
+                "control_plane.preview_reservation_recovery.original_preview_intent",
+                return_value=original,
+            ) as original_read:
+                for source_version, target_version, code in (
+                    ("19.0", "19.0", None),
+                    ("20.0", "20.0", None),
+                    ("19.0", "20.0", "odoo_preview_source_major_mismatch"),
+                    ("", "20.0", "odoo_preview_source_version_unavailable"),
+                ):
+                    original_plan.plan_request.manifest.build_flags = ArtifactBuildFlags(
+                        values={"odoo_version": source_version}
+                    )
+                    target.build_flags = ArtifactBuildFlags(values={"odoo_version": target_version})
+                    with self.subTest(source=source_version, target=target_version):
+                        if code is None:
+                            self.assertTrue(
+                                preview_has_completed_restore(
+                                    record_store=store,
+                                    profile=profile,
+                                    plan=plan,
+                                    pr_number=42,
+                                    artifact_manifest=target,
+                                )
+                            )
+                        else:
+                            with self.assertRaises(
+                                preview_http.OdooPreviewPlanProvenanceError
+                            ) as caught:
+                                preview_has_completed_restore(
+                                    record_store=store,
+                                    profile=profile,
+                                    plan=plan,
+                                    pr_number=42,
+                                    artifact_manifest=target,
+                                )
+                            self.assertEqual(caught.exception.code, code)
+                original_read.assert_called_with(operation, profile=profile, store=store)
+                original_read.side_effect = ValueError("private original binding")
+                with self.assertRaises(preview_http.OdooPreviewPlanProvenanceError) as caught:
+                    preview_has_completed_restore(
+                        record_store=store,
+                        profile=profile,
+                        plan=plan,
+                        pr_number=42,
+                        artifact_manifest=target,
+                    )
+                self.assertEqual(caught.exception.code, "odoo_preview_source_version_unavailable")
+                self.assertNotIn("private original binding", str(caught.exception))
 
     def test_driver_selects_upstream_restore_only_when_it_has_an_upstream_source(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())

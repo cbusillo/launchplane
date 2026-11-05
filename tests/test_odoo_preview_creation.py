@@ -440,6 +440,26 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.mutations, mutations)
 
     def enable_clean_snapshot(self) -> None:
+        from control_plane import odoo_snapshot_version
+        from control_plane.contracts.artifact_identity import ArtifactBuildFlags
+
+        assert self.inputs.manifest is not None
+        self.inputs.manifest.build_flags = ArtifactBuildFlags(values={"odoo_version": "19.0"})
+        self.enterContext(
+            patch.object(
+                odoo_snapshot_version,
+                "read_snapshot_archive",
+                return_value=[
+                    {
+                        "type": "complete",
+                        "metadata": {
+                            "recorded_base_version": "19.0.1.3",
+                            "preparation_stage": None,
+                        },
+                    }
+                ],
+            )
+        )
         from control_plane.clean_testing_snapshot import CleanTestingSnapshot
         from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 

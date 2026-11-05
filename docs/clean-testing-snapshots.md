@@ -100,6 +100,26 @@ lookup, including before the product has published its first snapshot. There
 is no production or live-testing fallback. The preview and snapshot must be on
 the same execution server; cross-host transport is not implied.
 
+Ordinary snapshot previews require the artifact's recorded Odoo major to match
+the snapshot's installed base version. The shared planning/apply path uses the
+existing immutable archive decoder before target changes or registry work.
+`odoo_preview_source_major_mismatch` refuses incompatible data;
+`odoo_preview_source_version_unavailable` refuses unreadable or unknown evidence.
+Source-read failures use existing event and open-PR sweep recovery, without an
+immediate retry loop.
+
+Compatible retained copies keep their data; the completed original's artifact
+version must match the new build. Unversioned builds need a normal versioned
+build. An admitted unused disposable legacy preview may use supported destroy
+then refresh from a qualified matching snapshot. Preserve used or needed copies
+for provenance resolution. Driver upstream restores and explicit migration
+routes keep their existing contracts.
+
+A matching source comes through the qualified testing refresh/rebuild and capture
+publication path above, published by `completed_operation_snapshot` at operation
+completion. A saved database file or migration output is not a published
+`CleanTestingSnapshot`.
+
 The copy receives no source SSH mount or upstream connection. Private-port
 preview renders also omit the host-gateway alias; runtime inspection rejects
 host aliases before copying. Its schedule

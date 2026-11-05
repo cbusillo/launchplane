@@ -4208,7 +4208,8 @@ workflow grant, after that.
   preview apply set the runtime `ODOO_VERSION` from it, overriding any site or
   global value, for lanes that declare `ODOO_VERSION` or already carry it.
   Deployment evidence records the value as `artifact_odoo_version`. Older
-  manifests without it keep the environment's value.
+  manifests without it keep the environment's value, except clean-snapshot
+  previews, which require a versioned manifest and qualified matching capture.
 - With no explicit artifact id, the Odoo prod rollback driver redeploys the
   artifact of the previous passing prod deployment: the newest passing one whose
   artifact differs from the lane's latest deployment. It writes rollback
