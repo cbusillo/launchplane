@@ -1,5 +1,6 @@
 from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
 from tests.support.auth import scoped_agent_test
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import asyncio
 import threading
@@ -4356,6 +4357,12 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_blocks_lone_failed_candidate_member_and_names_its_failure(self) -> None:
+        await self._check_lone_failed_candidate_block(cleanup_failure=False)
+
+    async def test_cleanup_failure_preserves_the_committed_culprit_block(self) -> None:
+        await self._check_lone_failed_candidate_block(cleanup_failure=True)
+
+    async def _check_lone_failed_candidate_block(self, *, cleanup_failure: bool) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
@@ -4398,7 +4405,19 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             ):
                 _FakeFailingMergeTrainGitHubClient.labels_added = []
                 failed_response = await _post_merge_train_controller_run_once(app, request_payload)
-                block_response = await _post_merge_train_controller_run_once(app, request_payload)
+                with (
+                    patch.object(
+                        _FakeFailingMergeTrainGitHubClient,
+                        "cleanup_batch_candidate_ref",
+                        side_effect=MergeTrainGitHubError("cleanup unavailable", status_code=503),
+                    )
+                    if cleanup_failure
+                    else nullcontext()
+                ):
+                    block_response = await _post_merge_train_controller_run_once(
+                        app, request_payload
+                    )
+                state = store.list_merge_train_controller_state_records()[0]
             remaining = store.list_merge_train_batch_candidate_records(
                 repository="cbusillo/sellyouroutboard", base_branch="main", status="active"
             )
@@ -4414,6 +4433,13 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_FakeFailingMergeTrainGitHubClient.labels_added, [(1, "merge-blocked")])
         # The failed lineage is retired so the next pass plans the rest of the queue.
         self.assertEqual(remaining, ())
+        if cleanup_failure:
+            self.assertEqual(result["candidate_ref_cleanup_status"], "failed")
+            self.assertEqual(state.reconciliation_status, "required")
+            self.assertEqual(state.active_phase, "cleanup_retired_candidate_refs")
+            self.assertTrue(state.step_payload["retired_candidate_record_ids"])
+            assert state.last_result is not None
+            self.assertEqual(state.last_result.reason_code, "candidate_failure_isolated")
         feedback = build_feedback_payloads(response=block_payload)
         self.assertEqual([item["pull_request_number"] for item in feedback], [1])
         message = cast(str, feedback[0]["message"])
@@ -4421,6 +4447,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("`tests.test_widget.WidgetTests.test_renders`", message)
 
     async def test_recovers_failed_candidate_when_rerun_checks_pass(self) -> None:
+        _FakeMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
@@ -4458,10 +4485,12 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                     failed_response = await _post_merge_train_controller_run_once(
                         app, request_payload
                     )
+                self.assertEqual(_FakeMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls, 0)
                 # The failed check is re-run on the same candidate SHA and passes.
                 recovered_response = await _post_merge_train_controller_run_once(
                     app, request_payload
                 )
+                self.assertEqual(_FakeMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls, 0)
                 landing_response = await _post_merge_train_controller_run_once(app, request_payload)
 
         failed_payload = failed_response.json()

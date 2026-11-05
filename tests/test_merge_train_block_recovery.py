@@ -159,6 +159,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.client = GitHubMergeTrainClient(transport=self.transport)
         self.client.read_pull_request_snapshot = Mock(side_effect=lambda **_: self.current)  # type: ignore[method-assign]
         self.lease = Mock()
+        self.lease.record.step_payload = {}
         self.lease.record.ordinary_job_binding = None
         self.lease.record.updated_at = "2026-10-18T00:02:00Z"
 

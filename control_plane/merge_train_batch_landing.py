@@ -37,6 +37,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubError,
     MergeTrainGitHubStaleHeadError,
     UrllibMergeTrainGitHubTransport,
+    merge_train_batch_refs,
 )
 from control_plane.merge_train_stack_disposition import resolve_stack_child_disposition_label
 from control_plane.merge_train_stack_collapse import (
@@ -509,8 +510,9 @@ def _cleanup_merge_train_batch_candidate_ref(
 ) -> dict[str, object]:
     try:
         deleted = github_client.cleanup_batch_candidate_ref(landing_plan=landing_plan)
-        retained = github_client.candidate_ref_exists(
-            repository=landing_plan.repository, reference=landing_plan.candidate_ref
+        retained = any(
+            github_client.candidate_ref_exists(repository=landing_plan.repository, reference=ref)
+            for ref in merge_train_batch_refs(landing_plan)
         )
     except MergeTrainGitHubError as error:
         message = str(error).strip() or "GitHub candidate ref cleanup failed."

@@ -2302,8 +2302,12 @@ refs; an open PR using a ref as either head or base also keeps it. Retirement
 closes only the generated PR bound to its candidate, preserving other PRs on
 the same head. Incomplete provider reads stop cleanup. Deletion uses GitHub's
 atomic expected-tip `updateRefs` mutation, so a ref that moves after qualification
-survives. Missing refs are already clean; interrupted retirement resumes before
-replacement work and retries only the remaining refs. This is per-batch cleanup,
+is preserved for that attempt; a retry qualifies its current tip again.
+Supersession saves the exact retired record identities in the existing lease
+before terminal writes, preserving the caller's phase and pending effect.
+Cleanup runs after the caller completes its block, replacement or other durable
+work. A provider failure preserves that result and resumes only cleanup on the
+next lease. Missing refs are already clean. This is per-batch cleanup,
 not an inventory sweep of historical branches.
 
 ### Guarded Level 3 landing

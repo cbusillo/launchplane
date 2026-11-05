@@ -572,7 +572,7 @@ class CulpritIsolationTests(unittest.TestCase):
                 recorded_at="2026-10-10T12:03:00Z",
                 trace_id="isolation",
                 mutate=True,
-                lease=Mock(),
+                lease=Mock(record=Mock(step_payload={})),
             )
         assert result is not None
         self.assertEqual(result["controller_action"], "plan_candidate")

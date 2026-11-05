@@ -2473,12 +2473,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         *,
         landing_plan: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
         effect_executor: MergeTrainSemanticEffectExecutor | None = None,
-        protected_refs: frozenset[str] = frozenset(),
     ) -> bool:
         resolved_effect_executor = effect_executor or self.semantic_effect_executor
         if (
             isinstance(landing_plan, MergeTrainBatchLandingPlan)
-            and landing_plan.candidate_ref not in protected_refs
             and landing_plan.candidate_pull_request_number is None
             and is_canonical_candidate_ref(landing_plan)
             and self.requires_full_odoo_build(repository=landing_plan.repository)
@@ -2496,18 +2494,9 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 raise MergeTrainGitHubError(
                     "Candidate validation PR cleanup could not be verified.", status_code=409
                 ) from error
-        canonical_ref = build_merge_train_batch_candidate_ref(
-            repository=landing_plan.repository,
-            base_branch=landing_plan.base_branch,
-            batch_id=landing_plan.batch_id,
-        )
-        if landing_plan.candidate_ref in (
-            canonical_ref,
-            merge_train_construction_ref(canonical_ref),
-        ):
+        if landing_plan.candidate_ref in merge_train_batch_refs(landing_plan):
             return self._cleanup_batch_refs(
                 candidate=landing_plan,
-                protected_refs=protected_refs,
                 effect_executor=resolved_effect_executor,
             )
         if isinstance(landing_plan, MergeTrainBatchCandidate):
@@ -2528,23 +2517,15 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self,
         *,
         candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
-        protected_refs: frozenset[str],
         effect_executor: MergeTrainSemanticEffectExecutor,
     ) -> bool:
-        canonical_ref = build_merge_train_batch_candidate_ref(
-            repository=candidate.repository,
-            base_branch=candidate.base_branch,
-            batch_id=candidate.batch_id,
-        )
-        references = (canonical_ref, merge_train_construction_ref(canonical_ref))
+        references = merge_train_batch_refs(candidate)
         if candidate.candidate_ref not in references:
             raise MergeTrainGitHubError("Retirement requires a train-owned batch ref.")
         repository_path = _repository_path(candidate.repository)
         owner = candidate.repository.split("/", 1)[0]
         deleted = False
         for reference in references:
-            if reference in protected_refs:
-                continue
             try:
                 payload = _json_object(
                     self.transport.request(
@@ -5577,6 +5558,17 @@ def _base_branch_sha(
     )
     commit = _json_object(branch.get("commit"), "GitHub branch commit")
     return _required_text(commit.get("sha"), "GitHub branch commit requires sha.")
+
+
+def merge_train_batch_refs(
+    candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+) -> tuple[str, str]:
+    canonical = build_merge_train_batch_candidate_ref(
+        repository=candidate.repository,
+        base_branch=candidate.base_branch,
+        batch_id=candidate.batch_id,
+    )
+    return canonical, merge_train_construction_ref(canonical)
 
 
 def merge_train_construction_ref(candidate_ref: str) -> str:
