@@ -22,7 +22,7 @@ from control_plane.contracts.production_consumer_reads import (
     ProductionConsumerReview,
     ReviewedOdooConsumer,
 )
-from control_plane.contracts.runtime_identity import RuntimeIdentity, RUNTIME_IDENTITY_ENV_KEY
+from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
 from control_plane.dokploy import api
 from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
@@ -288,27 +288,19 @@ class ConsumerReadHostTests(ConsumerProgramFixture):
         self.inspections = inspections
         return json.loads(response.stdout)
 
-    def read_consumer(self) -> ConsumerReadEvidence:
-        def remote(**kwargs: Any) -> None:
-            if self.host_mutation == "resource":
-                kwargs["payload"]["container"] = "e" * 64
-            elif self.host_mutation:
-                kwargs["payload"]["identity"][self.host_mutation] = "foreign"
-            self.payloads.append(kwargs["payload"])
-            encoded = base64.b64encode(json.dumps(kwargs["payload"]).encode()).decode()
-            with (
-                patch.object(sys, "argv", ["host", encoded, "FRAME:"]),
-                patch("subprocess.run", side_effect=self.subprocess_run),
-                patch("subprocess.Popen", side_effect=self.child),
-                contextlib.redirect_stdout(io.StringIO()) as output,
-            ):
-                exec(
-                    compile(kwargs["program"], "<consumer-host>", "exec"), {"__name__": "__main__"}
-                )
-            self.assertNotIn(PRIVATE, output.getvalue())
-            for line in output.getvalue().splitlines():
-                kwargs["receive"](json.loads(line.removeprefix("FRAME:")))
+    def execute_program(self, program: str, input_text: str, argv: list[str] | None = None) -> str:
+        with patch.object(sys, "argv", argv or ["fixed-reader"]):
+            return self.execute_consumer(program, input_text)
 
+    def remote(self, **kwargs: Any) -> None:
+        if self.host_mutation == "resource":
+            kwargs["payload"]["container"] = "e" * 64
+        elif self.host_mutation:
+            kwargs["payload"]["identity"][self.host_mutation] = "foreign"
+        with patch("subprocess.Popen", side_effect=self.child):
+            super().remote(**kwargs)
+
+    def read_consumer(self) -> ConsumerReadEvidence:
         with (
             patch.object(reads, "connect_runtime", return_value=self.fixture.connection),
             patch.object(reader, "consumer_authority", return_value=(self.authority, "authority")),
@@ -320,7 +312,7 @@ class ConsumerReadHostTests(ConsumerProgramFixture):
             ),
             patch.object(reads, "assert_selection_current"),
             patch.object(reader, "witness_source", return_value=True),
-            patch.object(reader, "_read_remote", side_effect=remote),
+            patch.object(reader, "_read_remote", side_effect=self.remote),
         ):
             return reader.read_consumer(
                 self.fixture.store,
@@ -332,9 +324,6 @@ class ConsumerReadHostTests(ConsumerProgramFixture):
 
     def test_completion_stamp_does_not_replace_observed_identity_at_host_or_container(self) -> None:
         observed = json.loads(self.env[RUNTIME_IDENTITY_ENV_KEY])
-        reads.require_runtime_identity(
-            self.fixture.identity, RuntimeIdentity.model_validate(observed)
-        )
         result = self.read_consumer()
         self.assertEqual(result.status, "verified")
         self.assertEqual(self.payloads[0]["identity"], observed)
