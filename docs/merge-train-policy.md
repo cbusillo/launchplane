@@ -543,6 +543,22 @@ review and conversation gates. Unknown, pending, conflicting and failed heads
 remain outside the next candidate, with `ineligible_reasons` on their queue
 entries, and are reconsidered on each fresh read without a label change.
 
+### Current-Head Previews
+
+When an active product on the repository has previews enabled, every queued PR
+waits until its own preview has served a ready generation built from its
+current head ([Q1268](https://github.com/cbusillo/odoo-devkit/issues/362#issuecomment-6647242111),
+[Q1269](https://github.com/cbusillo/launchplane/issues/5603#issuecomment-6647336256)).
+This applies to checked Ready handoffs, the enqueue label and automatic
+dependency admission alike. The snapshot reads the existing preview and
+reconcile records; it adds no check or store. The queue entry's reason names a
+failed current-head preview, a preview that has not served the current head
+yet, or an unreadable record, and the next fresh read requalifies it. A push,
+including the train's own branch refresh, waits for the new head's preview.
+A head that once served stays qualified when a later refresh of the same head
+fails or the preview is retired; recovering an already merged stack child does
+not need its preview. Products without previews keep their existing admission.
+
 Admission selects new members only between candidates. Eligible PRs beyond the
 cap, a known changed-file area group or a CODEOWNERS individual-landing boundary
 retain eligibility and report `deferred_reasons`. Grouping uses contiguous
@@ -814,9 +830,10 @@ land. A passing rerun on the same head or a base change resolving conflicts can
 also requalify it. An explicit enqueue label uses the normal block path above.
 A service candidate records each update excluded only for that reason as a
 `held_out` entry with reason `dependency_not_ready`, bound to its head and the
-candidate's base. If the update settles while the candidate builds, checks or
-lands, it waits for the next candidate instead of replacing this one and
-rerunning its checks. Landing admission checks only the plan's members. A new
+candidate's base; a PR of any kind excluded only for its
+[current-head preview](#current-head-previews) is recorded the same way. If the
+update settles while the candidate builds, checks or lands, it waits for the next
+candidate instead of replacing this one and rerunning its checks. Landing admission checks only the plan's members. A new
 head or a moved base releases the hold; a new head still waits until the active
 candidate finishes under the admission rule below. The hold posts no PR feedback.
 Every existing block label remains a hold,

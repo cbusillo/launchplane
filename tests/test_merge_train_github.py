@@ -67,6 +67,12 @@ from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.support.profiles import product_profile_payload
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+from control_plane.contracts.preview_generation_record import PreviewGenerationState
+from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
+from control_plane.merge_train import CURRENT_HEAD_PREVIEW_FAILED
+from control_plane.merge_train import CURRENT_HEAD_PREVIEW_NOT_SERVED
+from tests.http_app_test_support import _preview_generation_read_record, _preview_read_record
 
 
 class _ReadOnlyMergeTrainTransport(RecordingMergeTrainGitHubTransport):
@@ -417,6 +423,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             release_on_acceptance="held",
             is_active=True,
             repository=plan.repository,
+            preview=SimpleNamespace(enabled=False, context=""),
             owner=SimpleNamespace(is_set=True, review_label="owner-review"),
         )
         client = GitHubMergeTrainClient(
@@ -3970,6 +3977,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                             is_active=True,
                             repository="cbusillo/sellyouroutboard",
                             release_on_acceptance="director_standing",
+                            preview=SimpleNamespace(enabled=False, context=""),
                             owner=SimpleNamespace(is_set=True, review_label="owner-review"),
                         )
                         store = SimpleNamespace(list_product_profile_records=lambda: (profile,))
@@ -3989,6 +3997,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 is_active=True,
                 repository="example/site",
                 release_on_acceptance=mode,
+                preview=SimpleNamespace(enabled=False, context=""),
                 owner=SimpleNamespace(is_set=True, review_label="owner-review"),
             )
             for mode in ("director_standing", "held")
@@ -4061,6 +4070,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     release_on_acceptance="held",
                     is_active=True,
                     repository="cbusillo/sellyouroutboard",
+                    preview=SimpleNamespace(enabled=False, context=""),
                     owner=SimpleNamespace(
                         is_set=True,
                         review_label=label
@@ -4084,6 +4094,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             release_on_acceptance="held",
             is_active=True,
             repository="example/site",
+            preview=SimpleNamespace(enabled=False, context=""),
             owner=SimpleNamespace(is_set=False, review_label="owner-review"),
         )
         reader = GitHubMergeTrainSnapshotReader(
@@ -4120,6 +4131,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     release_on_acceptance="held",
                     is_active=False,
                     repository="cbusillo/sellyouroutboard",
+                    preview=SimpleNamespace(enabled=False, context=""),
                     owner=SimpleNamespace(is_set=True, review_label="owner-review"),
                 ),
             ),
@@ -4128,6 +4140,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     release_on_acceptance="held",
                     is_active=True,
                     repository="cbusillo/sellyouroutboard",
+                    preview=SimpleNamespace(enabled=False, context=""),
                     owner=SimpleNamespace(is_set=True, review_label="client-check"),
                 ),
             ),
@@ -4349,6 +4362,152 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 )
 
                 self.assertEqual(snapshot.pull_requests[0].dependency_update_class, expected)
+
+    def test_snapshot_reader_holds_pull_requests_until_their_preview_serves_the_head(
+        self,
+    ) -> None:
+        def read_with_previews(record_store: FilesystemRecordStore, *, bot_update: bool) -> str:
+            pull_request = _github_pull_request(16, author_association="CONTRIBUTOR")
+            dependency_reads: tuple[object, ...] = ()
+            if bot_update:
+                pull_request["user"] = {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"}
+                dependency_reads = (
+                    [_github_commit(49699333, INDIRECT_PATCH, sha="head-16")],
+                    [],
+                    {"files": [{"filename": "package.json", "status": "modified"}]},
+                )
+            transport = RecordingMergeTrainGitHubTransport(
+                responses=(
+                    _github_branch(),
+                    [pull_request],
+                    pull_request,
+                    MergeTrainGitHubError("permission not found", status_code=404),
+                    _label_events(),
+                    *dependency_reads,
+                    _protected_branch_with_checks("ci-status", app_id=None),
+                    [],
+                    _combined_status(),
+                    {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
+                    _conversation_rule(),
+                    [],
+                )
+            )
+            snapshot = GitHubMergeTrainSnapshotReader(
+                transport=transport,
+                branch_refresh_store=cast(Any, record_store),
+                repository_policy=dependency_repository_policy(),
+            ).read_merge_train_snapshot(repository="cbusillo/sellyouroutboard", base_branch="main")
+            self.assertEqual(
+                snapshot.pull_requests[0].dependency_update_class,
+                "patch_or_minor" if bot_update else None,
+            )
+            return snapshot.pull_requests[0].preview_hold
+
+        def preview_generation(
+            head_sha: str, state: PreviewGenerationState = "ready", sequence: int = 1
+        ) -> PreviewGenerationRecord:
+            recorded = _preview_generation_read_record(
+                anchor_pr_number=16, state=state, sequence=sequence
+            )
+            return recorded.model_copy(
+                update={
+                    "anchor_summary": recorded.anchor_summary.model_copy(
+                        update={"head_sha": head_sha}
+                    )
+                }
+            )
+
+        failed_refresh = ProductReconcileRequestRecord(
+            target_key="example-site:preview:16",
+            product="example-site",
+            target_kind="preview",
+            pull_request_number=16,
+            state="failed",
+            requested_at="2026-11-04T19:42:00Z",
+            updated_at="2026-11-04T19:42:00Z",
+            request_count=1,
+            last_error="Preview build failed",
+            last_plan={"action": "apply", "head_sha": "head-16"},
+        )
+        cases: tuple[
+            tuple[
+                str,
+                bool,
+                tuple[PreviewGenerationRecord, ...],
+                ProductReconcileRequestRecord | None,
+                str,
+            ],
+            ...,
+        ] = (
+            ("product without previews", False, (), None, ""),
+            ("preview never recorded", True, (), None, CURRENT_HEAD_PREVIEW_NOT_SERVED),
+            (
+                "preview serves an older head",
+                True,
+                (preview_generation("older-head"),),
+                None,
+                CURRENT_HEAD_PREVIEW_NOT_SERVED,
+            ),
+            (
+                "current head is still building",
+                True,
+                (preview_generation("head-16", state="building"),),
+                None,
+                CURRENT_HEAD_PREVIEW_NOT_SERVED,
+            ),
+            (
+                "current head preview failed",
+                True,
+                (preview_generation("older-head"),),
+                failed_refresh,
+                CURRENT_HEAD_PREVIEW_FAILED,
+            ),
+            (
+                "verification marked a generation ready that never deployed",
+                True,
+                (preview_generation("head-16").model_copy(update={"deploy_status": "fail"}),),
+                None,
+                CURRENT_HEAD_PREVIEW_NOT_SERVED,
+            ),
+            ("preview serves the current head", True, (preview_generation("head-16"),), None, ""),
+            (
+                "current head served before a same-head refresh failed",
+                True,
+                (
+                    preview_generation("head-16"),
+                    preview_generation("head-16", state="failed", sequence=2),
+                ),
+                failed_refresh,
+                "",
+            ),
+        )
+        for (label, previews_enabled, generations, reconcile_request, expected), dependency in (
+            (case, dependency) for case in cases for dependency in (True, False)
+        ):
+            with self.subTest(label, dependency=dependency), TemporaryDirectory() as state_dir:
+                store = _ReconcileRequestStore(
+                    state_dir=Path(state_dir), reconcile_request=reconcile_request
+                )
+                profile = product_profile_payload("example-site")
+                profile["repository"] = "cbusillo/sellyouroutboard"
+                profile["preview"] = {"enabled": previews_enabled, "context": "example-site"}
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(profile)
+                )
+                if generations:
+                    store.write_preview_record(
+                        _preview_read_record(anchor_pr_number=16).model_copy(
+                            update={
+                                "anchor_repo": "sellyouroutboard",
+                                "state": "failed"
+                                if generations[-1].state == "failed"
+                                else "active",
+                            }
+                        )
+                    )
+                for generation in generations:
+                    store.write_preview_generation_record(generation)
+                self.assertEqual(read_with_previews(store, bot_update=dependency), expected)
 
     def test_dependency_bots_share_immutable_diff_and_signature_admission(self) -> None:
         from tests.test_merge_train_dependency_updates import renovate_message
@@ -4879,6 +5038,19 @@ def _github_commit(
     }
 
 
+class _ReconcileRequestStore(FilesystemRecordStore):
+    def __init__(
+        self, *, state_dir: Path, reconcile_request: ProductReconcileRequestRecord | None
+    ) -> None:
+        super().__init__(state_dir=state_dir)
+        self._reconcile_request = reconcile_request
+
+    def read_product_reconcile_request(self, target_key: str) -> ProductReconcileRequestRecord:
+        if self._reconcile_request is None or self._reconcile_request.target_key != target_key:
+            raise FileNotFoundError(target_key)
+        return self._reconcile_request
+
+
 def _github_pull_request(
     number: int,
     *,
@@ -5226,6 +5398,7 @@ def _client_veto_store(decisions: tuple[ProductReviewDecisionRecord, ...]) -> Si
                 release_on_acceptance="held",
                 is_active=True,
                 repository="cbusillo/sellyouroutboard",
+                preview=SimpleNamespace(enabled=False, context=""),
                 owner=SimpleNamespace(is_set=True, github_id="901", review_label="owner-review"),
             ),
         ),
