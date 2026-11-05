@@ -127,6 +127,7 @@ try:
         stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=20,check=False)
     stage='drift'
     after=inspect()
+    stage='drift' if before!=after else 'host_execution'
     if before!=after or child.returncode!=0 or len(child.stdout)>1024:
         raise ValueError()
     stage='result_validation'

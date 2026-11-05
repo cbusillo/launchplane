@@ -1212,88 +1212,23 @@ class ParameterPresenceTests(unittest.TestCase):
             self.assertEqual(self.read().runtime, "unknown")
             self.assertNotIn(PRIVATE, repr(logger.call_args_list))
 
-
-class ParameterPresenceHttpTests(unittest.IsolatedAsyncioTestCase):
-    async def test_read_is_product_scoped_testing_only_and_typed(self) -> None:
-        from control_plane import odoo_parameter_presence as presence
-        from urllib.parse import urlencode
-
-        fixture = DiagnosticFixture()
-        allowed = MagicMock(return_value=True)
-        common = ReadRouteDependencies(
-            read_identity=lambda: _identity(),
-            get_record_store=lambda: fixture.store,
-            next_trace_id=lambda: "presence-trace",
-            authorization_allows=allowed,
-            http_error=lambda **kwargs: HTTPException(
-                status_code=kwargs["status_code"], detail={"code": kwargs["code"]}
-            ),
-            error_response_model=presence.ParameterPresenceResult,
-        )
-        app = FastAPI()
-        register_odoo_runtime_read_routes(
-            cast(ApiRouteRegistrar, app),
-            dependencies=OdooRuntimeReadDependencies(
-                common=common, control_plane_root=Path("fixture"), database_url=None
-            ),
-        )
-        base = presence.ROUTE.format(product=fixture.profile.product, environment="testing")
-        query = {
-            "parameter": "fixture.api_key",
-            "context": fixture.context,
-            "deployment_record_id": fixture.identity.deployment_record_id,
-            "source_git_ref": fixture.identity.source_git_ref,
-            "artifact_id": fixture.identity.artifact_id,
-            "image_digest": fixture.identity.image_reference.rpartition("@")[2],
-        }
-        path = base + "?" + urlencode(query)
-        with patch(
-            "control_plane.odoo_parameter_presence.read_parameter_presence",
-            return_value=presence.ParameterPresenceResult(),
-        ) as execute:
-            response = await request(app, "GET", path)
-            self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(response.headers["cache-control"], "no-store")
-            self.assertEqual(allowed.call_args.kwargs["product"], fixture.profile.product)
-            self.assertEqual(allowed.call_args.kwargs["target"].instances, ("testing",))
-            execute.reset_mock()
-            self.assertEqual(
-                (await request(app, "GET", path.replace("/testing/", "/prod/"))).status_code, 400
-            )
-            for invalid in (
-                path + "&sql=SELECT",
-                base,
-                base + "?" + urlencode({**query, "parameter": "bad;sql"}),
-            ):
-                self.assertEqual((await request(app, "GET", invalid)).status_code, 422)
-            allowed.return_value = False
-            self.assertEqual((await request(app, "GET", path)).status_code, 403)
-            execute.assert_not_called()
-
-
-class ParameterPresenceProgramTests(unittest.TestCase):
     def test_host_checks_resource_drift_and_discards_unselected_child_output(self) -> None:
         import base64
         import sys
-        from control_plane import odoo_parameter_presence as presence
 
-        fixture = DiagnosticFixture()
-        identity = fixture.identity.model_dump(mode="json")
-        container = "c" * 64
-        key = "fixture.api_key"
-        spec = {
-            "container": container,
-            "project": fixture.connection.app_name,
-            "identity": identity,
-            "addons": {},
-            "parameter": key,
-            "container_program": "fixture-child",
-        }
-        selected = {
-            "runtime": "verified",
-            "presence": {"parameter": key, "exists": True, "nonempty": True, "count": 1},
-        }
-        program = presence.HOST_PROGRAM.replace("__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY))
+        from dataclasses import replace
+
+        self.fixture.connection = replace(
+            self.fixture.connection,
+            evidence=self.fixture.connection.evidence.model_copy(update={"container_id": "c" * 64}),
+        )
+        self.connector.return_value = self.fixture.connection
+        self.assertEqual(self.read().runtime, "verified")
+        spec = self.remote.call_args.kwargs["payload"]
+        program = self.remote.call_args.kwargs["program"]
+        identity = spec["identity"]
+        container = spec["container"]
+        selected = self.observed
         for failure in ("none", "container", "image", "foreign_output", "stderr", "timeout"):
             with self.subTest(failure=failure):
                 inspections = 0
@@ -1372,5 +1307,70 @@ class ParameterPresenceProgramTests(unittest.TestCase):
                     self.assertEqual(result, selected)
                 else:
                     self.assertNotIn("presence", result)
-                    self.assertIsNotNone(result.get("failure_stage"))
+                    stages = {
+                        "container": "drift",
+                        "image": "host_inspection",
+                        "foreign_output": "result_validation",
+                        "stderr": "host_execution",
+                        "timeout": "host_execution",
+                    }
+                    self.assertEqual(result["failure_stage"], stages[failure])
                 self.assertNotIn(PRIVATE, output.getvalue() + errors.getvalue())
+
+
+class ParameterPresenceHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_read_is_product_scoped_testing_only_and_typed(self) -> None:
+        from control_plane import odoo_parameter_presence as presence
+        from urllib.parse import urlencode
+
+        fixture = DiagnosticFixture()
+        allowed = MagicMock(return_value=True)
+        common = ReadRouteDependencies(
+            read_identity=lambda: _identity(),
+            get_record_store=lambda: fixture.store,
+            next_trace_id=lambda: "presence-trace",
+            authorization_allows=allowed,
+            http_error=lambda **kwargs: HTTPException(
+                status_code=kwargs["status_code"], detail={"code": kwargs["code"]}
+            ),
+            error_response_model=presence.ParameterPresenceResult,
+        )
+        app = FastAPI()
+        register_odoo_runtime_read_routes(
+            cast(ApiRouteRegistrar, app),
+            dependencies=OdooRuntimeReadDependencies(
+                common=common, control_plane_root=Path("fixture"), database_url=None
+            ),
+        )
+        base = presence.ROUTE.format(product=fixture.profile.product, environment="testing")
+        query = {
+            "parameter": "fixture.api_key",
+            "context": fixture.context,
+            "deployment_record_id": fixture.identity.deployment_record_id,
+            "source_git_ref": fixture.identity.source_git_ref,
+            "artifact_id": fixture.identity.artifact_id,
+            "image_digest": fixture.identity.image_reference.rpartition("@")[2],
+        }
+        path = base + "?" + urlencode(query)
+        with patch(
+            "control_plane.odoo_parameter_presence.read_parameter_presence",
+            return_value=presence.ParameterPresenceResult(),
+        ) as execute:
+            response = await request(app, "GET", path)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            self.assertEqual(allowed.call_args.kwargs["product"], fixture.profile.product)
+            self.assertEqual(allowed.call_args.kwargs["target"].instances, ("testing",))
+            execute.reset_mock()
+            self.assertEqual(
+                (await request(app, "GET", path.replace("/testing/", "/prod/"))).status_code, 400
+            )
+            for invalid in (
+                path + "&sql=SELECT",
+                base,
+                base + "?" + urlencode({**query, "parameter": "bad;sql"}),
+            ):
+                self.assertEqual((await request(app, "GET", invalid)).status_code, 422)
+            allowed.return_value = False
+            self.assertEqual((await request(app, "GET", path)).status_code, 403)
+            execute.assert_not_called()
