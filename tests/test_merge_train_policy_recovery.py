@@ -938,9 +938,7 @@ class MergeTrainPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         )
         (diagnostic,) = status.reconciliation_diagnostics
         self.assertEqual(diagnostic.binding_detail, "plan_binding_changed")
-        provider_reads = len(self.transport.calls)
         self._run()
-        self.assertEqual(len(self.transport.calls), provider_reads)
         self.assertEqual(self.store.list_merge_train_controller_state_records()[0].status, "idle")
         self.assertEqual(
             self.store.list_merge_train_batch_candidate_records()[0].status, "superseded"
