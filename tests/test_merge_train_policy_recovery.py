@@ -68,6 +68,8 @@ class _RecoveryTransport:
         self.calls.append(path)
         if self.unavailable:
             raise MergeTrainGitHubError("Provider read unavailable", status_code=503)
+        if "/git/ref/heads/launchplane/" in path:
+            raise MergeTrainGitHubError("Ref not found", status_code=404)
         if path.endswith("/branches/main"):
             return {"commit": {"sha": self.base_sha, "commit": {"tree": {"sha": OTHER_SHA}}}}
         if path.endswith(f"/git/commits/{HEAD_SHA}"):
