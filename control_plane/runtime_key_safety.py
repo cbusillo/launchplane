@@ -394,7 +394,7 @@ def _evaluate_binding(
         if declared_findings:
             return declared_findings
         if (
-            binding.value_source == "supplied"
+            binding.value_source in {"supplied", "generated"}
             and (
                 (
                     target.environment_class == "testing"
