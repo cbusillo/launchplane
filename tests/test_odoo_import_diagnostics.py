@@ -1042,3 +1042,449 @@ class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
                 update={"driver_id": "generic-web"}
             )
             self.assertEqual((await request(app, "GET", path)).status_code, 400)
+
+
+class ParameterPresenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from control_plane import odoo_parameter_presence as presence
+        from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+
+        self.presence = presence
+        self.fixture = DiagnosticFixture()
+        self.key = "fixture.api_key"
+        self.fixture.bindings[0] = self.fixture.bindings[0].model_copy(
+            update={"binding_key": config_parameter_secret_env_key(self.key)}
+        )
+        self.override = OdooInstanceOverrideRecord.model_validate(
+            {
+                "context": self.fixture.context,
+                "instance": "testing",
+                "updated_at": STAMP,
+                "config_parameters": [
+                    {
+                        "key": self.key,
+                        "value": {
+                            "source": "secret_binding",
+                            "secret_binding_id": self.fixture.bindings[0].binding_id,
+                        },
+                    }
+                ],
+            }
+        )
+        self.fixture.store.read_odoo_instance_override_record.return_value = self.override
+        identity = self.fixture.identity
+        self.query = presence.ParameterPresenceQuery(
+            parameter=self.key,
+            context=identity.context,
+            deployment_record_id=identity.deployment_record_id,
+            source_git_ref=identity.source_git_ref,
+            artifact_id=identity.artifact_id,
+            image_digest=identity.image_reference.rpartition("@")[2],
+        )
+        self.connector = self.enterContext(
+            patch.object(reads, "connect_runtime", return_value=self.fixture.connection)
+        )
+        self.remote = self.enterContext(
+            patch.object(presence, "_read_remote", side_effect=self.observe)
+        )
+        self.observed: dict[str, object] = {
+            "runtime": "verified",
+            "presence": {"parameter": self.key, "exists": True, "nonempty": True, "count": 1},
+        }
+
+    def observe(self, **kwargs: Any) -> None:
+        kwargs["receive"]({"type": "complete", "result": self.observed})
+
+    def read(self) -> Any:
+        return self.presence.read_parameter_presence(
+            store=self.fixture.store,
+            product=self.fixture.profile.product,
+            query=self.query,
+            control_plane_root=Path("fixture"),
+            database_url=None,
+        )
+
+    def test_selected_presence_binds_runtime_without_mutations_or_values(self) -> None:
+        result = self.read()
+        self.assertEqual(result.runtime, "verified")
+        self.assertEqual(result.evidence.identity, self.fixture.identity)
+        self.assertTrue(result.presence.nonempty)
+        self.assertNotIn(PRIVATE, result.model_dump_json())
+        self.assertFalse(self.connector.call_args.kwargs.get("diagnostics", False))
+        self.fixture.store.read_secret_version.assert_not_called()
+        self.assertTrue(
+            all(call[0].startswith(("read_", "list_")) for call in self.fixture.store.mock_calls)
+        )
+
+    def test_absent_empty_and_nonempty_are_distinct(self) -> None:
+        for count, nonempty in ((0, False), (1, False), (1, True)):
+            with self.subTest(count=count, nonempty=nonempty):
+                self.observed["presence"] = {
+                    "parameter": self.key,
+                    "exists": bool(count),
+                    "nonempty": nonempty,
+                    "count": count,
+                }
+                result = self.read()
+                self.assertEqual(result.runtime, "verified")
+                self.assertEqual(result.presence.count, count)
+                self.assertEqual(result.presence.nonempty, nonempty)
+
+    def test_exact_tuple_and_foreign_runtime_refuse_before_transport(self) -> None:
+        for field, value in (
+            ("context", "foreign"),
+            ("deployment_record_id", "other-deploy"),
+            ("source_git_ref", "c" * 40),
+            ("artifact_id", "other-artifact"),
+            ("image_digest", "sha256:" + "d" * 64),
+        ):
+            with self.subTest(field=field):
+                original = self.query
+                self.query = original.model_copy(update={field: value})
+                self.assertEqual(self.read().runtime, "unknown")
+                self.query = original
+        for field, value in (("product", "foreign"), ("instance", "prod")):
+            with self.subTest(field=field):
+                self.fixture.store.read_environment_inventory.return_value = (
+                    self.fixture.inventory.model_copy(
+                        update={
+                            "runtime_identity": self.fixture.identity.model_copy(
+                                update={field: value}
+                            )
+                        }
+                    )
+                )
+                self.assertEqual(self.read().runtime, "unknown")
+        self.remote.assert_not_called()
+
+    def test_reference_selection_and_drift_remain_unknown(self) -> None:
+        original = self.override
+        for record in (
+            original.model_copy(update={"context": "foreign"}),
+            original.model_copy(update={"config_parameters": ()}),
+            original.model_copy(
+                update={
+                    "config_parameters": (
+                        original.config_parameters[0].model_copy(
+                            update={
+                                "value": original.config_parameters[0].value.model_copy(
+                                    update={"source": "literal", "value": PRIVATE}
+                                )
+                            }
+                        ),
+                    )
+                }
+            ),
+        ):
+            with self.subTest(record=record.context):
+                self.fixture.store.read_odoo_instance_override_record.return_value = record
+                self.assertEqual(self.read().runtime, "unknown")
+        self.remote.assert_not_called()
+        self.fixture.store.read_odoo_instance_override_record.side_effect = [
+            original,
+            original.model_copy(update={"updated_at": "changed"}),
+        ]
+        self.assertEqual(self.read().runtime, "unknown")
+        self.fixture.store.read_odoo_instance_override_record.side_effect = None
+        self.fixture.store.read_odoo_instance_override_record.return_value = original
+        with patch.object(
+            reads,
+            "assert_selection_current",
+            side_effect=reads.OdooRuntimeReadError("runtime_changed", PRIVATE),
+        ):
+            self.assertEqual(self.read().runtime, "unknown")
+
+    def test_unavailable_or_unselected_outputs_never_expose_values_or_false_absence(self) -> None:
+        for observed in (
+            {"runtime": "unknown"},
+            {
+                "runtime": "verified",
+                "presence": {"parameter": self.key, "exists": False, "nonempty": True, "count": 0},
+            },
+            {
+                "runtime": "verified",
+                "presence": {"parameter": "foreign", "exists": True, "nonempty": True, "count": 1},
+            },
+            {
+                "runtime": "verified",
+                "presence": {
+                    "parameter": self.key,
+                    "exists": True,
+                    "nonempty": True,
+                    "count": 1,
+                    "value": PRIVATE,
+                },
+            },
+        ):
+            with self.subTest(observed=observed.get("runtime")):
+                self.observed = dict(observed)
+                result = self.read()
+                self.assertEqual(result.runtime, "unknown")
+                self.assertIsNone(result.presence)
+                self.assertNotIn(PRIVATE, result.model_dump_json())
+        self.remote.side_effect = RuntimeError(PRIVATE)
+        with patch("logging.Logger._log") as logger:
+            self.assertEqual(self.read().runtime, "unknown")
+            logger.assert_not_called()
+
+
+class ParameterPresenceHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_read_is_product_scoped_testing_only_and_typed(self) -> None:
+        from control_plane import odoo_parameter_presence as presence
+        from urllib.parse import urlencode
+
+        fixture = DiagnosticFixture()
+        allowed = MagicMock(return_value=True)
+        common = ReadRouteDependencies(
+            read_identity=lambda: _identity(),
+            get_record_store=lambda: fixture.store,
+            next_trace_id=lambda: "presence-trace",
+            authorization_allows=allowed,
+            http_error=lambda **kwargs: HTTPException(
+                status_code=kwargs["status_code"], detail={"code": kwargs["code"]}
+            ),
+            error_response_model=presence.ParameterPresenceResult,
+        )
+        app = FastAPI()
+        register_odoo_runtime_read_routes(
+            cast(ApiRouteRegistrar, app),
+            dependencies=OdooRuntimeReadDependencies(
+                common=common, control_plane_root=Path("fixture"), database_url=None
+            ),
+        )
+        base = presence.ROUTE.format(product=fixture.profile.product, environment="testing")
+        query = {
+            "parameter": "fixture.api_key",
+            "context": fixture.context,
+            "deployment_record_id": fixture.identity.deployment_record_id,
+            "source_git_ref": fixture.identity.source_git_ref,
+            "artifact_id": fixture.identity.artifact_id,
+            "image_digest": fixture.identity.image_reference.rpartition("@")[2],
+        }
+        path = base + "?" + urlencode(query)
+        with patch(
+            "control_plane.odoo_parameter_presence.read_parameter_presence",
+            return_value=presence.ParameterPresenceResult(),
+        ) as execute:
+            response = await request(app, "GET", path)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            self.assertEqual(allowed.call_args.kwargs["product"], fixture.profile.product)
+            self.assertEqual(allowed.call_args.kwargs["target"].instances, ("testing",))
+            execute.reset_mock()
+            self.assertEqual(
+                (await request(app, "GET", path.replace("/testing/", "/prod/"))).status_code, 400
+            )
+            for invalid in (
+                path + "&sql=SELECT",
+                base,
+                base + "?" + urlencode({**query, "parameter": "bad;sql"}),
+            ):
+                self.assertEqual((await request(app, "GET", invalid)).status_code, 422)
+            allowed.return_value = False
+            self.assertEqual((await request(app, "GET", path)).status_code, 403)
+            execute.assert_not_called()
+
+
+class ParameterPresenceProgramTests(unittest.TestCase):
+    def test_database_evaluator_distinguishes_absent_whitespace_and_nonempty_without_values(
+        self,
+    ) -> None:
+        import sqlite3
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import mock_open
+        from control_plane import odoo_parameter_presence as presence
+
+        database = sqlite3.connect(":memory:")
+        self.addCleanup(database.close)
+        database.execute("CREATE TABLE ir_config_parameter (key TEXT, value TEXT)")
+        database.create_function("regexp_replace", 4, lambda value, *args: value.strip())
+        key = "fixture.api_key"
+        fixture = DiagnosticFixture()
+        program = presence.CONTAINER_PROGRAM.replace(
+            "__CONFIG_PATH__", repr("/fixture/odoo.conf")
+        ).replace("__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY))
+        environment = {
+            "PLATFORM_INSTANCE": "testing",
+            "ODOO_DB_NAME": "fixture_db",
+            RUNTIME_IDENTITY_ENV_KEY: fixture.identity.model_dump_json(),
+        }
+        config = b"[options]\ndb_name=fixture_db\ndb_host=database\ndb_user=fixture\ndb_password=private-database-password\n"
+        sql_cursor = database.cursor()
+        cursor = MagicMock()
+
+        def execute(query: str, params: Any) -> None:
+            if "= ANY(%s)" in query:
+                sql_cursor.execute(query.replace("= ANY(%s)", "IN (?)"), params[0])
+            else:
+                sql_cursor.execute(query.replace("%s", "?"), params)
+
+        cursor.execute.side_effect = execute
+        cursor.fetchone.side_effect = sql_cursor.fetchone
+        cursor.fetchall.side_effect = sql_cursor.fetchall
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value = cursor
+        driver = SimpleNamespace(connect=MagicMock(return_value=connection))
+        for value in (None, "", " \t\n", PRIVATE):
+            with self.subTest(value_is_absent=value is None):
+                database.execute("PRAGMA query_only=OFF")
+                database.execute("DELETE FROM ir_config_parameter")
+                if value is not None:
+                    database.execute("INSERT INTO ir_config_parameter VALUES (?,?)", (key, value))
+                database.commit()
+                database.execute("PRAGMA query_only=ON")
+                with (
+                    patch.dict(sys.modules, {"psycopg2": driver}),
+                    patch.dict(os.environ, environment, clear=True),
+                    patch("builtins.open", mock_open(read_data=config)),
+                    patch.object(
+                        sys,
+                        "stdin",
+                        io.StringIO(
+                            json.dumps(
+                                {
+                                    "parameter": key,
+                                    "identity": fixture.identity.model_dump(mode="json"),
+                                }
+                            )
+                        ),
+                    ),
+                    contextlib.redirect_stdout(io.StringIO()) as output,
+                    contextlib.redirect_stderr(io.StringIO()) as errors,
+                ):
+                    exec(program, {})
+                observed = json.loads(output.getvalue())
+                self.assertEqual(observed["runtime"], "verified")
+                self.assertEqual(
+                    observed["presence"],
+                    {
+                        "parameter": key,
+                        "exists": value is not None,
+                        "nonempty": bool(value and value.strip()),
+                        "count": int(value is not None),
+                    },
+                )
+                self.assertNotIn(PRIVATE, output.getvalue() + errors.getvalue())
+                connection.set_session.assert_called_with(
+                    isolation_level="REPEATABLE READ", readonly=True
+                )
+                self.assertIn(
+                    "default_transaction_read_only=on", driver.connect.call_args.kwargs["options"]
+                )
+        driver.connect.side_effect = RuntimeError(PRIVATE)
+        with (
+            patch.dict(sys.modules, {"psycopg2": driver}),
+            patch.dict(os.environ, environment, clear=True),
+            patch("builtins.open", mock_open(read_data=config)),
+            patch.object(
+                sys,
+                "stdin",
+                io.StringIO(
+                    json.dumps(
+                        {"parameter": key, "identity": fixture.identity.model_dump(mode="json")}
+                    )
+                ),
+            ),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            exec(program, {})
+        self.assertEqual(json.loads(output.getvalue()), {"runtime": "unknown"})
+        self.assertNotIn(PRIVATE, output.getvalue() + errors.getvalue())
+
+    def test_host_checks_resource_drift_and_discards_unselected_child_output(self) -> None:
+        import base64
+        import sys
+        from control_plane import odoo_parameter_presence as presence
+
+        fixture = DiagnosticFixture()
+        identity = fixture.identity.model_dump(mode="json")
+        container = "c" * 64
+        key = "fixture.api_key"
+        spec = {
+            "container": container,
+            "project": fixture.connection.app_name,
+            "identity": identity,
+            "addons": {},
+            "parameter": key,
+            "container_program": "fixture-child",
+        }
+        selected = {
+            "runtime": "verified",
+            "presence": {"parameter": key, "exists": True, "nonempty": True, "count": 1},
+        }
+        program = presence.HOST_PROGRAM.replace("__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY))
+        for failure in ("none", "container", "image", "foreign_output", "stderr", "timeout"):
+            with self.subTest(failure=failure):
+                inspections = 0
+
+                def run(command: list[str], **kwargs: Any) -> Any:
+                    nonlocal inspections
+                    if command[:2] == ["docker", "inspect"]:
+                        inspections += 1
+                        raw = {
+                            "Id": container,
+                            "Image": "sha256:" + "d" * 64,
+                            "Config": {
+                                "Image": identity["image_reference"],
+                                "Labels": {
+                                    "com.docker.compose.project": spec["project"],
+                                    "com.docker.compose.service": "web",
+                                },
+                                "Env": [
+                                    "PLATFORM_INSTANCE=testing",
+                                    RUNTIME_IDENTITY_ENV_KEY + "=" + json.dumps(identity),
+                                ],
+                            },
+                            "State": {
+                                "Running": True,
+                                "Pid": 13 if failure == "container" and inspections > 1 else 12,
+                            },
+                        }
+                        return subprocess.CompletedProcess(command, 0, stdout=json.dumps([raw]))
+                    if command[:3] == ["docker", "image", "inspect"]:
+                        return subprocess.CompletedProcess(
+                            command,
+                            0,
+                            stdout=json.dumps(
+                                [
+                                    {
+                                        "Id": command[-1],
+                                        "RepoDigests": []
+                                        if failure == "image"
+                                        else [identity["image_reference"]],
+                                    }
+                                ]
+                            ),
+                        )
+                    self.assertEqual(command[:2], ["docker", "exec"])
+                    self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
+                    if failure == "timeout":
+                        raise subprocess.TimeoutExpired(command, kwargs["timeout"], stderr=PRIVATE)
+                    return subprocess.CompletedProcess(
+                        command,
+                        1 if failure == "stderr" else 0,
+                        stdout=json.dumps(
+                            {
+                                **selected,
+                                **({"value": PRIVATE} if failure == "foreign_output" else {}),
+                            }
+                        ),
+                        stderr=PRIVATE,
+                    )
+
+                with (
+                    patch.object(
+                        sys,
+                        "argv",
+                        ["host", base64.b64encode(json.dumps(spec).encode()).decode(), "FRAME:"],
+                    ),
+                    patch("subprocess.run", side_effect=run),
+                    contextlib.redirect_stdout(io.StringIO()) as output,
+                    contextlib.redirect_stderr(io.StringIO()) as errors,
+                ):
+                    exec(program, {})
+                result = json.loads(output.getvalue().removeprefix("FRAME:"))["result"]
+                self.assertEqual(result, selected if failure == "none" else {"runtime": "unknown"})
+                self.assertNotIn(PRIVATE, output.getvalue() + errors.getvalue())

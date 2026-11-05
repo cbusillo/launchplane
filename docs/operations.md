@@ -5513,6 +5513,34 @@ head. Reselect the source explicitly when new-head import proof is needed.
 There is no production
 or stable-lane rollback because neither was changed.
 
+### Testing parameter presence
+
+`GET /v1/products/{product}/environments/testing/odoo-parameter-presence`
+uses the existing product-scoped `operations.read` permission. Supply `parameter`,
+`context`, `deployment_record_id`, `source_git_ref`, `artifact_id` and `image_digest`
+as query parameters from the current stable-testing environment read. All are
+required; the image digest includes `sha256:`. The parameter must already have
+an exact, agreeing typed managed-secret reference for that lane. Arbitrary or
+literal-backed parameters are unavailable. No secret value or binding credential
+is accepted, decrypted or returned.
+
+The service selects the current stable Odoo runtime, checks the expected tuple,
+and uses its existing managed provider transport to inspect the immutable web
+container and image before and after a bounded database read. The existing
+integration readback evaluator compares nonempty values inside PostgreSQL in a
+read-only transaction. Only the selected parameter name, existence/nonempty
+booleans and row count leave the database. A verified result includes the runtime
+identity, target/container evidence and observation time; the response supplies a
+trace and `Cache-Control: no-store`. Missing references, drift, unavailable
+transport/database evidence or malformed output return `runtime: unknown` with
+no presence result, never an absent verdict. There is no Odoo login, external
+integration probe, workflow run, settings delivery or safety/admission record.
+
+This observation proves presence on the selected stable runtime only. It does
+not qualify integration connectivity, live-write exclusion, printing, a separate
+preview or a newer Odoo candidate. Existing import-diagnostic and post-deploy
+callers keep their separate behavior.
+
 ### Testing import diagnostics
 
 `GET /v1/products/{product}/environments/testing/odoo-import-diagnostics`

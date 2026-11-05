@@ -310,6 +310,24 @@ def _validate_catalog(families: tuple[IntegrationFamily, ...]) -> None:
 _validate_catalog(INTEGRATION_FAMILIES)
 
 
+CONFIG_PARAMETER_READBACK_LIBRARY = """TRIMMED_VALUE_SQL = "regexp_replace(coalesce(value, ''), '^[[:space:]]+|[[:space:]]+$', '', 'g')"
+STORE_KEY_HANDLE_SQL = (
+    "rtrim(split_part(regexp_replace(lower(" + TRIMMED_VALUE_SQL + "), '^[a-z]+://', ''), '/', 1), '.')"
+)
+
+
+def present_config_parameters(cursor, keys):
+    cursor.execute(
+        "SELECT key FROM ir_config_parameter WHERE key = ANY(%s) AND "
+        + TRIMMED_VALUE_SQL
+        + " <> ''",
+        (list(keys),),
+    )
+    return sorted(row[0] for row in cursor.fetchall())
+
+"""
+
+
 # Runs in the script-runner container with the lane's database credentials. Every
 # query returns only key names, counts or booleans: values are compared inside
 # PostgreSQL. Table names and predicates come from the fixed catalog above, never
@@ -331,23 +349,9 @@ allowed_integrations = set(spec["allowed_integrations"])
 if spec["connection_isolation_required"] and os.environ.get("PLATFORM_INSTANCE", "").strip().lower() in {"prod", "production"}:
     raise SystemExit("Non-production readback refuses a production runner")
 
-# Trims every kind of whitespace, as Python's str.strip() does; btrim() trims only spaces.
-TRIMMED_VALUE_SQL = "regexp_replace(coalesce(value, ''), '^[[:space:]]+|[[:space:]]+$', '', 'g')"
-STORE_KEY_HANDLE_SQL = (
-    "rtrim(split_part(regexp_replace(lower(" + TRIMMED_VALUE_SQL + "), '^[a-z]+://', ''), '/', 1), '.')"
-)
-
-
-def present_config_parameters(cursor, keys):
-    cursor.execute(
-        "SELECT key FROM ir_config_parameter WHERE key = ANY(%s) AND "
-        + TRIMMED_VALUE_SQL
-        + " <> ''",
-        (list(keys),),
-    )
-    return sorted(row[0] for row in cursor.fetchall())
-
-
+"""
+    + CONFIG_PARAMETER_READBACK_LIBRARY
+    + """
 def payment_provider_activation(cursor: object) -> str:
     cursor.execute(
         "SELECT attribute.attname, format_type(attribute.atttypid, NULL)"

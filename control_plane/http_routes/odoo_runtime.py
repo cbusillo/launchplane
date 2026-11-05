@@ -10,6 +10,7 @@ from fastapi import Depends, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import odoo_runtime_reads as reads
+from control_plane import odoo_parameter_presence as presence
 from control_plane import odoo_copy_aggregates as aggregates
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.odoo_runtime_source_prerequisites import (
@@ -92,6 +93,13 @@ class OdooImportDiagnosticResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     result: ImportDiagnosticResult
+
+
+class OdooParameterPresenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    result: presence.ParameterPresenceResult
 
 
 class AggregateCountsResponse(BaseModel):
@@ -339,6 +347,59 @@ def register_odoo_runtime_read_routes(
                 apply_on=record.apply_on,
                 updated_at=record.updated_at,
                 source_label=record.source_label,
+            )
+
+    def read_parameter_presence(
+        product: str,
+        environment: str,
+        query: Annotated[presence.ParameterPresenceQuery, Query()],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        response: Response,
+    ) -> OdooParameterPresenceResponse:
+        trace_id = common.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if environment != "testing":
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Parameter presence requires stable testing.",
+            )
+        with errors(trace_id):
+            try:
+                profile = resolve_odoo_product_route(
+                    record_store=record_store, product=product, instance="testing"
+                )
+            except OdooProductMismatchError as error:
+                raise reads.OdooRuntimeReadError(
+                    "invalid_odoo_environment",
+                    "The product does not own an Odoo testing lane.",
+                    400,
+                ) from error
+            lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+            if not common.authorization_allows(
+                identity=identity,
+                action="operations.read",
+                product=profile.product,
+                context=lane.context,
+                target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
+            ):
+                raise common.http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="The caller cannot read this product's testing parameters.",
+                )
+            return OdooParameterPresenceResponse(
+                trace_id=trace_id,
+                result=presence.read_parameter_presence(
+                    store=cast(presence.PresenceStore, record_store),
+                    product=profile.product,
+                    query=query,
+                    control_plane_root=dependencies.control_plane_root,
+                    database_url=dependencies.database_url,
+                ),
             )
 
     def import_evidence(
@@ -592,6 +653,13 @@ def register_odoo_runtime_read_routes(
     )
 
     for path, endpoint, model, operation_id, summary in (
+        (
+            presence.ROUTE,
+            read_parameter_presence,
+            OdooParameterPresenceResponse,
+            "read_odoo_parameter_presence",
+            "Read selected typed parameter presence on exact stable testing without values or writes",
+        ),
         (
             "/v1/products/{product}/environments/{environment}/odoo-source-prerequisites",
             read_source_prerequisites,
