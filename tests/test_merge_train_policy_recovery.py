@@ -68,6 +68,8 @@ class _RecoveryTransport:
         self.calls.append(path)
         if self.unavailable:
             raise MergeTrainGitHubError("Provider read unavailable", status_code=503)
+        if "/git/ref/heads/launchplane/" in path:
+            raise MergeTrainGitHubError("Ref not found", status_code=404)
         if path.endswith("/branches/main"):
             return {"commit": {"sha": self.base_sha, "commit": {"tree": {"sha": OTHER_SHA}}}}
         if path.endswith(f"/git/commits/{HEAD_SHA}"):
@@ -936,9 +938,7 @@ class MergeTrainPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         )
         (diagnostic,) = status.reconciliation_diagnostics
         self.assertEqual(diagnostic.binding_detail, "plan_binding_changed")
-        provider_reads = len(self.transport.calls)
         self._run()
-        self.assertEqual(len(self.transport.calls), provider_reads)
         self.assertEqual(self.store.list_merge_train_controller_state_records()[0].status, "idle")
         self.assertEqual(
             self.store.list_merge_train_batch_candidate_records()[0].status, "superseded"

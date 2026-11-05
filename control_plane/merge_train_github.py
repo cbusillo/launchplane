@@ -2471,12 +2471,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     def cleanup_batch_candidate_ref(
         self,
         *,
-        landing_plan: MergeTrainBatchLandingPlan,
+        landing_plan: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
         effect_executor: MergeTrainSemanticEffectExecutor | None = None,
     ) -> bool:
         resolved_effect_executor = effect_executor or self.semantic_effect_executor
         if (
-            landing_plan.candidate_pull_request_number is None
+            isinstance(landing_plan, MergeTrainBatchLandingPlan)
+            and landing_plan.candidate_pull_request_number is None
             and is_canonical_candidate_ref(landing_plan)
             and self.requires_full_odoo_build(repository=landing_plan.repository)
         ):
@@ -2493,6 +2494,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 raise MergeTrainGitHubError(
                     "Candidate validation PR cleanup could not be verified.", status_code=409
                 ) from error
+        if landing_plan.candidate_ref in merge_train_batch_refs(landing_plan):
+            return self._cleanup_batch_refs(
+                candidate=landing_plan,
+                effect_executor=resolved_effect_executor,
+            )
+        if isinstance(landing_plan, MergeTrainBatchCandidate):
+            raise MergeTrainGitHubError("Retirement requires a train-owned batch ref.")
         return resolved_effect_executor.delete_candidate_ref(
             CandidateRefDeleteEffect(
                 lineage=MergeTrainEffectLineage(
@@ -2504,6 +2512,68 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 candidate_ref=landing_plan.candidate_ref,
             )
         )
+
+    def _cleanup_batch_refs(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+        effect_executor: MergeTrainSemanticEffectExecutor,
+    ) -> bool:
+        references = merge_train_batch_refs(candidate)
+        if candidate.candidate_ref not in references:
+            raise MergeTrainGitHubError("Retirement requires a train-owned batch ref.")
+        repository_path = _repository_path(candidate.repository)
+        owner = candidate.repository.split("/", 1)[0]
+        deleted = False
+        for reference in references:
+            try:
+                payload = _json_object(
+                    self.transport.request(
+                        method="GET",
+                        path=f"/repos/{repository_path}/git/ref/{_reference_path(reference)}",
+                    ),
+                    "Retired candidate ref",
+                )
+            except MergeTrainGitHubError as error:
+                if error.status_code == 404:
+                    continue
+                raise
+            if payload.get("ref") != reference:
+                raise MergeTrainGitHubError("Retired candidate ref identity changed.")
+            branch = _branch_name_from_ref(reference)
+            in_use = False
+            for query in (
+                f"head={quote(f'{owner}:{branch}', safe='')}",
+                f"base={quote(branch, safe='')}",
+            ):
+                pulls = self.transport.request(
+                    method="GET",
+                    path=f"/repos/{repository_path}/pulls?state=open&{query}&per_page=100",
+                )
+                if not isinstance(pulls, list) or len(pulls) >= 100:
+                    raise MergeTrainGitHubError("Open PR ref usage is unavailable or incomplete.")
+                in_use = in_use or bool(pulls)
+            if in_use:
+                continue
+            identity = _json_object(payload.get("object"), "Retired candidate ref object")
+            removed = effect_executor.delete_candidate_ref(
+                CandidateRefDeleteEffect(
+                    lineage=MergeTrainEffectLineage(
+                        repository=candidate.repository,
+                        base_branch=candidate.base_branch,
+                        batch_id=candidate.batch_id,
+                        landing_plan_id=candidate.plan_id
+                        if isinstance(candidate, MergeTrainBatchLandingPlan)
+                        else "",
+                    ),
+                    candidate_ref=reference,
+                    expected_ref_sha=_required_text(
+                        identity.get("sha"), "Retired ref requires SHA."
+                    ),
+                )
+            )
+            deleted = deleted or removed
+        return deleted
 
     def candidate_ref_exists(self, *, repository: str, reference: str) -> bool:
         repository_path = _repository_path(repository)
@@ -3709,6 +3779,45 @@ class LegacyMergeTrainEffectExecutor:
         )
 
     def delete_candidate_ref(self, effect: CandidateRefDeleteEffect) -> bool:
+        if effect.expected_ref_sha:
+            repository_path = _repository_path(effect.lineage.repository)
+            repository = _json_object(
+                self.client.transport.request(method="GET", path=f"/repos/{repository_path}"),
+                "Candidate ref repository",
+            )
+            payload = _json_object(
+                self.client.transport.request(
+                    method="POST",
+                    path="/graphql",
+                    body={
+                        "query": "mutation($input: UpdateRefsInput!) { updateRefs(input: $input) { clientMutationId } }",
+                        "variables": {
+                            "input": {
+                                "repositoryId": _required_text(
+                                    repository.get("node_id"), "Repository requires node id."
+                                ),
+                                "refUpdates": [
+                                    {
+                                        "name": effect.candidate_ref,
+                                        "beforeOid": effect.expected_ref_sha,
+                                        "afterOid": "0" * 40,
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                ),
+                "Candidate ref deletion",
+            )
+            if payload.get("errors"):
+                if not self.client.candidate_ref_exists(
+                    repository=effect.lineage.repository, reference=effect.candidate_ref
+                ):
+                    return False
+                raise _github_graphql_error(payload["errors"])
+            data = _json_object(payload.get("data"), "Candidate ref deletion data")
+            _json_object(data.get("updateRefs"), "Candidate ref deletion result")
+            return True
         return self.client._delete_reference_if_present(
             repository_path=_repository_path(effect.lineage.repository),
             reference=effect.candidate_ref,
@@ -5450,6 +5559,17 @@ def _base_branch_sha(
     )
     commit = _json_object(branch.get("commit"), "GitHub branch commit")
     return _required_text(commit.get("sha"), "GitHub branch commit requires sha.")
+
+
+def merge_train_batch_refs(
+    candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+) -> tuple[str, str]:
+    canonical = build_merge_train_batch_candidate_ref(
+        repository=candidate.repository,
+        base_branch=candidate.base_branch,
+        batch_id=candidate.batch_id,
+    )
+    return canonical, merge_train_construction_ref(canonical)
 
 
 def merge_train_construction_ref(candidate_ref: str) -> str:

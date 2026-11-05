@@ -2296,6 +2296,24 @@ persisted landing result, but the controller remains `reconcile_required` with
 the cleanup phase and candidate ref intact. The next lease holder resumes that exact
 phase before planning new train work.
 
+Service-owned batch retirement uses that same controller lease for branch
+cleanup, after supersession or landing, including unpublished candidates, changed-policy
+landings and externally completed landings. Failed candidates and same-batch
+replacements remain active while their checks or recovery can still use the refs. It retires both
+the exact canonical `launchplane/train/...` ref and its derived
+`launchplane/construct/...` ref. Active candidate records protect their
+refs; an open PR using a ref as either head or base also keeps it. Retirement
+closes only the generated PR bound to its candidate, preserving other PRs on
+the same head. Incomplete provider reads stop cleanup. Deletion uses GitHub's
+atomic expected-tip `updateRefs` mutation, so a ref that moves after qualification
+is preserved for that attempt; a retry qualifies its current tip again.
+Supersession saves the exact retired record identities in the existing lease
+before terminal writes, preserving the caller's phase and pending effect.
+Cleanup runs after the caller completes its block, replacement or other durable
+work. A provider failure preserves that result and resumes only cleanup on the
+next lease. Missing refs are already clean. This is per-batch cleanup,
+not an inventory sweep of historical branches.
+
 ### Guarded Level 3 landing
 
 Controller landing and direct batch landing use the same per-entry guarded
@@ -2336,7 +2354,7 @@ The persisted landing entries are `stale`, never successful train landings.
 The retirement source records the observed external merge commit and trace;
 the original plan retains its immutable expected head/tree and candidate
 identity. No admission or landing outcome is created. Candidate records are
-superseded; their branch ref is retained. A crash after retirement resumes that
+superseded; their train-owned refs follow the guarded cleanup above. A crash after retirement resumes that
 terminal record before clearing the fence. This recovery is limited to a
 single legacy collapsed root with no admission for that PR in any lineage.
 Partial batches, ordinary-bound work and admitted effects retain their existing

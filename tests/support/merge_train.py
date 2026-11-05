@@ -286,12 +286,17 @@ class _FakeMergeTrainGitHubClient:
                 )
         return landing_plan.model_copy(update={"entries": tuple(merged_entries)})
 
-    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
+    def cleanup_batch_candidate_ref(
+        self,
+        *,
+        landing_plan: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+    ) -> bool:
         type(self).cleanup_batch_candidate_ref_calls += 1
+        self._candidate_ref_removed = True
         return True
 
     def candidate_ref_exists(self, *, repository: str, reference: str) -> bool:
-        return True
+        return not getattr(self, "_candidate_ref_removed", False)
 
     def pull_request_has_label(
         self, *, repository: str, pull_request_number: int, label: str
@@ -529,7 +534,11 @@ class _ProgressedBlockedAdmissionMergeTrainGitHubClient(_FakeMergeTrainGitHubCli
 class _CleanupFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
     cleanup_batch_candidate_ref_calls = 0
 
-    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
+    def cleanup_batch_candidate_ref(
+        self,
+        *,
+        landing_plan: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+    ) -> bool:
         type(self).cleanup_batch_candidate_ref_calls += 1
         raise MergeTrainGitHubError("candidate ref cleanup unavailable", status_code=503)
 
@@ -540,7 +549,11 @@ class _CleanupAlreadyMissingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
     def candidate_ref_exists(self, *, repository: str, reference: str) -> bool:
         return False
 
-    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
+    def cleanup_batch_candidate_ref(
+        self,
+        *,
+        landing_plan: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+    ) -> bool:
         type(self).cleanup_batch_candidate_ref_calls += 1
         return False
 
@@ -579,7 +592,11 @@ class _AdmissionInvokingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
 class _CleanupFailingWithoutStatusMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
     cleanup_batch_candidate_ref_calls = 0
 
-    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
+    def cleanup_batch_candidate_ref(
+        self,
+        *,
+        landing_plan: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+    ) -> bool:
         type(self).cleanup_batch_candidate_ref_calls += 1
         raise MergeTrainGitHubError("candidate ref cleanup network unavailable")
 
