@@ -1450,7 +1450,16 @@ apply this testing-only controller through its declared standing action, without
 controller grant. The Director's standing read authority is evaluated and audited
 for each native published binding. Renewal requires original publication custody and a fresh
 matching managed-route and running-backend observation before the atomic evidence
-write. Recorded host and alias roles follow that observed owned publication;
+write. Public domains come from the applied canonical-address receipt, or the
+original publication's binding when no address amendment exists. Retained origin
+aliases do not become public monitoring authority. The topology view also lists
+only aliases active in that public binding. An exact native testing request to
+`POST /v1/route-bindings/reconcile` uses this same verifier and source-checked CAS,
+so one lane can be corrected without running the batch controller. Dry-run first,
+then use the current record's `record_sha256` in `expected_current` for apply;
+the existing confirmation and idempotency requirements remain. Physical origin
+routes and their safety checks remain intact, and a change to public authority
+still invalidates an older rebuild or inverse plan. Existing
 immutable publication/address receipts and provider routes do not change. Drift
 or missing custody stays blocked. This
 alternative neither admits legacy bindings without their existing apply authority

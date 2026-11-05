@@ -222,7 +222,7 @@ def plan_route_binding_reconcile(
             findings=(
                 RouteBindingReconcileFinding(
                     code=NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER,
-                    detail="The Odoo testing route refresh controller owns this published binding; run that controller to observe and renew its route.",
+                    detail="This published testing binding requires native observation through the route-binding service or refresh controller.",
                 ),
             ),
             current_record=current_record,
