@@ -26,7 +26,7 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.product_review import (
-    ProductReviewStore,
+    CurrentHeadPreviewStore,
     applicable_product_review_decisions,
     current_head_preview,
 )
@@ -4229,7 +4229,7 @@ class GitHubMergeTrainSnapshotReader:
             return ""
         try:
             preview = current_head_preview(
-                store=cast(ProductReviewStore, store),
+                store=cast(CurrentHeadPreviewStore, store),
                 repository=repository,
                 pull_request_number=pull_request_number,
                 head_sha=head_sha,

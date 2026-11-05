@@ -210,13 +210,35 @@ def resolve_serving_preview(
 CurrentHeadPreview = Literal["served", "failed", "not_served", "no_previews"]
 
 
+class CurrentHeadPreviewStore(Protocol):
+    def list_product_profile_records(
+        self, *, driver_id: str = ""
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewRecord, ...]: ...
+
+    def list_preview_generation_records(
+        self, *, preview_id: str = "", limit: int | None = None
+    ) -> tuple[PreviewGenerationRecord, ...]: ...
+
+
 def current_head_preview(
-    *, store: ProductReviewStore, repository: str, pull_request_number: int, head_sha: str
+    *, store: CurrentHeadPreviewStore, repository: str, pull_request_number: int, head_sha: str
 ) -> CurrentHeadPreview:
     previewed_profiles = tuple(
         profile
-        for profile in product_profiles_for_repository(store=store, repository=repository)
-        if profile.is_active and profile.preview.enabled and profile.preview.context.strip()
+        for profile in store.list_product_profile_records()
+        if repository_key(profile.repository) == repository_key(repository)
+        and profile.is_active
+        and profile.preview.enabled
+        and profile.preview.context.strip()
     )
     if not previewed_profiles:
         return "no_previews"
@@ -234,16 +256,29 @@ def current_head_preview(
 
 def _profile_current_head_preview(
     *,
-    store: ProductReviewStore,
+    store: CurrentHeadPreviewStore,
     profile: LaunchplaneProductProfileRecord,
     pull_request_number: int,
     head_sha: str,
 ) -> CurrentHeadPreview:
-    serving = resolve_serving_preview(
-        store=store, profile=profile, pull_request_number=pull_request_number
+    repository = profile.repository.strip().casefold()
+    anchor_repositories = {repository, repository.split("/", 1)[-1]}
+    head_generations = tuple(
+        generation
+        for preview in store.list_preview_records(
+            context_name=profile.preview.context, anchor_pr_number=pull_request_number
+        )
+        if preview.anchor_repo.strip().casefold() in anchor_repositories
+        for generation in store.list_preview_generation_records(preview_id=preview.preview_id)
+        if head_sha and generation.anchor_summary.head_sha.strip().lower() == head_sha
     )
-    if head_sha and serving.preview_url and serving.head_sha == head_sha:
+    if any(
+        generation.state in {"ready", "superseded"} and generation.ready_at.strip()
+        for generation in head_generations
+    ):
         return "served"
+    if any(generation.state == "failed" for generation in head_generations):
+        return "failed"
     request = product_preview_request(
         store, product=profile.product, pull_request_number=pull_request_number
     )

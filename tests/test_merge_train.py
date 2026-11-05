@@ -16,6 +16,7 @@ from control_plane.contracts.merge_train_batch import dependency_not_ready_holds
 from control_plane.merge_train_handoff import MergeTrainReadyHandoff
 from control_plane.merge_train import (
     CURRENT_HEAD_PREVIEW_HOLDS,
+    CURRENT_HEAD_PREVIEW_NOT_SERVED,
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
     apply_merge_train_branch_update_intent,
@@ -24,6 +25,7 @@ from control_plane.merge_train import (
     build_merge_train_dry_run_result,
     build_merge_train_wait_result,
     discover_merge_train_stack,
+    merge_train_stack_child_readiness_reasons,
 )
 from control_plane.merge_train_github import MergeTrainGitHubError
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
@@ -455,6 +457,22 @@ class MergeTrainDryRunTests(unittest.TestCase):
                             ],
                             [8],
                         )
+        held_child = _pull_request(8).model_copy(
+            update={"preview_hold": CURRENT_HEAD_PREVIEW_NOT_SERVED}
+        )
+        self.assertTrue(
+            merge_train_stack_child_readiness_reasons(
+                repository_policy=policy.policies[0], pull_request=held_child
+            )
+        )
+        self.assertEqual(
+            merge_train_stack_child_readiness_reasons(
+                repository_policy=policy.policies[0],
+                pull_request=held_child.model_copy(update={"state": "closed"}),
+                recovered_merge=True,
+            ),
+            (),
+        )
         with self.assertRaises(ValueError):
             MergeTrainPullRequestSnapshot.model_validate(
                 other.model_dump() | {"preview_hold": "preview looked fine"}

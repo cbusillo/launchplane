@@ -4404,9 +4404,11 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             return snapshot.pull_requests[0].preview_hold
 
         def preview_generation(
-            head_sha: str, state: PreviewGenerationState = "ready"
+            head_sha: str, state: PreviewGenerationState = "ready", sequence: int = 1
         ) -> PreviewGenerationRecord:
-            recorded = _preview_generation_read_record(anchor_pr_number=16, state=state)
+            recorded = _preview_generation_read_record(
+                anchor_pr_number=16, state=state, sequence=sequence
+            )
             return recorded.model_copy(
                 update={
                     "anchor_summary": recorded.anchor_summary.model_copy(
@@ -4461,6 +4463,16 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 CURRENT_HEAD_PREVIEW_FAILED,
             ),
             ("preview serves the current head", True, (preview_generation("head-16"),), None, ""),
+            (
+                "current head served before a same-head refresh failed",
+                True,
+                (
+                    preview_generation("head-16"),
+                    preview_generation("head-16", state="failed", sequence=2),
+                ),
+                failed_refresh,
+                "",
+            ),
         )
         for (label, previews_enabled, generations, reconcile_request, expected), dependency in (
             (case, dependency) for case in cases for dependency in (True, False)
@@ -4475,12 +4487,18 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 store.write_product_profile_record(
                     LaunchplaneProductProfileRecord.model_validate(profile)
                 )
-                for generation in generations:
+                if generations:
                     store.write_preview_record(
                         _preview_read_record(anchor_pr_number=16).model_copy(
-                            update={"anchor_repo": "sellyouroutboard"}
+                            update={
+                                "anchor_repo": "sellyouroutboard",
+                                "state": "failed"
+                                if generations[-1].state == "failed"
+                                else "active",
+                            }
                         )
                     )
+                for generation in generations:
                     store.write_preview_generation_record(generation)
                 self.assertEqual(read_with_previews(store, bot_update=dependency), expected)
 

@@ -932,8 +932,10 @@ def _build_queue_entry(
                 ineligible_reasons.append(handoff_refusal)
         elif pull_request.dependency_update_class != "patch_or_minor":
             ineligible_reasons.append("dependency update needs agent review")
-    if pull_request.preview_hold and not DEPENDENCY_HEAD_HOLD_REASONS.intersection(
-        ineligible_reasons
+    if (
+        pull_request.preview_hold
+        and pull_request.state == "open"
+        and not DEPENDENCY_HEAD_HOLD_REASONS.intersection(ineligible_reasons)
     ):
         ineligible_reasons.append(pull_request.preview_hold)
     if (

@@ -546,8 +546,8 @@ entries, and are reconsidered on each fresh read without a label change.
 ### Current-Head Previews
 
 When an active product on the repository has previews enabled, every queued PR
-waits until its own preview serves a ready generation built from its current
-head ([Q1268](https://github.com/cbusillo/odoo-devkit/issues/362#issuecomment-6647242111),
+waits until its own preview has served a ready generation built from its
+current head ([Q1268](https://github.com/cbusillo/odoo-devkit/issues/362#issuecomment-6647242111),
 [Q1269](https://github.com/cbusillo/launchplane/issues/5603#issuecomment-6647336256)).
 This applies to checked Ready handoffs, the enqueue label and automatic
 dependency admission alike. The snapshot reads the existing preview and
@@ -555,7 +555,9 @@ reconcile records; it adds no check or store. The queue entry's reason names a
 failed current-head preview, a preview that has not served the current head
 yet, or an unreadable record, and the next fresh read requalifies it. A push,
 including the train's own branch refresh, waits for the new head's preview.
-Products without previews keep their existing admission.
+A head that once served stays qualified when a later refresh of the same head
+fails or the preview is retired; recovering an already merged stack child does
+not need its preview. Products without previews keep their existing admission.
 
 Admission selects new members only between candidates. Eligible PRs beyond the
 cap, a known changed-file area group or a CODEOWNERS individual-landing boundary
