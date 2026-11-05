@@ -477,6 +477,10 @@ an edited handoff has unproven editor authority and requires a new checked
 checked `Engineering ready; waiting for the Client's acceptance` wait naming
 exactly the current head: it admits once Launchplane holds every Client's
 acceptance of that head, including one carried to it, with no second handoff.
+When a waiting handoff still holds the PR, the refusal reason distinguishes a
+checked Client wait on an older head, a checked Client wait still awaiting the
+Client's acceptance of the current head, and any other wait, and states what
+clears it.
 Every other admission check still applies. A push
 requires a fresh handoff naming exactly the current head. Missing, duplicate,
 quoted, fenced, stale or unreadable head evidence cannot admit a PR. The adapter

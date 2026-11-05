@@ -4360,6 +4360,7 @@ class GitHubMergeTrainSnapshotReader:
             actor_id=actor_id,
             actor_role=role,
             comment_id=comment_id,
+            client_wait=latest_kind == "client_wait",
             client_accepted=latest_kind == "client_wait"
             and declared_head == head_sha
             and self.client_accepted(

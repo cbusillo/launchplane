@@ -17,6 +17,7 @@ class MergeTrainReadyHandoff(BaseModel):
     actor_id: int | None = None
     actor_role: str = "unknown"
     comment_id: int | None = None
+    client_wait: bool = False
     client_accepted: bool = False
 
 
@@ -84,7 +85,11 @@ def ready_handoff_refusal(
     if handoff.status == "unreadable":
         return "Ready handoff evidence is unreadable"
     if handoff.status == "waiting" and not handoff.client_accepted:
-        return "latest trusted engineering handoff is waiting"
+        if not handoff.client_wait:
+            return "latest trusted engineering handoff is waiting (not the checked Client wait); post a fresh checked gh-pr.py ready handoff when that wait clears"
+        if not handoff.head_sha or handoff.head_sha != head_sha:
+            return "checked Client-wait handoff does not name the current head; post a fresh checked gh-pr.py ready handoff"
+        return "checked Client-wait handoff is waiting for the Client's acceptance of the current head; Client acceptance in Launchplane clears it"
     if handoff.status == "stale" or handoff.head_sha != head_sha:
         return "Ready handoff does not name exactly the current head; post a fresh checked gh-pr.py ready handoff"
     if not handoff_actor_allowed(policy, actor_id=handoff.actor_id, actor_role=handoff.actor_role):
