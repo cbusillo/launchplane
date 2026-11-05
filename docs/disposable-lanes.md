@@ -736,6 +736,10 @@ protective-report qualification as refresh. Known use, a needed copy or shared
 resources remain holds even after a report expires. Missing positive preview
 observations alone do not block teardown; reviewed-plan, target ownership,
 executor fences and provider-resource guards still apply before every effect.
+An owned destroyed lifecycle record can admit a fresh destroy plan for its
+remaining concrete target. This only reaches the current safety checks; it
+does not prove absence, qualify data custody or settle an older operation.
+Observation and clearing still require their existing lifecycle authority.
 Odoo teardown inspects its generated storage once outside the mutation lock,
 then rechecks placement, volume environment and raw compose binding inside the lock
 before each deletion. Missing owned resources can converge; foreign volume
