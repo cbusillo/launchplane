@@ -2728,13 +2728,7 @@ def _run_preview_operation(
             "odoo_preview_source_major_mismatch",
             "odoo_preview_source_version_unavailable",
         }:
-            outcome = _preview_failure(plan, error.code)
-            if error.retryable:
-                plan.update(
-                    preview_transport_retryable=True, deferred="snapshot_source_unavailable"
-                )
-                return ReconcileOutcome(plan, deferred=True)
-            return outcome
+            return _preview_failure(plan, error.code)
         return _preview_failure(plan, "preview_provenance_refused")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
         if is_transient_dokploy_error(error):

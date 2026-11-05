@@ -100,50 +100,28 @@ lookup, including before the product has published its first snapshot. There
 is no production or live-testing fallback. The preview and snapshot must be on
 the same execution server; cross-host transport is not implied.
 
-Ordinary snapshot previews require the selected artifact's recorded Odoo major
-to match the source database. Planning reads the installed base version with
-the existing immutable archive decoder and binds it into the issued plan.
-Apply reuses that fingerprinted evidence only while the complete snapshot
-binding still matches; a different source requires its own read. An unavailable
-archive reader, malformed base version or unversioned artifact refuses with
-`odoo_preview_source_version_unavailable`. Temporary archive/provider read
-failures return503 and remain eligible for reconciliation retry; invalid version
-evidence remains a refusal. A cross-major source refuses with
-`odoo_preview_source_major_mismatch` before target changes or registry work.
-The archive utility uses the testing database container's PostgreSQL tools, so
-that utility must be available for a new source read. Existing issued metadata
-is not a claim that migration or preparation completed.
+Ordinary snapshot previews require the artifact's recorded Odoo major to match
+the snapshot's installed base version. The shared planning/apply path uses the
+existing immutable archive decoder before target changes or registry work.
+`odoo_preview_source_major_mismatch` refuses incompatible data;
+`odoo_preview_source_version_unavailable` refuses unreadable or unknown evidence.
+Source-read failures use existing event and open-PR sweep recovery, without an
+immediate retry loop. The archive utility requires the testing database container.
+The check adds no plan field and preserves original-bound recovery fingerprints.
 
-A completed retained preview keeps its database and filestore. Before ordinary
-refresh, its completed original operation must verify the previous artifact's
-major against the new artifact; unknown original provenance refuses rather than
-replacing data or inferring compatibility. Same-major refreshes preserve the
-copy and do not select a newer snapshot. Driver upstream restores and explicit
-upgrade rehearsals keep their existing migration contracts.
+Compatible retained copies keep their data; the completed original's artifact
+version must match the new build. Unversioned builds need a normal versioned
+build. An admitted unused disposable legacy preview may use supported destroy
+then refresh from a qualified matching snapshot. Preserve used or needed copies
+for provenance resolution. Driver upstream restores and explicit migration
+routes keep their existing contracts.
 
-For an unversioned requested artifact, publish a normal build that records its
-Odoo version. If an old retained original has no verifiable artifact version,
-preserve used or needed copies for the responsible agent to resolve. An admitted
-unused disposable preview can use the supported destroy and then refresh from
-a qualified matching snapshot with a versioned build. The same non-use,
-custody, storage and original-operation protections still apply. Plans issued
-before version binding was introduced can become stale at apply; request a
-fresh plan through the normal path, preserving unknown-effect originals.
-
-To supply a matching source, use the existing qualified testing refresh/rebuild
-and capture publication path above. A saved database file is not a published
-`CleanTestingSnapshot`. Migration output follows migration; it is not an input
-prerequisite to the batch that creates it. Once the source is qualified, the
-existing admitted testing operation's completion publishes its capture through
-`completed_operation_snapshot`, and normal preview planning can select it.
-
-The existing upstream contract reads a PostgreSQL database and its matching
-filestore from recorded source coordinates; it does not select a saved dump
-path. If the batch returns only exported files, making that output available
-through the qualified existing source binding is a separate required event.
-An early version refusal does not supply that binding or complete migration,
-publication or staff testing. Product-specific routing and current events stay
-on their work records. No archive import or publication mode is added here.
+A matching source comes through the qualified testing refresh/rebuild and capture
+publication path above, published by `completed_operation_snapshot` at operation
+completion. A saved database file or migration output is not a published
+`CleanTestingSnapshot`, and future output is not an input to its producing batch.
+The existing upstream contract reads a PostgreSQL database and matching filestore,
+not a saved dump path; any required source binding remains a separate event.
 
 The copy receives no source SSH mount or upstream connection. Private-port
 preview renders also omit the host-gateway alias; runtime inspection rejects

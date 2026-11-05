@@ -130,10 +130,9 @@ class OdooPreviewApplyRouteDependencyError(ValueError):
 
 
 class OdooPreviewPlanProvenanceError(ValueError):
-    def __init__(self, *, code: str, message: str, retryable: bool = False) -> None:
+    def __init__(self, *, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
-        self.retryable = retryable
 
 
 class OdooPreviewApplyConfigError(click.ClickException):
@@ -230,7 +229,6 @@ def _build_odoo_preview_apply_inputs(
     profile: LaunchplaneProductProfileRecord,
     request: OdooPreviewApplyInputsRequest,
     database_url: str | None,
-    previously_issued_plan: OdooPreviewApplyInputsResult | None = None,
 ) -> OdooPreviewApplyInputsResult:
     result = build_odoo_preview_apply_inputs(
         control_plane_root=control_plane_root,
@@ -262,13 +260,10 @@ def _build_odoo_preview_apply_inputs(
         )
         if not retained:
             snapshot = preview_snapshot(cast(Any, record_store), profile)
-            source_version = _preview_snapshot_base_version(
-                record_store, snapshot, previously_issued_plan
-            )
+            source_version = _preview_snapshot_base_version(record_store, snapshot)
             _require_preview_source_major(source_version, target_version)
             result = result.model_copy(
                 update={
-                    "clean_snapshot_base_version": source_version,
                     "dry_run_plan": result.dry_run_plan.model_copy(
                         update={"clean_snapshot": snapshot}
                     ),
@@ -334,30 +329,18 @@ def _require_preview_source_major(source_version: str, target_version: str) -> N
 def _preview_snapshot_base_version(
     store: object,
     snapshot: CleanTestingSnapshot,
-    previously_issued_plan: OdooPreviewApplyInputsResult | None,
 ) -> str:
     from control_plane.odoo_snapshot_version import read_snapshot_metadata
-    from control_plane.odoo_runtime_reads import OdooRuntimeReadError
 
-    if (
-        previously_issued_plan is not None
-        and previously_issued_plan.dry_run_plan.clean_snapshot == snapshot
-        and previously_issued_plan.clean_snapshot_base_version
-    ):
-        return previously_issued_plan.clean_snapshot_base_version
     try:
         return read_snapshot_metadata(
             store=cast(Any, store), snapshot=snapshot
         ).recorded_base_version
     except (ValueError, FileNotFoundError, click.ClickException) as error:
-        from control_plane.dokploy.api import is_transient_dokploy_error
-
         raise OdooPreviewPlanProvenanceError(
             code="odoo_preview_source_version_unavailable",
             message="The selected immutable snapshot version could not be verified. "
             "Keep the existing source and retry after its archive reader is available.",
-            retryable=(isinstance(error, OdooRuntimeReadError) and error.status_code >= 500)
-            or is_transient_dokploy_error(error),
         ) from error
 
 
@@ -495,9 +478,6 @@ def refresh_odoo_preview_issued_plan(
             code="odoo_preview_plan_not_issued",
             message="Odoo preview apply requires service-issued plan provenance.",
         )
-    validate_odoo_preview_issued_plan(
-        plan_id=provenance.plan_id, issued_plan=issued_plan, request=request
-    )
     resolved_observed_at = observed_at or datetime.now(timezone.utc)
     if resolved_observed_at.tzinfo is None:
         raise ValueError("Odoo preview plan validation requires a timezone-aware timestamp.")
@@ -519,7 +499,6 @@ def refresh_odoo_preview_issued_plan(
             profile=profile,
             request=issued_plan.plan_request,
             database_url=database_url,
-            previously_issued_plan=issued_plan,
         )
     except (FileNotFoundError, PreviewImportSourceError, click.ClickException) as error:
         raise OdooPreviewPlanProvenanceError(
