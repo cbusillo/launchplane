@@ -17784,7 +17784,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                         )
                 migrate.assert_not_called()
 
-    def test_held_migration_joins_current_attestations_without_losing_retained_rows(self) -> None:
+    def test_held_migration_preserves_attestations_at_the_runtime_target(self) -> None:
         from control_plane.database_maintenance_host import RecoveryRequired
         from control_plane.database_maintenance import (
             apply_retirement,
@@ -17796,11 +17796,12 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
             retained_snapshot,
         )
         from control_plane.storage.schema_migration import (
+            SCHEMA_MIGRATION_TARGET_REVISION,
             migrate_schema_on_connection,
             schema_migration_target,
         )
         from control_plane.storage.migrations.versions import (
-            c8d2e4f6a9b1_add_integration_attestations as current,
+            c8d2e4f6a9b1_add_integration_attestations as attestations,
         )
         from control_plane.storage.migrations.versions import (
             e7c1d5e9a3b6_drop_retired_delivery_tables as retired,
@@ -17810,12 +17811,12 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
         from sqlalchemy import Table, MetaData
 
         with _isolated_postgres_database() as url:
-            alembic_command.upgrade(_alembic_config(url), current.revision)
+            alembic_command.upgrade(_alembic_config(url), SCHEMA_MIGRATION_TARGET_REVISION)
             engine = create_engine(url, poolclass=NullPool)
             self.addCleanup(engine.dispose)
             seed_retired_history(engine)
             with engine.begin() as seed:
-                table = Table(current.TABLE_NAME, MetaData(), autoload_with=seed)
+                table = Table(attestations.TABLE_NAME, MetaData(), autoload_with=seed)
                 seed.execute(
                     table.insert().values(
                         record_id="retained-attestation",
@@ -17836,7 +17837,8 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                     self.assertEqual(
                         final,
                         schema_migration_target(
-                            current_revision=current.revision, target_revision=retired.revision
+                            current_revision=SCHEMA_MIGRATION_TARGET_REVISION,
+                            target_revision=retired.revision,
                         ),
                     )
                     after = database_snapshot(connection)
@@ -17845,8 +17847,8 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                     self.assertEqual(set(before) - set(after), set(retired.RETIRED_TABLES))
                     self.assertEqual(retained_snapshot(after), retained_snapshot(before))
                     self.assertEqual(
-                        after[current.TABLE_NAME],
-                        before[current.TABLE_NAME],
+                        after[attestations.TABLE_NAME],
+                        before[attestations.TABLE_NAME],
                     )
                     preview.rollback()
                     rehearsal = {
@@ -17889,7 +17891,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                     }
             with engine.connect() as observer:
                 self.assertEqual(verify_committed_database(observer, proof), final)
-                table = Table(current.TABLE_NAME, MetaData(), autoload_with=observer)
+                table = Table(attestations.TABLE_NAME, MetaData(), autoload_with=observer)
                 observer.execute(table.update().values(pull_request_number=99))
                 with self.assertRaises(RecoveryRequired):
                     verify_committed_database(observer, proof)
