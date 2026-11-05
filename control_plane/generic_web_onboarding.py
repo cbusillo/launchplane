@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from ipaddress import ip_address
-from typing import Literal
+from typing import Literal, Protocol
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -27,44 +27,72 @@ _GIT_REF_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
 _PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
 
 
-def _normalize_preview_base_url(value: str) -> str:
+def normalize_preview_base_url(value: str, *, label: str = "generic-web onboarding") -> str:
     normalized_value = value.strip()
     if not normalized_value:
-        raise ValueError("generic-web onboarding requires preview_base_url")
+        raise ValueError(f"{label} requires preview_base_url")
     if any(character.isspace() for character in normalized_value):
-        raise ValueError("generic-web onboarding preview_base_url cannot contain whitespace")
+        raise ValueError(f"{label} preview_base_url cannot contain whitespace")
     parsed = urlparse(normalized_value)
     if parsed.scheme not in {"http", "https"}:
-        raise ValueError("generic-web onboarding preview_base_url must use http or https")
+        raise ValueError(f"{label} preview_base_url must use http or https")
     if not parsed.hostname:
-        raise ValueError("generic-web onboarding preview_base_url requires a hostname")
+        raise ValueError(f"{label} preview_base_url requires a hostname")
     if parsed.username or parsed.password:
-        raise ValueError("generic-web onboarding preview_base_url cannot contain credentials")
+        raise ValueError(f"{label} preview_base_url cannot contain credentials")
     if parsed.hostname.startswith("*."):
         raise ValueError(
-            "generic-web onboarding preview_base_url must name the preview base host, not a wildcard"
+            f"{label} preview_base_url must name the preview base host, not a wildcard"
         )
     try:
         ip_address(parsed.hostname)
     except ValueError:
         pass
     else:
-        raise ValueError(
-            "generic-web onboarding preview_base_url must use a DNS hostname, not an IP address"
-        )
+        raise ValueError(f"{label} preview_base_url must use a DNS hostname, not an IP address")
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
         raise ValueError(
-            "generic-web onboarding preview_base_url must be a root URL without path, query, or fragment"
+            f"{label} preview_base_url must be a root URL without path, query, or fragment"
         )
     try:
         port = parsed.port
     except ValueError as error:
-        raise ValueError("generic-web onboarding preview_base_url has an invalid port") from error
+        raise ValueError(f"{label} preview_base_url has an invalid port") from error
     hostname = parsed.hostname.lower()
     normalized_host = f"[{hostname}]" if ":" in hostname else hostname
     if port:
         normalized_host = f"{normalized_host}:{port}"
     return f"{parsed.scheme.lower()}://{normalized_host}"
+
+
+class NewProductIdentity(Protocol):
+    product: str
+    display_name: str
+    repository: str
+    repository_id: str
+    repository_owner_id: str
+    default_branch: str
+    image_repository: str
+
+
+def validate_new_product_identity(intent: NewProductIdentity, *, label: str) -> None:
+    """Check the immutable repository identity every native onboarding intent binds."""
+    if _PRODUCT_PATTERN.fullmatch(intent.product) is None:
+        raise ValueError(f"{label} product must use lowercase letters, numbers, and hyphens")
+    if not intent.display_name:
+        raise ValueError(f"{label} requires display_name")
+    if _REPOSITORY_PATTERN.fullmatch(intent.repository) is None:
+        raise ValueError(f"{label} repository must use owner/name form")
+    for field_name, value in (
+        ("repository_id", intent.repository_id),
+        ("repository_owner_id", intent.repository_owner_id),
+    ):
+        if not value.isdecimal():
+            raise ValueError(f"{label} {field_name} must be a numeric GitHub ID")
+    if _GIT_REF_PATTERN.fullmatch(intent.default_branch) is None:
+        raise ValueError(f"{label} default_branch is invalid")
+    if not intent.image_repository:
+        raise ValueError(f"{label} requires image_repository")
 
 
 class GenericWebOnboardingIntent(BaseModel):
@@ -99,7 +127,7 @@ class GenericWebOnboardingIntent(BaseModel):
         self.default_branch = self.default_branch.strip()
         self.image_repository = self.image_repository.strip()
         self.health_path = self.health_path.strip()
-        self.preview_base_url = _normalize_preview_base_url(self.preview_base_url)
+        self.preview_base_url = normalize_preview_base_url(self.preview_base_url)
         self.testing_context = self.testing_context.strip() or f"{self.product}-testing"
         self.target_name = self.target_name.strip() or f"{self.product}-testing"
         self.project_name = self.project_name.strip() or self.product
@@ -108,24 +136,7 @@ class GenericWebOnboardingIntent(BaseModel):
         self.preview_app_name_prefix = (
             self.preview_app_name_prefix.strip() or f"{self.product}-preview"
         )
-        if _PRODUCT_PATTERN.fullmatch(self.product) is None:
-            raise ValueError(
-                "generic-web onboarding product must use lowercase letters, numbers, and hyphens"
-            )
-        if not self.display_name:
-            raise ValueError("generic-web onboarding requires display_name")
-        if _REPOSITORY_PATTERN.fullmatch(self.repository) is None:
-            raise ValueError("generic-web onboarding repository must use owner/name form")
-        for label, value in (
-            ("repository_id", self.repository_id),
-            ("repository_owner_id", self.repository_owner_id),
-        ):
-            if not value.isdecimal():
-                raise ValueError(f"generic-web onboarding {label} must be a numeric GitHub ID")
-        if _GIT_REF_PATTERN.fullmatch(self.default_branch) is None:
-            raise ValueError("generic-web onboarding default_branch is invalid")
-        if not self.image_repository:
-            raise ValueError("generic-web onboarding requires image_repository")
+        validate_new_product_identity(self, label="generic-web onboarding")
         if not self.health_path.startswith("/"):
             raise ValueError("generic-web onboarding health_path must start with /")
         for label, value in (

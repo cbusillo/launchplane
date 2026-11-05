@@ -9,6 +9,7 @@ from control_plane.generic_web_onboarding import (
     generic_web_onboarding_plan_sha256,
 )
 from control_plane.http_routes.mutation_support import request_fingerprint
+from control_plane.odoo_onboarding import OdooOnboardingIntent
 from control_plane.storage.postgres import PostgresRecordStore
 
 if TYPE_CHECKING:
@@ -127,7 +128,7 @@ def validate_onboarding_target_request(request: DokployTargetSetupEnvelope) -> N
 
 def require_unallocated_onboarding_contexts(
     store: PostgresRecordStore,
-    intent: GenericWebOnboardingIntent,
+    intent: GenericWebOnboardingIntent | OdooOnboardingIntent,
     *,
     allocated_testing: bool = False,
 ) -> None:

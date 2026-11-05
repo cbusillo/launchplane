@@ -47,7 +47,8 @@ as Discord Blue's Every Code bridge port `8787`.
 ## Launchplane Records
 
 Create new generic-web products through the [native target allocation and
-product-record operations](operations.md#native-target-allocation). Resolve
+product-record operations](operations.md#native-target-allocation), and new
+Odoo products through [native Odoo onboarding](operations.md#native-odoo-onboarding). Resolve
 immutable repository and account IDs and the default branch through the configured
 GitHub helper before preparing the intent. The native service does not look
 these up. Save inputs and reviewed receipts in admin-owned state outside the

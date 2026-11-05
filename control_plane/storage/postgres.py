@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.generic_web_onboarding import GenericWebOnboardingIntent
+from control_plane.odoo_onboarding import OdooOnboardingIntent
 from control_plane.preview_namespaces import (
     require_postgres_preview_cleanup,
     preview_resource_declaration_changed,
@@ -6505,13 +6506,22 @@ class PostgresRecordStore(HumanSessionStore):
         self._write_product_authority_bundle(bundle, caller_identity=identity)
 
     def write_new_product_onboarding_bundle(
-        self, bundle: ProductAuthorityBundle, *, intent: GenericWebOnboardingIntent
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        intent: GenericWebOnboardingIntent | OdooOnboardingIntent,
     ) -> None:
         from control_plane.onboarding_target import require_unallocated_onboarding_contexts
 
+        # Generic-web records adopt their allocated testing target; Odoo records
+        # come first, so their contexts must still be empty.
+        allocated_testing = isinstance(intent, GenericWebOnboardingIntent)
+
         def guard(_session: Any) -> None:
             try:
-                require_unallocated_onboarding_contexts(self, intent, allocated_testing=True)
+                require_unallocated_onboarding_contexts(
+                    self, intent, allocated_testing=allocated_testing
+                )
             except ValueError as error:
                 raise ProductProfileConflictError(str(error)) from error
 
