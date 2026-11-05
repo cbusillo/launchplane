@@ -932,7 +932,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         get_json = self.github.get_json
 
         def stale_filtered_runs(path: str) -> object:
-            if "/actions/workflows/build.yml/runs?" in path and "status=success" in path:
+            if "/actions/workflows/build.yml/runs?" in path and "status=" in path:
                 return {"total_count": 1, "workflow_runs": [self.github.runs[10]]}
             return get_json(path)
 
@@ -942,6 +942,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
 
         self.assertEqual(plan["action"], "deploy")
         self.assertEqual(plan["desired_commit"], DEPLOYABLE)
+        self.assertNotIn("rejected_builds", plan)
         operation = self.store.read_odoo_stable_target_replacement_operation_record(
             cast(str, plan["queued_operation_id"])
         )
@@ -5026,6 +5027,31 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
                 )
                 self.assertTrue(plan["held"])
                 self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_failed_baseline_run_does_not_stop_build_inventory_pagination(self) -> None:
+        self.record_legacy_baseline()
+        for run_id in range(1, 52):
+            self.github.add_run(run_id, DEPLOYABLE)
+            self.github.runs[run_id]["run_started_at"] = "2026-10-08T12:00:00Z"
+        self.github.runs[51].update(head_sha=OLDER, conclusion="failure")
+        get_json = self.github.get_json
+
+        def paged(path: str) -> object:
+            if "/actions/workflows/build.yml/runs?" in path:
+                page = int(path.rsplit("page=", 1)[1]) if "&page=" in path else 1
+                runs = sorted(self.github.runs.values(), key=lambda run: -cast(int, run["id"]))
+                return {
+                    "total_count": len(runs),
+                    "workflow_runs": runs[(page - 1) * 50 : page * 50],
+                }
+            return get_json(path)
+
+        self.request()
+        with patch.object(self.github, "get_json", paged):
+            plan = self.reconcile()
+
+        self.assertEqual(plan["action"], "deploy", plan)
+        self.assertEqual(self.deploys.runtime_identities[-1].source_git_ref, DEPLOYABLE)
 
     def test_legacy_baseline_with_no_successful_builds_reports_no_verified_build(self) -> None:
         self.record_legacy_baseline()

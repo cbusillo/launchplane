@@ -550,7 +550,7 @@ than relying on GitHub's status filter, whose listing can omit a completed
 successful run. Exact-run provenance verification still precedes selection.
 An omitted running run or commit still
 holds selection with the observed counts. For a recorded generic-web baseline
-predating contract Build adoption, a complete empty successful Build inventory
+predating contract Build adoption, a complete run inventory without a successful Build
 reports `no_verified_build`: there is no candidate to verify or deploy, and no
 commit-history search was attempted. If the running build is beyond
 those bounds, or its history was rewritten, the supported service

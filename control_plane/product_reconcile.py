@@ -3850,12 +3850,24 @@ def _desired_release(
         ):
             raise
         return None, [], "build_workflow_missing"
+
+    def successful_build_run(run: dict[str, object]) -> bool:
+        return (
+            run.get("path") == BUILD_WORKFLOW_PATH
+            and run.get("event") == "push"
+            and run.get("head_branch") == default_branch
+            and run.get("status") == "completed"
+            and run.get("conclusion") == "success"
+            and bool(run.get("head_sha"))
+        )
+
     runs = _list(payload.get("workflow_runs"))
     # A held or explicitly rolled-back lane may be beyond the newest page.
     # Search bounded history rather than making a busy repository stay held.
     for page in range(2, 21):
         if not current_commit or any(
             isinstance(run, dict)
+            and successful_build_run(run)
             and str(run.get("head_sha", "")).lower() == current_commit
             and (not current_run_id or run.get("id") == current_run_id)
             for run in runs
@@ -3875,11 +3887,7 @@ def _desired_release(
     built_commits = {
         str(run.get("head_sha") or "").lower()
         for run in (item for item in runs if isinstance(item, dict))
-        if run.get("path") == BUILD_WORKFLOW_PATH
-        and run.get("event") == "push"
-        and run.get("head_branch") == default_branch
-        and run.get("conclusion") == "success"
-        and run.get("head_sha")
+        if successful_build_run(run)
     }
     generic_web = reconciles_as_generic_web(profile)
     if current_commit and (
