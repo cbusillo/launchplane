@@ -6702,7 +6702,7 @@ def create_launchplane_fastapi_app(
             ) from error
         except OdooPreviewPlanProvenanceError as error:
             raise _launchplane_http_error(
-                status_code=400,
+                status_code=503 if error.retryable else 400,
                 trace_id=trace_id,
                 code=error.code,
                 message=str(error),

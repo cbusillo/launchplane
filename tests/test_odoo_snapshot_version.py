@@ -119,20 +119,28 @@ class OrdinaryPreviewSourceVersionTests(unittest.TestCase):
                     self.plan(source, target)
                 self.assertEqual(caught.exception.code, "odoo_preview_source_version_unavailable")
 
-    def test_archive_unavailable_refuses_and_explicit_upstream_route_stays_separate(self) -> None:
-        self.archive.side_effect = OdooRuntimeReadError(
-            "archive_tool_unavailable", "unavailable", 503
-        )
-        with self.assertRaises(self.preview.OdooPreviewPlanProvenanceError) as caught:
-            self.plan("19.0", "20.0")
-        self.assertEqual(caught.exception.code, "odoo_preview_source_version_unavailable")
-        self.archive.reset_mock()
-        self.profile.preview.clean_testing_snapshot = False
-        self.profile.preview.data_transport_mode = "driver"
-        result = self.plan("19.0", "20.0")
-        self.assertEqual(result.status, "ready")
-        self.archive.assert_not_called()
-        self.store.read_clean_testing_snapshot.assert_called_once()
+    def test_archive_failure_retains_retry_semantics_without_exposing_provider_details(
+        self,
+    ) -> None:
+        from control_plane.dokploy.api import DokployRequestFailed
+
+        for failure, retryable in (
+            (OdooRuntimeReadError("archive_tool_unavailable", "private", 503), True),
+            (
+                DokployRequestFailed(
+                    method="GET", path="/fixture", detail="private", status_code=503
+                ),
+                True,
+            ),
+            (FileNotFoundError("private"), False),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                self.archive.side_effect = failure
+                with self.assertRaises(self.preview.OdooPreviewPlanProvenanceError) as caught:
+                    self.plan("19.0", "20.0")
+                self.assertEqual(caught.exception.code, "odoo_preview_source_version_unavailable")
+                self.assertEqual(caught.exception.retryable, retryable)
+                self.assertNotIn("private", str(caught.exception))
 
     def test_apply_reuses_only_fingerprinted_same_snapshot_version(self) -> None:
         result = self.plan("19.0.1.3", "19.0")
@@ -188,6 +196,39 @@ class OrdinaryPreviewSourceVersionTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "odoo_preview_source_major_mismatch")
         self.assertEqual(self.archive.call_count, 2)
+
+
+class OrdinaryPreviewVersionHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_planner_exposes_permanent_mismatch_and_temporary_archive_failure(self) -> None:
+        from control_plane import odoo_preview_apply_http as preview
+        from tests.test_director_bounded_writes import DirectorBoundedWritesFixture
+        from tests.test_odoo_preview_apply_execution import _issued_plan
+
+        fixture = DirectorBoundedWritesFixture(self, record_source_history=False)
+        issued = _issued_plan(preview.OdooPreviewApplyEnvelope.model_validate(fixture.payload))
+        for code, retryable, status in (
+            ("odoo_preview_source_major_mismatch", False, 400),
+            ("odoo_preview_source_version_unavailable", True, 503),
+        ):
+            with (
+                self.subTest(code=code),
+                patch(
+                    "control_plane.http_app.build_odoo_preview_apply_inputs_result",
+                    side_effect=preview.OdooPreviewPlanProvenanceError(
+                        code=code, message="qualified source required", retryable=retryable
+                    ),
+                ),
+            ):
+                response = await fixture.post(
+                    "/v1/drivers/odoo/preview-apply-inputs",
+                    {
+                        "product": fixture.profile.product,
+                        "inputs": issued.plan_request.model_dump(mode="json"),
+                    },
+                    code,
+                )
+            self.assertEqual(response.status_code, status, response.text)
+            self.assertEqual(response.json()["error"]["code"], code)
 
 
 class SnapshotVersionParserTests(unittest.TestCase):

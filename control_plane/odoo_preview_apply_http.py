@@ -130,9 +130,10 @@ class OdooPreviewApplyRouteDependencyError(ValueError):
 
 
 class OdooPreviewPlanProvenanceError(ValueError):
-    def __init__(self, *, code: str, message: str) -> None:
+    def __init__(self, *, code: str, message: str, retryable: bool = False) -> None:
         super().__init__(message)
         self.code = code
+        self.retryable = retryable
 
 
 class OdooPreviewApplyConfigError(click.ClickException):
@@ -348,11 +349,15 @@ def _preview_snapshot_base_version(
         return read_snapshot_metadata(
             store=cast(Any, store), snapshot=snapshot
         ).recorded_base_version
-    except (ValueError, FileNotFoundError, OdooRuntimeReadError) as error:
+    except (ValueError, FileNotFoundError, click.ClickException) as error:
+        from control_plane.dokploy.api import is_transient_dokploy_error
+
         raise OdooPreviewPlanProvenanceError(
             code="odoo_preview_source_version_unavailable",
             message="The selected immutable snapshot version could not be verified. "
             "Keep the existing source and retry after its archive reader is available.",
+            retryable=(isinstance(error, OdooRuntimeReadError) and error.status_code >= 500)
+            or is_transient_dokploy_error(error),
         ) from error
 
 
@@ -916,7 +921,9 @@ def preview_has_completed_restore(
                         raise OdooPreviewPlanProvenanceError(
                             code="odoo_preview_source_version_unavailable",
                             message="The retained copy lacks verified original artifact provenance. "
-                            "Preserve its data and inspect its completed operation.",
+                            "Preserve used or needed copies and inspect the completed operation. "
+                            "For an admitted disposable preview, use supported destroy then refresh "
+                            "with a versioned build and qualified matching capture.",
                         ) from error
                     _require_preview_source_major(
                         artifact_odoo_version(original.issued_plan.plan_request.manifest),

@@ -6666,6 +6666,52 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile()["preview_result_status"], "pass")
         self.assertEqual(self.provider.applied, [("destroy", 5)])
 
+    def test_preview_archive_outage_retries_same_build_before_any_provider_effect(self) -> None:
+        from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch.object(
+            self.provider,
+            "build_inputs",
+            side_effect=OdooPreviewPlanProvenanceError(
+                code="odoo_preview_source_version_unavailable",
+                message="archive unavailable",
+                retryable=True,
+            ),
+        ):
+            unavailable = self.run_once()
+        self.assertEqual(unavailable.state, "pending")
+        self.assertTrue(unavailable.last_plan["preview_transport_retryable"])
+        self.assertEqual(self.provider.applied, [])
+        recovered = self.run_once()
+        self.assertEqual(recovered.state, "done")
+        self.assertEqual(recovered.last_plan["preview_result_status"], "pass")
+        self.assertEqual(self.provider.applied, [("refresh", 5)])
+
+    def test_preview_major_mismatch_reports_actionable_refusal_without_provider_effects(
+        self,
+    ) -> None:
+        from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
+        from control_plane.contracts.record_failures import record_failure_summary
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        code = "odoo_preview_source_major_mismatch"
+        with patch.object(
+            self.provider,
+            "build_inputs",
+            side_effect=OdooPreviewPlanProvenanceError(
+                code=code, message="matching source required"
+            ),
+        ):
+            refused = self.run_once()
+        self.assertEqual(refused.state, "failed")
+        self.assertEqual(refused.last_plan["last_failed_error_code"], code)
+        self.assertEqual(refused.last_error, record_failure_summary(code))
+        self.assertNotIn("preview_transport_retryable", refused.last_plan)
+        self.assertEqual(self.provider.applied, [])
+
     def test_legacy_preview_source_refusal_keeps_serving_evidence_and_logs_its_cause(self) -> None:
         from control_plane import http_error_evidence, preview_source
 

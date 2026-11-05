@@ -549,6 +549,17 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
                                 )
                             self.assertEqual(caught.exception.code, code)
                 original_read.assert_called_with(operation, profile=profile, store=store)
+                original_read.side_effect = ValueError("private original binding")
+                with self.assertRaises(preview_http.OdooPreviewPlanProvenanceError) as caught:
+                    preview_has_completed_restore(
+                        record_store=store,
+                        profile=profile,
+                        plan=plan,
+                        pr_number=42,
+                        artifact_manifest=target,
+                    )
+                self.assertEqual(caught.exception.code, "odoo_preview_source_version_unavailable")
+                self.assertNotIn("private original binding", str(caught.exception))
 
     def test_driver_selects_upstream_restore_only_when_it_has_an_upstream_source(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
