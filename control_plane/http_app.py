@@ -128,6 +128,11 @@ from control_plane.generic_web_onboarding import (
     generic_web_onboarding_plan_sha256,
     validate_generic_web_onboarding_is_new_product,
 )
+from control_plane.odoo_onboarding import (
+    OdooOnboardingIntent,
+    build_odoo_onboarding_manifest,
+    odoo_onboarding_plan_sha256,
+)
 from control_plane.generic_web_preview_authz import (
     GenericWebPreviewAuthzPlanResult,
     GenericWebPreviewAuthzPlanRequest,
@@ -1989,6 +1994,7 @@ class ProductOnboardingApplyEnvelope(BaseModel):
     reviewed_plan_sha256: str = ""
     manifest: ProductOnboardingManifest | None = None
     generic_web: GenericWebOnboardingIntent | None = None
+    odoo: OdooOnboardingIntent | None = None
     resolved_target_id: str = ""
     allocation_id: str = ""
 
@@ -2000,8 +2006,10 @@ class ProductOnboardingApplyEnvelope(BaseModel):
         self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
         self.resolved_target_id = self.resolved_target_id.strip()
         self.allocation_id = self.allocation_id.strip()
-        if (self.manifest is None) == (self.generic_web is None):
-            raise ValueError("Product onboarding requires exactly one of manifest or generic_web.")
+        if sum(intent is not None for intent in (self.manifest, self.generic_web, self.odoo)) != 1:
+            raise ValueError(
+                "Product onboarding requires exactly one of manifest, generic_web or odoo."
+            )
         if self.manifest is not None:
             if self.mode != "apply":
                 raise ValueError("Legacy product onboarding manifests support apply mode only.")
@@ -2010,6 +2018,8 @@ class ProductOnboardingApplyEnvelope(BaseModel):
                     "Legacy product onboarding manifests reject generic-web plan fields."
                 )
             return self
+        if self.odoo is not None and (self.resolved_target_id or self.allocation_id):
+            raise ValueError("Odoo onboarding records precede their testing target.")
         if self.mode == "dry_run":
             if self.reviewed_plan_sha256 or self.resolved_target_id or self.allocation_id:
                 raise ValueError(
@@ -2017,8 +2027,8 @@ class ProductOnboardingApplyEnvelope(BaseModel):
                 )
             return self
         if re.fullmatch(r"[0-9a-f]{64}", self.reviewed_plan_sha256) is None:
-            raise ValueError("Generic-web onboarding apply requires reviewed_plan_sha256.")
-        if not self.resolved_target_id:
+            raise ValueError("Native onboarding apply requires reviewed_plan_sha256.")
+        if self.generic_web is not None and not self.resolved_target_id:
             raise ValueError("Generic-web onboarding apply requires resolved_target_id.")
         return self
 
@@ -17770,14 +17780,13 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
+        native_intent = onboarding_request.generic_web or onboarding_request.odoo
         onboarding_action = (
             "generic_web_onboarding.plan"
-            if onboarding_request.generic_web is not None and onboarding_request.mode == "dry_run"
+            if native_intent is not None and onboarding_request.mode == "dry_run"
             else "product_onboarding.apply"
         )
-        director_onboarding = (
-            onboarding_request.generic_web is not None and director_agent_identity(identity)
-        )
+        director_onboarding = native_intent is not None and director_agent_identity(identity)
         if not director_onboarding and not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=onboarding_action,
@@ -17790,7 +17799,7 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Workflow cannot plan or apply Launchplane product onboarding.",
             )
-        native_onboarding = onboarding_request.generic_web is not None and (
+        native_onboarding = native_intent is not None and (
             director_onboarding or isinstance(identity, GitHubHumanIdentity)
         )
         if native_onboarding and onboarding_request.mode == "apply" and not idempotency_key.strip():
@@ -17833,9 +17842,77 @@ def create_launchplane_fastapi_app(
             )
 
         onboarding_manifest = onboarding_request.manifest
-        generic_web_plan_sha256 = ""
+        native_plan_sha256 = ""
         adopted_onboarding_target = None
         adopted_onboarding_target_id = None
+        if onboarding_request.odoo is not None:
+            odoo_intent = onboarding_request.odoo
+            try:
+                existing_odoo_profile = database_store.read_product_profile_record(
+                    odoo_intent.product
+                )
+            except (FileNotFoundError, KeyError):
+                existing_odoo_profile = None
+            if existing_odoo_profile is not None:
+                replay_response = replay_committed_onboarding()
+                if replay_response is not None:
+                    return replay_response
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_product_onboarding_manifest",
+                    message=(
+                        "Odoo onboarding only creates new products; existing product "
+                        f"{odoo_intent.product} must use a bounded product-profile path."
+                    ),
+                )
+            native_plan_sha256 = odoo_onboarding_plan_sha256(odoo_intent)
+            try:
+                onboarding_manifest = build_odoo_onboarding_manifest(odoo_intent)
+                from control_plane.onboarding_target import (
+                    require_unallocated_onboarding_contexts,
+                )
+
+                require_unallocated_onboarding_contexts(database_store, odoo_intent)
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_product_onboarding_manifest",
+                    message=str(error),
+                ) from error
+            if onboarding_request.mode == "dry_run":
+                return accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={
+                        "provider_target_count": "0",
+                        "runtime_environment_record_count": str(
+                            len(onboarding_manifest.runtime_environments)
+                        ),
+                        "secret_binding_count": "0",
+                    },
+                    result={
+                        "mode": "dry_run",
+                        "product": odoo_intent.product,
+                        "driver_id": "odoo",
+                        "repository": odoo_intent.repository,
+                        "repository_id": odoo_intent.repository_id,
+                        "repository_owner_id": odoo_intent.repository_owner_id,
+                        "default_branch": odoo_intent.default_branch,
+                        "testing_context": odoo_intent.context,
+                        "preview_context": odoo_intent.context,
+                        "preview_base_url": odoo_intent.preview_base_url,
+                        "target_operation": "create-compose",
+                        "plan_sha256": native_plan_sha256,
+                    },
+                )
+            if onboarding_request.reviewed_plan_sha256 != native_plan_sha256:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_onboarding_plan_mismatch",
+                    message="Odoo onboarding inputs no longer match the reviewed dry-run.",
+                )
         if onboarding_request.generic_web is not None:
             try:
                 existing_profile = database_store.read_product_profile_record(
@@ -17858,9 +17935,7 @@ def create_launchplane_fastapi_app(
                     code="invalid_product_onboarding_manifest",
                     message=str(error),
                 ) from error
-            generic_web_plan_sha256 = generic_web_onboarding_plan_sha256(
-                onboarding_request.generic_web
-            )
+            native_plan_sha256 = generic_web_onboarding_plan_sha256(onboarding_request.generic_web)
             if onboarding_request.mode == "dry_run":
                 try:
                     planned_manifest = build_generic_web_onboarding_manifest(
@@ -17895,10 +17970,10 @@ def create_launchplane_fastapi_app(
                         "preview_context": onboarding_request.generic_web.preview_context,
                         "preview_base_url": onboarding_request.generic_web.preview_base_url,
                         "target_operation": "create-application",
-                        "plan_sha256": generic_web_plan_sha256,
+                        "plan_sha256": native_plan_sha256,
                     },
                 )
-            if onboarding_request.reviewed_plan_sha256 != generic_web_plan_sha256:
+            if onboarding_request.reviewed_plan_sha256 != native_plan_sha256:
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
@@ -18000,11 +18075,11 @@ def create_launchplane_fastapi_app(
                 onboarding_result
             )
         )
-        if generic_web_plan_sha256:
+        if native_plan_sha256:
             driver_result = {
                 **driver_result,
                 "mode": "apply",
-                "plan_sha256": generic_web_plan_sha256,
+                "plan_sha256": native_plan_sha256,
             }
         onboarding_response = accepted_evidence_response(
             trace_id=trace_id,
@@ -18030,9 +18105,9 @@ def create_launchplane_fastapi_app(
                 response=onboarding_response,
             )
             if native_onboarding:
-                assert onboarding_request.generic_web is not None
+                assert native_intent is not None
                 database_store.write_new_product_onboarding_bundle(
-                    committed_bundle, intent=onboarding_request.generic_web
+                    committed_bundle, intent=native_intent
                 )
             else:
                 database_store.write_product_authority_bundle(committed_bundle)

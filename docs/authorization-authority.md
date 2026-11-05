@@ -305,8 +305,10 @@ policy grant through the existing Dokploy target setup dry-run/apply endpoint.
 This path creates only a new project, a new environment and an empty raw compose
 for an active product's exclusively owned context. It accepts no existing
 project, environment or target IDs, replacement reference, repository source,
-domain route or published port. The testing lane and all three target authority
-records must be absent. Production ownership on the same product does not block
+domain route or published port. All three target authority records must be
+absent. A testing lane may already be registered only if it never deployed or
+served, as when [native Odoo onboarding](operations.md#native-odoo-onboarding)
+records the lane first. Production ownership on the same product does not block
 this new-resource staging and acquires no new permission.
 
 The service checks eligibility before each provider effect and provider read,

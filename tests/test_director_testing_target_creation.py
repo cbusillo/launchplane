@@ -357,26 +357,24 @@ class DirectorTestingTargetCreationTests(_DirectorTestingSetupFixture):
         self.assertEqual(result.status_code, 202, result.text)
         self.assert_production_unchanged()
 
-    async def test_partial_target_authority_and_registered_lane_are_not_first_setup(self) -> None:
+    async def test_partial_target_authority_and_a_lane_that_ran_are_not_first_setup(self) -> None:
         target = self.production.model_copy(update={"instance": "testing"})
         self.store.write_dokploy_target_record(target)
         result = await self.post()
         self.assertEqual(result.status_code, 400, result.text)
         self.provider.assert_not_called()
         self.store.delete_dokploy_target_record(expected_record=target)
-        self.store.write_product_profile_record(
-            self.profile.model_copy(
-                update={
-                    "lanes": (
-                        *self.profile.lanes,
-                        self.profile.lanes[0].model_copy(update={"instance": "testing"}),
-                    )
-                }
-            )
-        )
+        self.register_testing_lane()
+        self.record_testing_deploy("fail")
         result = await self.post()
         self.assertEqual(result.status_code, 400, result.text)
         self.provider.assert_not_called()
+
+    async def test_a_lane_registered_before_its_first_target_gets_one(self) -> None:
+        self.register_testing_lane()
+        result = await self.post()
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertEqual(self.current_testing_target_id(), "created-compose")
 
     async def test_owner_change_between_creates_stops_before_next_provider_effect(self) -> None:
         def create_project(*_args: Any) -> dict[str, str]:

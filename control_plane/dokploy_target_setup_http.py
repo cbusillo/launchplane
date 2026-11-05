@@ -110,10 +110,10 @@ def require_empty_testing_target_creation(
             read_provider_source=read_provider_source,
         )
         return
-    # An existing registered lane needs its own current disposable-lane facts;
-    # first setup cannot replace it or take over its usage/data commitments.
-    if any(lane.instance == request.instance for lane in profile.lanes):
-        raise ValueError("First testing setup cannot change an already registered lane.")
+    if any(
+        lane.instance == request.instance for lane in profile.lanes
+    ) and _lane_has_usage_or_data_commitments(record_store, request):
+        raise ValueError("First testing setup cannot change a lane that has deployed.")
     for read in (
         record_store.read_dokploy_target_record,
         record_store.read_dokploy_target_id_record,
@@ -124,6 +124,28 @@ def require_empty_testing_target_creation(
         except FileNotFoundError:
             continue
         raise ValueError("First testing setup cannot replace existing target authority.")
+
+
+def _lane_has_usage_or_data_commitments(
+    record_store: PostgresRecordStore, request: "DokployTargetSetupEnvelope"
+) -> bool:
+    return bool(
+        record_store.list_deployment_records(
+            context_name=request.context, instance_name=request.instance
+        )
+    ) or _environment_inventory_exists(record_store, request)
+
+
+def _environment_inventory_exists(
+    record_store: PostgresRecordStore, request: "DokployTargetSetupEnvelope"
+) -> bool:
+    try:
+        record_store.read_environment_inventory(
+            context_name=request.context, instance_name=request.instance
+        )
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def _require_never_deployed_testing_target(
@@ -148,13 +170,7 @@ def _require_never_deployed_testing_target(
         )
     ):
         raise ValueError("First testing setup cannot replace a testing lane that has deployed.")
-    try:
-        record_store.read_environment_inventory(
-            context_name=request.context, instance_name=request.instance
-        )
-    except FileNotFoundError:
-        pass
-    else:
+    if _environment_inventory_exists(record_store, request):
         raise ValueError("First testing setup cannot replace a testing lane that has served.")
     expected = request.expected_current_provider_target
     try:
