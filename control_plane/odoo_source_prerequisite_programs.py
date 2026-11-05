@@ -435,14 +435,10 @@ print(json.dumps(result))
 
 CONTAINER_PROGRAM = CONTAINER_LIBRARY + CONTAINER_RUN
 
-HOST_LIBRARY = (
-    _VALIDATOR
-    + r"""
+HOST_INSPECT_LIBRARY = r"""
 import base64,json,re,subprocess,sys
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 prefix=sys.argv[2]
-names=tuple(spec['addons'])
-result={'runtime':'unknown','sources':[{'source':name} for name in names]}
 
 def inspect(instance="testing"):
     raw=subprocess.run(['docker','inspect','--type','container',spec['container']],capture_output=True,check=True,timeout=5)
@@ -477,6 +473,14 @@ def inspect(instance="testing"):
         'State':{key:value['State'].get(key) for key in ('Running','StartedAt','Pid')},
         'VerifiedImage':{'Id':image,'RepoDigests':images[0]['RepoDigests']}}
 
+"""
+
+HOST_LIBRARY = (
+    _VALIDATOR
+    + HOST_INSPECT_LIBRARY
+    + r"""
+names=tuple(spec['addons'])
+result={'runtime':'unknown','sources':[{'source':name} for name in names]}
 """
 )
 

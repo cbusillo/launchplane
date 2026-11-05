@@ -14977,6 +14977,108 @@ class RealPostgresSecretReferenceTests(unittest.TestCase):
             )
             self.assertNotIn("private-readback-sentinel", output.getvalue())
 
+            from unittest.mock import mock_open
+            from control_plane import odoo_parameter_presence as presence
+            from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
+            from psycopg.errors import ReadOnlySqlTransaction
+
+            identity = {"instance": "testing", "context": "fixture"}
+            config = b"[options]\ndb_name=fixture\ndb_host=database\ndb_user=fixture\ndb_password=fixture\n"
+            program = presence.CONTAINER_PROGRAM.replace(
+                "__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY)
+            ).replace("__CONFIG_PATH__", repr("/fixture/odoo.conf"))
+            for key, count, nonempty in (
+                ("acme.present", 1, True),
+                ("acme.empty", 1, False),
+                ("acme.missing", 0, False),
+            ):
+                with self.subTest(parameter=key):
+                    raw = store._engine.raw_connection()
+                    write_refused = []
+
+                    @contextlib.contextmanager
+                    def readonly_cursor() -> Iterator[Any]:
+                        cursor = raw.cursor()
+                        try:
+
+                            def fetched_rows() -> Any:
+                                rows = cursor.fetchall()
+                                cursor.execute("SAVEPOINT presence_readonly_probe")
+                                try:
+                                    with self.assertRaises(ReadOnlySqlTransaction):
+                                        cursor.execute(
+                                            "UPDATE ir_config_parameter SET value = 'forbidden'"
+                                        )
+                                    write_refused.append(True)
+                                finally:
+                                    cursor.execute("ROLLBACK TO SAVEPOINT presence_readonly_probe")
+                                return rows
+
+                            yield SimpleNamespace(
+                                execute=cursor.execute,
+                                fetchone=cursor.fetchone,
+                                fetchall=fetched_rows,
+                            )
+                        finally:
+                            cursor.close()
+
+                    output = io.StringIO()
+                    errors = io.StringIO()
+                    with (
+                        patch.dict(
+                            sys.modules,
+                            {
+                                "psycopg2": SimpleNamespace(
+                                    connect=lambda **kwargs: SimpleNamespace(
+                                        cursor=readonly_cursor,
+                                        rollback=raw.rollback,
+                                        close=raw.close,
+                                    )
+                                )
+                            },
+                        ),
+                        patch.dict(
+                            os.environ,
+                            {
+                                "PLATFORM_INSTANCE": "testing",
+                                "ODOO_DB_NAME": "fixture",
+                                RUNTIME_IDENTITY_ENV_KEY: json.dumps(identity),
+                            },
+                            clear=True,
+                        ),
+                        patch("builtins.open", mock_open(read_data=config)),
+                        patch.object(
+                            sys,
+                            "stdin",
+                            io.StringIO(json.dumps({"identity": identity, "parameter": key})),
+                        ),
+                        contextlib.redirect_stdout(output),
+                        contextlib.redirect_stderr(errors),
+                    ):
+                        exec(program, {})
+                    result = json.loads(output.getvalue())
+                    self.assertEqual(result["runtime"], "verified", result)
+                    self.assertEqual(
+                        result["presence"],
+                        {
+                            "parameter": key,
+                            "exists": bool(count),
+                            "nonempty": nonempty,
+                            "count": count,
+                        },
+                    )
+                    self.assertEqual(write_refused, [True])
+                    self.assertNotIn(
+                        "private-readback-sentinel", output.getvalue() + errors.getvalue()
+                    )
+            with store._engine.connect() as connection:
+                self.assertEqual(
+                    connection.execute(
+                        text("SELECT value FROM ir_config_parameter WHERE key = 'acme.present'")
+                    ).scalar_one(),
+                    "private-readback-sentinel",
+                )
+
     def test_selection_cas_rollback_and_late_completion_preservation(self) -> None:
         from tests.test_odoo_secret_references import seed, KEY
         from control_plane.odoo_secret_references import plan_secret_reference_reconciliation

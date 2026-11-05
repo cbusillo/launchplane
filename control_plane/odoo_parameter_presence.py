@@ -18,7 +18,7 @@ from control_plane.odoo_secret_references import (
     read_secret_reference_authority,
     selected_config_parameter_bindings,
 )
-from control_plane.odoo_source_prerequisite_programs import HOST_LIBRARY
+from control_plane.odoo_source_prerequisite_programs import HOST_INSPECT_LIBRARY, FailureStage
 from control_plane.runtime_environments import SiteSecretDeliveryStore
 
 ROUTE = "/v1/products/{product}/environments/{environment}/odoo-parameter-presence"
@@ -53,6 +53,7 @@ class ParameterPresenceResult(BaseModel):
     runtime: Literal["verified", "unknown"] = "unknown"
     evidence: reads.OdooRuntimeEvidence | None = None
     presence: ParameterPresence | None = None
+    failure_stage: FailureStage | None = None
     applied: Literal[False] = False
     values_redacted: Literal[True] = True
 
@@ -70,9 +71,11 @@ import configparser,json,os,sys
 import psycopg2
 spec=json.loads(sys.stdin.read(4097))
 result={'runtime':'unknown'}
+stage='runtime_inspection'
 try:
     if os.environ.get('PLATFORM_INSTANCE')!='testing' or json.loads(os.environ[__IDENTITY_KEY__])!=spec['identity']:
         raise ValueError()
+    stage='configuration'
     config=configparser.ConfigParser(interpolation=None)
     path=__CONFIG_PATH__
     with open(path,'rb') as stream:
@@ -84,12 +87,13 @@ try:
     database=os.environ.get('ODOO_DB_NAME')
     if not database or options.get('db_name')!=database or options.get('db_host')!='database':
         raise ValueError()
+    stage='applied_parameters'
     connection=psycopg2.connect(host='database',port=options.get('db_port') or '5432',
         user=options['db_user'],password=options['db_password'],dbname=database,connect_timeout=3,
         options='-c default_transaction_read_only=on -c statement_timeout=3000')
     try:
-        connection.set_session(isolation_level='REPEATABLE READ',readonly=True)
         with connection.cursor() as cursor:
+            cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
             key=spec['parameter']
             cursor.execute('SELECT count(*) FROM ir_config_parameter WHERE key = %s',(key,))
             count=cursor.fetchone()[0]
@@ -100,27 +104,36 @@ try:
             connection.rollback()
         finally:
             connection.close()
+    stage='drift'
     with open(path,'rb') as stream:
         if stream.read(262145)!=before:
             raise ValueError()
 except BaseException:
-    result={'runtime':'unknown'}
+    result={'runtime':'unknown','failure_stage':stage}
 print(json.dumps(result))
 """
 )
 
 HOST_PROGRAM = (
-    HOST_LIBRARY
+    HOST_INSPECT_LIBRARY
     + r"""
+result={'runtime':'unknown'}
+stage='host_inspection'
 try:
     before=inspect()
+    stage='host_execution'
     child=subprocess.run(['docker','exec','-i',before['Id'],'timeout','--kill-after=2s','15s','python3','-I','-c',spec['container_program']],
         input=json.dumps({'identity':spec['identity'],'parameter':spec['parameter']}),text=True,
         stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=20,check=False)
+    stage='drift'
     after=inspect()
     if before!=after or child.returncode!=0 or len(child.stdout)>1024:
         raise ValueError()
+    stage='result_validation'
     observed=json.loads(child.stdout)
+    if set(observed)=={'runtime','failure_stage'} and observed['runtime']=='unknown' and observed['failure_stage'] in ('runtime_inspection','configuration','applied_parameters','drift'):
+        stage=observed['failure_stage']
+        raise ValueError()
     presence=observed['presence']
     if (set(observed)!={'runtime','presence'} or observed['runtime']!='verified'
         or set(presence)!={'parameter','exists','nonempty','count'}
@@ -131,7 +144,7 @@ try:
         raise ValueError()
     result=observed
 except Exception:
-    result={'runtime':'unknown'}
+    result={'runtime':'unknown','failure_stage':stage}
 print(prefix+json.dumps({'type':'complete','result':result}),flush=True)
 """
 )
@@ -177,8 +190,10 @@ def read_parameter_presence(
     control_plane_root: Path,
     database_url: str | None,
 ) -> ParameterPresenceResult:
+    stage: FailureStage = "authority"
     try:
         authority = parameter_authority(store, product, query)
+        stage = "runtime_selection"
         profile = store.read_product_profile_record(product)
         selection = reads.select_stable_runtime(store, profile, "testing")
         identity = selection.identity
@@ -190,13 +205,15 @@ def read_parameter_presence(
             or identity.artifact_id != query.artifact_id
             or identity.image_reference.rpartition("@")[2] != query.image_digest
         ):
-            return ParameterPresenceResult()
+            return ParameterPresenceResult(failure_stage=stage)
+        stage = "runtime_connection"
         connection = reads.connect_runtime(
             store=store,
             selection=selection,
             control_plane_root=control_plane_root,
             database_url=database_url,
         )
+        stage = "transport"
         frames: list[dict[str, object]] = []
         _read_remote(
             host=connection.host,
@@ -207,7 +224,6 @@ def read_parameter_presence(
                 "project": connection.app_name,
                 "container": connection.evidence.container_id,
                 "identity": identity.model_dump(mode="json"),
-                "addons": {},
                 "parameter": query.parameter,
                 "container_program": CONTAINER_PROGRAM.replace(
                     "__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY)
@@ -216,23 +232,27 @@ def read_parameter_presence(
             receive=frames.append,
             timeout_seconds=40,
         )
+        stage = "result_validation"
         if (
             len(frames) != 1
             or set(frames[0]) != {"type", "result"}
             or frames[0]["type"] != "complete"
         ):
-            return ParameterPresenceResult()
+            return ParameterPresenceResult(failure_stage=stage)
         result = ParameterPresenceResult.model_validate(frames[0]["result"])
+        if result.runtime == "unknown" and result.evidence is None and result.presence is None:
+            return result
         if (
             result.runtime != "verified"
             or result.evidence is not None
             or result.presence is None
             or result.presence.parameter != query.parameter
         ):
-            return ParameterPresenceResult()
+            return ParameterPresenceResult(failure_stage=stage)
+        stage = "drift"
         reads.assert_selection_current(store, selection)
         if parameter_authority(store, product, query) != authority:
-            return ParameterPresenceResult()
+            return ParameterPresenceResult(failure_stage=stage)
         return result.model_copy(update={"evidence": connection.evidence})
     except Exception:
-        return ParameterPresenceResult()
+        return ParameterPresenceResult(failure_stage=stage)

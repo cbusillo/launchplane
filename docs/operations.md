@@ -5533,7 +5533,7 @@ booleans and row count leave the database. A verified result includes the runtim
 identity, target/container evidence and observation time; the response supplies a
 trace and `Cache-Control: no-store`. Missing references, drift, unavailable
 transport/database evidence or malformed output return `runtime: unknown` with
-no presence result, never an absent verdict. There is no Odoo login, external
+no presence result and a bounded `failure_stage`, never an absent verdict. There is no Odoo login, external
 integration probe, workflow run, settings delivery or safety/admission record.
 
 This observation proves presence on the selected stable runtime only. It does
