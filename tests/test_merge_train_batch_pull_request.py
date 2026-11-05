@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, cast
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
@@ -28,6 +29,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubError,
     MergeTrainGitHubMergeRejectedError,
     MergeTrainGitHubStaleHeadError,
+    merge_train_construction_ref,
 )
 from control_plane.release_review_github import owner_test_notes
 from tests.test_merge_train_github import (
@@ -70,6 +72,10 @@ class _BatchProvider:
         self.requires_conversation_resolution = False
         self.batch_threads: tuple[tuple[bool, str], ...] = ()
         self.batch_comments: list[dict[str, object]] = []
+        self.refs = {
+            candidate.candidate_ref: candidate.candidate_sha,
+            merge_train_construction_ref(candidate.candidate_ref): candidate.candidate_sha,
+        }
 
     @property
     def merge_calls(self) -> list[tuple[str, str, dict[str, object] | None]]:
@@ -106,6 +112,13 @@ class _BatchProvider:
         if method == "POST" and path == "/graphql":
             assert body is not None
             variables = cast(dict[str, object], body["variables"])
+            if "input" in variables:
+                mutation: Any = variables["input"]
+                update = mutation["refUpdates"][0]
+                if self.refs.get(update["name"]) != update["beforeOid"]:
+                    return {"errors": [{"message": "ref moved"}]}
+                del self.refs[update["name"]]
+                return {"data": {"updateRefs": {"clientMutationId": None}}}
             if "number" not in variables:
                 return _conversation_rule(self.requires_conversation_resolution)
             assert variables["number"] == self.number
@@ -115,7 +128,26 @@ class _BatchProvider:
         if method == "GET" and "/rules/branches/" in path:
             return []
         if method == "GET" and "/pulls?" in path:
-            return [self.pull_request(self.number)] if self.created else []
+            if not self.created:
+                return []
+            query = parse_qs(urlsplit(path).query)
+            pull = self.pull_request(self.number)
+            if query.get("state") == ["open"] and pull["state"] != "open":
+                return []
+            for field in ("head", "base"):
+                if field in query:
+                    identity: Any = pull[field]
+                    branch = query[field][0].split(":", 1)[-1]
+                    if identity["ref"] != branch:
+                        return []
+            return [pull]
+        if method == "GET" and "/git/ref/" in path:
+            reference = "refs/" + unquote(path.split("/git/ref/", 1)[1])
+            if reference not in self.refs:
+                raise MergeTrainGitHubError("missing", status_code=404)
+            return {"ref": reference, "object": {"sha": self.refs[reference]}}
+        if method == "GET" and path == f"/repos/{self.repository_name}":
+            return {"node_id": "repository-node"}
         if method == "POST" and path.endswith("/pulls"):
             assert body is not None
             assert isinstance(body["body"], str)

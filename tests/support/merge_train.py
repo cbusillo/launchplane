@@ -290,8 +290,27 @@ class _FakeMergeTrainGitHubClient:
         type(self).cleanup_batch_candidate_ref_calls += 1
         return True
 
+    def close_landed_candidate_validation_pr(
+        self, *, landing_plan: MergeTrainBatchLandingPlan
+    ) -> None:
+        return None
+
+    def cleanup_retired_batch_refs(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+        protected_refs: frozenset[str] = frozenset(),
+    ) -> str:
+        if candidate.candidate_ref in protected_refs:
+            return "retained"
+        plan = candidate if isinstance(candidate, MergeTrainBatchLandingPlan) else None
+        if plan is not None and not getattr(self, "_candidate_ref_removed", False):
+            self.cleanup_batch_candidate_ref(landing_plan=plan)
+        self._candidate_ref_removed = True
+        return "deleted"
+
     def candidate_ref_exists(self, *, repository: str, reference: str) -> bool:
-        return True
+        return not getattr(self, "_candidate_ref_removed", False)
 
     def pull_request_has_label(
         self, *, repository: str, pull_request_number: int, label: str

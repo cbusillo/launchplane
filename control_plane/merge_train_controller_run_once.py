@@ -1105,11 +1105,13 @@ def _resume_merge_train_controller_state(
             return None
         if lease.record.active_phase == "retire_stale_policy_landing":
             return _finish_retired_policy_landing(
+                github_client=github_client,
                 candidate_store=candidate_store,
                 retired_record=landed_record,
                 lease=lease,
             )
         return _finish_landed_merge_train_batch(
+            candidate_store=candidate_store,
             request=request,
             policy_sha256=policy_sha256,
             repository_policy=repository_policy,
@@ -1141,6 +1143,7 @@ def _resume_merge_train_controller_state(
     if landed_record is None:
         raise MergeTrainControllerRequestError("merge train landed resume record is missing")
     return _finish_landed_merge_train_batch(
+        candidate_store=candidate_store,
         request=request,
         policy_sha256=policy_sha256,
         repository_policy=repository_policy,
@@ -1628,6 +1631,7 @@ def _advance_active_landing_record(
 
     if _ordinary_landing_terminal_success(active_landing_record):
         return _finish_landed_merge_train_batch(
+            candidate_store=candidate_store,
             request=request,
             policy_sha256=policy_sha256,
             repository_policy=repository_policy,
@@ -1913,6 +1917,7 @@ def _advance_active_landing_record(
     )
     landing_store.write_merge_train_batch_landing_plan_record(landed_record)
     return _finish_landed_merge_train_batch(
+        candidate_store=candidate_store,
         request=request,
         policy_sha256=policy_sha256,
         repository_policy=repository_policy,
@@ -2028,7 +2033,10 @@ def _recover_external_stack_landing(
                 "merge_train_batch_landing_plan_record_id": completed.record_id,
             }
         return _finish_retired_policy_landing(
-            candidate_store=candidate_store, retired_record=completed, lease=lease
+            github_client=github_client,
+            candidate_store=candidate_store,
+            retired_record=completed,
+            lease=lease,
         )
     validate_merge_train_landing_record_for_controller(
         landing_record=source,
@@ -2144,7 +2152,10 @@ def _recover_external_stack_landing(
     )
     landing_store.write_merge_train_batch_landing_plan_record(retired)
     result = _finish_retired_policy_landing(
-        candidate_store=candidate_store, retired_record=retired, lease=lease
+        github_client=github_client,
+        candidate_store=candidate_store,
+        retired_record=retired,
+        lease=lease,
     )
     result["reason_code"] = "external_stack_landing_observed"
     return result
@@ -2286,15 +2297,14 @@ def _record_landing_retirement(
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object]:
     plan = landing_record.landing_plan
-    if plan.candidate_pull_request_number is not None:
-        # Keep the retirement phase so an interruption after the close resumes here (#2846).
-        _close_service_batch_pull_request(
-            github_client=github_client,
-            candidate_record=candidate_record,
-            lease=lease,
-            reason=_CHANGED_POLICY_CLOSE_REASON,
-            active_phase="retire_stale_policy_landing",
-        )
+    _close_service_batch_pull_request(
+        candidate_store=candidate_store,
+        github_client=github_client,
+        candidate_record=candidate_record,
+        lease=lease,
+        reason=_CHANGED_POLICY_CLOSE_REASON,
+        active_phase="retire_stale_policy_landing",
+    )
     retired_record = build_merge_train_batch_landing_plan_record(
         landing_plan=stale_merge_train_landing_plan(plan),
         source=f"service:controller:{retirement_source}:{trace_id}",
@@ -2302,7 +2312,10 @@ def _record_landing_retirement(
     )
     landing_store.write_merge_train_batch_landing_plan_record(retired_record)
     return _finish_retired_policy_landing(
-        candidate_store=candidate_store, retired_record=retired_record, lease=lease
+        github_client=github_client,
+        candidate_store=candidate_store,
+        retired_record=retired_record,
+        lease=lease,
     )
 
 
@@ -2359,6 +2372,7 @@ def _resume_unrecorded_landing_retirement(
 
 def _finish_retired_policy_landing(
     *,
+    github_client: GitHubMergeTrainClient,
     candidate_store: MergeTrainBatchCandidateRecordStore,
     retired_record: MergeTrainBatchLandingPlanRecord,
     lease: MergeTrainControllerLeaseContext,
@@ -2370,7 +2384,12 @@ def _finish_retired_policy_landing(
         or any(entry.status != "stale" for entry in plan.entries)
     ):
         raise MergeTrainControllerRequestError("Policy-change retirement evidence is incomplete.")
-    lease.checkpoint()
+    cleanup_status = _cleanup_service_batch_refs(
+        github_client=github_client,
+        candidate_store=candidate_store,
+        candidate=plan,
+        lease=lease,
+    )
     for record in candidate_store.list_merge_train_batch_candidate_records(
         repository=plan.repository, base_branch=plan.base_branch, status="active"
     ):
@@ -2388,12 +2407,13 @@ def _finish_retired_policy_landing(
         "controller_action": "retire_stale_landing",
         "merge_train_batch_landing_plan_record_id": retired_record.record_id,
         "landing_plan": plan.model_dump(mode="json"),
-        "candidate_ref_cleanup_status": "retained",
+        "candidate_ref_cleanup_status": cleanup_status,
     }
 
 
 def _finish_landed_merge_train_batch(
     *,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
     request: MergeTrainControllerRunOnceEnvelope,
     policy_sha256: str,
     repository_policy: MergeTrainRepositoryPolicy,
@@ -2472,6 +2492,7 @@ def _finish_landed_merge_train_batch(
         },
     )
     candidate_ref_cleanup_result = cleanup_merge_train_batch_candidate_ref(
+        candidate_store=candidate_store,
         github_client=github_client,
         landing_plan=landed_plan,
         trace_id=trace_id,
@@ -3007,6 +3028,7 @@ def _advance_without_active_landing(
                 active_pull_request_number=None,
             )
             _close_service_batch_pull_request(
+                candidate_store=candidate_store,
                 github_client=github_client,
                 candidate_record=candidate_record,
                 lease=lease,
@@ -3102,20 +3124,51 @@ def _uses_protected_candidate_pr(
 
 def _close_service_batch_pull_request(
     *,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
     github_client: GitHubMergeTrainClient,
     candidate_record: MergeTrainBatchCandidateRecord,
     lease: MergeTrainControllerLeaseContext,
     reason: str,
     active_phase: str = "close_batch_pull_request",
 ) -> None:
+    if candidate_record.ordinary_job_binding is not None:
+        return
     candidate = candidate_record.candidate
-    if (
-        candidate_record.ordinary_job_binding is None
-        and candidate.head_check_reuse is None
-        and candidate.candidate_sha
-    ):
-        lease.checkpoint(active_phase=active_phase)
+    lease.checkpoint(active_phase=active_phase)
+    if candidate.head_check_reuse is None and candidate.candidate_sha:
         github_client.close_batch_pull_request(candidate=candidate, reason=reason)
+    _cleanup_service_batch_refs(
+        github_client=github_client,
+        candidate_store=candidate_store,
+        candidate=candidate,
+        lease=lease,
+    )
+
+
+def _cleanup_service_batch_refs(
+    *,
+    github_client: GitHubMergeTrainClient,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+    lease: MergeTrainControllerLeaseContext,
+) -> str:
+    protected_refs: set[str] = set()
+    for record in candidate_store.list_merge_train_batch_candidate_records(
+        repository=candidate.repository, status="active"
+    ):
+        other = record.candidate
+        if other.batch_id == candidate.batch_id and other.base_branch == candidate.base_branch:
+            continue
+        reference = build_merge_train_batch_candidate_ref(
+            repository=other.repository, base_branch=other.base_branch, batch_id=other.batch_id
+        )
+        protected_refs.update(
+            (other.candidate_ref, reference, merge_train_construction_ref(reference))
+        )
+    lease.checkpoint()
+    return github_client.cleanup_retired_batch_refs(
+        candidate=candidate, protected_refs=frozenset(protected_refs)
+    )
 
 
 def _failed_batch_close_reason(candidate: MergeTrainBatchCandidate) -> str:
@@ -3134,6 +3187,7 @@ def _fail_service_batch_candidate(
     recorded_at: str,
 ) -> MergeTrainBatchCandidateRecord:
     _close_service_batch_pull_request(
+        candidate_store=candidate_store,
         github_client=github_client,
         candidate_record=candidate_record,
         lease=lease,
@@ -3183,6 +3237,7 @@ def _advance_active_candidate_record(
         lease.observe_failed_candidate(active_candidate_record)
         if request.mutate:
             _close_service_batch_pull_request(
+                candidate_store=candidate_store,
                 github_client=github_client,
                 candidate_record=active_candidate_record,
                 lease=lease,
@@ -3423,6 +3478,7 @@ def _advance_active_candidate_record(
     if request.mutate:
         if candidate.status == "failed":
             _close_service_batch_pull_request(
+                candidate_store=candidate_store,
                 github_client=github_client,
                 candidate_record=active_candidate_record,
                 lease=lease,
@@ -3561,6 +3617,7 @@ def _reflow_stale_candidate_record(
                 ).model_copy(update={"status": "superseded"})
                 candidate_store.write_merge_train_batch_candidate_record(retirement)
             _close_service_batch_pull_request(
+                candidate_store=candidate_store,
                 github_client=github_client,
                 candidate_record=candidate_record,
                 lease=lease,
@@ -7102,6 +7159,7 @@ def validate_merge_train_stack_collapse_record_for_controller(
 
 def cleanup_merge_train_batch_candidate_ref(
     *,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
     github_client: GitHubMergeTrainClient,
     landing_plan: MergeTrainBatchLandingPlan,
     trace_id: str,
@@ -7131,29 +7189,18 @@ def cleanup_merge_train_batch_candidate_ref(
             },
         )
         return {"candidate_ref_cleanup_status": cleanup_status}
-    if lease.record.step_payload.get("cleanup_status") == "deleted":
-        return {"candidate_ref_cleanup_status": "deleted"}
-    if not github_client.candidate_ref_exists(
-        repository=landing_plan.repository,
-        reference=candidate_ref,
-    ):
-        lease.checkpoint(
-            step_payload={
-                **lease.record.step_payload,
-                "candidate_ref": candidate_ref,
-                "cleanup_status": "already_missing",
-            },
-        )
-        return {"candidate_ref_cleanup_status": "already_missing"}
     try:
-        deleted = github_client.cleanup_batch_candidate_ref(landing_plan=landing_plan)
+        github_client.close_landed_candidate_validation_pr(landing_plan=landing_plan)
+        cleanup_status = _cleanup_service_batch_refs(
+            github_client=github_client,
+            candidate_store=candidate_store,
+            candidate=landing_plan,
+            lease=lease,
+        )
     except MergeTrainGitHubError as error:
         return _candidate_ref_cleanup_failed_result(
-            error=error,
-            trace_id=trace_id,
-            landing_plan=landing_plan,
+            error=error, trace_id=trace_id, landing_plan=landing_plan
         )
-    cleanup_status = "deleted" if deleted else "already_missing"
     lease.checkpoint(
         step_payload={
             **lease.record.step_payload,
@@ -7161,9 +7208,7 @@ def cleanup_merge_train_batch_candidate_ref(
             "cleanup_status": cleanup_status,
         },
     )
-    return {
-        "candidate_ref_cleanup_status": cleanup_status,
-    }
+    return {"candidate_ref_cleanup_status": cleanup_status}
 
 
 def _candidate_ref_cleanup_failed_result(

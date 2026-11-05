@@ -470,6 +470,7 @@ class OrdinaryLandingControllerTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(MergeTrainControllerRequestError, "stack collapse"):
                 _finish_landed_merge_train_batch(
+                    candidate_store=self.stack_store,
                     request=self.request,
                     policy_sha256=POLICY_SHA256,
                     repository_policy=self.policy,
