@@ -46,6 +46,7 @@ class OdooProdBackupRestoreHttpTests(unittest.IsolatedAsyncioTestCase):
                     payload=self._payload(apply=True),
                 )
             self.assertEqual(response.status_code, 403, response.text)
+            self.assertEqual(response.json()["error"]["code"], "authorization_denied")
             enqueue.assert_not_called()
 
     def _policy(self, *, action: str) -> LaunchplaneAuthzPolicy:

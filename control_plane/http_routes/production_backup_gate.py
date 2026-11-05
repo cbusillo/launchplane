@@ -26,6 +26,7 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationCaptureError,
     capture_durable_operation_authorization,
+    director_backup_capture_allowed,
     read_active_authz_policy_record,
 )
 from control_plane.http_routes.mutation_support import idempotency_scope
@@ -283,18 +284,16 @@ def register_production_backup_gate_routes(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", max_length=256)] = "",
     ) -> ProductionBackupGateResponse:
         trace_id = common.next_trace_id()
-        director_capture = (
-            isinstance(identity, LocalOperatorIdentity)
-            and director_agent_identity(identity)
-            and request.instance == "prod"
-        )
-        if not common.authorization_allows(
+        if not director_backup_capture_allowed(
+            identity=identity,
+            action=PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
+            instances=(request.instance,),
+        ) and not common.authorization_allows(
             identity=identity,
             action=PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
             product=request.product,
             context=request.context,
             target=AuthorizationTarget(scope="instance", instances=(request.instance,)),
-            inherit_agent_read_role=director_capture,
         ):
             raise common.http_error(
                 status_code=403,
@@ -363,7 +362,6 @@ def register_production_backup_gate_routes(
             product=scope[0],
             context=scope[1],
             target=AuthorizationTarget(scope="instance", instances=(scope[2],)),
-            inherit_agent_read_role=action != PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
         ):
             raise common.http_error(
                 status_code=403,

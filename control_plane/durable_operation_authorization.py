@@ -210,6 +210,17 @@ def read_active_authz_policy_record(record_store: object) -> LaunchplaneAuthzPol
     return record
 
 
+def director_backup_capture_allowed(
+    *, identity: LaunchplaneIdentity, action: str, instances: tuple[str, ...]
+) -> bool:
+    return (
+        isinstance(identity, LocalOperatorIdentity)
+        and director_agent_identity(identity)
+        and action == PRODUCTION_BACKUP_GATE_EXECUTE_ACTION
+        and instances == ("prod",)
+    )
+
+
 def capture_durable_operation_authorization(
     *,
     identity: LaunchplaneIdentity,
@@ -233,12 +244,7 @@ def capture_durable_operation_authorization(
     )
     if administrator_authorization is not None:
         return administrator_authorization
-    if (
-        isinstance(identity, LocalOperatorIdentity)
-        and director_agent_identity(identity)
-        and action == PRODUCTION_BACKUP_GATE_EXECUTE_ACTION
-        and instances == ("prod",)
-    ):
+    if director_backup_capture_allowed(identity=identity, action=action, instances=instances):
         return DurableOperationAuthorization(
             grant="director_backup_capture",
             action=action,

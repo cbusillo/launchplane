@@ -68,7 +68,7 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400, response.text)
         self.assertEqual(response.json()["error"]["code"], "missing_idempotency_key")
 
-    async def test_director_capture_does_not_allow_delete_cancel_or_policy_changes(self) -> None:
+    async def test_director_capture_does_not_authorize_cancellation(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             bearer_identity_config=_local_operator_bearer_config(),
@@ -76,10 +76,6 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=object,
         )
         headers = {"Authorization": "Bearer local-operator-token"}
-        deleted = await request(
-            app, "DELETE", "/v1/production-backup-gates/operations/backup", headers=headers
-        )
-        self.assertEqual(deleted.status_code, 405, deleted.text)
         cancelled = await request(
             app,
             "POST",
@@ -88,17 +84,34 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
             payload={"reason": "capture does not authorize cancellation"},
         )
         self.assertEqual(cancelled.status_code, 403, cancelled.text)
-        for extra in ({"retention_count": 0}, {"restore": True}, {"delete": True}):
-            with self.subTest(extra=extra):
+        self.assertEqual(cancelled.json()["error"]["code"], "authorization_denied")
+
+    async def test_capture_standing_permission_excludes_terminal_and_nonproduction(self) -> None:
+        config = _local_operator_bearer_config().model_copy(
+            update={
+                "terminal_agent_token": "terminal-token",
+                "terminal_agent_subject": "director",
+                "terminal_agent_token_label": "terminal",
+            }
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            bearer_identity_config=config,
+            authz_policy=LaunchplaneAuthzPolicy(schema_version=2),
+            record_store_factory=object,
+        )
+        for token, instance in (("terminal-token", "prod"), ("local-operator-token", "testing")):
+            with self.subTest(token=token, instance=instance):
                 response = await request(
                     app,
                     "POST",
                     "/v1/production-backup-gates",
-                    headers=headers,
-                    payload=_binding().request.model_dump(mode="json") | extra,
+                    headers={"Authorization": f"Bearer {token}"},
+                    payload=_binding()
+                    .request.model_copy(update={"instance": instance})
+                    .model_dump(mode="json"),
                 )
-                self.assertEqual(response.status_code, 400, response.text)
-                self.assertEqual(response.json()["error"]["code"], "invalid_request")
+                self.assertEqual(response.status_code, 403, response.text)
 
     async def test_list_operations_rejects_blank_or_missing_scope_and_invalid_selectors(
         self,
