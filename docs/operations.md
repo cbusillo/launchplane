@@ -6382,16 +6382,17 @@ ordinary carries remain readable by the preceding image. Activation uses the
 same read contract unchanged. Do not roll activation back past this compatible
 image after any populated carry has been saved.
 
-### Monitoring-authority history compatibility
+### Monitoring-authority history
 
-The prepared additive revision `e2b6c8d0a4f7` retains profile, route-binding and
+The additive revision `e2b6c8d0a4f7` retains profile, route-binding and
 private-endpoint decisions in `launchplane_monitoring_authority_history`.
-Ordinary startup still targets the integration-attestation revision. This
-compatibility release neither creates the history table nor establishes coverage.
-It recognizes the future additive revision and its empty held-branch join,
-`f3c7d9e1b5a8`, so it can remain the previous-image rollback target after activation.
-Qualify its deployed image before changing the startup target. Never activate
-with Alembic `head`: the separately held delivery drop remains unapproved.
+Ordinary startup targets this additive revision. An installation already on the
+held delivery branch advances through its empty join `f3c7d9e1b5a8`; other
+installations stay on the non-destructive branch. Never activate with Alembic
+`head`: the separately held delivery drop remains unapproved. The preceding
+compatibility image, delivered in PR5589 and retained by PR5593, recognizes both
+revisions and remains the rollback floor. Startup verifies capture storage,
+projection functions and enabled source and append-only triggers.
 
 The prepared PostgreSQL migration takes the existing authority-bundle lock, then
 locks all three source tables in one transaction. It records one coverage epoch
@@ -6410,12 +6411,65 @@ rewrites that change no monitoring fact append no revision. Source keys identify
 revisions across scope changes: fold by source key before filtering by scope.
 PostgreSQL transaction IDs retain grouping within the current database history,
 not continuity or unique grouping across a database restore. Sequence numbers and
-recording timestamps identify writes, not commit order or commit time. The later
-reader/accountant must preserve this distinction and earlier incomplete intervals.
+recording timestamps identify writes, not commit order or commit time.
 These monitoring facts are private historical decision evidence, not a new current
-authority or provider inventory. No capture health or timeline qualification is
-asserted by this compatibility slice.
+authority or provider inventory.
 Downgrade retains this evidence; rollback uses the compatible image with the
 additive table and capture intact.
 SQLite remains a rehearsal backend without authority-history capture; the real
 PostgreSQL integration suite owns installation, atomicity and projection proof.
+
+Under Director decision Q1263 on #2993, each completed batch of the existing
+monitor appends one small confirmation. It records the database clock before
+profile discovery and after completion, the batch's observation timestamp and
+lane scopes, exact observation identifiers and a digest of each lane's redacted
+observations, cluster identifier, epoch, capture verification and snapshot xmin.
+Runs that raise or are cancelled produce no confirmation. A confirmation proves that
+transactions below its xmin had settled by its database timestamp. Changes,
+including the epoch and seeds, earn no healthy time before a later confirmation
+settles them. An application timestamp cannot backdate this proof. No timer,
+service, grant, database setting, baseline or reset is added.
+Bookkeeping failures are logged by exception type and leave the confirmation
+missing; they do not repeat completed probes or prevent monitor receipts. The
+confirmation records a completed probe batch, not scheduler lease ownership or
+cadence completion. Its identifiers and digest reject overwritten, missing or
+same-second observations before the existing accountant receives them.
+Qualification treats a rejected binding as that lane and batch's UNKNOWN gap,
+including intentional provider-source refusals that were never published. It
+does not discard retained negative evidence or abort unrelated lane accounting.
+
+`GET /v1/monitoring-authority-history` returns a paginated settled prefix,
+including inactive and deleted authority. The first page freezes xmin; following
+pages use that same boundary and report their actual database read time. A cursor
+never supplies a historical read time. Restart at the first
+page for a fresh prefix, rather than using the last sequence as a delta cursor:
+lower sequences can commit later. Current capture errors or a changed cluster
+identifier make coverage UNKNOWN. An earlier invalid confirmation means source
+changes could have been missed. Later healthy confirmations cannot reconstruct
+them, so the retained authority stays UNKNOWN; the ordinary monitor continues.
+There is no automatic reset or invented replacement baseline. Restore continuity
+and authority before installation are
+explicitly excluded; a physical restore within one cluster also needs separate
+continuity evidence. Privileged trigger bypass between confirmations cannot be
+reconstructed from this history.
+The xmin boundary is cluster-wide. A long or prepared transaction in any database
+can hold it back; its unchanged value and the last retained confirmation expose
+that stalled proof. This reader does not block or terminate those transactions.
+
+The existing `product_profile.read` permission authorizes an explicit product.
+Only the existing service-wide read permission or authenticated Director agent
+identity can omit the product and read the complete roster. Source keys are
+folded before scope filtering: the first departure is retained without the new
+scope or payload, and subsequent foreign changes are withheld. Private endpoint
+URLs and CA values are replaced by a material digest; external-ingress metadata
+is limited to domains. Responses are not cached. These permissions add no grant.
+
+The existing lane `health-history` read accepts an explicit `historical_context`
+for testing and production under the exact product/context/instance
+`product_environment.read` permission,
+even when its current profile is absent or retired. Its observations establish
+neither Live membership nor check applicability; use the retained decisions for
+those. A complete settled source prefix is not a seven-day health result.
+Qualification must bound each constant-authority interval by confirmations,
+exclude batches crossing a change or unknown gap, and pass only the resulting
+required health and identity streams to the existing observation accountant.

@@ -46,7 +46,7 @@ from control_plane.storage.schema_invariants import (
     PRE_RETIREMENT_ALEMBIC_REVISION,
 )
 
-SCHEMA_MIGRATION_TARGET_REVISION = integration_attestations.revision
+SCHEMA_MIGRATION_TARGET_REVISION = monitoring_history.revision
 SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
     PRE_RETIREMENT_ALEMBIC_REVISION,
@@ -61,6 +61,7 @@ SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     idle_hostnames_join.revision,
     idle_compatibility_join.revision,
     integration_attestations.revision,
+    monitoring_history.revision,
 )
 _RECOGNIZED_SOURCE_REVISIONS = (
     *SCHEMA_MIGRATION_SUPPORTED_REVISIONS,
@@ -78,7 +79,6 @@ _RECOGNIZED_SOURCE_REVISIONS = (
     idle_hostnames_join.revision,
     idle_compatibility_join.revision,
     attestations_compatibility_join.revision,
-    monitoring_history.revision,
     monitoring_history_join.revision,
 )
 _ARCHIVE_JOIN_BY_SOURCE = {
@@ -134,6 +134,13 @@ def schema_migration_action(
 
 
 def schema_migration_target(*, current_revision: str, target_revision: str) -> str:
+    if target_revision == monitoring_history.revision:
+        if current_revision in _RECOGNIZED_SOURCE_REVISIONS and (
+            current_revision == retired_delivery.revision
+            or retired_delivery.revision in _alembic_predecessor_revisions(current_revision)
+        ):
+            return monitoring_history_join.revision
+        return target_revision
     if target_revision == integration_attestations.revision:
         if current_revision in _RECOGNIZED_SOURCE_REVISIONS and (
             current_revision == retired_delivery.revision
