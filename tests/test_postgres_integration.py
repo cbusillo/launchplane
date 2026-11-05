@@ -301,6 +301,171 @@ LOCK_WAIT_TIMEOUT = "1000ms"
 
 
 class RealPostgresMonitoringAuthorityTests(unittest.TestCase):
+    def test_authority_rejection_keeps_its_retained_negative_binding(self) -> None:
+        from control_plane.monitoring_authority_history import MonitoringAuthorityLaneEvidence
+        from control_plane.lane_health_history import project_observation
+
+        profile = _public_ingress_profile()
+        self.store.write_product_profile_record(profile)
+        self.initialize_history()
+        changed = False
+
+        def fail_after_change(url: str, _timeout: int) -> HttpObservation:
+            nonlocal changed
+            if not changed:
+                changed = True
+                self.store.write_product_profile_record(
+                    profile.model_copy(update={"health_path": "/changed"})
+                )
+            return HttpObservation(status_code=503, final_url=url, redirect_count=0)
+
+        result = run_public_ingress_monitor_once(
+            record_store=self.store, http_get=fail_after_change, notify=False
+        )
+        self.assertEqual(result.authority_changed_count, 1)
+        self.assertEqual(result.records[0].status, "fail")
+        page = self.store.read_monitoring_authority_history(
+            product=profile.product, limit=500, cursor=None
+        )
+        lanes = page.revisions[-1].payload["lanes"]
+        assert isinstance(lanes, list)
+        evidence = MonitoringAuthorityLaneEvidence.model_validate(lanes[0])
+        retained = tuple(
+            project_observation(row) for row in self.store.list_public_ingress_observation_records()
+        )
+        self.assertEqual(
+            evidence.confirmed_observations(retained),
+            tuple(project_observation(row) for row in result.records),
+        )
+        self.assertEqual(self.store.list_public_ingress_incident_records(), ())
+
+    def test_provider_source_refusal_is_a_lane_binding_gap_without_poisoning_capture(self) -> None:
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+        from control_plane.monitoring_authority_history import MonitoringAuthorityLaneEvidence
+        from tests.test_public_ingress_monitor import _profile
+
+        profile = _profile(lane=ProductLaneProfile(instance="prod", context="example-site"))
+        self.store.write_product_profile_record(profile)
+        self.initialize_history()
+        origin = ProviderTargetOrigin(
+            product=profile.product,
+            context="example-site",
+            instance="prod",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id="original",
+        )
+
+        def reserve(key: str, target: ProviderTargetOrigin, now: str) -> None:
+            with patch.object(self.store, "_database_mutation_timestamp", return_value=now):
+                self.store.reserve_mutation(
+                    scope="fixture",
+                    route_path="/fixture",
+                    idempotency_key=key,
+                    request_fingerprint=key,
+                    lease_owner="fixture",
+                    lease_seconds=60,
+                    reconciliation_key="fixture",
+                    provider_target_key=target.target_key(),
+                    provider_target_origin=target,
+                )
+
+        reserve("first", origin, "2026-10-01T00:00:00Z")
+        transition = self.store.write_public_ingress_transition_with_outbox
+
+        def change_source(**kwargs: Any) -> Any:
+            reserve(
+                "second",
+                origin.model_copy(update={"target_id": "replacement"}),
+                "2026-10-01T01:00:00Z",
+            )
+            outcome = transition(**kwargs)
+            self.assertEqual(outcome.status, "provider_source_changed")
+            return outcome
+
+        with (
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value="2026-10-01T01:00:00Z"
+            ),
+            patch.object(
+                self.store, "write_public_ingress_transition_with_outbox", side_effect=change_source
+            ),
+        ):
+            result = run_public_ingress_monitor_once(
+                record_store=self.store, checked_at="2026-10-01T01:00:00Z", notify=False
+            )
+        self.assertEqual(result.skipped_count, 1)
+        self.assertEqual(self.store.list_public_ingress_observation_records(), ())
+        page = self.store.read_monitoring_authority_history(
+            product=profile.product, limit=500, cursor=None
+        )
+        self.assertEqual(page.capture_errors, ())
+        lanes = page.revisions[-1].payload["lanes"]
+        assert isinstance(lanes, list)
+        evidence = MonitoringAuthorityLaneEvidence.model_validate(lanes[0])
+        self.assertEqual(evidence.observation_ids, (result.records[0].record_id,))
+        with self.assertRaises(ValueError):
+            evidence.confirmed_observations(())
+
+    def test_ordinary_startup_from_the_live_join_installs_capture_once(self) -> None:
+        from control_plane.storage.migrations.versions import (
+            d1a5b7c9d2e4_join_attestations_compatibility as previous,
+            f3c7d9e1b5a8_join_monitoring_history as joined,
+        )
+
+        alembic_command.upgrade(_alembic_config(self.url), previous.revision)
+        before = set(inspect(self.engine).get_table_names())
+        self.assertEqual(migrate_schema(database_url=self.url), joined.revision)
+        self.store.verify_schema()
+        self.assertEqual(
+            set(inspect(self.engine).get_table_names()) - before, {self.history.TABLE_NAME}
+        )
+        self.assertTrue(before <= set(inspect(self.engine).get_table_names()))
+        self.assertEqual(migrate_schema(database_url=self.url), joined.revision)
+        self.assertEqual(
+            len([row for row in self.rows(include_epoch=True) if row["operation"] == "epoch"]), 1
+        )
+        batch = self.store.begin_monitoring_authority_batch()
+        assert batch is not None
+        self.assertEqual(batch.capture_errors, ())
+
+    def test_monitor_incident_and_recovery_batches_bind_the_retained_records(self) -> None:
+        from control_plane.monitoring_authority_history import MonitoringAuthorityLaneEvidence
+        from control_plane.lane_health_history import project_observation
+
+        self.store.write_product_profile_record(_public_ingress_profile())
+        self.initialize_history()
+        results = []
+        for second, status in enumerate((503, 503, 200)):
+
+            def fetch(url: str, _timeout: int) -> HttpObservation:
+                return HttpObservation(status_code=status, final_url=url, redirect_count=0)
+
+            results.append(
+                run_public_ingress_monitor_once(
+                    record_store=self.store,
+                    checked_at=f"2026-07-27T12:00:0{second}Z",
+                    notify=False,
+                    http_get=fetch,
+                )
+            )
+        self.assertEqual(results[0].open_incident_count, 1)
+        self.assertEqual(results[-1].resolved_incident_count, 1)
+        retained = tuple(
+            project_observation(row) for row in self.store.list_public_ingress_observation_records()
+        )
+        page = self.store.read_monitoring_authority_history(product="", limit=500, cursor=None)
+        confirmations = [row for row in page.revisions if row.operation == "confirmation"]
+        self.assertEqual(len(confirmations), len(results))
+        for row, result in zip(confirmations, results, strict=True):
+            lanes = row.payload["lanes"]
+            assert isinstance(lanes, list)
+            evidence = MonitoringAuthorityLaneEvidence.model_validate(lanes[0])
+            self.assertEqual(
+                evidence.confirmed_observations(retained),
+                tuple(project_observation(record) for record in result.records),
+            )
+
     def test_monitor_confirms_once_only_after_a_completed_batch(self) -> None:
         from control_plane.workflows.public_ingress_monitor import (
             MonitorRunCancelled,

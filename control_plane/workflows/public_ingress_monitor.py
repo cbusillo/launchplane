@@ -20,7 +20,6 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
-from control_plane.monitoring_authority_history import MonitoringAuthorityBatchStart
 
 from control_plane.contracts.secret_record import SecretRecord
 from control_plane.provider_target_holds import (
@@ -897,14 +896,13 @@ def run_public_ingress_monitor_once(
     lane_keys: frozenset[tuple[str, str, str]] | None = None,
     max_concurrent_probes: int = 1,
 ) -> PublicIngressMonitorResult:
+    from control_plane.storage.postgres import PostgresRecordStore
+
     _check_monitor_cancelled(should_stop)
-    begin_authority: Callable[[], MonitoringAuthorityBatchStart | None] | None = getattr(
-        record_store, "begin_monitoring_authority_batch", None
-    )
-    authority_start: MonitoringAuthorityBatchStart | None = None
-    if begin_authority is not None:
+    authority_start = None
+    if isinstance(record_store, PostgresRecordStore):
         try:
-            authority_start = begin_authority()
+            authority_start = record_store.begin_monitoring_authority_batch()
         except Exception as error:
             logging.getLogger(__name__).warning(
                 "Monitoring authority batch start failed: %s", type(error).__name__
@@ -1075,10 +1073,9 @@ def run_public_ingress_monitor_once(
         reminder_states=tuple(reminder_states),
         delivery_attempts=tuple(delivery_attempts),
     )
-    if authority_start is not None:
+    if isinstance(record_store, PostgresRecordStore) and authority_start is not None:
         try:
-            complete_authority = getattr(record_store, "complete_monitoring_authority_batch")
-            complete_authority(
+            record_store.complete_monitoring_authority_batch(
                 start=authority_start, checked_at=observed_at, records=result.records
             )
         except Exception as error:

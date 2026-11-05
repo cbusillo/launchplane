@@ -6424,7 +6424,7 @@ monitor appends one small confirmation. It records the database clock before
 profile discovery and after completion, the batch's observation timestamp and
 lane scopes, exact observation identifiers and a digest of each lane's redacted
 observations, cluster identifier, epoch, capture verification and snapshot xmin.
-Cancelled or failed batches produce no confirmation. A confirmation proves that
+Runs that raise or are cancelled produce no confirmation. A confirmation proves that
 transactions below its xmin had settled by its database timestamp. Changes,
 including the epoch and seeds, earn no healthy time before a later confirmation
 settles them. An application timestamp cannot backdate this proof. No timer,
@@ -6434,6 +6434,9 @@ missing; they do not repeat completed probes or prevent monitor receipts. The
 confirmation records a completed probe batch, not scheduler lease ownership or
 cadence completion. Its identifiers and digest reject overwritten, missing or
 same-second observations before the existing accountant receives them.
+Qualification treats a rejected binding as that lane and batch's UNKNOWN gap,
+including intentional provider-source refusals that were never published. It
+does not discard retained negative evidence or abort unrelated lane accounting.
 
 `GET /v1/monitoring-authority-history` returns a paginated settled prefix,
 including inactive and deleted authority. The first page freezes xmin; following
