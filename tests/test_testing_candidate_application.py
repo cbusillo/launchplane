@@ -17,11 +17,13 @@ from control_plane.dokploy import api, source as provider_source, post_deploy
 from control_plane.contracts.testing_candidate_application import TestingCandidatePrepared
 from control_plane.provider_operations import ProviderOperationLease
 from control_plane.contracts.artifact_identity import (
+    ArtifactBuildFlags,
     ArtifactIdentityManifest,
     ArtifactImageReference,
 )
 from control_plane.contracts.odoo_stable_target_replacement import LAUNCHPLANE_REQUIRED_ODOO_MODULES
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.product_profile_record import ProductRuntimeConfigRequirement
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 from control_plane.contracts.testing_candidate_application import TestingCandidateApplication
 from control_plane.contracts.odoo_testing_source import (
@@ -136,6 +138,107 @@ class CandidateApplicationTests(unittest.TestCase):
             inputs.runtime_environment["ODOO_HTTP_PORT"], str(self.profile.runtime_port)
         )
         self.fixture.assert_serving_unchanged()
+
+    def test_candidate_runtime_version_follows_its_artifact_and_preserves_legacy_inputs(
+        self,
+    ) -> None:
+        allocation = self.allocate("upstream")
+        runtime = next(
+            record
+            for record in self.store.list_runtime_environment_records()
+            if (record.scope, record.context, record.instance)
+            == ("instance", self.fixture.context, "testing")
+        )
+        for index, (artifact_version, lane_version, declared_instance) in enumerate(
+            (
+                ("20.0", "19.0", ""),
+                ("19.0", "19.0", ""),
+                ("20.0", "20.0", ""),
+                ("18.0", "19.0", ""),
+                ("", "19.0", ""),
+                ("20.0", "", ""),
+                ("", "", ""),
+                ("20.0", "", "testing"),
+                ("20.0", "", "prod"),
+                ("", "", "testing"),
+            )
+        ):
+            with self.subTest(
+                artifact=artifact_version, lane=lane_version, declared=declared_instance
+            ):
+                expected_config = self.profile.expected_config
+                if declared_instance:
+                    expected_config = expected_config.model_copy(
+                        update={
+                            "runtime_environment_keys": (
+                                *expected_config.runtime_environment_keys,
+                                ProductRuntimeConfigRequirement(
+                                    key="ODOO_VERSION",
+                                    context=self.fixture.context,
+                                    instance=declared_instance,
+                                ),
+                            )
+                        }
+                    )
+                self.store.write_product_profile_record(
+                    self.profile.model_copy(update={"expected_config": expected_config})
+                )
+                artifact = self.artifact.model_copy(
+                    update={
+                        "artifact_id": f"versioned-candidate-{index}",
+                        "build_flags": ArtifactBuildFlags(
+                            values={"odoo_version": artifact_version}
+                        ),
+                    }
+                )
+                self.store.write_artifact_manifest(artifact)
+                environment = dict(runtime.env)
+                if lane_version:
+                    environment["ODOO_VERSION"] = lane_version
+                self.store.write_runtime_environment_record(
+                    runtime.model_copy(update={"env": environment})
+                )
+                self.fixture.before = self.fixture.authority()
+                inputs = candidate_runtime_inputs(
+                    root=self.root,
+                    store=self.store,
+                    allocation=allocation.model_copy(
+                        update={
+                            "intent_sha256": candidate_application_intent(
+                                product=self.fixture.product,
+                                context=self.fixture.context,
+                                artifact_id=artifact.artifact_id,
+                                source="upstream",
+                            )
+                        }
+                    ),
+                    artifact_id=artifact.artifact_id,
+                    source="upstream",
+                )
+                expected_version = lane_version
+                if artifact_version and (lane_version or declared_instance == "testing"):
+                    expected_version = artifact.build_flags.values["odoo_version"]
+                if expected_version:
+                    self.assertEqual(
+                        inputs.runtime_environment["ODOO_VERSION"],
+                        expected_version,
+                    )
+                else:
+                    self.assertNotIn("ODOO_VERSION", inputs.runtime_environment)
+                self.assertEqual(inputs.plan.artifact, artifact)
+                self.assertEqual(
+                    inputs.plan.runtime_identity.source_git_ref, artifact.source_commit
+                )
+                self.assertEqual(inputs.plan.runtime_identity.artifact_id, artifact.artifact_id)
+                self.assertEqual(
+                    inputs.runtime_environment["ODOO_DB_NAME"], runtime.env["ODOO_DB_NAME"]
+                )
+                self.assertEqual(
+                    inputs.plan.upstream_source["ODOO_UPSTREAM_HOST"],
+                    runtime.env["ODOO_UPSTREAM_HOST"],
+                )
+                self.assertNotIn("ODOO_UPSTREAM_HOST", inputs.runtime_environment)
+                self.fixture.assert_serving_unchanged()
 
     def test_managed_port_reaches_private_probe_and_recorded_endpoint(self) -> None:
         real_readiness = application.candidate_private_readiness

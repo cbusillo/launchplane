@@ -14,6 +14,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideValue,
 )
 from control_plane.contracts.odoo_stable_target_replacement import (
+    apply_artifact_odoo_version,
     missing_required_odoo_modules_from_artifact,
 )
 from control_plane.contracts.odoo_testing_source import NativeOdooTestingSource
@@ -29,6 +30,7 @@ from control_plane.contracts.testing_candidate_application import TestingCandida
 from control_plane.dokploy import compose, post_deploy
 from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.integration_readback import INTEGRATION_FAMILIES
+from control_plane.live_target_runtime import declared_runtime_keys
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
 from control_plane.odoo_instance_overrides import build_post_deploy_environment
 from control_plane.odoo_testing_native_source import (
@@ -383,6 +385,13 @@ def candidate_runtime_inputs(
         for key, value in runtime.values.items()
         if key not in omitted and key not in post_deploy.ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS
     }
+    apply_artifact_odoo_version(
+        values,
+        artifact_manifest=artifact,
+        declared_keys=declared_runtime_keys(
+            profile=profile, context_name=allocation.context, instance_name="testing"
+        ),
+    )
     addons_path = merge_required_odoo_addons_path(values.get("ODOO_ADDONS_PATH", ""))
     if addons_path:
         values["ODOO_ADDONS_PATH"] = addons_path
