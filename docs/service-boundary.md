@@ -3436,7 +3436,13 @@ Odoo post-deploy, config-parameter override,
 and website-bootstrap override are native FastAPI routes too. They preserve
 product-profile driver validation, lane-scoped authorization, optional
 `Idempotency-Key` replay/conflict behavior, post-deploy transition records, and
-Odoo instance override record merge behavior. Odoo preview apply inputs and
+Odoo instance override record merge behavior. Native
+website-bootstrap `mode: dry-run` plans return the validated website intent
+without writing an override or idempotency record. Stable website plans use
+the existing context/instance-scoped `driver.read` authority; apply keeps its
+write identity and authorization. Exact-preview plans and writes retain their
+original-reservation custody requirements. Recording intent does not apply it
+to the running Odoo database. Odoo preview apply inputs and
 preview apply are also owned by native FastAPI. They preserve preview-context
 authorization, runtime-environment dependency classification, and the
 `odoo_preview_runtime_config_incomplete` details envelope for apply requests

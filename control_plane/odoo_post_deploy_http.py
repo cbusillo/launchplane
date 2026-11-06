@@ -182,12 +182,7 @@ class OdooWebsiteBootstrapOverrideRequest(BaseModel):
         if not self.instance:
             raise ValueError("Odoo website-bootstrap override requires instance.")
         if not self.preview_original_reservation_id:
-            if (
-                self.website_bootstrap is None
-                or self.mode != "apply"
-                or self.reviewed_plan_sha256
-                or self.inherit_template
-            ):
+            if self.website_bootstrap is None or self.reviewed_plan_sha256 or self.inherit_template:
                 raise ValueError("Stable website-bootstrap writes require bootstrap intent.")
         elif self.mode == "apply" and (
             len(self.reviewed_plan_sha256) != 64
@@ -359,11 +354,20 @@ def write_odoo_website_bootstrap_override_result(
         record_store=record_store,
         request=request.override,
     )
-    return {
+    result: dict[str, object] = {
         "context": override_record.context,
         "instance": override_record.instance,
         "website_bootstrap": override_record.website_bootstrap is not None,
     }
+    if request.override.mode == "dry-run":
+        result.update(
+            mode="dry-run",
+            applied=False,
+            planned_website_bootstrap=override_record.website_bootstrap.model_dump(mode="json")
+            if override_record.website_bootstrap is not None
+            else None,
+        )
+    return result
 
 
 def write_odoo_config_parameter_override_record(
@@ -451,6 +455,8 @@ def write_odoo_website_bootstrap_override_record(
         updated_at=_utc_now_timestamp(),
         source_label=request.source_label,
     )
+    if request.mode == "dry-run":
+        return record
     record_store.write_odoo_instance_override_record(
         record, expected_record=existing_record, require_absent=existing_record is None
     )

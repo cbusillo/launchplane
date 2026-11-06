@@ -7278,6 +7278,121 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_request")
 
+    async def test_stable_website_bootstrap_plan_is_read_only_and_scoped(self) -> None:
+        for existing in (False, True):
+            for granted_instance in ("testing", "prod"):
+                with self.subTest(existing=existing, granted_instance=granted_instance):
+                    with TemporaryDirectory() as temporary_directory_name:
+                        root = Path(temporary_directory_name)
+                        state_dir = root / "state"
+                        store = self._store_with_tenant_profile(state_dir)
+                        if existing:
+                            store.write_odoo_instance_override_record(
+                                OdooInstanceOverrideRecord(
+                                    context="cm",
+                                    instance="testing",
+                                    apply_on=("manual",),
+                                    updated_at="2026-05-10T20:00:00Z",
+                                )
+                            )
+                        policy = LaunchplaneAuthzPolicy.model_validate(
+                            {
+                                "schema_version": 2,
+                                "github_actions": [
+                                    {
+                                        "repository": "every/tenant-opw",
+                                        "workflow_refs": [self._identity().workflow_ref],
+                                        "event_names": ["workflow_dispatch"],
+                                        "products": ["launchplane"],
+                                        "contexts": ["cm"],
+                                        "instances": [granted_instance],
+                                        "actions": ["driver.read"],
+                                    }
+                                ],
+                            }
+                        )
+                        app = create_launchplane_fastapi_app(
+                            verifier=_StubVerifier(self._identity()),
+                            authz_policy=policy,
+                            record_store_factory=lambda: store,
+                            control_plane_root_path=root,
+                        )
+                        before = {
+                            path.relative_to(state_dir): path.read_bytes()
+                            for path in state_dir.rglob("*")
+                            if path.is_file()
+                        }
+                        payload = self._website_override_payload()
+                        cast(dict[str, object], payload["override"])["mode"] = "dry-run"
+                        response = await _asgi_request(
+                            app,
+                            method="POST",
+                            path="/v1/drivers/odoo/website-bootstrap-override",
+                            headers={"Authorization": "Bearer valid-token"},
+                            payload=payload,
+                        )
+                        self.assertEqual(
+                            response.status_code, 202 if granted_instance == "testing" else 403
+                        )
+                        if response.status_code == 202:
+                            result = response.json()["result"]
+                            self.assertFalse(result["applied"])
+                            self.assertEqual(
+                                result["planned_website_bootstrap"],
+                                OdooWebsiteBootstrapPayload.model_validate(
+                                    cast(dict[str, object], payload["override"])[
+                                        "website_bootstrap"
+                                    ]
+                                ).model_dump(mode="json"),
+                            )
+                        cast(dict[str, object], payload["override"])["mode"] = "apply"
+                        apply_response = await _asgi_request(
+                            app,
+                            method="POST",
+                            path="/v1/drivers/odoo/website-bootstrap-override",
+                            headers={"Authorization": "Bearer valid-token"},
+                            payload=payload,
+                        )
+                        self.assertEqual(apply_response.status_code, 403)
+                        self.assertEqual(
+                            {
+                                path.relative_to(state_dir): path.read_bytes()
+                                for path in state_dir.rglob("*")
+                                if path.is_file()
+                            },
+                            before,
+                        )
+
+    async def test_terminal_agent_can_plan_bootstrap_without_apply_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="reader-token",
+                    terminal_agent_subject="reader",
+                    terminal_agent_token_label="reader",
+                ),
+            )
+            payload = self._website_override_payload()
+            cast(dict[str, object], payload["override"])["mode"] = "dry-run"
+            response = await _post_odoo_website_bootstrap_override(
+                app, payload, authorization="Bearer reader-token"
+            )
+            self.assertEqual(response.status_code, 202)
+            self.assertFalse(response.json()["result"]["applied"])
+            cast(dict[str, object], payload["override"])["mode"] = "apply"
+            response = await _post_odoo_website_bootstrap_override(
+                app, payload, authorization="Bearer reader-token"
+            )
+            self.assertEqual(response.status_code, 403)
+            with self.assertRaises(FileNotFoundError):
+                store.read_odoo_instance_override_record(context_name="cm", instance_name="testing")
+
     async def test_odoo_website_bootstrap_override_writes_typed_payload(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
