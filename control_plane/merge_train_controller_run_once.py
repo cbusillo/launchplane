@@ -5719,6 +5719,8 @@ def _resume_known_failed_batch(
     mutate: bool,
     lease: MergeTrainControllerLeaseContext,
     conflict_probe: dict[str, object] | None = None,
+    interrupted_parent_record: MergeTrainBatchCandidateRecord | None = None,
+    interrupted_retry_field: str = "",
 ) -> dict[str, object] | None:
     """Resume recorded failure isolation rather than rebuild identical failed inputs."""
     compatible_history = tuple(
@@ -5743,14 +5745,26 @@ def _resume_known_failed_batch(
     matching_records = tuple(
         record
         for record in compatible_history
-        if _merge_train_candidate_matches_dry_run_queue(
+        if (
+            interrupted_parent_record is None
+            or getattr(record.candidate, interrupted_retry_field, None)
+            == interrupted_parent_record.record_id
+        )
+        and _merge_train_candidate_matches_dry_run_queue(
             candidate=record.candidate,
             dry_run_result=dry_run_result,
             base_sha=snapshot.base_sha,
         )
     )
     if matching_records:
-        latest = matching_records[0]
+        latest = (
+            cast(
+                MergeTrainBatchCandidateRecord,
+                latest_merge_train_batch_candidate_progress_record(matching_records),
+            )
+            if interrupted_parent_record is not None
+            else matching_records[0]
+        )
         retry = latest.candidate
         parent = next(
             (
@@ -5778,13 +5792,13 @@ def _resume_known_failed_batch(
         ):
             return _stop_failed_batch_after_conflict_probe(
                 candidate_store=candidate_store,
-                active_candidate_record=latest,
+                active_candidate_record=interrupted_parent_record or latest,
                 probe=_ConflictProbeOutcome(snapshot, dry_run_result, held_out, conflict_probe),
                 repository=snapshot.repository,
                 base_branch=snapshot.base_branch,
                 recorded_at=recorded_at,
                 trace_id=trace_id,
-                mutate=mutate,
+                mutate=mutate and interrupted_parent_record is None,
                 lease=lease,
                 stopped_result={"reason_code": "candidate_retry_unavailable"},
             )
@@ -5797,13 +5811,13 @@ def _resume_known_failed_batch(
             except (MergeTrainGitHubError, MergeAdmissionDeniedError):
                 return _stop_failed_batch_after_conflict_probe(
                     candidate_store=candidate_store,
-                    active_candidate_record=latest,
+                    active_candidate_record=interrupted_parent_record or latest,
                     probe=_ConflictProbeOutcome(snapshot, dry_run_result, held_out, conflict_probe),
                     repository=snapshot.repository,
                     base_branch=snapshot.base_branch,
                     recorded_at=recorded_at,
                     trace_id=trace_id,
-                    mutate=mutate,
+                    mutate=mutate and interrupted_parent_record is None,
                     lease=lease,
                     stopped_result={"reason_code": "candidate_retry_evidence_unavailable"},
                 )
@@ -5818,13 +5832,13 @@ def _resume_known_failed_batch(
             elif closed is not None:
                 return _stop_failed_batch_after_conflict_probe(
                     candidate_store=candidate_store,
-                    active_candidate_record=latest,
+                    active_candidate_record=interrupted_parent_record or latest,
                     probe=_ConflictProbeOutcome(snapshot, dry_run_result, held_out, conflict_probe),
                     repository=snapshot.repository,
                     base_branch=snapshot.base_branch,
                     recorded_at=recorded_at,
                     trace_id=trace_id,
-                    mutate=mutate,
+                    mutate=mutate and interrupted_parent_record is None,
                     lease=lease,
                     stopped_result={"reason_code": "candidate_retry_closed"},
                 )
@@ -5884,6 +5898,8 @@ def _resume_known_failed_batch(
                     lease=lease,
                 )
             return result
+    if interrupted_parent_record is not None:
+        return None
     failed_record = next(
         (
             record
@@ -6099,31 +6115,56 @@ def _retry_closed_candidate_after_passing_checks(
     # One replacement per failed record, not per unchanged queue. A replacement
     # may itself fail transiently and later pass its exact-head rerun. Earlier
     # recovery on the same base must not leave that new failure stuck forever.
+    history = _candidate_history_on_base(
+        candidate_store=candidate_store,
+        repository=repository,
+        base_branch=base_branch,
+        base_sha=snapshot.base_sha,
+    )
     retry_used = any(
-        record.candidate.check_retry_of == active_candidate_record.record_id
-        for record in _candidate_history_on_base(
-            candidate_store=candidate_store,
-            repository=repository,
-            base_branch=base_branch,
-            base_sha=snapshot.base_sha,
-        )
+        record.candidate.check_retry_of == active_candidate_record.record_id for record in history
     )
     if retry_used:
-        # This budget cannot suppress a still-unused generated-body retry.
-        body_retry_used = failed.batch_body_retry_of or any(
-            record.candidate.batch_body_retry_of
-            and _merge_train_candidate_matches_dry_run_queue(
-                candidate=record.candidate,
-                dry_run_result=dry_run_result,
-                base_sha=snapshot.base_sha,
-            )
-            for record in _candidate_history_on_base(
-                candidate_store=candidate_store,
-                repository=repository,
-                base_branch=base_branch,
-                base_sha=snapshot.base_sha,
+        body_retry_recorded = any(
+            record.candidate.batch_body_retry_of == active_candidate_record.record_id
+            for record in history
+        )
+        body_retry_used = (
+            bool(failed.batch_body_retry_of)
+            or body_retry_recorded
+            or any(
+                record.candidate.batch_body_retry_of
+                and _merge_train_candidate_matches_dry_run_queue(
+                    candidate=record.candidate,
+                    dry_run_result=dry_run_result,
+                    base_sha=snapshot.base_sha,
+                )
+                for record in history
             )
         )
+        resumed = _plan_failed_candidate_replacement(
+            stack_collapse_store=stack_collapse_store,
+            reason_code=(
+                "closed_batch_body_changed" if body_retry_recorded else "candidate_checks_recovered"
+            ),
+            candidate_store=candidate_store,
+            github_client=github_client,
+            active_candidate_record=active_candidate_record,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            snapshot=snapshot,
+            holds=held_out,
+            details=details,
+            repository=repository,
+            base_branch=base_branch,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=mutate,
+            lease=lease,
+            retry_used=True,
+        )
+        if resumed is not None:
+            return resumed
         try:
             if not body_retry_used and changed_closed_batch_body(
                 client=github_client, candidate=failed
@@ -6378,24 +6419,14 @@ def _recover_failed_merge_train_candidate(
                 "reason_code": "candidate_checks_retry_pending",
             }
     if failures.infrastructure_only:
-        if _infrastructure_retry_used(
+        infrastructure_retry_used = _infrastructure_retry_used(
             candidate_store=candidate_store,
             failed=failed,
             dry_run_result=dry_run_result,
             base_sha=snapshot.base_sha,
-        ):
-            # Runners failed twice; that blames no pull request. Stay stopped.
-            return {
-                "repository": repository,
-                "base_branch": base_branch,
-                "mode": "dry-run",
-                "controller_action": "candidate_failed",
-                "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
-                "candidate": failed.model_dump(mode="json"),
-                "reason_code": "infrastructure_retry_used",
-                "details": details,
-            }
-        return _plan_failed_candidate_replacement(
+            failed_record_id=active_candidate_record.record_id,
+        )
+        replacement = _plan_failed_candidate_replacement(
             stack_collapse_store=stack_collapse_store,
             reason_code="infrastructure_retry",
             candidate_store=candidate_store,
@@ -6412,7 +6443,23 @@ def _recover_failed_merge_train_candidate(
             trace_id=trace_id,
             mutate=mutate,
             lease=lease,
+            retry_used=infrastructure_retry_used,
         )
+        if replacement is not None:
+            return replacement
+        if infrastructure_retry_used:
+            # Runners failed twice; that blames no pull request. Stay stopped.
+            return {
+                "repository": repository,
+                "base_branch": base_branch,
+                "mode": "dry-run",
+                "controller_action": "candidate_failed",
+                "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+                "candidate": failed.model_dump(mode="json"),
+                "reason_code": "infrastructure_retry_used",
+                "details": details,
+            }
+        return None
     base_read_succeeded = True
     try:
         base_observation = github_client.read_base_check_observation(
@@ -6815,11 +6862,15 @@ def _infrastructure_retry_used(
     failed: MergeTrainBatchCandidate,
     dry_run_result: MergeTrainDryRunResult,
     base_sha: str,
+    failed_record_id: str = "",
 ) -> bool:
     return bool(failed.infrastructure_retry_of) or any(
         record.candidate.infrastructure_retry_of
-        and _merge_train_candidate_matches_dry_run_queue(
-            candidate=record.candidate, dry_run_result=dry_run_result, base_sha=base_sha
+        and (
+            record.candidate.infrastructure_retry_of == failed_record_id
+            or _merge_train_candidate_matches_dry_run_queue(
+                candidate=record.candidate, dry_run_result=dry_run_result, base_sha=base_sha
+            )
         )
         for record in _candidate_history_on_base(
             candidate_store=candidate_store,
@@ -6848,6 +6899,7 @@ def _plan_failed_candidate_replacement(
     trace_id: str,
     mutate: bool,
     lease: MergeTrainControllerLeaseContext,
+    retry_used: bool = False,
 ) -> dict[str, object] | None:
     failed = active_candidate_record.candidate
     held = {(entry.pull_request_number, entry.head_sha) for entry in holds}
@@ -6872,7 +6924,12 @@ def _plan_failed_candidate_replacement(
     expected_order = expected_order[:cap]
     if plan_dry_run.intended_next_action != "merge" or plan_dry_run.queue_order != expected_order:
         return None
-    if reason_code == "failure_isolation":
+    retry_kind = {
+        "infrastructure_retry": ("infrastructure-retry", "infrastructure_retry_of"),
+        "candidate_checks_recovered": ("check-retry", "check_retry_of"),
+        "closed_batch_body_changed": ("body-retry", "batch_body_retry_of"),
+    }.get(reason_code)
+    if reason_code == "failure_isolation" or retry_used:
         recovery = _resume_known_failed_batch(
             stack_collapse_store=stack_collapse_store,
             candidate_store=candidate_store,
@@ -6889,9 +6946,13 @@ def _plan_failed_candidate_replacement(
             trace_id=trace_id,
             mutate=mutate,
             lease=lease,
+            interrupted_parent_record=active_candidate_record if retry_kind is not None else None,
+            interrupted_retry_field=retry_kind[1] if retry_kind is not None else "",
         )
         if recovery is not None:
-            if mutate:
+            if retry_used:
+                recovery["details"] = details
+            if mutate and not retry_used:
                 replacement_id = recovery.get("merge_train_batch_candidate_record_id")
                 if not _controller_result_requires_reconciliation(recovery):
                     lease.checkpoint(
@@ -6915,6 +6976,8 @@ def _plan_failed_candidate_replacement(
                     active_candidate_record.record_id
                 )
             return recovery
+    if retry_used:
+        return None
     candidate = build_merge_train_batch_candidate(
         dry_run_result=plan_dry_run,
         base_sha=snapshot.base_sha,
@@ -6922,11 +6985,6 @@ def _plan_failed_candidate_replacement(
         created_at=recorded_at,
         held_out=holds,
     )
-    retry_kind = {
-        "infrastructure_retry": ("infrastructure-retry", "infrastructure_retry_of"),
-        "candidate_checks_recovered": ("check-retry", "check_retry_of"),
-        "closed_batch_body_changed": ("body-retry", "batch_body_retry_of"),
-    }.get(reason_code)
     if retry_kind is not None:
         # A separate ref keeps the retry from rediscovering the failed run and batch PR.
         check_retry = reason_code == "candidate_checks_recovered"

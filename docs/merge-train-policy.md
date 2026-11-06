@@ -1509,9 +1509,12 @@ supersedes an older failure; it permits fresh planning with new checks rather
 than authorizing a landing from historical evidence.
 An existing check, infrastructure or body retry that was retired before its
 checks completed resumes on its recorded retry ref and budget lineage; it is
-not mistaken for an exhausted failed retry. Unfinished construction without a
-candidate SHA restarts validation. A retry with a recorded SHA rereads its
-current checks: a concluded failure resumes isolation, and an open retry
+not mistaken for an exhausted failed retry. This also applies when replacement
+persistence was interrupted before superseding its failed parent: resume only
+that parent's recorded unfinished replacement, then retire the parent through
+replacement persistence. Unfinished construction without a candidate SHA restarts
+validation. A retry with a recorded SHA rereads its current checks: a concluded
+failure resumes isolation, and an open retry
 resumes observation at that SHA. A closed retry with no conclusive failure stays
 stopped; it is not reopened or rebuilt. When the controller retires an open
 retry after a queue change, it records that retirement intent before closing
