@@ -2407,6 +2407,14 @@ generation, key and copy custody; do not edit its digest or invent a safe-releas
 attestation. A forward fix for new journals does not establish recovery of an
 already stranded legacy operation.
 
+### Publish the first testing public edge
+
+Use the same client below without `--operation-id` for a service-created Odoo
+testing lane that has never deployed or served. Complete its approved origin
+hostname first. Review the dry-run, then apply and read back with the same saved
+evidence and stable key. Preserve that original key if the outcome is uncertain.
+Public TLS readback does not prove application serving or installed modules.
+
 ### Continue a restored generation's public edge
 
 An independent Dokploy hostname does not provision its public edge. With a

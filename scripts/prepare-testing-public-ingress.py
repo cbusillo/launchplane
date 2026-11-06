@@ -16,8 +16,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("dry-run", "apply", "readback"))
     parser.add_argument("--operator-helper", type=Path, required=True)
-    for name in ("product", "context", "operation-id", "reason"):
+    for name in ("product", "context", "reason"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--operation-id", default="")
     parser.add_argument("--evidence-file", type=Path, required=True)
     parser.add_argument("--reviewed-dry-run", action="store_true")
     parser.add_argument("--idempotency-key", default="")

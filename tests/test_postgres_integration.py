@@ -126,6 +126,7 @@ from tests.test_every_code_feedback_resume_storage import (
 )
 from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapPrerequisiteScenario
 from tests import test_testing_public_ingress as public_ingress_tests
+from tests import test_first_testing_public_ingress as first_public_ingress_tests
 from tests import test_testing_verification as testing_verification_tests
 from tests.test_merge_train_historical_completion import (
     _HistoricalCompletionFixture,
@@ -11951,6 +11952,27 @@ class RealPostgresTestingRetryTests(testing_retry_tests.TestingRetryTests):
             return_value=generation,
         ):
             self.test_concurrent_same_key_commits_one_rearm_and_one_wakeup()
+
+
+class RealPostgresFirstTestingPublicIngressTests(
+    first_public_ingress_tests.FirstTestingPublicIngressTests
+):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
+        policy = LaunchplaneAuthzPolicy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                revision=1,
+                status="active",
+                source="test:first-testing-public-ingress",
+                updated_at=self.profile.updated_at,
+                policy=policy,
+            )
+        )
 
 
 class RealPostgresTestingPublicIngressTests(public_ingress_tests.TestingPublicIngressTests):

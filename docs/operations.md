@@ -3036,7 +3036,10 @@ free of target and deployment records, checked again under the record-write lock
 Then stage the empty testing compose through
 [first testing target creation](authorization-authority.md#first-testing-target-creation).
 Credentials, domains, data and the first deploy follow through their own
-operations; registration proves none of them.
+operations; registration proves none of them. After the initial origin hostname
+is verified, [first testing public ingress](disposable-lanes.md#publish-the-first-testing-public-edge)
+can publish its exact route using the recorded edge and an existing covering
+certificate. It does not provision preview wildcard certificates.
 
 #### Compatibility workflow recovery
 

@@ -417,6 +417,14 @@ class NpmplusClient:
                 domains.extend(name.strip().lower() for name in host.domain_names)
         return tuple(domains)
 
+    def list_certificates(self) -> tuple[NpmplusCertificate, ...]:
+        payload = self._request(method="GET", path="/api/nginx/certificates")
+        if not isinstance(payload, list):
+            raise click.ClickException(
+                "NPMplus certificate inventory is unavailable or incomplete."
+            )
+        return tuple(_validate_response(NpmplusCertificate, item) for item in payload)
+
     def get_certificate(self, certificate_id: int) -> NpmplusCertificate:
         payload = self._request(method="GET", path=f"/api/nginx/certificates/{certificate_id}")
         if not isinstance(payload, dict):

@@ -310,7 +310,7 @@ def _target_reservations(
                 if retained_fence_is_separated(store, row):
                     continue
             selected.append(row)
-    if require_complete and not selected and unattributed:
+    if require_complete and unattributed:
         raise TestingExclusionRefused("execution_ownership_unproved")
     return tuple(selected)
 
