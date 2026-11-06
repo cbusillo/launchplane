@@ -4053,7 +4053,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
             def complete_source() -> None:
                 try:
-                    store.complete_dokploy_compose_source(
+                    store.complete_dokploy_compose_setup(
                         expected_profile=profile,
                         expected_record=target,
                         expected_target_id=target_id,

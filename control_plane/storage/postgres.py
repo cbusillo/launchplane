@@ -31228,7 +31228,7 @@ class PostgresRecordStore(HumanSessionStore):
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
         self._write_row(self._dokploy_target_row(record))
 
-    def complete_dokploy_compose_source(
+    def complete_dokploy_compose_setup(
         self,
         *,
         expected_profile: LaunchplaneProductProfileRecord,
@@ -31237,16 +31237,20 @@ class PostgresRecordStore(HumanSessionStore):
         expected_provider_target: ProviderTargetRecord,
         replacement_record: DokployTargetRecord,
         apply_provider: Callable[[], None],
+        setup_kind: Literal["source", "domain"] = "source",
     ) -> None:
-        """Fence ownership and binding across provider source completion/read-back."""
-        allowed_fields = {
-            "source_type",
-            "custom_git_url",
-            "custom_git_branch",
-            "compose_path",
-            "updated_at",
-            "source_label",
-        }
+        allowed_fields = (
+            {
+                "source_type",
+                "custom_git_url",
+                "custom_git_branch",
+                "compose_path",
+                "updated_at",
+                "source_label",
+            }
+            if setup_kind == "source"
+            else {"domains", "updated_at", "source_label"}
+        )
         if expected_record.model_dump(exclude=allowed_fields) != replacement_record.model_dump(
             exclude=allowed_fields
         ):
@@ -31338,6 +31342,10 @@ class PostgresRecordStore(HumanSessionStore):
                     != (expected_record.context, expected_record.instance)
                 ):
                     raise ValueError("Compose source target is shared with another lane.")
+            if setup_kind == "domain":
+                self._assert_available_target_hosts(
+                    session, replacement_record, target_id=expected_target_id.target_id
+                )
             apply_provider()
             try:
                 target_row.updated_at = replacement_record.updated_at

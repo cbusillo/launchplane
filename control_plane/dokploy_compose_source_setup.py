@@ -244,7 +244,7 @@ def complete_compose_source(
             if director_apply:
                 checkpoint(live)
             if request.mode == "apply":
-                record_store.complete_dokploy_compose_source(
+                record_store.complete_dokploy_compose_setup(
                     expected_profile=profile,
                     expected_record=target,
                     expected_target_id=target_id,

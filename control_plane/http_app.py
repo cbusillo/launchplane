@@ -26350,12 +26350,19 @@ def create_launchplane_fastapi_app(
             and setup_request.instance == "testing"
             and bool(lane_owner)
         )
+        director_testing_domain = (
+            director_agent_identity(identity)
+            and setup_request.operation == "reconcile-compose-domain"
+            and setup_request.instance == "testing"
+            and bool(lane_owner)
+        )
         if (
             isinstance(identity, TerminalAgentIdentity)
             and setup_request.mode == "apply"
             and not disposable_rebuild_setup
             and not first_testing_setup
             and not director_source_completion
+            and not director_testing_domain
             and not native_onboarding
         ):
             raise _launchplane_http_error(
@@ -26396,6 +26403,7 @@ def create_launchplane_fastapi_app(
             or disposable_rebuild_setup
             or first_testing_setup
             or director_source_completion
+            or director_testing_domain
             or native_onboarding
         )
         can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (
@@ -26730,6 +26738,7 @@ def create_launchplane_fastapi_app(
                     record_store=database_store,
                     request=execution_request,
                     director_source_completion=director_source_completion,
+                    director_testing_domain=director_testing_domain,
                     # A lane-scoped caller's owner is re-checked when records commit.
                     required_context_owner=(
                         (lane_owner, setup_request.context)
