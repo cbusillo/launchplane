@@ -897,6 +897,14 @@ class OdooPreviewApplyOperation:
                 if self.adapter._pre_mutation_guard is not None:
                     self.adapter._pre_mutation_guard()
                 self.adapter.capture_source_decision()
+                decision = self.adapter.source_decision
+                if self.adapter._apply_request.unrecorded_original_reservation_id and (
+                    decision is None or not decision.is_source_free()
+                ):
+                    raise OdooPreviewPlanProvenanceError(
+                        code="odoo_preview_source_history_unknown",
+                        message="Unrecorded preview continuation requires a source-free decision.",
+                    )
             else:
                 existing = postgres.read_idempotency_record(
                     scope=self.reservation_scope,

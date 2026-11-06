@@ -13,6 +13,9 @@ class PreviewSourceDecision(BaseModel):
     source: Literal["none", "upstream", "clean_snapshot", "retained"]
     fishbowl_import: bool
 
+    def is_source_free(self) -> bool:
+        return self.source == "none" and not self.fishbowl_import
+
 
 def require_source_free_preview_original(
     original: LaunchplaneIdempotencyRecord, intent: dict[str, object]
@@ -37,7 +40,7 @@ def require_source_free_preview_original(
     decision = intent.get("effective_source")
     if decision is not None:
         source = PreviewSourceDecision.model_validate(decision)
-        if source.source == "none" and not source.fishbowl_import:
+        if source.is_source_free():
             return
     raise ValueError("Preview original source history is unknown; preserve its data.")
 

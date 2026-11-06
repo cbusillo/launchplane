@@ -14,7 +14,7 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetStaffTestingHold,
 )
 from control_plane.contracts.deploy_target import ProviderTargetRecord
-from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord, ScalarValue
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.product_secret_copy import ProductSecretCopyFrom
 from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
@@ -29,6 +29,7 @@ from control_plane.storage.postgres import (
     LaunchplanePreviewRow,
     LaunchplanePreviewGenerationRow,
     LaunchplaneIdempotencyRow,
+    ORIGINAL_MUTATION_INTENT_ROUTE,
 )
 from tests.support.auth import scoped_agent_transport
 from tests.test_director_bounded_writes import DirectorBoundedWritesFixture
@@ -204,6 +205,55 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409, response.text)
         apply.assert_not_called()
         self.assert_original_preserved()
+
+    async def test_driver_continuation_uses_the_resolved_source_before_dispatch(self) -> None:
+        from control_plane.workflows.odoo_preview_runtime import ODOO_PREVIEW_REQUIRED_ENV_KEYS
+
+        for upstream in (False, True):
+            with self.subTest(upstream=upstream):
+                self.prepare_fixture()
+                self.profile = self.profile.model_copy(
+                    update={
+                        "preview": self.profile.preview.model_copy(
+                            update={"data_transport_mode": "driver"}
+                        )
+                    }
+                )
+                self.fixture.profile = self.profile
+                self.store.write_product_profile_record(self.profile)
+                self.fixture.issue_preview()
+                values: dict[str, ScalarValue] = {
+                    key: f"fixture-{key.lower()}" for key in ODOO_PREVIEW_REQUIRED_ENV_KEYS
+                }
+                if upstream:
+                    values["ODOO_UPSTREAM_HOST"] = "source.example.test"
+                self.store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context=self.profile.preview.context,
+                        instance=self.profile.preview.template_instance,
+                        env=values,
+                        updated_at=self.profile.updated_at,
+                        source_label="fixture",
+                    )
+                )
+                with patch(
+                    "control_plane.http_app.execute_odoo_preview_apply_result",
+                    return_value=self.passing_result(),
+                ) as apply:
+                    response = await self.fixture.preview_apply()
+                self.assertEqual(response.status_code, 409 if upstream else 202, response.text)
+                if upstream:
+                    self.assertEqual(
+                        response.json()["error"]["code"], "odoo_preview_source_history_unknown"
+                    )
+                    apply.assert_not_called()
+                    self.assert_original_preserved()
+                else:
+                    apply.assert_called_once()
+                    self.assertEqual(
+                        apply.call_args.kwargs["expected_source_decision"].source, "none"
+                    )
 
     async def test_current_none_mode_cannot_erase_unknown_or_restored_original_history(
         self,
@@ -408,7 +458,7 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(self.store.list_preview_records())
                 self.assert_original_preserved()
 
-    async def test_failed_apply_and_original_observation_never_publish_success_or_reexecute(
+    async def test_legacy_continuation_observes_without_reexecution_or_inventing_source(
         self,
     ) -> None:
         def execute(**kwargs: Any) -> dict[str, object]:
@@ -427,6 +477,26 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         ) as apply:
             first = await self.fixture.preview_apply()
             self.assertEqual(first.status_code, 409, first.text)
+            operation_id = apply.call_args.kwargs["deployment_record_id"]
+            reservation = self.store.read_idempotency_record_by_id(operation_id)
+            assert reservation is not None
+            self.source_intent.pop("effective_source")
+            with self.store._session_factory() as session:
+                receipt = session.scalar(
+                    select(LaunchplaneIdempotencyRow).where(
+                        LaunchplaneIdempotencyRow.scope == reservation.scope,
+                        LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                        LaunchplaneIdempotencyRow.idempotency_key == operation_id,
+                    )
+                )
+                assert receipt is not None
+                payload = dict(receipt.payload)
+                payload["response_payload"] = {
+                    **payload["response_payload"],
+                    "original_intent": self.source_intent,
+                }
+                receipt.payload = payload
+                session.commit()
             with patch(
                 "control_plane.http_app.observe_odoo_preview_apply_result",
                 side_effect=[
@@ -443,7 +513,6 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
                 repeated = await self.fixture.preview_apply()
                 self.assertEqual(repeated.status_code, 502, repeated.text)
                 self.assertEqual(observe.call_count, 3)
-            operation_id = apply.call_args.kwargs["deployment_record_id"]
             reservation = self.store.read_idempotency_record_by_id(operation_id)
             assert reservation is not None
             self.assertEqual(
@@ -660,7 +729,6 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
             "stable_collision",
             "profile_drift",
             "snapshot",
-            "restore",
         ):
             with self.subTest(scenario=scenario):
                 self.prepare_fixture()
@@ -671,11 +739,9 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
                     self.store.write_product_profile_record(
                         self.profile.model_copy(update={"repository": "example/changed"})
                     )
-                elif scenario in {"snapshot", "restore"}:
+                elif scenario == "snapshot":
                     preview = self.profile.preview.model_copy(
                         update={"clean_testing_snapshot": True}
-                        if scenario == "snapshot"
-                        else {"data_transport_mode": "driver"}
                     )
                     self.store.write_product_profile_record(
                         self.profile.model_copy(update={"preview": preview})

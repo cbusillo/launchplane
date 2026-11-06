@@ -226,6 +226,9 @@ authorize another effect or settle the original.
 
 For a source-free preview that never published a lifecycle, ordinary reconciliation
 and the existing original-bound preview apply can continue its retained recipient.
+This includes driver transport only when the retained original and the current
+resolved source decision both prove no restore or import. Driver configuration
+alone does not establish the source, and unknown source history remains protected.
 They reuse the existing original-bound and [disposable preview](disposable-lanes.md)
 checks; recorded or destroyed previews keep their existing refresh path.
 A creation original without a concrete receipt requires complete exact-original
@@ -393,8 +396,10 @@ tuple before reading provider evidence. Missing original intent refuses;
 current naming, a held-list row or a newer controller plan cannot replace it.
 
 The response exposes the original's opaque reservation/reference, attempt,
-checkpoint, lease expiry and recorded terminal response status. Executor
-exclusion remains unknown: this read takes no executor lock and changes no
+checkpoint, lease expiry and recorded terminal response status.
+The retained effective-source decision is returned as closed source/import
+metadata, or null when unavailable; it does not establish current data custody.
+Executor exclusion remains unknown: this read takes no executor lock and changes no
 lease. Completed originals remain readable after they disappear from the held
 reservation list. That list remains a discovery/classification surface.
 
