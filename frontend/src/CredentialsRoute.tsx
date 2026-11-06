@@ -42,7 +42,7 @@ export function CredentialsRoute({ admin }: { admin: boolean }) {
   return <EngineeringRouteFrame view="credentials" title="Credentials" icon={KeyRound}
     description="Credential names, fingerprints and restrictions, with collection coverage and drift. Values stay in their existing stores."
     actions={admin ? <EngineeringResourceControls state={state} refresh={refresh} cancel={cancel} refreshLabel="Refresh credentials" /> : undefined}>
-    {!admin ? <p role="alert">Sign in as an administrator to view credentials.</p> : <>
+    {!admin ? <p role="alert">This account does not have permission to view credentials.</p> : <>
       <EngineeringResourceGate state={state} refresh={refresh} noun="credential inventory">{() => null}</EngineeringResourceGate>
       {inventory ? <div className="credential-inventory">
         <section className="credentials-summary" aria-label="Collection status" role="status" data-stale={stale} data-coverage={inventory.coverage} data-result={inventory.collection_status} data-confirmed={!state.stale}>
