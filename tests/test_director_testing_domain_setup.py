@@ -442,3 +442,18 @@ class DirectorTestingDomainSetupTests(_DirectorTestingSetupFixture):
         recovered = await self.post()
         self.assertEqual(recovered.status_code, 202, recovered.text)
         self.assertEqual(self.writes, [])
+
+    async def test_missing_receipt_recovers_the_already_recorded_exact_hostname(self) -> None:
+        with patch.object(
+            self.store,
+            "write_idempotency_record",
+            side_effect=RuntimeError("Fixture lost receipt storage"),
+        ):
+            with self.assertRaises(RuntimeError):
+                await self.post()
+        self.assertEqual(len(self.writes), 1)
+        changed = await self.post(domains=["different.example.invalid"])
+        self.assertEqual(changed.status_code, 400, changed.text)
+        recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertEqual(len(self.writes), 1)

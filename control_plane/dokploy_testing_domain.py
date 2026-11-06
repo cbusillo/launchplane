@@ -102,7 +102,7 @@ def setup_empty_testing_domain(
             target_record=target, target_id_record=target_id
         ).to_deployed_target_reference()
         or target.env
-        or target.domains
+        or target.domains not in ((), request.domains)
         or target.public_hosts
         or target.pending_public_host_effects
         or target.custom_git_url
