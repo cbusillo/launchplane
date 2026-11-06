@@ -400,9 +400,12 @@ def require_quiescent_testing_provider_work(
         ("schedules", "/api/schedule.list", {"id": target_id, "scheduleType": "compose"}),
     )
     for kind, path, query in inspections:
-        rows = dokploy_api.dokploy_request(host=host, token=token, path=path, query=query)
-        facet = _inventory(lambda: rows, kind=kind, target_id=target_id)
-        if facet.code != "proved" or never_deployed and kind == "deployments" and rows != []:
+        facet = _inventory(
+            lambda: dokploy_api.dokploy_request(host=host, token=token, path=path, query=query),
+            kind=kind,
+            target_id=target_id,
+        )
+        if facet.code != "proved" or never_deployed and kind == "deployments" and facet.count != 0:
             raise ValueError("Provider testing work or serving history is present or unknown.")
 
 

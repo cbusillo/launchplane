@@ -15,7 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
 import time
-from typing import Any, cast
+from typing import Any, Literal, cast
 import unittest
 from tests import test_odoo_business_hours_config as calendar_config_tests
 from control_plane.storage.migrations.versions import (
@@ -4001,6 +4001,14 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 self.assertEqual(latest[0].feedback_id, newer.feedback_id)
 
     def test_compose_source_completion_holds_ownership_across_provider_update(self) -> None:
+        self._assert_compose_setup_holds_ownership("source")
+
+    def test_compose_domain_setup_holds_ownership_across_provider_update(self) -> None:
+        self._assert_compose_setup_holds_ownership("domain")
+
+    def _assert_compose_setup_holds_ownership(
+        self, setup_kind: Literal["source", "domain"]
+    ) -> None:
         with _store_for_fresh_head_database() as store:
             profile = _public_ingress_profile().model_copy(
                 update={
@@ -4046,6 +4054,11 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 }
             )
 
+            if setup_kind == "domain":
+                replacement = target.model_copy(
+                    update={"domains": ("first-testing.example.invalid",)}
+                )
+
             def apply_provider() -> None:
                 entered_provider.set()
                 if not release_provider.wait(timeout=5):
@@ -4060,6 +4073,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                         expected_provider_target=provider,
                         replacement_record=replacement,
                         apply_provider=apply_provider,
+                        setup_kind=setup_kind,
                     )
                 except BaseException as error:
                     errors.append(error)

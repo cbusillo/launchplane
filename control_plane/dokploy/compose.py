@@ -1,7 +1,6 @@
 import hashlib
 import json
 import re
-from collections.abc import Callable
 
 from typing import Any, Literal
 
@@ -753,7 +752,6 @@ def ensure_compose_web_domain_route(
     runtime_port: int,
     certificate_type: str = "none",
     service_name: str = "web",
-    before_write: Callable[[bool], None] | None = None,
 ) -> str:
     normalized_compose_id = compose_id.strip()
     normalized_domain_host = domain_host.strip()
@@ -804,8 +802,6 @@ def ensure_compose_web_domain_route(
         certificate_type=normalized_certificate_type,
         service_name=service_name,
     )
-    if before_write is not None:
-        before_write(existing is not None)
     if existing is not None:
         domain_id = str(existing.get("domainId") or "").strip()
         if not domain_id:

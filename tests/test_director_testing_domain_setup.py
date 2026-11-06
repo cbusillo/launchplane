@@ -229,16 +229,25 @@ class DirectorTestingDomainSetupTests(_DirectorTestingSetupFixture):
 
     async def test_safety_change_during_provider_inventory_prevents_effect(self) -> None:
         original = self.provider_request
+        read_safety = self.store.read_disposable_lane_safety
+        record_safety(self.store, self.profile.product, self.context, "testing")
+        inspected = False
 
         def provider(**kwargs: Any) -> Any:
+            nonlocal inspected
             if kwargs["path"] == "/api/schedule.list":
-                record_safety(
-                    self.store, self.profile.product, self.context, "testing", data="only_copy"
-                )
+                inspected = True
             return original(**kwargs)
 
+        def safety(*args: Any, **kwargs: Any) -> Any:
+            observed = read_safety(*args, **kwargs)
+            if observed is not None and inspected:
+                return observed.model_copy(update={"data": "only_copy"})
+            return observed
+
         self.inventory.side_effect = provider
-        refused = await self.post()
+        with patch.object(self.store, "read_disposable_lane_safety", side_effect=safety):
+            refused = await self.post()
         self.assertEqual(refused.status_code, 400, refused.text)
         self.assertEqual(self.writes, [])
 
@@ -360,3 +369,76 @@ class DirectorTestingDomainSetupTests(_DirectorTestingSetupFixture):
                 context_name=self.context, instance_name="testing"
             ).domains,
         )
+
+    async def test_id_only_alias_prevents_hostname_effects(self) -> None:
+        self.store.write_dokploy_target_id_record(
+            self.target_id.model_copy(update={"context": "other", "instance": "prod"})
+        )
+        refused = await self.post()
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(self.writes, [])
+
+    async def test_near_matching_customized_routes_are_never_adopted(self) -> None:
+        from control_plane.dokploy.compose import compose_web_domain_route_payload
+
+        baseline = {
+            "domainId": "existing",
+            **compose_web_domain_route_payload(
+                compose_id=self.target_id.target_id,
+                domain_host=self.payload["domains"][0],
+                runtime_port=self.profile.runtime_port,
+            ),
+        }
+        for changes in ({"port": self.profile.runtime_port + 1}, {"middlewares": ["foreign"]}):
+            self.routes = [{**baseline, **changes}]
+            self.live["domains"] = deepcopy(self.routes)
+            refused = await self.post()
+            self.assertEqual(refused.status_code, 400, refused.text)
+            self.assertEqual(self.writes, [])
+            self.assertEqual(
+                self.store.read_dokploy_target_record(
+                    context_name=self.context, instance_name="testing"
+                ),
+                self.target,
+            )
+
+    async def test_inventory_transport_failure_refuses_before_hostname_effects(self) -> None:
+        original = self.provider_request
+
+        def provider(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/deployment.allByType":
+                raise OSError("Fixture connection reset")
+            return original(**kwargs)
+
+        self.inventory.side_effect = provider
+        refused = await self.post()
+        self.assertEqual(refused.status_code, 400, refused.text)
+        self.assertEqual(self.writes, [])
+
+    async def test_record_only_commit_failure_preserves_domain_recovery(self) -> None:
+        from control_plane.dokploy.compose import compose_web_domain_route_payload
+        from control_plane.dokploy.target_source_setup import DokployComposeSourcePartialError
+
+        self.routes = [
+            {
+                "domainId": "existing",
+                **compose_web_domain_route_payload(
+                    compose_id=self.target_id.target_id,
+                    domain_host=self.payload["domains"][0],
+                    runtime_port=self.profile.runtime_port,
+                ),
+            }
+        ]
+        self.live["domains"] = deepcopy(self.routes)
+
+        def fail_commit(**kwargs: Any) -> None:
+            kwargs["apply_provider"]()
+            raise DokployComposeSourcePartialError("Fixture record commit failed")
+
+        with patch.object(self.store, "complete_dokploy_compose_setup", side_effect=fail_commit):
+            failed = await self.post()
+        self.assertEqual(failed.status_code, 502, failed.text)
+        self.assertEqual(failed.json()["error"]["code"], "dokploy_domain_partial_outcome")
+        recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertEqual(self.writes, [])

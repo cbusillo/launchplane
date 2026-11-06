@@ -6,6 +6,7 @@ from control_plane.contracts.product_profile_record import (
     is_exclusive_product_context,
     product_context_owner_map,
 )
+from control_plane.disposable_lanes import require_lane_target_ownership
 from control_plane.dokploy import api, compose
 from control_plane.dokploy.application_domains import (
     _domain_value_matches,
@@ -60,8 +61,8 @@ def setup_empty_testing_domain(
         request.model_dump(exclude_defaults=True).keys() - allowed
         or request.instance != "testing"
         or len(request.domains) != 1
-        or request.mode == "apply"
-        and not request.target_id
+        or request.mode != "apply"
+        or not request.target_id
     ):
         raise ValueError(
             "First hostname setup requires one exact testing compose target and hostname."
@@ -123,8 +124,15 @@ def setup_empty_testing_domain(
     target_key = dokploy_generic_web_provider_target_key(provider)
     route_ids: list[str] = []
     effect_started = False
+    provider_verified = False
 
     def require_unprotected_binding() -> None:
+        require_lane_target_ownership(
+            record_store.list_dokploy_target_id_records(),
+            context=request.context,
+            instance="testing",
+            target_id=target_id.target_id,
+        )
         evidence = record_store.read_disposable_lane_safety(product, request.context, "testing")
         if evidence is not None and (
             evidence.usage == "in_use"
@@ -262,35 +270,34 @@ def setup_empty_testing_domain(
         check()
         return existing_route
 
-    def before_write(existing: bool) -> None:
-        nonlocal effect_started
-        if existing:
-            raise ValueError("First hostname setup cannot rewrite an existing route.")
-        if checkpoint():
-            raise ValueError(
-                "A provider route appeared before first hostname creation; inspect it again."
-            )
-        effect_started = True
-
     def apply_provider() -> None:
-
+        nonlocal effect_started, provider_verified
         existing_route = checkpoint()
         if existing_route:
             route_ids.append(existing_route)
         else:
-            route_ids.append(
-                compose.ensure_compose_web_domain_route(
+            effect_started = True
+            created = api.as_json_object(
+                api.dokploy_request(
                     host=host,
                     token=token,
-                    compose_id=target_id.target_id,
-                    domain_host=domain,
-                    runtime_port=profile.runtime_port,
-                    before_write=before_write,
+                    path="/api/domain.create",
+                    method="POST",
+                    payload=compose.compose_web_domain_route_payload(
+                        compose_id=target_id.target_id,
+                        domain_host=domain,
+                        runtime_port=profile.runtime_port,
+                    ),
                 )
             )
+            domain_id = (created or {}).get("domainId")
+            if not isinstance(domain_id, str) or not domain_id.strip():
+                raise ValueError("First hostname creation returned no provider route identity.")
+            route_ids.append(domain_id)
         if read_route() != route_ids[0]:
             raise ValueError("First hostname provider readback does not match the exact route.")
         check()
+        provider_verified = True
 
     lock = record_store.testing_replacement_execution_lock(
         testing_event_execution_lock_name(target_key)
@@ -300,19 +307,17 @@ def setup_empty_testing_domain(
             if held_check is None:
                 raise ValueError("A testing executor for this target is still active.")
             check: Callable[[], None] = held_check
-            checkpoint()
-            if request.mode == "apply":
-                record_store.complete_dokploy_compose_setup(
-                    expected_profile=profile,
-                    expected_record=target,
-                    expected_target_id=target_id,
-                    expected_provider_target=provider,
-                    replacement_record=replacement,
-                    apply_provider=apply_provider,
-                    setup_kind="domain",
-                )
+            record_store.complete_dokploy_compose_setup(
+                expected_profile=profile,
+                expected_record=target,
+                expected_target_id=target_id,
+                expected_provider_target=provider,
+                replacement_record=replacement,
+                apply_provider=apply_provider,
+                setup_kind="domain",
+            )
     except Exception as error:
-        if effect_started:
+        if effect_started or provider_verified:
             raise DokployComposeDomainPartialError(
                 request=request,
                 compose_id=target_id.target_id,
@@ -322,8 +327,8 @@ def setup_empty_testing_domain(
             ) from error
         raise
     return DokployComposeDomainReconcileResult(
-        applied=request.mode == "apply",
-        target_record=replacement if request.mode == "apply" else target,
+        applied=True,
+        target_record=replacement,
         target_id_record=target_id,
         domains=request.domains,
         runtime_port=profile.runtime_port,
