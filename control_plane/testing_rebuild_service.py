@@ -247,6 +247,7 @@ def rebuild_source(operation: OdooStableTargetReplacementOperationRecord) -> Can
         "empty": "empty",
         "production_restore": "production",
         "upstream_restore": "upstream",
+        "migrated_restore": "migrated",
     }
     if not operation.is_native_testing_rebuild or operation.request.data_source_mode not in modes:
         raise ValueError("A native rebuild requires its explicit testing source.")
@@ -1447,6 +1448,7 @@ class NativeTestingRebuildExecution:
                 allocation=allocation,
                 artifact_id=self.operation.request.artifact_id,
                 source=rebuild_source(self.operation),
+                migrated_source=self.operation.request.migrated_source,
                 admitted_profile=self.intent.profile,
             )
         except CandidateRuntimeInputsChanged as error:
@@ -1595,6 +1597,7 @@ class NativeTestingRebuildExecution:
                         context=self.operation.context,
                         artifact_id=self.operation.request.artifact_id,
                         source=rebuild_source(self.operation),
+                        migrated_source=self.operation.request.migrated_source,
                     ),
                     serving_target_id=self.intent.old.target_id,
                     server_id=self.intent.server_id,

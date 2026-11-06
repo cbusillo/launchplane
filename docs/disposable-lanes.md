@@ -2729,6 +2729,33 @@ recovery without the private cache. Missing original bytes in both places,
 without a database witness, are held for recovery, never silently replaced with
 a newer production snapshot.
 
+An offline migrated pair uses `data_source_mode=migrated_restore` on the same
+independent testing rebuild. Its `migrated_source` names the product/context,
+backup and migration run, selected immutable target image, dump and compressed
+filestore SHA256/lengths, and complete expanded filestore file/byte counts.
+This is the operator's declared offline output, never a claimed observation of
+production. The compiler binds it to the selected artifact and generation.
+
+Once the normal worker has recorded its private candidate application, the
+original authenticated testing caller uploads each part to
+`POST /v1/products/{product}/testing-rebuild/{operation_id}/migrated-source/{part}`
+with `application/octet-stream`, `Content-Length`, `Upload-Offset`, and
+`Upload-Prefix-SHA256`. Read that route without `/{part}` to inspect retained
+sizes/digests. Upload only over the documented private operator connection.
+A disconnect retains the original prefix; its digest must match before resume.
+The service hashes and fsyncs both complete files before committing their
+existing native-copy receipt. GET never commits a receipt. The original caller,
+product, candidate custody and unstarted restore remain required.
+
+Migrated uploads use actual free space and their declared complete inventories
+instead of the small live-capture limits above. Delivery streams windows through
+one registered terminal connection into the candidate data volume, preserving
+only an exact verified prefix on interruption. Receiver size/hash readback still
+precedes restore. Streaming extraction rejects unsafe or duplicate paths and
+requires the exact declared full filestore count and bytes before publishing the
+dump. The existing credential boundary, quarantine, restore witness, private
+readiness, route cutover and clean snapshot remain the normal rebuild path.
+
 Native rebuilds bind a capture to their original private candidate's recorded
 generation while its restore remains undispatched and its allocation custody
 and predecessor selection agree. The serving generation stays unchanged until

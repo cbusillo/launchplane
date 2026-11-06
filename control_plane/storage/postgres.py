@@ -14038,9 +14038,23 @@ class PostgresRecordStore(HumanSessionStore):
                 if (
                     (candidate.product, candidate.context) != (record.product, record.context)
                     or app is None
-                    or app.phase != "restoring"
-                    or app.restore_workflow_started is not False
-                    or app.plan.source != "production"
+                    or (
+                        not (
+                            app.plan.source == "migrated"
+                            and app.phase
+                            in {
+                                "planned",
+                                "configuring",
+                                "configured",
+                                "deploying",
+                                "deployed",
+                                "restoring",
+                            }
+                            and app.restore_workflow_started is not True
+                        )
+                        and (app.phase != "restoring" or app.restore_workflow_started is not False)
+                    )
+                    or app.plan.source not in {"production", "migrated"}
                     or app.plan.generation is None
                     or custody is None
                     or (custody.provider_id, custody.target_category, custody.target_id)
@@ -14063,6 +14077,12 @@ class PostgresRecordStore(HumanSessionStore):
                 or generation.source_binding_sha256 != record.source_binding_sha256
             ):
                 raise ValueError("Native capture differs from the active generation.")
+            if generation.migrated_source is not None and (
+                record.source_observation != generation.migrated_source
+                or record.database != generation.migrated_source.database
+                or record.filestore != generation.migrated_source.filestore
+            ):
+                raise ValueError("Migrated capture differs from its admitted output pair.")
             row = session.get(
                 LaunchplaneNativeTestingCopyCaptureRow, record.generation_binding_sha256
             )

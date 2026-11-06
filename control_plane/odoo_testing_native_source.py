@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import shutil
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, cast, TypeVar
+from typing import Literal, TYPE_CHECKING, cast, TypeVar
 import uuid
 
 from control_plane.contracts.odoo_testing_source import (
@@ -21,6 +21,7 @@ from control_plane.contracts.odoo_testing_source import (
     NativeOdooTestingSource,
     NativeTestingCopyArtifact,
     NativeTestingCopyCapture,
+    MigratedOdooTestingSource,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -394,7 +395,7 @@ def prepare_native_testing_delivery(
     *,
     root: Path,
     generation: FreshOdooTestingGeneration,
-    descriptor: NativeOdooTestingSource,
+    descriptor: NativeOdooTestingSource | MigratedOdooTestingSource,
     host: str,
     token: str,
     server_id: str,
@@ -455,6 +456,10 @@ def prepare_native_testing_delivery(
     }:
         return capture
     if capture is None:
+        if isinstance(descriptor, MigratedOdooTestingSource):
+            raise NativeSourceUnavailable(
+                "The declared migrated pair has not finished its authenticated upload."
+            )
         try:
             capture = capture_native_testing_source(
                 store, root=root, generation=generation, descriptor=descriptor
@@ -467,6 +472,31 @@ def prepare_native_testing_delivery(
         if resume:
             raise ValueError("The testing database appeared during source capture.")
     files = verify_native_capture_files(capture)
+    if isinstance(descriptor, MigratedOdooTestingSource):
+        from control_plane.dokploy.native_testing_stream import write_native_testing_stream
+
+        if before_mutation is not None:
+            before_mutation("native_testing_copy_stream")
+        for part, path in zip(("database", "filestore"), files, strict=True):
+            write_native_testing_stream(
+                host=host,
+                token=token,
+                server_id=server_id,
+                container_id=runner,
+                capture_id=capture.capture_id,
+                part=cast(Literal["database", "filestore"], part),
+                path=path,
+                artifact=getattr(capture, part),
+            )
+        final_runner, resume, _, actual = inspect(capture)
+        if (
+            final_runner != runner
+            or resume
+            or actual
+            != {part: getattr(capture, part).model_dump() for part in ("database", "filestore")}
+        ):
+            raise ValueError("Migrated output failed receiver integrity readback.")
+        return capture
     expected: dict[tuple[str, int], dict[str, object]] = {}
     delivery_started = False
     for part, path in zip(("database", "filestore"), files, strict=True):

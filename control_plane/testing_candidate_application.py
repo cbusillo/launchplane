@@ -322,6 +322,12 @@ def prepare_candidate_application(
         save()
     app = record.application
     assert app is not None
+    if (
+        app.plan.source == "migrated"
+        and app.plan.generation is not None
+        and store.read_native_testing_copy_capture(generation_binding(app.plan.generation)) is None
+    ):
+        raise CandidateObservationUnavailable("The original migrated pair is awaiting upload.")
     if app.phase == "abandoned":
         raise ValueError("An abandoned candidate cannot run again.")
     if app.phase == "prepared":

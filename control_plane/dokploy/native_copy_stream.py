@@ -213,10 +213,12 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
-def _lines(connection: ReadConnection, deadline: float) -> Iterator[str]:
+def _lines(connection: ReadConnection, deadline: float | Callable[[], float]) -> Iterator[str]:
     pending = ""
     while True:
-        message = connection.recv(timeout=_remaining(deadline))
+        message = connection.recv(
+            timeout=_remaining(deadline() if callable(deadline) else deadline)
+        )
         pending += (
             message.decode("utf-8", errors="strict") if isinstance(message, bytes) else message
         )
@@ -238,6 +240,7 @@ def _read_program(
     receive: Callable[[dict[str, object]], None],
     dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
     abort_send: Callable[[], None] | None = None,
+    input_frames: Callable[[dict[str, object]], list[bytes]] | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     nonce = uuid.uuid4().hex
@@ -290,7 +293,8 @@ def _read_program(
         "HISTFILE=/dev/null; export HISTFILE; unset PROMPT_COMMAND; "
         "set +o history; exec " + shlex.join(["python3", "-u", "-c", loader, ready, prefix]) + "\n"
     )
-    lines = _lines(connection, deadline)
+    progress_deadline = [deadline]
+    lines = _lines(connection, lambda: progress_deadline[0])
     for line in lines:
         if line == ready:
             break
@@ -396,6 +400,18 @@ def _read_program(
             raise NativeSourceExceedsBound("The source exceeds the bounded native copy capacity.")
         if value.get("type") == "upload_failed":
             raise NativeUploadRejected()
+        if value == {"type": "progress"} and input_frames is not None:
+            progress_deadline[0] = time.monotonic() + timeout_seconds
+            continue
+        if value.get("type") == "input":
+            if input_frames is None:
+                raise NativeSourceUnavailable("The source unexpectedly requested input.")
+            for chunk in input_frames(value):
+                if not 0 < len(chunk) <= NATIVE_TESTING_COPY_CHUNK_BYTES:
+                    raise NativeSourceUnavailable("The input chunk exceeds its bound.")
+                connection.send(base64.b64encode(chunk).decode() + "\n")
+            progress_deadline[0] = time.monotonic() + timeout_seconds
+            continue
         receive(value)
         if value.get("type") == "complete":
             complete = True
@@ -437,6 +453,16 @@ def inspect_native_testing_receiver(
 ) -> None:
     from control_plane.odoo_testing_restore import FRESH_TESTING_RESTORE_HOST_PROGRAM
 
+    capture = spec.get("native_capture")
+    timeout = 120.0
+    if isinstance(capture, dict):
+        observation = capture.get("source_observation")
+        if isinstance(observation, dict) and observation.get("kind") == "migrated":
+            timeout = max(
+                timeout,
+                sum(capture[part]["size"] for part in ("database", "filestore"))
+                / (4 * 1024 * 1024),
+            )
     _read_remote(
         host=host,
         token=token,
@@ -444,7 +470,7 @@ def inspect_native_testing_receiver(
         program=FRESH_TESTING_RESTORE_HOST_PROGRAM,
         payload={**spec, "inspection_only": True},
         receive=receive,
-        timeout_seconds=120,
+        timeout_seconds=timeout,
     )
 
 
@@ -562,6 +588,7 @@ def run_managed_server_program(
     receive: Callable[[dict[str, object]], None],
     timeout_seconds: float,
     dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
+    input_frames: Callable[[dict[str, object]], list[bytes]] | None = None,
 ) -> None:
     logger = logging.Logger("launchplane-private-source", level=logging.CRITICAL + 1)
     logger.disabled = True
@@ -587,6 +614,7 @@ def run_managed_server_program(
                 timeout_seconds=timeout_seconds,
                 receive=receive,
                 dispatch_guard=dispatch_guard,
+                input_frames=input_frames,
                 abort_send=(lambda: connection.socket.shutdown(socket.SHUT_RDWR))
                 if dispatch_guard is not None
                 else None,

@@ -30,6 +30,7 @@ from control_plane.contracts.odoo_testing_source import (
     NativeOdooTestingSource,
     NativeOdooSourceAuthority,
     NativeTestingCopyCapture,
+    MigratedOdooTestingSource,
 )
 from control_plane import testing_candidate_runtime as compiler
 from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
@@ -105,7 +106,11 @@ class CandidateApplicationTests(unittest.TestCase):
             context_name=self.fixture.context, instance_name="testing"
         )
 
-    def allocate(self, source: CandidateSource = "empty") -> TestingCandidateAllocation:
+    def allocate(
+        self,
+        source: CandidateSource = "empty",
+        migrated_source: MigratedOdooTestingSource | None = None,
+    ) -> TestingCandidateAllocation:
         self.fixture.allocation = self.fixture.allocation.model_copy(
             update={
                 "intent_sha256": candidate_application_intent(
@@ -113,13 +118,17 @@ class CandidateApplicationTests(unittest.TestCase):
                     context=self.fixture.context,
                     artifact_id=self.artifact.artifact_id,
                     source=source,
+                    migrated_source=migrated_source,
                 )
             }
         )
         return self.fixture.prepare()
 
     def inputs(
-        self, allocation: TestingCandidateAllocation, source: CandidateSource = "empty"
+        self,
+        allocation: TestingCandidateAllocation,
+        source: CandidateSource = "empty",
+        migrated_source: MigratedOdooTestingSource | None = None,
     ) -> TestingCandidateRuntimeInputs:
         return candidate_runtime_inputs(
             root=self.root,
@@ -127,7 +136,62 @@ class CandidateApplicationTests(unittest.TestCase):
             allocation=allocation,
             artifact_id=self.artifact.artifact_id,
             source=source,
+            migrated_source=migrated_source,
         )
+
+    def test_migrated_pair_binds_candidate_image_and_receipt_before_restore(self) -> None:
+        from tests.test_migrated_testing_source import MigratedTestingRequestTests
+        from control_plane.odoo_testing_restore import generation_binding
+
+        original = MigratedTestingRequestTests().request().migrated_source
+        assert original is not None
+        migrated = original.model_copy(
+            update={
+                "product": self.fixture.product,
+                "context": self.fixture.context,
+                "target_image": self.artifact.image.digest,
+            }
+        )
+        allocation = self.allocate("migrated", migrated)
+        inputs = self.inputs(allocation, "migrated", migrated)
+        app = TestingCandidateApplication(plan=inputs.plan)
+        recorded = allocation.model_copy(update={"application": app})
+        self.store.compare_and_write_testing_candidate(allocation, recorded)
+        generation = inputs.plan.generation
+        assert generation is not None
+        capture = NativeTestingCopyCapture(
+            product=migrated.product,
+            context=migrated.context,
+            generation_binding_sha256=generation_binding(generation),
+            source_binding_sha256=migrated.binding_sha256,
+            capture_id="f" * 32,
+            database=migrated.database,
+            filestore=migrated.filestore,
+            captured_at=datetime.now(UTC).isoformat(),
+            source_observation=migrated,
+        )
+        self.store.write_native_testing_copy_capture(
+            capture, candidate_namespace=recorded.namespace
+        )
+        self.assertEqual(
+            self.store.read_native_testing_copy_capture(generation_binding(generation)), capture
+        )
+        changed = capture.model_copy(
+            update={
+                "database": capture.database.model_copy(update={"size": capture.database.size + 1})
+            }
+        )
+        with self.assertRaises(ValueError):
+            self.store.write_native_testing_copy_capture(
+                changed, candidate_namespace=recorded.namespace
+            )
+        with self.assertRaises(compiler.CandidateRuntimeInputsChanged):
+            self.inputs(
+                recorded,
+                "migrated",
+                migrated.model_copy(update={"target_image": "sha256:" + "c" * 64}),
+            )
+        self.fixture.assert_serving_unchanged()
 
     def test_private_candidate_uses_the_managed_application_port(self) -> None:
         self.profile = self.profile.model_copy(update={"runtime_port": 8072})

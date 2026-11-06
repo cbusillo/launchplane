@@ -18,6 +18,7 @@ from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRA
 from control_plane.testing_address_settings_program import CANONICAL_ADDRESS_HOST_LIBRARY
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
+from control_plane.contracts.odoo_testing_source import MigratedOdooTestingSource
 from control_plane.contracts.product_profile_record import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS as FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
     LaunchplaneProductProfileRecord,
@@ -67,6 +68,9 @@ class FreshOdooTestingGeneration(BaseModel):
     reconcile_requested_at: str = ""
     source_mode: Literal["ssh", "container-export"] = "ssh"
     source_binding_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
+    migrated_source: MigratedOdooTestingSource | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     drill_storage_budget: OdooTestingDrillStorageBudget | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -93,6 +97,13 @@ class FreshOdooTestingGeneration(BaseModel):
             raise ValueError("Clean testing snapshots require reviewed storage headroom.")
         if (self.source_mode == "container-export") != bool(self.source_binding_sha256):
             raise ValueError("A native source needs its exact binding; SSH generations carry none.")
+        if self.migrated_source is not None and (
+            self.source_mode != "container-export"
+            or (self.migrated_source.product, self.migrated_source.context)
+            != (self.product, self.context)
+            or self.migrated_source.binding_sha256 != self.source_binding_sha256
+        ):
+            raise ValueError("Migrated output differs from its testing generation.")
         if bool(self.discard_drill_database) != bool(self.discard_copy_binding) or (
             self.discard_drill_database and self.discard_drill_database == self.drill_database
         ):
@@ -637,6 +648,9 @@ identity=capture['capture_id']
 if not re.fullmatch(r'[a-f0-9]{32}',identity):
     raise RuntimeError('Invalid capture identity')
 mode=spec['mode']
+if capture.get('source_observation',{}).get('kind')=='migrated':
+    exec(__LP_MIGRATED_FILES_PROGRAM__)
+    sys.exit(0)
 chunk_size=__LP_NATIVE_CHUNK_BYTES__
 def path_for(part,index):
     return Path('/tmp')/('lp-native-'+identity+'-'+part+'-'+str(index))
@@ -775,9 +789,15 @@ finally:
 
 
 def render_native_testing_files_program() -> str:
-    return _NATIVE_TESTING_FILES_PROGRAM_TEMPLATE.replace(
-        "__LP_NATIVE_CHUNK_BYTES__", str(NATIVE_TESTING_COPY_CHUNK_BYTES)
-    ).replace("__LP_NATIVE_ARTIFACT_BYTES__", str(NATIVE_TESTING_COPY_ARTIFACT_BYTES))
+    from control_plane._migrated_testing_files_program import MIGRATED_TESTING_FILES_PROGRAM
+
+    return (
+        _NATIVE_TESTING_FILES_PROGRAM_TEMPLATE.replace(
+            "__LP_NATIVE_CHUNK_BYTES__", str(NATIVE_TESTING_COPY_CHUNK_BYTES)
+        )
+        .replace("__LP_NATIVE_ARTIFACT_BYTES__", str(NATIVE_TESTING_COPY_ARTIFACT_BYTES))
+        .replace("__LP_MIGRATED_FILES_PROGRAM__", repr(MIGRATED_TESTING_FILES_PROGRAM))
+    )
 
 
 NATIVE_TESTING_FILES_PROGRAM = render_native_testing_files_program()
@@ -1582,7 +1602,7 @@ def fresh_testing_authority_sha256(
     from control_plane.contracts.canonical_json import canonical_json_sha256
 
     profile = getattr(store, "read_product_profile_record")(generation.product)
-    if generation.source_mode == "container-export":
+    if generation.source_mode == "container-export" and generation.migrated_source is None:
         from control_plane.odoo_testing_native_source import (
             native_testing_source_authority,
             recorded_native_testing_capture,

@@ -54,6 +54,56 @@
         "modes": [
           "read"
         ],
+        "operation_id": "read_state_v1_products__product__testing_rebuild__operation_id__migrated_source_get",
+        "path": "/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source",
+        "purpose": "Read the original migrated testing pair upload state without publishing bytes or changing a receipt.",
+        "response_statuses": [
+          "200",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "5ef833f2a312a77431c414e427c52d83ee28001d1603c65a193aa42dedc38397",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "offset-and-prefix",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "upload",
+          "resume"
+        ],
+        "operation_id": "upload_v1_products__product__testing_rebuild__operation_id__migrated_source__part__post",
+        "path": "/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source/{part}",
+        "purpose": "Stream one original migrated testing artifact and resume only its matching retained prefix under the existing caller and candidate custody.",
+        "response_statuses": [
+          "200",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "Upload-Offset",
+          "Upload-Prefix-SHA256"
+        ],
+        "schema_fingerprint_sha256": "87708a58f353a0cb8d78882bd2887c6f62804cf914361869bee19650e000963b",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
         "operation_id": "read_exact_preview_evidence",
         "path": "/v1/products/{product}/preview-evidence",
         "purpose": "Read exact original intent, retained provider history and optional exact serving-generation probes without admission publication or effect settlement.",
@@ -1391,8 +1441,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "d87da40ba30d4e0de1391bf8a40be4fc7838be65"
+    "source_commit_sha": "998b886515b815e1c953a6f6103655f93270b919"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "9d3b39d27facdf5965288910b0cbc3c8f06f36d2cb6e87f9cb131dbc9384c1dd"
+  "semantic_digest_sha256": "a35add9d96b737db65dae238ff94090ce7f4c5f54035855e622927e3216d4aea"
 }

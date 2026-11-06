@@ -30460,6 +30460,15 @@ def create_launchplane_fastapi_app(
         root=resolved_control_plane_root,
         run_provider_mutation=run_provider_mutation,
     )
+    from control_plane.http_routes.migrated_testing_source import (
+        register_migrated_testing_source_routes,
+    )
+
+    register_migrated_testing_source_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+    )
     from control_plane.http_routes.odoo_upgrade_rehearsal import (
         register_odoo_upgrade_rehearsal_routes,
     )
