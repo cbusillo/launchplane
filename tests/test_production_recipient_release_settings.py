@@ -775,12 +775,11 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
             decision_reference="fixture:settings-request",
             actor="local:fixture",
         )
-        with patch(
-            "control_plane.client_release.publish_release_decision",
-            return_value="https://github.com/example/site/issues/2",
-        ):
-            releases._record_standing_acceptance(store, fixture.fixture.root, requested)
+        releases._record_standing_acceptance(store, fixture.fixture.root, requested)
         future = store.list_release_review_decision_records(product=profile.product, limit=1)[0]
+        future = store.record_release_review_decision_publication(
+            record_id=future.record_id, release_issue_url="https://github.com/example/site/issues/2"
+        )
         original = self.case.decision
         self.assertNotEqual(future.record_id, original.record_id)
         self.assertEqual(
