@@ -18,6 +18,7 @@ from http.client import IncompleteRead
 
 from control_plane import secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION, NpmplusClient
@@ -46,6 +47,8 @@ class _DnsOpener(_Opener):
         self.certificates = [self.certificate_payload.copy()]
 
     def open(self, request: Request, timeout: int | float) -> _Response:
+        if request.get_method() == "GET" and request.selector == "/api/nginx/proxy-hosts/78":
+            return _Response(self.host_details)
         if request.get_method() == "POST" and request.selector == "/api/nginx/proxy-hosts":
             self.created += 1
             body = json.loads(cast(bytes, request.data))
@@ -185,18 +188,175 @@ class _Fixture:
             },
         }
 
-    async def post(self, *, mode: str = "apply", key: str = "wildcard-original") -> Response:
+    async def post(
+        self,
+        *,
+        mode: str = "apply",
+        key: str = "wildcard-original",
+        authorization: str = "Bearer valid-token",
+    ) -> Response:
         ingress = cast(dict[str, object], self.payload["ingress"])
         return await _asgi_request(
             self.app,
             "POST",
             _ROUTE,
             payload={**self.payload, "ingress": {**ingress, "mode": mode}},
-            headers={"Authorization": "Bearer valid-token", "Idempotency-Key": key},
+            headers={"Authorization": authorization, "Idempotency-Key": key},
         )
+
+    def use_director(self) -> str:
+        from control_plane.service_auth import (
+            BearerIdentityConfig,
+            LaunchplaneAuthzPolicy,
+            LocalOperatorPolicyRule,
+        )
+
+        self.app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_operators=(
+                    LocalOperatorPolicyRule(
+                        subjects=("director",),
+                        token_labels=("fixture",),
+                        products=("sample",),
+                        contexts=("sample-testing",),
+                        actions=("agent.read",),
+                    ),
+                ),
+            ),
+            record_store_factory=lambda: self.store,
+            npmplus_ingress_client_factory=lambda: self.client,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="director-token",
+                local_operator_subject="director",
+                local_operator_token_label="fixture",
+            ),
+        )
+        return "Bearer director-token"
 
 
 class WildcardIngressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_director_can_plan_its_preview_namespace_without_write_authority(self) -> None:
+        from tests.support.auth import scoped_agent_transport
+
+        fixture = _Fixture(self, supplied=False)
+        authorization = fixture.use_director()
+        with patch.object(secrets, "resolve_context_secret_value_from_store") as resolver:
+            plan = await fixture.post(mode="dry-run", authorization=authorization)
+            self.assertEqual(plan.status_code, 202, plan.text)
+            self.assertFalse(plan.json()["records"]["dns_secret_ready"])
+            with scoped_agent_transport():
+                scoped = await fixture.post(mode="dry-run", authorization=authorization)
+                self.assertEqual(scoped.status_code, 400, scoped.text)
+                self.assertNotIn("dns_secret_version_id", scoped.text)
+            ingress = cast(dict[str, object], fixture.payload["ingress"])
+            route = cast(dict[str, object], ingress["route"])
+            with patch.dict(route, {"dns_challenge": ""}):
+                refused = await fixture.post(authorization=authorization)
+                self.assertEqual(refused.status_code, 403, refused.text)
+            with patch.dict(fixture.payload, {"product": "unknown-product"}):
+                missing = await fixture.post(mode="dry-run", authorization=authorization)
+                self.assertEqual(missing.status_code, 400, missing.text)
+            route["domain_names"] = ["*.foreign.example.test"]
+            foreign = await fixture.post(mode="dry-run", authorization=authorization)
+            self.assertEqual(foreign.status_code, 400, foreign.text)
+            resolver.assert_not_called()
+        self.assertEqual(fixture.opener.created, 0)
+
+    async def test_director_create_is_closed_to_unsafe_fields_and_foreign_scopes(self) -> None:
+        from tests.support.auth import scoped_agent_transport
+
+        fixture = _Fixture(self)
+        authorization = fixture.use_director()
+        ingress = cast(dict[str, object], fixture.payload["ingress"])
+        route = cast(dict[str, object], ingress["route"])
+        route.pop("npmplus_noindex")
+        with patch.object(secrets, "resolve_context_secret_value_from_store") as resolver:
+            for field, value in (
+                ("advanced_config", "include /data/custom_nginx/shared.conf;"),
+                (
+                    "locations",
+                    [
+                        {
+                            "path": "/extra",
+                            "forward_scheme": "https",
+                            "forward_host": "other.example.test",
+                            "forward_port": 443,
+                        }
+                    ],
+                ),
+                ("npmplus_auth_request", "authentik"),
+                ("forward_scheme", "http"),
+                ("npmplus_noindex", True),
+            ):
+                with self.subTest(field=field), patch.dict(route, {field: value}):
+                    refused = await fixture.post(authorization=authorization, key="unsafe-" + field)
+                    self.assertEqual(refused.status_code, 403, refused.text)
+            with scoped_agent_transport():
+                refused = await fixture.post(authorization=authorization, key="client")
+                self.assertEqual(refused.status_code, 403, refused.text)
+            with patch.dict(route, {"domain_names": ["*.foreign.example.test"]}):
+                refused = await fixture.post(authorization=authorization, key="foreign")
+                self.assertEqual(refused.status_code, 400, refused.text)
+            resolver.assert_not_called()
+        created = await fixture.post(authorization=authorization, key="director-original")
+        self.assertEqual(created.status_code, 202, created.text)
+        self.assertEqual(fixture.opener.created, 1)
+        self.assertNotIn(_TOKEN, created.text)
+
+    async def test_recorded_lane_hosts_and_nested_preview_namespaces_block_issuance(self) -> None:
+        for source in (
+            "clear",
+            "lane",
+            "apex_lane",
+            "nested_lane",
+            "public_hosts",
+            "parent_preview",
+            "child_preview",
+        ):
+            with self.subTest(source=source):
+                fixture = _Fixture(self)
+                profile = LaunchplaneProductProfileRecord.model_validate(
+                    product_profile_payload("other")
+                )
+                if source == "lane":
+                    profile.lanes[0].base_url = "https://app.preview.example.test"
+                elif source == "apex_lane":
+                    profile.lanes[0].base_url = "https://preview.example.test"
+                elif source == "nested_lane":
+                    profile.lanes[0].base_url = "https://a.b.preview.example.test"
+                fixture.store.write_product_profile_record(profile)
+                if source == "public_hosts":
+                    fixture.store.write_dokploy_target_record(
+                        DokployTargetRecord(
+                            context=profile.lanes[0].context,
+                            instance=profile.lanes[0].instance,
+                            public_hosts=("app.preview.example.test",),
+                            updated_at=profile.updated_at,
+                        )
+                    )
+                if source in {"parent_preview", "child_preview"}:
+                    fixture.store.write_runtime_environment_record(
+                        RuntimeEnvironmentRecord(
+                            scope="context",
+                            context=profile.preview.context,
+                            env={
+                                "LAUNCHPLANE_PREVIEW_BASE_URL": "https://example.test"
+                                if source == "parent_preview"
+                                else "https://child.preview.example.test"
+                            },
+                            updated_at=profile.updated_at,
+                        )
+                    )
+                with patch.object(secrets, "resolve_context_secret_value_from_store") as resolver:
+                    refused = await fixture.post(mode="dry-run")
+                    self.assertEqual(
+                        refused.status_code, 202 if source == "clear" else 400, refused.text
+                    )
+                    resolver.assert_not_called()
+                self.assertEqual(fixture.opener.created, 0)
+
     async def test_plan_absence_and_invalid_scope_never_resolve_a_value(self) -> None:
         fixture = _Fixture(self, supplied=False)
         with patch.object(secrets, "resolve_context_secret_value_from_store") as resolver:

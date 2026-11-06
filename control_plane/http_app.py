@@ -16382,6 +16382,11 @@ def create_launchplane_fastapi_app(
         operator_identity = isinstance(
             identity, GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity
         )
+        service_dns_input = (
+            isinstance(identity, LocalOperatorIdentity)
+            and director_agent_identity(identity)
+            and product_config_request.is_preview_dns_service_input()
+        )
         action = (
             "product_config.apply"
             if product_config_request.mode == "apply"
@@ -16451,8 +16456,10 @@ def create_launchplane_fastapi_app(
                         code="authorization_denied",
                         message=f"Caller cannot perform {required_action} for calendar configuration.",
                     )
-        if isinstance(identity, LocalOperatorIdentity) and (
-            product_config_request.mode == "apply" or not director_agent_identity(identity)
+        if (
+            not service_dns_input
+            and isinstance(identity, LocalOperatorIdentity)
+            and (product_config_request.mode == "apply" or not director_agent_identity(identity))
         ):
             scope_refusal = _local_operator_product_config_scope_refusal(
                 record_store=record_store,
@@ -16560,13 +16567,17 @@ def create_launchplane_fastapi_app(
             )
 
         try:
-            config_profile = control_plane_product_config_service.resolve_product_config_profile(
-                database_store,
-                product=product_config_request.product,
-                context=product_config_request.context,
-                instance=product_config_request.instance,
-                context_wide=context_wide_config,
-                diagnostic_preview=is_diagnostic_preview_config(request_payload),
+            config_profile = (
+                None
+                if service_dns_input
+                else control_plane_product_config_service.resolve_product_config_profile(
+                    database_store,
+                    product=product_config_request.product,
+                    context=product_config_request.context,
+                    instance=product_config_request.instance,
+                    context_wide=context_wide_config,
+                    diagnostic_preview=is_diagnostic_preview_config(request_payload),
+                )
             )
         except control_plane_product_config.ProductConfigError as error:
             profile_error = control_plane_product_config_service.product_config_service_error(error)
@@ -16608,6 +16619,7 @@ def create_launchplane_fastapi_app(
         if (
             isinstance(identity, LocalOperatorIdentity)
             and (product_config_request.mode == "apply" or not director_agent_identity(identity))
+            and config_profile is not None
             and config_profile.production_use == "live"
             # The profile's live status describes production, not its owned
             # testing lane. Target ownership and instance scope are checked above.
@@ -16653,6 +16665,25 @@ def create_launchplane_fastapi_app(
                 code="matching_dry_run_required",
                 message="Product-config apply requires a prior matching dry-run.",
             )
+        if service_dns_input:
+            from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION
+
+            if (
+                database_store.find_secret_record(
+                    scope="context",
+                    integration=PREVIEW_DNS_INTEGRATION,
+                    name=PREVIEW_DNS_BINDING,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    instance="",
+                )
+                is not None
+            ):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="service_secret_already_configured",
+                    message="The DNS credential is already configured. Use the signed-in form to rotate it.",
+                )
 
         def secret_copy_source_readable(*, context: str, instance: str) -> bool:
             # Secret-value copies retain their existing explicit source grants.
@@ -16693,6 +16724,7 @@ def create_launchplane_fastapi_app(
         calendar_replacement = None
         try:
             if product_config_request.odoo_business_hours is not None:
+                assert config_profile is not None
                 try:
                     calendar_plan, calendar_replacement = await asyncio.to_thread(
                         odoo_business_hours_config.plan_business_hours_config,
@@ -16860,15 +16892,16 @@ def create_launchplane_fastapi_app(
             authority_bundle = authority_bundle.model_copy(
                 update={"expected_product_profiles": (expected_product_profile,)}
             )
-        authority_bundle = authority_bundle.model_copy(
-            update={
-                "required_product_config_target": (
-                    product_config_request.product,
-                    product_config_request.context,
-                    "" if context_wide_config else product_config_request.instance,
-                )
-            }
-        )
+        if not service_dns_input:
+            authority_bundle = authority_bundle.model_copy(
+                update={
+                    "required_product_config_target": (
+                        product_config_request.product,
+                        product_config_request.context,
+                        "" if context_wide_config else product_config_request.instance,
+                    )
+                }
+            )
         driver_result: dict[str, object] = {
             **planned_driver_result,
             "reason": product_config_request.reason,
@@ -16938,7 +16971,11 @@ def create_launchplane_fastapi_app(
                 response=product_config_response,
             )
         else:
-            if isinstance(identity, LocalOperatorIdentity) and product_config_request.context:
+            if (
+                not service_dns_input
+                and isinstance(identity, LocalOperatorIdentity)
+                and product_config_request.context
+            ):
                 # Re-checked under the profile-write lock when the bundle commits.
                 authority_bundle = authority_bundle.model_copy(
                     update={
@@ -16958,7 +16995,11 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     response=product_config_response,
                 )
-                if public_hosts_plan is None:
+                if service_dns_input:
+                    database_store.write_preview_dns_secret_bundle(
+                        completed_bundle, identity=identity
+                    )
+                elif public_hosts_plan is None:
                     database_store.write_product_authority_bundle(
                         completed_bundle, identity=identity
                     )
@@ -17072,12 +17113,17 @@ def create_launchplane_fastapi_app(
                 message="The secret copy source changed. Read metadata and review a fresh dry-run.",
             ) from error
         except SecretRecordConflictError as error:
+            dns_input = product_config_request.is_preview_dns_service_input()
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
-                code="provider_secret_already_recorded",
+                code="service_secret_already_configured"
+                if dns_input
+                else "provider_secret_already_recorded",
                 message=(
-                    "A secret named for provider adoption was recorded before commit. "
+                    "The DNS credential was configured before commit. Use the signed-in form to rotate it."
+                    if dns_input
+                    else "A secret named for provider adoption was recorded before commit. "
                     "Review a fresh dry-run."
                 ),
             ) from error
@@ -23330,6 +23376,12 @@ def create_launchplane_fastapi_app(
             else native_routes.native_driver_route_alternate_authz_action(apply_ingress_route)
         )
         instance_name = route_request.instance.strip()
+        director_wildcard_create = (
+            isinstance(identity, LocalOperatorIdentity)
+            and director_agent_identity(identity)
+            and not instance_name
+            and route_request.ingress.is_preview_wildcard_create()
+        )
         # The audit permission reaches only the guarded exact-instance no-op
         # below. General provider mutation still requires ingress_route.apply.
         if (
@@ -23355,7 +23407,7 @@ def create_launchplane_fastapi_app(
             == "allowed"
         ):
             authz_action = "ingress_route.audit"
-        if not resolved_authz_policy_runtime.allows(
+        if not director_wildcard_create and not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=authz_action,
             product=route_request.product,
@@ -23375,7 +23427,7 @@ def create_launchplane_fastapi_app(
                     + ("product/context/instance." if instance_name else "product/context.")
                 ),
             )
-        role_only = not resolved_authz_policy_runtime.allows(
+        role_only = not director_wildcard_create and not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=authz_action,
             product=route_request.product,
@@ -23385,7 +23437,13 @@ def create_launchplane_fastapi_app(
             else AuthorizationTarget(scope="context"),
             inherit_agent_read_role=False,
         )
-        if instance_name or role_only:
+        wildcard_context_plan = (
+            route_request.ingress.mode == "dry-run"
+            and director_agent_identity(identity)
+            and not instance_name
+            and bool(route_request.ingress.route.dns_challenge)
+        )
+        if instance_name or (role_only and not wildcard_context_plan):
             try:
                 profile_store = require_product_profile_read_store(record_store)
                 profile = profile_store.read_product_profile_record(route_request.product)

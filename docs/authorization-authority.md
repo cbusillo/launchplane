@@ -594,6 +594,10 @@ idempotency and compare-and-write checks remain required. This changes no
 credentials, grants, provider state or release authority. See
 [artifact scanning](artifact-security.md) for qualification and recovery.
 
+The transport-marked Director agent can also create a product preview
+wildcard conditionally through the existing ingress apply operation; see
+[preview wildcard creation](driver-development.md#preview-wildcard-creation).
+
 Treat `authorization_denied` as an authority result, not a credential-selection
 hint. Record the denied action, scope, and trace ID, then:
 
