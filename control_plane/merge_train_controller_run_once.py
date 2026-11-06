@@ -5843,7 +5843,7 @@ def _resume_known_failed_batch(
                 )
             except MergeTrainGitHubError:
                 unfinished_retry = False
-        if unfinished_retry:
+        if unfinished_retry and parent is not None:
             candidate = build_merge_train_batch_candidate(
                 dry_run_result=dry_run_result,
                 base_sha=snapshot.base_sha,
@@ -5868,14 +5868,14 @@ def _resume_known_failed_batch(
                 "mode": "plan_candidate" if mutate else "dry-run",
                 "controller_action": "plan_candidate",
                 "reason_code": "candidate_retry_resumed",
-                "superseded_merge_train_batch_candidate_record_id": latest.record_id,
+                "superseded_merge_train_batch_candidate_record_id": parent.record_id,
                 "candidate": candidate.model_dump(mode="json"),
                 "dry_run_result": dry_run_result.model_dump(mode="json"),
             }
             if mutate:
                 result["merge_train_batch_candidate_record_id"] = _persist_replacement_candidate(
                     candidate_store=candidate_store,
-                    active_candidate_record=latest,
+                    active_candidate_record=parent,
                     candidate=candidate,
                     repository=snapshot.repository,
                     base_branch=snapshot.base_branch,

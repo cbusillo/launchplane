@@ -1866,7 +1866,9 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(dry["reason_code"], "candidate_retry_resumed")
             self.assertEqual(store.list_merge_train_batch_candidate_records(), before)
-            resumed = self._fresh_plan(store, mutate=True)
+            resumed = self._reflow(
+                store, self.candidate, source=f"{_MISSING_SCAN_FAILURE_SOURCE}test"
+            )
             self.assertEqual(
                 MergeTrainBatchCandidate.model_validate(resumed["candidate"]).candidate_ref,
                 retry.candidate_ref,
@@ -1879,7 +1881,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             )
             self.reflow_client.read_candidate_check_failures.assert_not_called()
             self.reflow_client.add_pull_request_label.assert_not_called()
-            active = store.list_merge_train_batch_candidate_records(status="active")[0]
+            (active,) = store.list_merge_train_batch_candidate_records(status="active")
             store.write_merge_train_batch_candidate_record(
                 active.model_copy(update={"status": "superseded"})
             )

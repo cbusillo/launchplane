@@ -106,7 +106,7 @@ asks the admin to reread merge requirements. Raw provider response bodies are no
 For a blocked head, the adapter also reads the active branch's required
 code-scanning tools and the exact head's native `github-advanced-security`
 results through the existing rule and check readers. If a required tool is
-absent after all observed checks have been complete for ten minutes, the
+absent after all observed checks have been complete for the configured grace, the
 refusal diagnosis is `required_code_scanning_missing`. That grace allows GitHub
 to process a just-uploaded result. Running checks, missing completion times,
 unreadable evidence and changed heads do not prove an absent scan; a similarly
