@@ -17,7 +17,7 @@ test("private testing integration entry and reference recovery", { tag: "@layout
   const referenceApplies: Array<{ body: unknown; key: string }> = [];
   const allowanceApplies: Array<{ body: unknown; key: string }> = [];
   let allowances = [{ integration: "other", kind: "read_only_source", reason: "Existing independent source", evidence: "Existing proof" }];
-  let staleRead = true;
+  let concurrentWritePending = true;
   let saved = false;
   const referenceResult = () => ({ product: "atlas-commerce", context: data.config!.context, instance: "testing",
     entries: [{ key: "printnode.api_key", runtime_key: bindingKey, action: saved ? "already_agrees" : "add_reference" }],
@@ -28,6 +28,10 @@ test("private testing integration entry and reference recovery", { tag: "@layout
       const scope = { product: "atlas-commerce", context: data.config!.context, instance: "testing" };
       if (route.request().method() === "POST") {
         const body = route.request().postDataJSON();
+        if (body.mode === "dry-run" && concurrentWritePending) {
+          concurrentWritePending = false;
+          allowances = [...allowances, { integration: "concurrent", kind: "read_only_source", reason: "Another admin's update", evidence: "Concurrent proof" }];
+        }
         const names = new Set([...allowances.map(item => item.integration), ...body.allowances.map((item: { integration: string }) => item.integration)]);
         const changes = [...names].map(integration => {
           const before = allowances.find(item => item.integration === integration);
@@ -43,7 +47,6 @@ test("private testing integration entry and reference recovery", { tag: "@layout
           result: { ...scope, changes, plan_sha256: "b".repeat(64), read_back_matches: body.mode === "apply" } } });
       } else {
         await route.fulfill({ json: { status: "accepted", trace_id: "allowance-read", records: scope, result: { ...scope, allowances } } });
-        if (staleRead) { staleRead = false; allowances = [...allowances, { integration: "concurrent", kind: "read_only_source", reason: "Another admin's update", evidence: "Concurrent proof" }]; }
       }
       return;
     }
@@ -81,6 +84,9 @@ test("private testing integration entry and reference recovery", { tag: "@layout
   });
   await page.goto("/ui/products/atlas-commerce/environments/testing/managed-secrets");
   const allowancePanel = page.getByRole("region", { name: "Testing integration allowances" });
+  await expect(allowancePanel.getByText("other: read only source", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(allowancePanel.getByText("other: read only source", { exact: true })).toBeVisible();
   await allowancePanel.getByLabel("Integration name").fill("printnode");
   await allowancePanel.getByLabel("Testing account reason").fill("Independent testing account");
   await allowancePanel.getByLabel("Isolation evidence").fill("Dedicated account and testing printer verified");
