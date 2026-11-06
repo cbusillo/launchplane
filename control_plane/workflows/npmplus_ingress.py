@@ -389,6 +389,8 @@ def _plan_operations(
         )
 
     operations: list[NpmplusIngressOperation] = []
+    if desired_payload.certificate_id == "new":
+        raise click.ClickException("A new NPMplus certificate requires a new proxy host.")
     change_categories = _update_change_categories(existing_host, desired_payload)
     if change_categories:
         if not request.allow_update:

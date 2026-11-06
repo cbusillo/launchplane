@@ -473,7 +473,7 @@ class NpmplusClientTests(unittest.TestCase):
         client = NpmplusClient(credentials=_credentials(), opener=opener)
         domains = client.list_other_host_domains()
         self.assertIn("claimed.example.test", domains)
-        self.assertNotIn("disabled.example.test", domains)
+        self.assertIn("disabled.example.test", domains)
         self.assertFalse(
             any(
                 method != "GET" and path.endswith("proxy-hosts")

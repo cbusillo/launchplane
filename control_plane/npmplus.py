@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
@@ -221,6 +221,13 @@ class NpmplusProxyHost(NpmplusProxyHostPayload):
 
     @model_validator(mode="before")
     @classmethod
+    def _discard_provider_metadata(cls, value: object) -> object:
+        if isinstance(value, dict):
+            return {**value, "meta": {}}
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
     def _normalize_access_list_fields(cls, value: object) -> object:
         if not isinstance(value, dict):
             return value
@@ -287,14 +294,14 @@ def _validate_response[Model: BaseModel](model: type[Model], value: object) -> M
     try:
         return model.model_validate(value)
     except ValidationError as error:
-        raise ProviderResponseValidationError(error, model) from error
+        raise ProviderResponseValidationError(error, model) from None
 
 
 @dataclass(frozen=True)
 class NpmplusCredentials:
     base_url: str
     identity: str
-    secret: str
+    secret: str = field(repr=False)
 
     def __post_init__(self) -> None:
         normalized_base_url = self.base_url.strip().rstrip("/")
@@ -408,8 +415,7 @@ class NpmplusClient:
                 raise click.ClickException("NPMplus hostname claims are unavailable.")
             for item in payload:
                 host = _validate_response(NpmplusOtherHost, item)
-                if host.enabled:
-                    domains.extend(name.strip().lower() for name in host.domain_names)
+                domains.extend(name.strip().lower() for name in host.domain_names)
         return tuple(domains)
 
     def get_certificate(self, certificate_id: int) -> NpmplusCertificate:
@@ -496,21 +502,24 @@ class NpmplusClient:
             with self._opener.open(request, timeout=self._timeout_seconds) as response:
                 raw_payload = response.read()
         except HTTPError as error:
-            error_body = error.read().decode(errors="replace").strip()
+            status = error.code
+            error.close()
             raise click.ClickException(
-                f"NPMplus API {method} {normalized_path} failed ({error.code}): {error_body}"
-            ) from error
-        except URLError as error:
+                f"NPMplus API request failed ({status}); provider output withheld."
+            ) from None
+        except (URLError, TimeoutError, OSError):
             raise click.ClickException(
-                f"NPMplus API {method} {normalized_path} request failed: {error.reason}"
-            ) from error
+                "NPMplus API request failed; provider output withheld."
+            ) from None
 
         if not raw_payload:
             return {}
         try:
             return _normalize_json_value(json.loads(raw_payload))
-        except json.JSONDecodeError:
-            return {"raw": raw_payload.decode("utf-8", errors="replace")}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise click.ClickException(
+                "NPMplus API returned invalid JSON; output withheld."
+            ) from None
 
 
 def _normalize_json_value(value: object) -> JsonValue:
