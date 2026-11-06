@@ -435,15 +435,16 @@ class MigratedStreamTests(unittest.TestCase):
             self.assertEqual(partial.with_suffix("").read_bytes(), data)
 
 
-class MigratedUploadHttpTests(unittest.IsolatedAsyncioTestCase):
+class MigratedUploadRouteTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
         from fastapi import FastAPI, HTTPException
         from pydantic import BaseModel
-        from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+        from control_plane.http_routes.support import ReadRouteDependencies
         from control_plane.http_routes.mutation_support import idempotency_scope
         from control_plane.http_routes import migrated_testing_source as routes
+        from control_plane.http_routes.migrated_testing_source import UploadRoutes
         from control_plane.service_auth import (
             BearerIdentityConfig,
             configured_local_operator_identity,
@@ -490,49 +491,109 @@ class MigratedUploadHttpTests(unittest.IsolatedAsyncioTestCase):
             error_response_model=BaseModel,
         )
         routes.register_migrated_testing_source_routes(
-            cast(ApiRouteRegistrar, self.app),
+            cast(UploadRoutes, self.app),
             dependencies=dependencies,
-            mutation_identity=lambda: identity,
+            bearer_identity=lambda header: identity if header == "Bearer fixture" else None,
         )
         self.url = "/v1/products/fixture/testing-rebuild/original/migrated-source"
 
+    async def websocket(
+        self, url: str, frames: list[dict[str, Any]], *, token: str = "fixture"
+    ) -> list[dict[str, Any]]:
+        import asyncio
+        from starlette.types import Message
+
+        incoming: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        incoming.put_nowait({"type": "websocket.connect"})
+        for frame in frames:
+            incoming.put_nowait(frame)
+        incoming.put_nowait({"type": "websocket.disconnect", "code": 1006})
+        sent = []
+
+        async def send(message: Message) -> None:
+            sent.append(dict(message))
+
+        scope = {
+            "type": "websocket",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "scheme": "wss",
+            "path": url,
+            "raw_path": url.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"authorization", ("Bearer " + token).encode())],
+            "client": ("127.0.0.1", 123),
+            "server": ("fixture", 443),
+            "subprotocols": [],
+        }
+        await self.app(scope, incoming.get, send)
+        return sent
+
+    def frames(self, data: bytes, *, offset: int = 0, finish: bool = True) -> list[dict[str, Any]]:
+        import json
+
+        frames: list[dict[str, Any]] = [
+            {
+                "type": "websocket.receive",
+                "text": json.dumps(
+                    {
+                        "offset": offset,
+                        "prefix_sha256": hashlib.sha256(data[:offset]).hexdigest(),
+                        "size": len(data) - offset,
+                    }
+                ),
+            }
+        ]
+        if offset < len(data):
+            frames.append({"type": "websocket.receive", "bytes": data[offset:]})
+        if finish:
+            frames.append({"type": "websocket.receive", "text": '{"complete": true}'})
+        return frames
+
     async def test_original_caller_uploads_the_pair_and_get_never_commits_a_receipt(self) -> None:
+        import json
         from tests.support.http import request
 
         read = await request(self.app, "GET", self.url)
         self.assertEqual(read.status_code, 200, read.text)
         self.store.write_native_testing_copy_capture.assert_not_called()
         for part, data in (("database", b"database"), ("filestore", b"store")):
-            uploaded = await request(
-                self.app,
-                "POST",
-                self.url + "/" + part,
-                headers={"Content-Type": "application/octet-stream"},
-                raw_body=data,
+            sent = await self.websocket(self.url + "/" + part, self.frames(data))
+            self.assertEqual(sent[0]["type"], "websocket.accept", sent)
+            self.assertEqual(json.loads(sent[1]["text"]), {"ready": True, "offset": 0})
+            self.assertEqual(
+                sent[-1], {"type": "websocket.close", "code": 1000, "reason": ""}, sent
             )
-            self.assertEqual(uploaded.status_code, 200, uploaded.text)
+            result = json.loads(sent[-2]["text"])
+            self.assertTrue(result["parts"][part]["complete"])
         self.store.write_native_testing_copy_capture.assert_called_once()
 
     async def test_foreign_product_caller_scope_and_authority_are_rejected_before_body_storage(
         self,
     ) -> None:
-        from tests.support.http import request
-
-        for denied in ("product", "scope", "identity"):
+        for denied in ("product", "scope", "authority", "token"):
             original_scope = self.operation.idempotency_scope
-            if denied == "scope":
-                self.operation.idempotency_scope = "another-caller"
-            if denied == "identity":
-                self.allowed.return_value = False
-            url = self.url.replace("/fixture/", "/foreign/") if denied == "product" else self.url
-            result = await request(
-                self.app,
-                "POST",
-                url + "/database",
-                headers={"Content-Type": "application/octet-stream"},
-                raw_body=b"database",
+            self.operation.idempotency_scope = (
+                "another-caller" if denied == "scope" else original_scope
             )
-            self.assertEqual(result.status_code, 403, result.text)
+            self.allowed.return_value = denied != "authority"
+            url = self.url.replace("/fixture/", "/foreign/") if denied == "product" else self.url
+            sent = await self.websocket(
+                url + "/database",
+                self.frames(b"database"),
+                token="invalid" if denied == "token" else "fixture",
+            )
+            self.assertEqual(sent, [{"type": "websocket.close", "code": 1008, "reason": ""}])
             self.operation.idempotency_scope = original_scope
         self.assertFalse((self.fixture.directory / "database.partial").exists())
         self.store.write_native_testing_copy_capture.assert_not_called()
+
+    async def test_disconnect_retains_prefix_and_resume_requires_its_original_hash(self) -> None:
+        data = b"database"
+        frames = self.frames(data, finish=False)
+        frames[1]["bytes"] = data[:4]
+        await self.websocket(self.url + "/database", frames)
+        self.assertEqual((self.fixture.directory / "database.partial").read_bytes(), data[:4])
+        sent = await self.websocket(self.url + "/database", self.frames(data, offset=4))
+        self.assertEqual(sent[-1]["code"], 1000, sent)
+        self.assertEqual((self.fixture.directory / "database").read_bytes(), data)

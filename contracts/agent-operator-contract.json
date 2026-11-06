@@ -69,33 +69,6 @@
         ]
       },
       {
-        "idempotency": "offset-and-prefix",
-        "identity_dependencies": [
-          "read_browser_mutation_identity"
-        ],
-        "method": "POST",
-        "modes": [
-          "upload",
-          "resume"
-        ],
-        "operation_id": "upload_v1_products__product__testing_rebuild__operation_id__migrated_source__part__post",
-        "path": "/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source/{part}",
-        "purpose": "Stream one original migrated testing artifact and resume only its matching retained prefix under the existing caller and candidate custody.",
-        "response_statuses": [
-          "200",
-          "409",
-          "503"
-        ],
-        "reviewed_evidence": [
-          "Upload-Offset",
-          "Upload-Prefix-SHA256"
-        ],
-        "schema_fingerprint_sha256": "87708a58f353a0cb8d78882bd2887c6f62804cf914361869bee19650e000963b",
-        "supported_surfaces": [
-          "service_api"
-        ]
-      },
-      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_identity"
@@ -1441,8 +1414,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "998b886515b815e1c953a6f6103655f93270b919"
+    "source_commit_sha": "5fc4988eaf0e4f56fd9b8f283bd5a431c40a1223"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "a35add9d96b737db65dae238ff94090ce7f4c5f54035855e622927e3216d4aea"
+  "semantic_digest_sha256": "b355dd718261f97ad26825b85e23817c07d1763f55096621f4473ee6e3d59825"
 }

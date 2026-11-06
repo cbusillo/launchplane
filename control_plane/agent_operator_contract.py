@@ -118,15 +118,6 @@ OPERATION_SPECS = (
         (),
     ),
     OperationSpec(
-        "POST",
-        "/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source/{part}",
-        "Stream one original migrated testing artifact and resume only its matching retained prefix under the existing caller and candidate custody.",
-        ("service_api",),
-        ("upload", "resume"),
-        "offset-and-prefix",
-        ("Upload-Offset", "Upload-Prefix-SHA256"),
-    ),
-    OperationSpec(
         "GET",
         "/v1/products/{product}/preview-evidence",
         "Read exact original intent, retained provider history and optional exact serving-generation probes without admission publication or effect settlement.",
@@ -830,18 +821,9 @@ def build_agent_operator_contract(
             if isinstance(parameter, Mapping)
         }
         has_idempotency_header = "idempotency-key" in parameter_names
-        if (
-            spec.idempotency not in {"none", "body", "offset-and-prefix"}
-        ) != has_idempotency_header:
+        if (spec.idempotency not in {"none", "body"}) != has_idempotency_header:
             raise AgentOperatorContractError(
                 f"Idempotency metadata differs from OpenAPI: {spec.method} {spec.path}"
-            )
-        if (
-            spec.idempotency == "offset-and-prefix"
-            and not {"upload-offset", "upload-prefix-sha256"} <= parameter_names
-        ):
-            raise AgentOperatorContractError(
-                "Migrated upload must retain its original prefix headers"
             )
         operations.append(
             {

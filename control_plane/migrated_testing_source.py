@@ -32,7 +32,7 @@ class UploadDigest(Protocol):
 
 
 def migrated_candidate(
-    store: PostgresRecordStore, product: str, operation_id: str
+    store: PostgresRecordStore, product: str, operation_id: str, *, allow_complete: bool = False
 ) -> TestingCandidateAllocation:
     operation = store.read_odoo_stable_target_replacement_operation_record(operation_id)
     allocation = store.read_testing_candidate(
@@ -50,8 +50,9 @@ def migrated_candidate(
     if (
         app.plan.source != "migrated"
         or app.plan.generation is None
-        or app.phase in {"prepared", "abandoned"}
-        or app.restore_workflow_started is True
+        or app.phase == "abandoned"
+        or not allow_complete
+        and (app.phase == "prepared" or app.restore_workflow_started is True)
         or app.plan.native_source != operation.request.migrated_source
     ):
         raise ValueError("Migrated input no longer belongs to an unstarted testing restore")

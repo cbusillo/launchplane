@@ -1,11 +1,11 @@
 import asyncio
 from collections.abc import Callable
 from functools import partial
-from typing import Annotated, Literal, NoReturn
-import hashlib
+from typing import Annotated, Any, Literal, NoReturn, Protocol
 
-from fastapi import Depends, Header, Path, Request
-from pydantic import BaseModel, ConfigDict
+from fastapi import Depends, HTTPException, Path, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.odoo_testing_source import MigratedOdooTestingSource
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
@@ -29,6 +29,17 @@ from control_plane.testing_rebuild_authorization import director_testing_rebuild
 from control_plane.odoo_testing_restore import generation_binding
 
 
+class UploadRoutes(ApiRouteRegistrar, Protocol):
+    def add_api_websocket_route(self, path: str, endpoint: Callable[..., Any]) -> None: ...
+
+
+class MigratedUploadStart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    offset: int = Field(ge=0)
+    prefix_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    size: int = Field(ge=0)
+
+
 class MigratedSourceUploadResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     product: str
@@ -39,10 +50,10 @@ class MigratedSourceUploadResponse(BaseModel):
 
 
 def register_migrated_testing_source_routes(
-    app: ApiRouteRegistrar,
+    app: UploadRoutes,
     *,
     dependencies: ReadRouteDependencies,
-    mutation_identity: Callable[..., LaunchplaneIdentity],
+    bearer_identity: Callable[[str], LaunchplaneIdentity | None],
 ) -> None:
     def context(
         store: object,
@@ -77,7 +88,7 @@ def register_migrated_testing_source_routes(
                 code="authorization_denied",
                 message="Use the original authorized testing caller for this upload.",
             )
-        return store, migrated_candidate(store, product, operation_id)
+        return store, migrated_candidate(store, product, operation_id, allow_complete=read_only)
 
     def response(
         store: PostgresRecordStore, allocation: TestingCandidateAllocation
@@ -95,7 +106,12 @@ def register_migrated_testing_source_routes(
             operation_id=allocation.operation_id,
             source_binding_sha256=source.binding_sha256,
             receipt_recorded=receipt is not None,
-            parts=upload_state(allocation),
+            parts={
+                part: {"complete": True, "size": getattr(receipt, part).size}
+                for part in ("database", "filestore")
+            }
+            if receipt is not None
+            else upload_state(allocation),
         )
 
     def refuse(error: Exception) -> NoReturn:
@@ -121,31 +137,28 @@ def register_migrated_testing_source_routes(
             refuse(error)
 
     async def upload(
-        product: Annotated[str, Path(min_length=1)],
-        operation_id: Annotated[str, Path(min_length=1)],
+        websocket: WebSocket,
+        product: str,
+        operation_id: str,
         part: Literal["database", "filestore"],
-        request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(mutation_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
-        offset: Annotated[int, Header(alias="Upload-Offset", ge=0)] = 0,
-        prefix_sha256: Annotated[
-            str, Header(alias="Upload-Prefix-SHA256", pattern=r"^[a-f0-9]{64}$")
-        ] = hashlib.sha256().hexdigest(),
-        content_length: Annotated[int, Header(alias="Content-Length", ge=0)] = 0,
-    ) -> MigratedSourceUploadResponse:
+    ) -> None:
         try:
+            identity = await run_in_worker_thread(
+                lambda: bearer_identity(websocket.headers.get("authorization", ""))
+            )
+            if identity is None:
+                raise ValueError("An authenticated bearer caller is required")
             store, allocation = await run_in_worker_thread(
                 lambda: context(record_store, identity, product, operation_id)
             )
             assert allocation.application is not None
             source = allocation.application.plan.native_source
-            if (
-                request.headers.get("content-type", "").split(";", 1)[0]
-                != "application/octet-stream"
-                or content_length != getattr(source, part).size - offset
-            ):
-                raise ValueError("Upload body differs from the admitted remaining bytes")
-            receiver = receive_migrated_part(allocation, part, offset, prefix_sha256)
+            await websocket.accept()
+            start = MigratedUploadStart.model_validate(await websocket.receive_json())
+            if start.size != getattr(source, part).size - start.offset:
+                raise ValueError("Upload differs from the admitted remaining bytes")
+            receiver = receive_migrated_part(allocation, part, start.offset, start.prefix_sha256)
             entered = []
 
             def enter() -> MigratedUpload:
@@ -168,8 +181,14 @@ def register_migrated_testing_source_routes(
 
             try:
                 writer = await blocking(enter)
-                async for chunk in request.stream():
+                await websocket.send_json({"ready": True, "offset": start.offset})
+                while writer.remaining:
+                    chunk = await websocket.receive_bytes()
+                    if not 0 < len(chunk) <= 1024 * 1024:
+                        raise ValueError("Upload frame exceeds its bound")
                     await blocking(partial(writer.write, chunk))
+                if await websocket.receive_json() != {"complete": True}:
+                    raise ValueError("The original upload has no completion frame")
             except BaseException as error:
                 if entered:
                     await blocking(
@@ -178,26 +197,18 @@ def register_migrated_testing_source_routes(
                 raise
             else:
                 await blocking(partial(receiver.__exit__, None, None, None))
-            await run_in_worker_thread(lambda: finish_migrated_upload(store, allocation))
-            return await run_in_worker_thread(lambda: response(store, allocation))
-        except (ValueError, OSError) as error:
-            refuse(error)
+            await blocking(lambda: finish_migrated_upload(store, allocation))
+            completed = await blocking(lambda: response(store, allocation))
+            await websocket.send_json(completed.model_dump(mode="json"))
+        except (HTTPException, ValueError, OSError, WebSocketDisconnect, KeyError):
+            if websocket.application_state != WebSocketState.DISCONNECTED:
+                await websocket.close(code=1008)
+            return
+        if websocket.application_state != WebSocketState.DISCONNECTED:
+            await websocket.close()
 
     route = "/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source"
     app.add_api_route(
         route, read_state, methods=["GET"], response_model=MigratedSourceUploadResponse
     )
-    app.add_api_route(
-        route + "/{part}",
-        upload,
-        methods=["POST"],
-        response_model=MigratedSourceUploadResponse,
-        openapi_extra={
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
-                },
-            }
-        },
-    )
+    app.add_api_websocket_route(route + "/{part}", upload)
