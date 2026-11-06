@@ -7834,7 +7834,7 @@ def create_launchplane_fastapi_app(
         if not preview_bootstrap and dry_run:
             authorized = resolved_authz_policy_runtime.allows(
                 identity=identity,
-                action="driver.read",
+                action="operations.read",
                 product=_LAUNCHPLANE_SERVICE_CONTEXT,
                 context=override_request.override.context,
                 target=AuthorizationTarget(
@@ -7859,7 +7859,7 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="authorization_denied",
                 message=(
-                    "Workflow cannot write Odoo website-bootstrap overrides for the requested"
+                    "Workflow cannot prepare Odoo website-bootstrap overrides for the requested"
                     " product/context."
                 ),
             )

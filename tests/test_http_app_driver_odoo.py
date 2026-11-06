@@ -7306,7 +7306,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                                         "products": ["launchplane"],
                                         "contexts": ["cm"],
                                         "instances": [granted_instance],
-                                        "actions": ["driver.read"],
+                                        "actions": ["operations.read"],
                                     }
                                 ],
                             }
@@ -7414,21 +7414,32 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                     updated_at="2026-05-10T20:00:00Z",
                 )
             )
+            policy = self._tenant_policy(
+                action="odoo_website_bootstrap_override.write",
+                workflow_name="odoo-website-bootstrap-override.yml",
+            )
+            policy.github_actions[0].products += ("launchplane",)
+            policy.github_actions[0].actions += ("operations.read",)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(
                     self._tenant_identity(workflow_name="odoo-website-bootstrap-override.yml")
                 ),
-                authz_policy=self._tenant_policy(
-                    action="odoo_website_bootstrap_override.write",
-                    workflow_name="odoo-website-bootstrap-override.yml",
-                ),
+                authz_policy=policy,
                 record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
 
+            payload = self._website_override_payload()
+            cast(dict[str, object], payload["override"])["mode"] = "dry-run"
+            planned = await _post_odoo_website_bootstrap_override(
+                app, payload, idempotency_key="odoo-cm-testing-website-bootstrap"
+            )
+            self.assertEqual(planned.status_code, 202)
+            self.assertFalse(planned.json()["result"]["applied"])
+            cast(dict[str, object], payload["override"])["mode"] = "apply"
             response = await _post_odoo_website_bootstrap_override(
                 app,
-                self._website_override_payload(),
+                payload,
                 idempotency_key="odoo-cm-testing-website-bootstrap",
             )
             stored_record = store.read_odoo_instance_override_record(
@@ -7445,6 +7456,12 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                 stored_record.website_bootstrap.canonical_url,
                 "https://cm-testing.shinycomputers.com",
             )
+            cast(dict[str, object], payload["override"])["mode"] = "dry-run"
+            planned = await _post_odoo_website_bootstrap_override(
+                app, payload, idempotency_key="odoo-cm-testing-website-bootstrap"
+            )
+            self.assertEqual(planned.status_code, 202)
+            self.assertFalse(planned.json()["result"]["applied"])
 
     async def test_openapi_includes_odoo_post_deploy_override_contracts(self) -> None:
         response = await openapi_response()
