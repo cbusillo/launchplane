@@ -21,6 +21,7 @@ from control_plane.preview_reservation_recovery import (
     preview_reservation_reference,
 )
 from control_plane.product_reconcile import reconcile_reservation_scope
+from control_plane.preview_source import PreviewSourceDecision
 from control_plane.provider_operations import build_provider_operation_key, provider_operation_title
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
@@ -208,6 +209,10 @@ def read_preview_evidence(
         )
     retained = store.read_original_mutation_intent(reservation)
     reference = preview_reservation_reference(reservation, retained)
+    try:
+        source_decision = PreviewSourceDecision.model_validate(retained.get("effective_source"))
+    except ValueError:
+        source_decision = None
     current: dict[str, object] = {
         "usage": "unknown",
         "production_resources": "unknown",
@@ -337,6 +342,9 @@ def read_preview_evidence(
             "result_status": result_status,
             "recorded_at": reservation.recorded_at or None,
             "intent_coverage": "validated_original",
+            "effective_source": source_decision.model_dump(mode="json")
+            if source_decision
+            else None,
             "schedule_binding_available": bool(retained.get("schedule_binding")),
         },
         "current": current,

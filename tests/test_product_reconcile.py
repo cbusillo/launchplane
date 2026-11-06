@@ -1,4 +1,5 @@
 from tests.merge_train_policy_fixtures import seed_dependency_policy
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.odoo_target_replacement_failures import TESTING_RESTORE_REQUIRED_CODE
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
@@ -6928,7 +6929,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(failed.last_error, record_failure_summary("reconcile_required"))
         self.assertNotIn("image pull denied", failed.model_dump_json())
 
-    def test_never_served_source_free_preview_continues_its_quiescent_original(self) -> None:
+    def interrupt_never_served_preview(self) -> LaunchplaneIdempotencyRecord:
         self.github.add_run(50, PR_HEAD, event="pull_request")
 
         def interrupted(**kwargs: Any) -> dict[str, object]:
@@ -6942,7 +6943,9 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(first.last_plan["preview_operation_status"], "reconcile_required")
         self.assertFalse(self.store.list_preview_records())
         (original,) = self.store.list_held_odoo_preview_reservations(product="site")
-        retained = self.store.read_original_mutation_intent(original)
+        return original
+
+    def continue_never_served_preview(self) -> ProductReconcileRequestRecord:
         target = next(iter(self.provider.targets.values()))
         self.advance_preview_recovery_grace = True
         self.request("preview", 5)
@@ -6953,7 +6956,12 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
                 return_value=target,
             ),
         ):
-            continued = self.run_once()
+            return self.run_once()
+
+    def assert_never_served_preview_continues(self) -> None:
+        original = self.interrupt_never_served_preview()
+        retained = self.store.read_original_mutation_intent(original)
+        continued = self.continue_never_served_preview()
         self.assertEqual(continued.state, "done", continued.last_error)
         self.assertEqual(continued.last_plan["preview_result_status"], "pass")
         self.assertEqual(self.provider.applied, [("refresh", 5)])
@@ -6968,6 +6976,52 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         self.assertEqual(self.reconcile()["reason"], "already_serving")
         self.assertEqual(self.provider.applied, [("refresh", 5)])
+
+    def test_never_served_source_free_preview_continues_its_quiescent_original(self) -> None:
+        self.assert_never_served_preview_continues()
+
+    def test_source_free_driver_preview_continues_its_quiescent_original(self) -> None:
+        profile = self.store.read_product_profile_record("site")
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "preview": profile.preview.model_copy(update={"data_transport_mode": "driver"})
+                }
+            )
+        )
+        with patch(
+            "control_plane.odoo_preview_apply_http._odoo_preview_base_environment",
+            return_value=MagicMock(values={}),
+        ):
+            self.assert_never_served_preview_continues()
+
+    def test_driver_continuation_preserves_a_new_upstream_source(self) -> None:
+        profile = self.store.read_product_profile_record("site")
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "preview": profile.preview.model_copy(update={"data_transport_mode": "driver"})
+                }
+            )
+        )
+        with patch(
+            "control_plane.odoo_preview_apply_http._odoo_preview_base_environment",
+            return_value=MagicMock(values={}),
+        ) as environment:
+            original = self.interrupt_never_served_preview()
+            retained = self.store.read_original_mutation_intent(original)
+            environment.return_value.values = {"ODOO_UPSTREAM_DATABASE": "restored-database"}
+            refused = self.continue_never_served_preview()
+        self.assertEqual(refused.state, "failed")
+        self.assertEqual(
+            refused.last_plan["preview_result_error_code"], "odoo_preview_source_history_unknown"
+        )
+        self.assertEqual(self.store.read_original_mutation_intent(original), retained)
+        preserved = self.store.read_idempotency_record_by_id(original.record_id)
+        assert preserved is not None
+        self.assertEqual(preserved.state, "reconcile_required")
+        self.assertFalse(self.provider.applied)
+        self.assertFalse(self.store.list_preview_records())
 
     def test_failed_recreation_keeps_the_recorded_destroyed_preview_refresh_path(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")

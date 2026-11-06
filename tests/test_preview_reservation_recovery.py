@@ -162,6 +162,32 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             )
         original = cast(dict[str, object], result["original"])
         self.assertEqual(original["reservation_id"], self.reservation.record_id)
+        retained = self.store.read_original_mutation_intent(self.reservation)
+        self.operation.adapter.capture_source_decision()
+        captured_source = self.operation.adapter.source_decision
+        assert captured_source is not None
+        for decision, valid in (
+            (None, False),
+            (captured_source.model_dump(mode="json"), True),
+            ({"source": "unknown", "private": "withheld"}, False),
+        ):
+            with (
+                self.subTest(decision=decision),
+                patch.object(
+                    self.store,
+                    "read_original_mutation_intent",
+                    return_value={**retained, "effective_source": decision},
+                ),
+                patch.object(preview_evidence, "read_preview_provider_history", return_value={}),
+            ):
+                observed = preview_evidence.read_preview_evidence(
+                    self.store, product=self.profile.product, query=query, root=self.root
+                )
+            expected = decision if valid else None
+            self.assertEqual(
+                cast(dict[str, object], observed["original"])["effective_source"], expected
+            )
+            self.assertNotIn("withheld", json.dumps(observed))
         self.assertEqual(
             self.store.read_idempotency_record_by_id(self.reservation.record_id), self.reservation
         )

@@ -2544,7 +2544,6 @@ def _run_preview_operation(
         elif (
             existing is None
             and operation == "refresh"
-            and profile.preview.data_transport_mode == "none"
             and not profile.preview.clean_testing_snapshot
             and not operation_plan.dry_run_plan.compose_ref.startswith("${created.")
             and not any(
