@@ -2308,6 +2308,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 self.assertFalse(candidate.candidate_sha)
                 self.assertEqual(candidate.held_out, () if interrupted else (hold,))
                 self.assertTrue(self.provider.closed)
+                (active,) = store.list_merge_train_batch_candidate_records(status="active")
+                self.assertEqual(active.record_id, result["merge_train_batch_candidate_record_id"])
 
     def test_nonmerge_isolation_recovers_a_subset_whose_sha_now_passes(self) -> None:
         self.policy = self.policy.model_copy(
