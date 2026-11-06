@@ -11,10 +11,12 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request
 
+from graphql import build_schema, execute_sync, parse
+from control_plane import merge_train_planning_completion as completion
+from control_plane.merge_train_planning_scope import PlanningRepositoryScope
 from control_plane.github_read_cache import GitHubReadCache
 from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
 from control_plane.github_request_timing import (
-    GitHubRequestPhase,
     MAX_QUOTA_OBSERVATIONS,
     github_request_tally,
     github_request_phase,
@@ -32,11 +34,14 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainSnapshotReader,
     MergeTrainGitHubError,
     UrllibMergeTrainGitHubTransport,
+    _classic_conversation_rule,
+    _review_conversations,
 )
 from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.test_merge_train_github import _github_branch, _github_commit, _github_pull_request
+from tests.test_merge_train_planning_completion import PlanningProvider
 from tests.support.merge_train import (
     _FakeStackedMergeTrainSnapshotReader,
     _seed_merge_train_stack_collapse_plan_record,
@@ -57,6 +62,28 @@ class _Response:
 
     def read(self) -> bytes:
         return json.dumps(self.payload).encode()
+
+
+_COST_SCHEMA = build_schema("""
+scalar ID
+type Query { rateLimit: RateLimit }
+type RateLimit { cost: Int! }
+""")
+
+
+def _query_response(request: Request, payload: dict[str, Any], points: int) -> _Response:
+    body = json.loads(cast(bytes, request.data))
+    projected = execute_sync(
+        _COST_SCHEMA,
+        parse(body["query"]),
+        root_value={"rateLimit": {"cost": points}},
+        variable_values=body["variables"],
+    )
+    if projected.errors:
+        raise AssertionError(projected.errors)
+    headers = Message()
+    headers["x-ratelimit-resource"] = "graphql"
+    return _Response({"data": {**payload, **(projected.data or {})}}, headers)
 
 
 class _Provider:
@@ -93,27 +120,63 @@ class _Provider:
 
 class MergeTrainReadCostTests(unittest.TestCase):
     def test_native_graphql_points_follow_response_phase_and_tally(self) -> None:
-        headers = Message()
-        headers["x-ratelimit-resource"] = "graphql"
-        headers["x-ratelimit-reset"] = "123456"
         transport = UrllibMergeTrainGitHubTransport(token="fixture", read_cache=GitHubReadCache())
+        client = GitHubMergeTrainClient(transport=transport)
+        policy = build_test_merge_train_policy().policies[0]
+        reader = GitHubMergeTrainSnapshotReader(transport=transport, repository_policy=policy)
+        points = iter((7, 11, 3, 5))
+
+        def response(request: Request, *, timeout: int) -> _Response:
+            return _query_response(
+                request,
+                {
+                    "repository": {
+                        "ref": {"refUpdateRule": {"requiresConversationResolution": False}},
+                        "pullRequest": {
+                            "timelineItems": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+                            "reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+                        },
+                    },
+                    "node": {
+                        "id": "comment",
+                        "body": "hidden",
+                        "updatedAt": "2026-11-06T10:00:00Z",
+                        "editor": {},
+                    },
+                },
+                next(points),
+            )
+
         with (
             self.assertLogs("control_plane.github_request_timing", level="INFO") as logs,
             github_request_tally("controller trace native-cost"),
-            patch("control_plane.merge_train_github.urlopen") as open_request,
+            patch("control_plane.merge_train_github.urlopen", side_effect=response),
         ):
-            for phase, points in (("controller", 7), ("controller", 11), ("admission", 3)):
-                open_request.return_value = _Response(
-                    {"data": {"rateLimit": {"cost": points}, "private-body": "hidden"}}, headers
+            self.assertEqual(
+                _classic_conversation_rule(
+                    transport=transport, repository_path="example/repo", base_branch="main"
+                ),
+                "not_required",
+            )
+            self.assertTrue(
+                client._head_check_reuse_base_history_is_unchanged(
+                    repository_path="example/repo", pull_request_number=1
                 )
-                with github_request_phase(cast(GitHubRequestPhase, phase)):
-                    transport.request(method="POST", path="/graphql")
+            )
+            with github_request_phase("admission"):
+                self.assertIsNone(
+                    _review_conversations(
+                        transport=transport,
+                        repository_path="example/repo",
+                        pull_request_number=1,
+                        rule="required",
+                    )
+                )
             with github_request_tally("feedback trace native-cost", phase="feedback"):
-                with patch(
-                    "control_plane.workflows.launchplane.urlopen",
-                    return_value=_Response({"data": {"rateLimit": {"cost": 5}}}, headers),
-                ):
-                    github_api_request(path="/graphql", token="fixture", method="POST")
+                reader._trusted_managed_comment_edit(
+                    {"node_id": "comment", "body": "hidden", "updated_at": "2026-11-06T10:00:00Z"},
+                    policy,
+                )
         observations = [
             json.loads(line.split("; ", 1)[1])
             for line in logs.output
@@ -126,6 +189,47 @@ class MergeTrainReadCostTests(unittest.TestCase):
         self.assertEqual(by_phase["feedback"]["graphql_points"], 5)
         self.assertTrue(all(row["charged_requests"] == "UNKNOWN" for row in observations))
         self.assertNotIn("hidden", "\n".join(logs.output))
+
+    def test_completed_feedback_queries_expose_cost_through_the_workflow_transport(self) -> None:
+        provider = PlanningProvider()
+        points = iter((13, 17, 19))
+
+        def response(request: Request, *, timeout: int) -> _Response:
+            parsed = urlsplit(request.full_url)
+            path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            body = json.loads(cast(bytes, request.data)) if request.data else None
+            payload = provider.request(path=path, method=request.get_method(), body=body)
+            if path == "/graphql":
+                return _query_response(request, payload["data"], next(points))
+            return _Response(payload, Message())
+
+        with (
+            self.assertLogs("control_plane.github_request_timing", level="INFO") as logs,
+            github_request_tally("feedback trace completion-cost", phase="feedback"),
+            patch("control_plane.workflows.launchplane.urlopen", side_effect=response),
+        ):
+            completion.reconcile_completed_change(
+                repository="example/product",
+                base_branch="main",
+                number=9,
+                token="fixture",
+                trusted_author_ids=(41,),
+                attempted_at="2026-10-01T00:02:00Z",
+            )
+            completion._configuration(PlanningRepositoryScope("example/product", "main", "fixture"))
+            self.assertIsNotNone(
+                completion._prepare_project(
+                    "fixture", provider.issue, {"projects": {"default_project": 2}}, "example"
+                )
+            )
+        observations = [
+            json.loads(line.split("; ", 1)[1])
+            for line in logs.output
+            if "GitHub quota observation:" in line
+        ]
+        (observation,) = [row for row in observations if row["resource"] == "graphql"]
+        self.assertEqual(observation["phase"], "feedback")
+        self.assertEqual(observation["graphql_points"], 49)
 
     def test_missing_or_failed_graphql_cost_never_becomes_zero_or_a_partial_total(self) -> None:
         valid = {"data": {"rateLimit": {"cost": 7}}}
