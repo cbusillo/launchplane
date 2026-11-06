@@ -38,6 +38,7 @@ PROVIDER_PAGE_SIZE = 100
 MAX_PROVIDER_PAGES = 10
 _QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $after: String, $config: String!) {
+  rateLimit { cost }
   repository(owner: $owner, name: $name) {
     defaultBranchRef { name }
     object(expression: $config) { ... on Blob { text } }
@@ -272,6 +273,7 @@ def _prepare_project(
     owner_kind = "organization" if owner_record.get("type") == "Organization" else "user"
     query = """
     query($owner: String!, $number: Int!, $issue: ID!) {
+      rateLimit { cost }
       OWNER_KIND(login: $owner) { projectV2(number: $number) { id fields(first: 100) {
         nodes { ... on ProjectV2SingleSelectField { id name options { id name } } }
         pageInfo { hasNextPage }
@@ -446,6 +448,7 @@ class _Snapshot:
 def _configuration(scope: PlanningRepositoryScope) -> dict[str, Any]:
     owner, name = scope.repository.split("/", 1)
     query = """query($owner: String!, $name: String!, $config: String!) {
+      rateLimit { cost }
       repository(owner: $owner, name: $name) {
         defaultBranchRef { name } object(expression: $config) { ... on Blob { text } }
       }

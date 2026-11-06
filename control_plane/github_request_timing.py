@@ -26,6 +26,7 @@ def configure_github_request_logging() -> None:
 SLOW_GITHUB_REQUEST_SECONDS = 5.0
 SLOW_GITHUB_OPERATION_SECONDS = 60.0
 MAX_QUOTA_OBSERVATIONS = 8
+GRAPHQL_INT_MAX = 2_147_483_647
 GitHubRequestPhase = Literal["operation", "controller", "admission", "feedback"]
 
 
@@ -39,6 +40,7 @@ class _GitHubResponseEvidence:
     graphql: bool
     status: int | None = None
     headers: dict[str, str] = field(default_factory=dict)
+    graphql_points: int | None = None
 
 
 _ACTIVE_RESPONSE: ContextVar[_GitHubResponseEvidence | None] = ContextVar(
@@ -82,7 +84,6 @@ def _record_quota_observation(
         "charged_requests": 0
         if response.status == 304 and response.authenticated and not response.graphql
         else "UNKNOWN",
-        "graphql_points": "UNKNOWN",
     }
     key = tuple(metadata.values())
     observation = tally.quota_observations.get(key)
@@ -90,8 +91,14 @@ def _record_quota_observation(
         if len(tally.quota_observations) >= MAX_QUOTA_OBSERVATIONS:
             tally.quota_omitted_requests += 1
             return
-        observation = {**metadata, "requests": 0}
+        observation = {**metadata, "requests": 0, "graphql_points": 0}
         tally.quota_observations[key] = observation
+    points = observation["graphql_points"]
+    observation["graphql_points"] = (
+        points + response.graphql_points
+        if isinstance(points, int) and response.graphql_points is not None
+        else "UNKNOWN"
+    )
     counters = {
         name: _quota_number(headers.get(f"x-ratelimit-{name}"))
         for name in ("used", "remaining", "limit")
@@ -127,6 +134,19 @@ def record_github_response(status: int, headers: object = None) -> None:
     if response is not None:
         response.status = status if type(status) is int and 100 <= status <= 599 else None
         response.headers = normalized_github_quota_response_headers(headers)
+
+
+def record_github_graphql_cost(payload: object) -> None:
+    response = _ACTIVE_RESPONSE.get()
+    if response is None or not response.graphql or response.status != 200:
+        return
+    if not isinstance(payload, dict) or payload.get("errors"):
+        return
+    data = payload.get("data")
+    rate_limit = data.get("rateLimit") if isinstance(data, dict) else None
+    cost = rate_limit.get("cost") if isinstance(rate_limit, dict) else None
+    if type(cost) is int and 0 < cost <= GRAPHQL_INT_MAX:
+        response.graphql_points = cost
 
 
 @contextmanager
