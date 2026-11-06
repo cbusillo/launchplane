@@ -25,6 +25,7 @@ from control_plane.contracts.merge_train_stall import (
 )
 from control_plane.launchplane_github_delivery import resolve_delivery_github_token
 from control_plane.merge_train import build_merge_train_dry_run_result
+from control_plane.merge_train_branch_refresh import MergeTrainBranchRefreshReadStore
 from control_plane.merge_train_github import GitHubMergeTrainClient, UrllibMergeTrainGitHubTransport
 from control_plane.merge_train_github_token import resolve_merge_train_github_token
 from control_plane.merge_train_policy_source import resolve_merge_train_policy_record
@@ -182,7 +183,7 @@ def run_stall_monitor_pass(
                     client = GitHubMergeTrainClient(
                         transport=UrllibMergeTrainGitHubTransport(token=token),
                         source_screening=True,
-                        product_profile_store=store,
+                        branch_refresh_store=cast(MergeTrainBranchRefreshReadStore, store),
                     )
                     client.begin_snapshot_pass(policy=target, read_only=True)
                     setting_gaps = client.target_setting_gaps(repository_policy=target)
