@@ -471,7 +471,7 @@ explicitly authorized initial transfer through the
 review the plan and pass its `dns_secret_version_id` in the ingress request for
 apply, with the original `Idempotency-Key`. Authorization uses
 `ingress_route.plan` or `ingress_route.apply`. The transport-marked Director
-operator can conditionally create this new preview wildcard with a minimal
+agent can conditionally create this new preview wildcard with a minimal
 route: `domain_names`, `edge_endpoint_key`, `dns_challenge`, `certificate_id`,
 `ssl_forced` and `enabled`. Omitted options keep their defaults; arbitrary NGINX
 text, extra locations, authentication forwarding and upstream overrides are

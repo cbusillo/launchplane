@@ -594,7 +594,7 @@ idempotency and compare-and-write checks remain required. This changes no
 credentials, grants, provider state or release authority. See
 [artifact scanning](artifact-security.md) for qualification and recovery.
 
-The transport-marked Director operator can also create a product preview
+The transport-marked Director agent can also create a product preview
 wildcard conditionally through the existing ingress apply operation; see
 [preview wildcard creation](driver-development.md#preview-wildcard-creation).
 
