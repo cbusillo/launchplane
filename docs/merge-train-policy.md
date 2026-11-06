@@ -124,8 +124,8 @@ where the provider exposes them, including CODEOWNERS' base SHA and check result
 head SHA. Successfully read commit-pinned contents are reused by that immutable
 revision; a moved base reads its own ownership file. Author permissions are shared
 by login only within the snapshot. Every mutable observation revalidates with GitHub; a terminal check can
-still be rerun or superseded. A 304 supplies the previously observed body and quota
-headers without charging primary quota. A restart or managed-key rotation starts
+still be rerun or superseded. A 304 supplies the previously observed body with the
+new response's quota headers without charging primary quota. A restart or managed-key rotation starts
 cold. Grant validation runs when minting; a conclusive 401 authentication
 failure discards the issued token so the next pass mints and validates again. A
 denied or failed read never supplies a cached answer.
@@ -140,7 +140,7 @@ with the same trace after the controller completes. Admission responses carry an
 responses carry `feedback`.
 
 The existing tally emits up to eight body-free `GitHub quota observation` records
-per operation, grouped by phase, API host, verified App/installation, HTTP status,
+per operation, grouped by phase, API host, issued-credential App/installation, HTTP status,
 resource and reset. Each retains first/last observed used, remaining and limit
 headers from the existing response allowlist. Additional groups are omitted with
 an explicit omitted-request count; the original attempt tally stays complete.
@@ -149,11 +149,20 @@ filtered by trace. Its tally-only projection retains the original controller cou
 and withholds quota observations. No bodies, tokens, token fingerprints or managed
 secret identities enter these records. A raw credential has unknown installation
 scope unless it matches the operation's verified issued credential.
+These locally attached IDs are credential provenance, not identity independently
+attested by a response.
 
 These counters belong to the provider's shared scope. Their difference is never
 a controller charge: concurrent callers can advance them. Authenticated REST 304s
-prove zero primary charge for those requests; other charges and GraphQL point
-costs remain explicit `UNKNOWN`. The receipt does not establish exclusive callers,
+prove zero primary charge for those requests. Train GraphQL queries select
+[`rateLimit { cost }`](https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api#returning-the-point-value-of-a-query).
+Each group's `graphql_points` sums only those native response costs, independently
+of the shared counters and request count. If any response in the group has missing,
+redacted, invalid or error cost evidence, the whole group's points stay `UNKNOWN`.
+HTTP errors, unsupported operations (including mutations without native cost),
+and omitted groups remain `UNKNOWN`; no response body is logged. These are primary
+GraphQL points, not REST requests or secondary-limit points. Other charges remain
+`UNKNOWN`. The receipt does not establish exclusive callers,
 continuity across container replacements, or a complete night. The HTTP fixture in
 `tests/test_merge_train_read_cost.py` exercises fifteen unqueued PRs with isolated
 provider semantics; it does not prove the natural single-target workload or overnight

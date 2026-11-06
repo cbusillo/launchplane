@@ -30,6 +30,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "asgi-lifespan>=2.1.0",
+    "graphql-core>=3.2,<3.3",
     "httpx2>=2.10.0",
     "mypy>=2.3.0",
     "passlib>=1.7.4",

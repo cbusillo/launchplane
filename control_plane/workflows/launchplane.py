@@ -36,7 +36,11 @@ from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.github_response_headers import GitHubResponseHeadersObserver
 from control_plane.github_response_headers import notify_github_quota_response_headers
-from control_plane.github_request_timing import timed_github_request, record_github_response
+from control_plane.github_request_timing import (
+    timed_github_request,
+    record_github_response,
+    record_github_graphql_cost,
+)
 
 RECENT_GENERATION_LIMIT = 3
 LAUNCHPLANE_PREVIEW_BASE_URL_ENV_KEYS = ("LAUNCHPLANE_PREVIEW_BASE_URL",)
@@ -329,7 +333,9 @@ def github_api_request(
                 response_headers_observer,
                 getattr(response, "headers", None),
             )
-            return json.loads(response_text) if response_text.strip() else None
+            payload = json.loads(response_text) if response_text.strip() else None
+            record_github_graphql_cost(payload)
+            return payload
     except (HTTPError, URLError, OSError, json.JSONDecodeError) as exc:
         raise click.ClickException(f"GitHub API request failed for {path}: {exc}") from exc
 

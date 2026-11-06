@@ -98,7 +98,11 @@ from control_plane.github_payload import required_string_text
 from control_plane.github_response_headers import GitHubResponseHeadersObserver
 from control_plane.github_response_headers import notify_github_quota_response_headers
 from control_plane.github_response_headers import normalized_github_quota_response_headers
-from control_plane.github_request_timing import timed_github_request, record_github_response
+from control_plane.github_request_timing import (
+    timed_github_request,
+    record_github_response,
+    record_github_graphql_cost,
+)
 from control_plane.github_read_cache import GitHubReadCache, MERGE_TRAIN_READ_CACHE
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.merge_train_candidate_failures import CandidateCheckFailures
@@ -421,6 +425,7 @@ class UrllibMergeTrainGitHubTransport:
                     getattr(response, "headers", None),
                 )
                 payload = json.loads(response_text) if response_text.strip() else None
+                record_github_graphql_cost(payload)
                 if method == "GET":
                     etag = str(response.headers.get("ETag") or "")
                     if etag or immutable_contents:
@@ -1831,6 +1836,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 body={
                     "query": """
                     query($owner: String!, $name: String!, $number: Int!) {
+                      rateLimit { cost }
                       repository(owner: $owner, name: $name) {
                         pullRequest(number: $number) {
                           timelineItems(first: 1, itemTypes: [BASE_REF_CHANGED_EVENT,
@@ -4605,7 +4611,7 @@ class GitHubMergeTrainSnapshotReader:
                 method="POST",
                 path="/graphql",
                 body={
-                    "query": "query($id: ID!) { node(id: $id) { ... on IssueComment { id body updatedAt editor { __typename ... on Bot { databaseId } } } } }",
+                    "query": "query($id: ID!) { rateLimit { cost } node(id: $id) { ... on IssueComment { id body updatedAt editor { __typename ... on Bot { databaseId } } } } }",
                     "variables": {"id": node_id},
                 },
             ),
@@ -6131,6 +6137,7 @@ def _config_comparison(
 
 _CONVERSATION_RESOLUTION_RULE_QUERY = """
 query($owner: String!, $name: String!, $ref: String!) {
+  rateLimit { cost }
   repository(owner: $owner, name: $name) {
     ref(qualifiedName: $ref) { refUpdateRule { requiresConversationResolution } }
   }
@@ -6139,6 +6146,7 @@ query($owner: String!, $name: String!, $ref: String!) {
 
 _REVIEW_THREADS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  rateLimit { cost }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
