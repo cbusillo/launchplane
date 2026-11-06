@@ -13,7 +13,12 @@ from urllib.request import Request
 
 from control_plane.github_read_cache import GitHubReadCache
 from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
-from control_plane.github_request_timing import github_request_tally, github_request_phase
+from control_plane.github_request_timing import (
+    GitHubRequestPhase,
+    MAX_QUOTA_OBSERVATIONS,
+    github_request_tally,
+    github_request_phase,
+)
 from control_plane.workflows.launchplane import github_api_request
 from control_plane.merge_admission import MergeAdmissionEvaluator
 from control_plane.merge_train import build_merge_train_dry_run_result
@@ -87,6 +92,104 @@ class _Provider:
 
 
 class MergeTrainReadCostTests(unittest.TestCase):
+    def test_native_graphql_points_follow_response_phase_and_tally(self) -> None:
+        headers = Message()
+        headers["x-ratelimit-resource"] = "graphql"
+        headers["x-ratelimit-reset"] = "123456"
+        transport = UrllibMergeTrainGitHubTransport(token="fixture", read_cache=GitHubReadCache())
+        with (
+            self.assertLogs("control_plane.github_request_timing", level="INFO") as logs,
+            github_request_tally("controller trace native-cost"),
+            patch("control_plane.merge_train_github.urlopen") as open_request,
+        ):
+            for phase, points in (("controller", 7), ("controller", 11), ("admission", 3)):
+                open_request.return_value = _Response(
+                    {"data": {"rateLimit": {"cost": points}, "private-body": "hidden"}}, headers
+                )
+                with github_request_phase(cast(GitHubRequestPhase, phase)):
+                    transport.request(method="POST", path="/graphql")
+            with github_request_tally("feedback trace native-cost", phase="feedback"):
+                with patch(
+                    "control_plane.workflows.launchplane.urlopen",
+                    return_value=_Response({"data": {"rateLimit": {"cost": 5}}}, headers),
+                ):
+                    github_api_request(path="/graphql", token="fixture", method="POST")
+        observations = [
+            json.loads(line.split("; ", 1)[1])
+            for line in logs.output
+            if "GitHub quota observation:" in line
+        ]
+        by_phase = {row["phase"]: row for row in observations}
+        self.assertEqual(by_phase["controller"]["graphql_points"], 18)
+        self.assertEqual(by_phase["controller"]["requests"], 2)
+        self.assertEqual(by_phase["admission"]["graphql_points"], 3)
+        self.assertEqual(by_phase["feedback"]["graphql_points"], 5)
+        self.assertTrue(all(row["charged_requests"] == "UNKNOWN" for row in observations))
+        self.assertNotIn("hidden", "\n".join(logs.output))
+
+    def test_missing_or_failed_graphql_cost_never_becomes_zero_or_a_partial_total(self) -> None:
+        valid = {"data": {"rateLimit": {"cost": 7}}}
+        payloads: list[object] = [
+            None,
+            {},
+            {"data": None},
+            {"data": {"rateLimit": None}},
+            {"data": {"rateLimit": {}}},
+            {**valid, "errors": [{"message": "private-error"}]},
+            *(
+                {"data": {"rateLimit": {"cost": value}}}
+                for value in (None, "REDACTED", "7", True, 0, -1, 1.5, 10**30)
+            ),
+        ]
+        transport = UrllibMergeTrainGitHubTransport(token="fixture", read_cache=GitHubReadCache())
+        for payload in payloads:
+            for first, second in ((valid, payload), (payload, valid)):
+                with (
+                    self.subTest(payload=payload, first_valid=first is valid),
+                    self.assertLogs("control_plane.github_request_timing", level="INFO") as logs,
+                    github_request_tally("controller trace unknown-cost"),
+                    patch(
+                        "control_plane.merge_train_github.urlopen",
+                        side_effect=[_Response(first, Message()), _Response(second, Message())],
+                    ),
+                ):
+                    transport.request(method="POST", path="/graphql")
+                    transport.request(method="POST", path="/graphql")
+                (observation,) = [
+                    json.loads(line.split("; ", 1)[1])
+                    for line in logs.output
+                    if "GitHub quota observation:" in line
+                ]
+                self.assertEqual(observation["graphql_points"], "UNKNOWN")
+                self.assertEqual(observation["requests"], 2)
+                self.assertNotIn("private-error", "\n".join(logs.output))
+
+    def test_native_cost_preserves_http_errors_and_bounded_omissions(self) -> None:
+        transport = UrllibMergeTrainGitHubTransport(token="fixture", read_cache=GitHubReadCache())
+        with (
+            self.assertLogs("control_plane.github_request_timing", level="INFO") as logs,
+            github_request_tally("controller trace capped-cost"),
+            patch("control_plane.merge_train_github.urlopen") as open_request,
+        ):
+            for reset in range(MAX_QUOTA_OBSERVATIONS + 2):
+                headers = Message()
+                headers["x-ratelimit-reset"] = str(reset)
+                open_request.return_value = _Response({"data": {"rateLimit": {"cost": 9}}}, headers)
+                transport.request(method="POST", path="/graphql")
+            open_request.side_effect = HTTPError("url", 503, "unavailable", Message(), None)
+            with self.assertRaises(MergeTrainGitHubError):
+                transport.request(method="POST", path="/graphql")
+        observations = [
+            json.loads(line.split("; ", 1)[1])
+            for line in logs.output
+            if "GitHub quota observation:" in line
+        ]
+        self.assertEqual(len(observations), MAX_QUOTA_OBSERVATIONS)
+        self.assertTrue(all(row["graphql_points"] == 9 for row in observations))
+        (coverage,) = [line for line in logs.output if "GitHub quota coverage:" in line]
+        self.assertIn("omitted_requests=3", coverage)
+        self.assertIn("graphql_points=UNKNOWN", coverage)
+
     def test_unavailable_status_cannot_make_quota_logging_break_a_response(self) -> None:
         response = _Response({"result": "available"}, Message())
         transport = UrllibMergeTrainGitHubTransport(token="fixture", read_cache=GitHubReadCache())
