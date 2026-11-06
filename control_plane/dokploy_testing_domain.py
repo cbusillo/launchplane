@@ -1,6 +1,11 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from control_plane.contracts.public_hosts import retained_hostname_identity
+from control_plane.contracts.disposable_lane import DisposableLaneSafety
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.provider_operations import build_provider_operation_key
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.product_profile_record import (
     is_exclusive_product_context,
@@ -31,6 +36,166 @@ from control_plane.workflows.generic_web_deploy_provider import (
     dokploy_generic_web_provider_target_key,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+
+
+def require_first_testing_target_unprotected(
+    store: PostgresRecordStore,
+    *,
+    product: str,
+    context: str,
+    provider: ProviderTargetRecord,
+) -> DisposableLaneSafety | None:
+    from control_plane.application_state_volume import require_no_held_state_volume
+
+    require_no_held_state_volume(store, context)
+    require_lane_target_ownership(
+        store.list_dokploy_target_id_records(),
+        context=context,
+        instance="testing",
+        target_id=provider.target_id,
+    )
+    if any(
+        other.provider_id == provider.provider_id
+        and other.target_id == provider.target_id
+        and (other.context, other.instance) != (context, "testing")
+        for other in store.list_physical_provider_target_records()
+    ):
+        raise ValueError("The testing compose is shared with another lane.")
+    evidence = store.read_disposable_lane_safety(product, context, "testing")
+    if evidence is not None and (
+        evidence.usage == "in_use"
+        or evidence.data == "only_copy"
+        or evidence.production_resources in {"shared", "separation_ready"}
+    ):
+        raise ValueError("Testing use, data custody or resource sharing protects this lane.")
+    return evidence
+
+
+def require_first_testing_hostname_available(
+    *,
+    product: str,
+    target: DokployTargetRecord,
+    domain: str,
+    targets: Iterable[DokployTargetRecord],
+    profiles: Iterable[LaunchplaneProductProfileRecord],
+    bindings: Iterable[EnvironmentRouteBindingRecord],
+    allow_current_binding: bool = False,
+) -> None:
+    require_exclusive_testing_application_hostname(hostname=domain, target=target, targets=())
+    require_testing_hostname_claims_available(
+        product=product,
+        target=target,
+        domain=domain,
+        targets=targets,
+        profiles=profiles,
+        bindings=bindings,
+        allow_current_binding=allow_current_binding,
+    )
+
+
+def require_testing_hostname_claims_available(
+    *,
+    product: str,
+    target: DokployTargetRecord,
+    domain: str,
+    targets: Iterable[DokployTargetRecord],
+    profiles: Iterable[LaunchplaneProductProfileRecord],
+    bindings: Iterable[EnvironmentRouteBindingRecord],
+    allow_current_binding: bool = False,
+) -> None:
+    claims = {
+        retained_hostname_identity(value)
+        for other in targets
+        if (other.context, other.instance) != (target.context, "testing")
+        for value in other.hostname_claims
+    } | {
+        entry.domain_name
+        for binding in bindings
+        if not (
+            allow_current_binding
+            and (binding.product, binding.context, binding.instance)
+            == (product, target.context, "testing")
+        )
+        for entry in binding.domains
+    }
+    profile_claims = {
+        retained_hostname_identity(value)
+        for other in profiles
+        for lane in other.lanes
+        if (other.product, lane.context, lane.instance) != (product, target.context, "testing")
+        for value in (lane.base_url, lane.health_url)
+        if retained_hostname_identity(value)
+    }
+    if any(not claim or claim.startswith("~") for claim in claims) or any(
+        claim == domain or claim.startswith("*.") and domain.endswith(claim[1:])
+        for claim in claims | profile_claims
+    ):
+        raise ValueError("The hostname belongs to existing ingress authority.")
+
+
+def require_first_testing_idle(
+    store: PostgresRecordStore,
+    *,
+    product: str,
+    request: DokployTargetSetupEnvelope,
+    provider: ProviderTargetRecord,
+    current_provider_key: str = "",
+) -> None:
+    if _lane_has_usage_or_data_commitments(store, request):
+        raise ValueError("First testing setup cannot change a lane that has deployed or served.")
+    reservations = _target_reservations(
+        store,
+        product=product,
+        context=request.context,
+        target_key=dokploy_generic_web_provider_target_key(provider),
+        target_id=provider.target_id,
+        require_complete=True,
+    )
+    if any(
+        build_provider_operation_key(
+            scope=row.scope,
+            route_path=row.route_path,
+            idempotency_key=row.idempotency_key,
+            request_fingerprint=row.request_fingerprint,
+            reconciliation_key=row.reconciliation_key,
+        )
+        != current_provider_key
+        for row in reservations
+    ):
+        raise ValueError("A provider operation still owns the testing target.")
+
+
+def match_first_testing_origin(
+    routes: object, *, target_id: str, domain: str, runtime_port: int
+) -> str:
+    if not isinstance(routes, list) or len(routes) > 1:
+        raise ValueError("First hostname setup requires zero routes or one exact reviewed route.")
+    if not routes:
+        return ""
+    route = routes[0]
+    expected = compose.compose_web_domain_route_payload(
+        compose_id=target_id, domain_host=domain, runtime_port=runtime_port
+    )
+    defaults: api.JsonObject = {
+        "customEntrypoint": None,
+        "middlewares": [],
+        "forwardAuthEnabled": False,
+        "enabled": True,
+    }
+    if (
+        not isinstance(route, dict)
+        or not isinstance(route.get("domainId"), str)
+        or not route["domainId"].strip()
+        or any(not _domain_value_matches(route.get(key), value) for key, value in expected.items())
+        or any(
+            not _domain_value_matches(route.get(key, value), value)
+            for key, value in defaults.items()
+        )
+    ):
+        raise ValueError(
+            "An existing provider route differs from the exact reviewed first hostname."
+        )
+    return str(route["domainId"])
 
 
 def setup_empty_testing_domain(
@@ -121,25 +286,14 @@ def setup_empty_testing_domain(
             "source_label": "service:dokploy-targets:setup:reconcile-compose-domain",
         }
     )
-    target_key = dokploy_generic_web_provider_target_key(provider)
     route_ids: list[str] = []
     effect_started = False
     provider_verified = False
 
     def require_unprotected_binding() -> None:
-        require_lane_target_ownership(
-            record_store.list_dokploy_target_id_records(),
-            context=request.context,
-            instance="testing",
-            target_id=target_id.target_id,
+        require_first_testing_target_unprotected(
+            record_store, product=product, context=request.context, provider=provider
         )
-        evidence = record_store.read_disposable_lane_safety(product, request.context, "testing")
-        if evidence is not None and (
-            evidence.usage == "in_use"
-            or evidence.data == "only_copy"
-            or evidence.production_resources in {"shared", "separation_ready"}
-        ):
-            raise ValueError("Testing use, data custody or resource sharing protects this lane.")
         if (
             record_store.read_product_profile_record(product) != profile
             or record_store.read_dokploy_target_record(
@@ -158,40 +312,9 @@ def setup_empty_testing_domain(
             raise ValueError("Testing bindings changed during hostname qualification.")
 
     def matching_route(routes: object) -> str:
-        if not isinstance(routes, list) or len(routes) > 1:
-            raise ValueError(
-                "First hostname setup requires zero routes or one exact reviewed route."
-            )
-        if not routes:
-            return ""
-        route = routes[0]
-        expected = compose.compose_web_domain_route_payload(
-            compose_id=target_id.target_id,
-            domain_host=domain,
-            runtime_port=profile.runtime_port,
+        return match_first_testing_origin(
+            routes, target_id=target_id.target_id, domain=domain, runtime_port=profile.runtime_port
         )
-        defaults: api.JsonObject = {
-            "customEntrypoint": None,
-            "middlewares": [],
-            "forwardAuthEnabled": False,
-            "enabled": True,
-        }
-        if (
-            not isinstance(route, dict)
-            or not isinstance(route.get("domainId"), str)
-            or not route["domainId"].strip()
-            or any(
-                not _domain_value_matches(route.get(key), value) for key, value in expected.items()
-            )
-            or any(
-                not _domain_value_matches(route.get(key, value), value)
-                for key, value in defaults.items()
-            )
-        ):
-            raise ValueError(
-                "An existing provider route differs from the exact reviewed first hostname."
-            )
-        return str(route["domainId"])
 
     def read_route() -> str:
         return matching_route(
@@ -204,50 +327,18 @@ def setup_empty_testing_domain(
         )
 
     def checkpoint() -> str:
-        from control_plane.application_state_volume import require_no_held_state_volume
-
-        require_no_held_state_volume(record_store, request.context)
-        if _lane_has_usage_or_data_commitments(record_store, request):
-            raise ValueError(
-                "First hostname setup cannot change a lane that has deployed or served."
-            )
-        require_unprotected_binding()
-        if any(
-            other.provider_id == provider.provider_id
-            and other.target_id == provider.target_id
-            and (other.context, other.instance) != (request.context, "testing")
-            for other in record_store.list_physical_provider_target_records()
-        ):
-            raise ValueError("The testing compose is shared with another lane.")
-        require_exclusive_testing_application_hostname(
-            hostname=domain, target=target, targets=record_store.list_dokploy_target_records()
+        require_first_testing_idle(
+            record_store, product=product, request=request, provider=provider
         )
-        claims = {
-            retained_hostname_identity(value)
-            for other in record_store.list_product_profile_records()
-            for lane in other.lanes
-            if (other.product, lane.context, lane.instance) != (product, request.context, "testing")
-            for value in (lane.base_url, lane.health_url)
-            if value
-        } | {
-            binding_domain.domain_name
-            for binding in record_store.list_route_binding_records()
-            for binding_domain in binding.domains
-        }
-        if any(
-            claim == domain or claim.startswith("*.") and domain.endswith(claim[1:])
-            for claim in claims
-        ):
-            raise ValueError("The hostname belongs to existing ingress authority.")
-        if _target_reservations(
-            record_store,
+        require_unprotected_binding()
+        require_first_testing_hostname_available(
             product=product,
-            context=request.context,
-            target_key=target_key,
-            target_id=target_id.target_id,
-            require_complete=True,
-        ):
-            raise ValueError("A provider operation still owns the testing target.")
+            target=target,
+            domain=domain,
+            targets=record_store.list_dokploy_target_records(),
+            profiles=record_store.list_product_profile_records(),
+            bindings=record_store.list_route_binding_records(),
+        )
         live = fetch_dokploy_target_payload_for_setup(host, token, "compose", target_id.target_id)
         require_empty_compose_source(live, target_id.target_id)
         matching_route(live.get("domains"))
@@ -300,7 +391,7 @@ def setup_empty_testing_domain(
         provider_verified = True
 
     lock = record_store.testing_replacement_execution_lock(
-        testing_event_execution_lock_name(target_key)
+        testing_event_execution_lock_name(dokploy_generic_web_provider_target_key(provider))
     )
     try:
         with lock as held_check:

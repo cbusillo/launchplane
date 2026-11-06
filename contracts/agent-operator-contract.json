@@ -615,7 +615,7 @@
         ],
         "operation_id": "prepare_testing_public_ingress",
         "path": "/v1/products/{product}/testing-public-ingress",
-        "purpose": "Publish the current independent Odoo testing hostname at its recorded edge using an existing covering certificate; preserve its restored copy and retained routes.",
+        "purpose": "Publish a first-use or restored Odoo testing hostname at its recorded edge with an existing covering certificate; preserve runtime, credentials and retained routes.",
         "response_statuses": [
           "202",
           "400",
@@ -627,7 +627,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "8c3ae83b520e9986ebcde155bb0108ba547b36d07d71e6d85855c1dbb80313d9",
+        "schema_fingerprint_sha256": "d517dd463371a6d7a3da4c1d2135f47d212dcc8f42b0a2c96922e3bd06f13e0c",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1391,8 +1391,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "a6115078b4520f5648ba9c72d0b3ca6a64fcb4d0"
+    "source_commit_sha": "d87da40ba30d4e0de1391bf8a40be4fc7838be65"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "070eb5b4e0bb9b490de5f24eb6b0444c41c7a05b762c8fabdb9403140641088b"
+  "semantic_digest_sha256": "9d3b39d27facdf5965288910b0cbc3c8f06f36d2cb6e87f9cb131dbc9384c1dd"
 }

@@ -29725,6 +29725,43 @@ class PostgresRecordStore(HumanSessionStore):
     def write_route_binding_record(self, record: EnvironmentRouteBindingRecord) -> None:
         self._write_row(self._route_binding_row(record))
 
+    def _require_locked_testing_hostname_available(
+        self,
+        session: Session,
+        *,
+        product: str,
+        target: DokployTargetRecord,
+        domain: str,
+    ) -> None:
+        from control_plane.dokploy_testing_domain import (
+            require_testing_hostname_claims_available,
+        )
+
+        require_testing_hostname_claims_available(
+            product=product,
+            target=target,
+            domain=domain,
+            targets=(
+                self._read_payload(model_type=DokployTargetRecord, payload=row.payload)
+                for row in session.scalars(
+                    select(LaunchplaneDokployTargetRow).with_for_update()
+                ).all()
+            ),
+            profiles=(
+                self._read_payload(model_type=LaunchplaneProductProfileRecord, payload=row.payload)
+                for row in session.scalars(
+                    select(LaunchplaneProductProfileRow).with_for_update()
+                ).all()
+            ),
+            bindings=(
+                self._read_payload(model_type=EnvironmentRouteBindingRecord, payload=row.payload)
+                for row in session.scalars(
+                    select(LaunchplaneRouteBindingRow).with_for_update()
+                ).all()
+            ),
+            allow_current_binding=True,
+        )
+
     def publish_testing_public_ingress_binding(
         self,
         *,
@@ -29818,11 +29855,153 @@ class PostgresRecordStore(HumanSessionStore):
                 != expected["generation"]
             ):
                 raise ValueError("The reviewed testing generation changed.")
+            self._require_locked_testing_hostname_available(
+                session,
+                product=replacement.product,
+                target=DokployTargetRecord.model_validate(expected["target"]),
+                domain=audit.requested_domains[0],
+            )
             audit_row = session.get(
                 LaunchplaneIngressRouteAuditRow, audit.record_id, with_for_update=True
             )
             if audit_row is None or audit_row.payload != self._payload_dict(audit):
                 raise ValueError("Testing edge audit changed before publication.")
+            session.merge(self._route_binding_row(replacement))
+            session.commit()
+
+    def publish_first_testing_public_ingress_binding(
+        self,
+        *,
+        expected: dict[str, object],
+        replacement: EnvironmentRouteBindingRecord,
+        audit: IngressRouteAuditRecord,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(expected["profile"])
+        target = DokployTargetRecord.model_validate(expected["target"])
+        endpoint = EdgeEndpointRecord.model_validate(expected["endpoint"])
+        if (
+            replacement.instance != "testing"
+            or (replacement.product, replacement.context) != (profile.product, target.context)
+            or target.instance != "testing"
+            or len(target.domains) != 1
+            or tuple(domain.domain_name for domain in replacement.domains) != target.domains
+            or replacement.source.source_kind != "service"
+            or replacement.ingress.provider != "npmplus"
+            or replacement.ingress.termination_kind != "edge"
+            or replacement.ingress.endpoint_key != endpoint.endpoint_key
+            or replacement.ingress.provider_evidence.get("audit_record") != audit.record_id
+            or replacement.tls.owner != "provider"
+            or replacement.tls.provider_evidence.get("provider_certificate_ref")
+            != audit.provider_certificate_ref
+            or audit.product != profile.product
+            or audit.context != target.context
+            or audit.edge_endpoint_key != endpoint.endpoint_key
+            or audit.requested_domains != target.domains
+            or audit.status != "applied"
+            or audit.mode != "apply"
+            or audit.testing_generation_sha256
+            or not audit.testing_authority_sha256
+        ):
+            raise ValueError("First testing edge publication must preserve its exact lane.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_route_binding_write(session, binding_key=replacement.binding_key)
+            require_bundle_context_owner(
+                ProductAuthorityBundle(required_context_owner=(profile.product, target.context)),
+                (
+                    self._read_payload(
+                        model_type=LaunchplaneProductProfileRecord, payload=row.payload
+                    )
+                    for row in session.scalars(
+                        select(LaunchplaneProductProfileRow).with_for_update()
+                    ).all()
+                ),
+            )
+            for orm, model, identity, field in (
+                (
+                    LaunchplaneProductProfileRow,
+                    LaunchplaneProductProfileRecord,
+                    profile.product,
+                    "profile",
+                ),
+                (
+                    LaunchplaneDokployTargetRow,
+                    DokployTargetRecord,
+                    (target.context, "testing"),
+                    "target",
+                ),
+                (
+                    LaunchplaneDokployTargetIdRow,
+                    DokployTargetIdRecord,
+                    (target.context, "testing"),
+                    "target_id",
+                ),
+                (
+                    LaunchplaneProviderTargetRow,
+                    ProviderTargetRecord,
+                    (target.context, "testing"),
+                    "provider",
+                ),
+                (
+                    LaunchplaneRouteBindingRow,
+                    EnvironmentRouteBindingRecord,
+                    (profile.product, target.context, "testing"),
+                    "binding",
+                ),
+                (LaunchplaneEdgeEndpointRow, EdgeEndpointRecord, endpoint.endpoint_key, "endpoint"),
+                (
+                    LaunchplaneDisposableLaneSafetyRow,
+                    DisposableLaneSafety,
+                    (profile.product, target.context, "testing"),
+                    "safety",
+                ),
+            ):
+                row = session.get(orm, identity, with_for_update=True)
+                current = (
+                    None
+                    if row is None
+                    else self._read_payload(
+                        model_type=model, payload=getattr(row, "payload")
+                    ).model_dump(mode="json", exclude_none=True)
+                )
+                if current != expected[field]:
+                    raise ValueError("Initial testing edge authority changed before publication.")
+            if (
+                session.get(
+                    LaunchplaneFreshOdooTestingGenerationRow,
+                    (profile.product, target.context),
+                    with_for_update=True,
+                )
+                is not None
+            ):
+                raise ValueError("A restored testing generation now owns this lane.")
+            self._require_locked_testing_hostname_available(
+                session, product=profile.product, target=target, domain=target.domains[0]
+            )
+            audit_row = session.get(
+                LaunchplaneIngressRouteAuditRow, audit.record_id, with_for_update=True
+            )
+            if audit_row is None or audit_row.payload != self._payload_dict(audit):
+                raise ValueError("The initial testing edge audit changed.")
+            url = "https://" + target.domains[0]
+            updated_profile = profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(
+                            update={
+                                "base_url": url,
+                                "health_url": lane.health_url or url + profile.health_path,
+                            }
+                        )
+                        if (lane.context, lane.instance) == (target.context, "testing")
+                        else lane
+                        for lane in profile.lanes
+                    ),
+                    "updated_at": _utc_now_timestamp(),
+                }
+            )
+            session.merge(self._product_profile_row(updated_profile))
             session.merge(self._route_binding_row(replacement))
             session.commit()
 

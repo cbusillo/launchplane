@@ -19,6 +19,7 @@ from control_plane.http_routes.support import (
 )
 from control_plane.service_auth import LaunchplaneIdentity, director_agent_identity
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_first_public_ingress import FirstTestingPublicIngressAdapter
 from control_plane.testing_public_ingress import (
     ROUTE,
     TestingIngressPrerequisiteError,
@@ -65,7 +66,12 @@ def register_testing_public_ingress_routes(
         if body.mode == "apply" and not idempotency_key.strip():
             refuse(400, "idempotency_key_required", "Keep the original testing ingress key.")
         try:
-            adapter = TestingPublicIngressAdapter(
+            adapter_type = (
+                TestingPublicIngressAdapter
+                if body.operation_id
+                else FirstTestingPublicIngressAdapter
+            )
+            adapter = adapter_type(
                 root, record_store, product, body, trace, build_npmplus_ingress_client_from_env()
             )
             if body.mode == "apply":
@@ -107,7 +113,7 @@ def register_testing_public_ingress_routes(
         response_model=AcceptedEvidenceResponse,
         response_model_exclude_none=True,
         operation_id="prepare_testing_public_ingress",
-        summary="Publish one independent testing hostname at its existing public edge",
+        summary="Publish a first-use or restored Odoo testing hostname at its recorded edge",
         responses={
             code: {"model": dependencies.error_response_model} for code in (400, 401, 403, 409, 503)
         },

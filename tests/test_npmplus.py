@@ -92,6 +92,8 @@ class _Opener:
             return _Response(self.proxy_hosts_payload)
         if method == "GET" and path in ("/api/nginx/redirection-hosts", "/api/nginx/dead-hosts"):
             return _Response(self.other_hosts_payload)
+        if method == "GET" and path == "/api/nginx/certificates":
+            return _Response([self.certificate_payload])
         if method == "GET" and path == f"/api/nginx/certificates/{self.certificate_payload['id']}":
             return _Response(self.certificate_payload)
         if method == "GET" and path == "/api/nginx/access-lists/1":
@@ -588,6 +590,14 @@ class NpmplusClientTests(unittest.TestCase):
         )
         self.assertNotIn("meta", certificate.model_dump())
         self.assertNotIn("fixture-secret", certificate.model_dump_json())
+
+    def test_certificate_inventory_keeps_only_public_metadata(self) -> None:
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        certificates = client.list_certificates()
+        self.assertEqual(certificates, (client.get_certificate(certificates[0].id),))
+        self.assertNotIn("fixture-secret", certificates[0].model_dump_json())
+        self.assertNotIn("meta", certificates[0].model_dump())
 
     def test_create_proxy_host_authenticates_and_posts_payload(self) -> None:
         opener = _Opener()
