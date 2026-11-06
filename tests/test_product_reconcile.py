@@ -6928,6 +6928,48 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(failed.last_error, record_failure_summary("reconcile_required"))
         self.assertNotIn("image pull denied", failed.model_dump_json())
 
+    def test_never_served_source_free_preview_continues_its_quiescent_original(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+
+        def interrupted(**kwargs: Any) -> dict[str, object]:
+            self.provider.allocate_target(kwargs["issued_plan"])
+            kwargs["provider_effect_checkpoint"]("post_deploy_schedule_trigger")
+            return {"status": "fail", "provider_effect_attempted": True}
+
+        self.request("preview", 5)
+        with patch.object(self.provider, "execute_apply", side_effect=interrupted):
+            first = self.run_once()
+        self.assertEqual(first.last_plan["preview_operation_status"], "reconcile_required")
+        self.assertFalse(self.store.list_preview_records())
+        (original,) = self.store.list_held_odoo_preview_reservations(product="site")
+        retained = self.store.read_original_mutation_intent(original)
+        target = next(iter(self.provider.targets.values()))
+        self.advance_preview_recovery_grace = True
+        self.request("preview", 5)
+        with (
+            patch.object(self.provider, "observe_apply", return_value=("unknown", None, False)),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
+                return_value=target,
+            ),
+        ):
+            continued = self.run_once()
+        self.assertEqual(continued.state, "done", continued.last_error)
+        self.assertEqual(continued.last_plan["preview_result_status"], "pass")
+        self.assertEqual(self.provider.applied, [("refresh", 5)])
+        self.assertEqual(self.provider.allocations, 1)
+        self.assertEqual(self.store.read_original_mutation_intent(original), retained)
+        superseded = self.store.read_idempotency_record_by_id(original.record_id)
+        assert superseded is not None
+        self.assertEqual(superseded.state, "completed")
+        self.assertEqual(superseded.response_status_code, 409)
+        self.assertEqual(superseded.response_payload["result"]["status"], "fail")
+        (preview,) = self.store.list_preview_records()
+        self.assertTrue(preview.serving_generation_id)
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["reason"], "already_serving")
+        self.assertEqual(self.provider.applied, [("refresh", 5)])
+
     def test_preview_destination_refusal_has_a_fixed_reason(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)
