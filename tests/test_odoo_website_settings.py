@@ -789,6 +789,7 @@ class WebsiteSettingsTests(unittest.TestCase):
             )
             review = build_release_review(store=store, profile=profile(), read=github_read)
             self.assertFalse(review.approved)
+            self.assertFalse(review.checklist_complete)
             self.assertTrue(review.blockers)
             self.assertIsNone(review.checklist.website_settings if review.checklist else None)
 

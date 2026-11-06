@@ -659,7 +659,6 @@ def build_release_review(
             }
         )
     blockers = checklist_blockers(checklist, profile=profile)
-    complete = not blockers
     approved = bool(latest_decision and latest_decision.release_issue_url) and (
         bool(latest_decision and latest_decision.decision == "overridden")
         # The Director's temporary hotfix approves its exact, complete checklist; the
@@ -691,6 +690,7 @@ def build_release_review(
             "Website settings readback is unverified after a failed workflow. Retry the recorded maintenance/release before reviewing current settings.",
         )
         approved = False
+    complete = not blockers
     if latest_decision and not latest_decision.release_issue_url:
         blockers += (RELEASE_RECORD_PENDING,)
     if not approved and not blockers:

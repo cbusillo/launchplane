@@ -16,6 +16,7 @@ from control_plane.client_release import (
     _generic_web_release_authority_allows,
     client_release_step_operation_id,
     client_release_steps,
+    ClientReleaseBackoff,
     read_client_release_run,
     release_start_for_acceptance,
 )
@@ -85,7 +86,7 @@ from control_plane.merge_train_release_hold import (
     MergeTrainReleaseHoldStore,
     merge_train_release_hold,
 )
-from control_plane.release_review import build_release_review
+from control_plane.release_review import build_release_review, checklist_digest
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
 from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromotionRunRequest
@@ -725,6 +726,99 @@ class ClientReleaseTests(unittest.TestCase):
             decision(self.store, outcome="overridden", date="2026-09-23T02:00:00Z")
         )
         self.assertEqual(self.advance(), ())
+
+    def test_saved_acceptance_recovers_publication_before_starting_its_release(self) -> None:
+        self.switch("promote")
+        accepted = self.accept().model_copy(update={"release_issue_url": ""})
+        self.store.write_release_review_decision_record(accepted)
+        backoff = ClientReleaseBackoff()
+
+        def advance() -> tuple[str, ...]:
+            return advance_client_releases(
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
+            )
+
+        def publish_saved(**kwargs: object) -> str:
+            return self.store.record_release_review_decision_publication(
+                record_id=accepted.record_id,
+                release_issue_url="https://github.com/example/site/issues/99",
+            ).release_issue_url
+
+        with (
+            patch(
+                "control_plane.client_release.publish_release_decision", side_effect=StopIteration
+            ) as publish,
+            patch("control_plane.client_release.monotonic", return_value=0),
+        ):
+            with self.assertLogs("control_plane.client_release", level="ERROR"):
+                self.assertEqual(advance(), ())
+            self.assertEqual(advance(), ())
+            publish.assert_called_once()
+        with (
+            patch("control_plane.client_release.monotonic", return_value=86_400),
+            patch(
+                "control_plane.client_release.publish_release_decision", side_effect=publish_saved
+            ) as publish,
+        ):
+            (backup,) = advance()
+            self.assertTrue(backup.startswith("production-backup-gate-"))
+            publish.assert_called_once_with(
+                store=self.store,
+                control_plane_root=self.root,
+                profile=self.store.read_product_profile_record(PRODUCT),
+                decision=accepted,
+            )
+            advance()
+            publish.assert_called_once()
+        (stored,) = self.store.list_release_review_decision_records(product=PRODUCT)
+        self.assertEqual(stored.model_copy(update={"release_issue_url": ""}), accepted)
+
+    def test_publication_recovery_does_not_publish_or_release_a_changed_candidate(self) -> None:
+        self.switch("promote")
+        accepted = self.accept().model_copy(update={"release_issue_url": ""})
+        self.store.write_release_review_decision_record(accepted)
+        testing = self.store.read_release_tuple_record(context_name=CONTEXT, channel_name="testing")
+        self.store.write_release_tuple_record(
+            testing.model_copy(update={"artifact_id": "artifact-prod"})
+        )
+        with (
+            patch(
+                "control_plane.client_release.publish_release_decision",
+                return_value="https://github.com/example/site/issues/99",
+            ) as publish,
+            patch("control_plane.client_release._queue_backup") as enqueue,
+        ):
+            self.assertEqual(self.advance(), ())
+        publish.assert_not_called()
+        enqueue.assert_not_called()
+        (stored,) = self.store.list_release_review_decision_records(product=PRODUCT)
+        self.assertEqual(stored.model_copy(update={"release_issue_url": ""}), accepted)
+
+    def test_publication_recovery_requires_the_current_notes_and_complete_checklist(self) -> None:
+        self.switch("promote")
+        accepted = self.accept().model_copy(update={"release_issue_url": ""})
+        self.store.write_release_review_decision_record(accepted)
+        current = build_release_review(store=self.store, profile=profile(), read=github_read)
+        assert current.checklist is not None
+        item = current.checklist.items[0].model_copy(
+            update={"owner_test_notes": "Check the revised repair prices."}
+        )
+        changed = current.checklist.model_copy(update={"items": (item,)})
+        for review in (
+            current.model_copy(update={"checklist_complete": False}),
+            current.model_copy(
+                update={"checklist": changed, "checklist_digest": checklist_digest(changed)}
+            ),
+        ):
+            with (
+                self.subTest(review=review),
+                patch("control_plane.client_release.current_release_review", return_value=review),
+                patch("control_plane.client_release.publish_release_decision") as publish,
+                patch("control_plane.client_release._queue_backup") as enqueue,
+            ):
+                self.assertEqual(self.advance(), ())
+            publish.assert_not_called()
+            enqueue.assert_not_called()
 
     def test_progress_explains_a_hold_and_clears_it_without_starting_work(self) -> None:
         self.switch("promote")

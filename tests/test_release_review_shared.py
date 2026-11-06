@@ -25,7 +25,6 @@ from control_plane.release_review import (
     release_version,
     ReleaseReviewStore,
 )
-from control_plane.release_review_record import release_decision_issue_body
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.test_release_review import BASE, HEAD, profile, seed
 
@@ -156,7 +155,6 @@ class SharedReleaseReviewTests(unittest.TestCase):
                 self.assertEqual(
                     (ranges[0].production_commit, ranges[0].candidate_commit), (BASE, HEAD)
                 )
-                self.assertIn(self.github.notes, release_decision_issue_body(accepted))
                 self.github.notes += " Check the second sign-in."
                 self.assertFalse(self.review().approved)
                 self.github.notes = ""
@@ -403,10 +401,6 @@ class SharedReleaseReviewTests(unittest.TestCase):
         self.assertTrue(self.review().approved)
         saved = self.store.list_release_review_decision_records(product=profile().product)[0]
         self.assertEqual(saved, record)
-        body = release_decision_issue_body(saved)
-        for source in saved.checklist.shared_sources:
-            self.assertIn(source.items[0].url, body)
-            self.assertIn(source.items[0].owner_test_notes, body)
         self.assertEqual(self.store.list_deployment_records(), ())
 
     def test_shared_engineering_notes_allow_release_and_empty_reasons_block(self) -> None:

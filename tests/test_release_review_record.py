@@ -17,6 +17,7 @@ from control_plane.release_review_record import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.release_review import SharedSourceReview
 from tests.test_release_review import decision, profile, seed
 
 
@@ -304,7 +305,7 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         api.assert_not_called()
         token.assert_not_called()
 
-    def test_publishes_full_checklist_and_decision_to_tenant_repository(self) -> None:
+    def test_publishes_saved_decision_identity_to_tenant_repository(self) -> None:
         with patch(
             "control_plane.release_review_record.github_api_request",
             side_effect=[[], {"number": 99}, None],
@@ -322,13 +323,50 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         self.assertEqual(write["method"], "POST")
         self.assertEqual(write["path"], "/repos/example/site/issues")
         body = write["body"]["body"]
-        self.assertIn("Check the repair prices.", body)
         self.assertIn(self.decision.checklist_digest, body)
         self.assertIn(self.decision.checklist.production.source_commit, body)
         self.assertIn(self.decision.checklist.candidate.source_commit, body)
         self.assertIn("site-owner", body)
-        self.assertIn("## Client checklist", body)
-        self.assertNotIn("Owner", body)
+
+    def test_large_checklist_can_publish_within_the_provider_body_limit(self) -> None:
+        item = self.decision.checklist.items[0].model_copy(
+            update={"owner_test_notes": "Check the repair prices.\n" * 4000}
+        )
+        checklist = self.decision.checklist.model_copy(
+            update={
+                "items": (item,),
+                "shared_sources": (
+                    SharedSourceReview(
+                        repository="example/addons",
+                        production_commit=self.decision.checklist.production.source_commit,
+                        candidate_commit=self.decision.checklist.candidate.source_commit,
+                        items=(item,),
+                    ),
+                ),
+            }
+        )
+        saved = self.decision.model_copy(
+            update={"record_id": "large-checklist", "checklist": checklist}
+        )
+        self.store.create_release_review_decision_record_if_absent(saved)
+        github = FakeReleaseIssues()
+        request = github.request
+
+        def bounded_request(
+            *, path: str, token: str, method: str = "GET", body: dict[str, str] | None = None
+        ) -> object:
+            if body is not None and isinstance(body.get("body"), str):
+                if len(body["body"]) > 65_536:
+                    raise ValueError("GitHub rejected an oversized body")
+            return request(path=path, token=token, method=method, body=body)
+
+        with patch(
+            "control_plane.release_review_record.github_api_request", side_effect=bounded_request
+        ):
+            url = publish_release_decision(
+                store=self.store, control_plane_root=self.root, profile=profile(), decision=saved
+            )
+        self.assertEqual(url, "https://github.com/example/site/issues/99")
 
     def test_publication_uses_saved_action_after_client_settings_change(self) -> None:
         saved = self.decision.model_copy(
@@ -393,27 +431,6 @@ class ReleaseReviewRecordTests(unittest.TestCase):
             [call.kwargs.get("method", "GET") for call in api.call_args_list], ["GET", "DELETE"]
         )
         self.assertNotIn("method", api.call_args_list[0].kwargs)
-
-    def test_recovers_a_record_written_with_older_wording(self) -> None:
-        older_body = (
-            release_decision_issue_body(self.decision)
-            .replace("## Client checklist", "## Owner checklist")
-            .replace("\n", "\r\n")
-        )
-        with patch(
-            "control_plane.release_review_record.github_api_request",
-            return_value=[{"number": 99, "body": older_body}],
-        ) as api:
-            url = publish_release_decision(
-                store=self.store,
-                control_plane_root=self.root,
-                profile=profile(),
-                decision=self.decision,
-            )
-        self.assertEqual(url, "https://github.com/example/site/issues/99")
-        self.assertEqual(
-            [call.kwargs.get("method", "GET") for call in api.call_args_list], ["GET", "DELETE"]
-        )
 
     def test_only_the_same_record_marker_on_the_first_line_recovers(self) -> None:
         body = release_decision_issue_body(self.decision)
