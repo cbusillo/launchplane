@@ -2,7 +2,7 @@ from control_plane.contracts.github_app_installation_token import GitHubAppInsta
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_record
 from tests.support.auth import scoped_agent_test
 from contextlib import nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import asyncio
 import threading
 import unittest
@@ -2872,6 +2872,170 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(payloads[4]["result"]["landing_plan"]["entries"][0]["status"], "merged")
+
+    async def test_missing_code_scanning_replans_once_and_a_fresh_scan_can_land(self) -> None:
+        await self._exercise_missing_scan_recovery(misses=1)
+
+    async def test_missing_code_scanning_stops_with_its_reason_after_one_replacement(self) -> None:
+        await self._exercise_missing_scan_recovery(misses=2)
+
+    async def test_missing_scan_retirement_resumes_without_merging_after_interruption(self) -> None:
+        for phase in ("before_close", "after_close"):
+            with self.subTest(phase=phase):
+                await self._exercise_missing_scan_recovery(misses=2, interruption=phase)
+
+    async def _exercise_missing_scan_recovery(self, *, misses: int, interruption: str = "") -> None:
+        attempts: list[int] = []
+        built: list[str] = []
+        closed: dict[str, str] = {}
+        interrupt = bool(interruption)
+
+        class MissingScanClient(_FakeMergeTrainGitHubClient):
+            def build_batch_candidate(self, **kwargs: Any) -> Any:
+                built.append(kwargs["candidate"].batch_id)
+                return (
+                    super()
+                    .build_batch_candidate(**kwargs)
+                    .model_copy(update={"candidate_sha": f"built-{len(built)}"})
+                )
+
+            def ensure_batch_pull_request(self, **kwargs: Any) -> int:
+                return 100 if kwargs["candidate"].infrastructure_retry_of else 99
+
+            def close_batch_pull_request(self, **kwargs: Any) -> None:
+                nonlocal interrupt
+                if interrupt:
+                    interrupt = False
+                    if interruption == "after_close":
+                        closed[kwargs["candidate"].candidate_sha] = kwargs["reason"]
+                    raise RuntimeError("interrupted retirement")
+                closed[kwargs["candidate"].candidate_sha] = kwargs["reason"]
+
+            def land_batch_candidate(self, **kwargs: Any) -> Any:
+                number = kwargs["landing_plan"].candidate_pull_request_number
+                attempts.append(number)
+                if len(attempts) <= misses:
+                    raise MergeTrainGitHubMergeRejectedError(
+                        pull_request_number=number,
+                        observed_merge_state="blocked",
+                        missing_required_code_scanning=True,
+                    )
+                kwargs["provider_checkpoint"] = None
+                return super().land_batch_candidate(**kwargs)
+
+        clock = datetime.now(timezone.utc)
+
+        def next_timestamp() -> str:
+            nonlocal clock
+            clock += timedelta(microseconds=1)
+            return clock.isoformat().replace("+00:00", "Z")
+
+        def closed_batch(**kwargs: Any) -> dict[str, object] | None:
+            return {"number": 99} if kwargs["candidate"].candidate_sha in closed else None
+
+        with (
+            patch("control_plane.storage.filesystem.utc_now_timestamp", side_effect=next_timestamp),
+            TemporaryDirectory() as directory,
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
+            patch(
+                "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ),
+            patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                MissingScanClient,
+            ),
+            patch(
+                "control_plane.merge_train_controller_run_once.bound_closed_batch_pull_request",
+                side_effect=closed_batch,
+            ),
+        ):
+            state_dir = Path(directory) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            repository = "cbusillo/sellyouroutboard"
+            request = {
+                "schema_version": 1,
+                "repository": repository,
+                "base_branch": "main",
+                "mutate": True,
+            }
+            for _ in range(4):
+                await _post_merge_train_controller_run_once(app, request)
+            if interruption:
+                with self.assertRaisesRegex(RuntimeError, "interrupted retirement"):
+                    await _post_merge_train_controller_run_once(
+                        app, request, idempotency_key="missing-scan"
+                    )
+                store = FilesystemRecordStore(state_dir)
+            response = await _post_merge_train_controller_run_once(
+                app, request, idempotency_key="missing-scan"
+            )
+            self.assertEqual(attempts, [99])
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(
+                response.json()["result"]["last_controller_result"]["reason_code"],
+                "required_code_scanning_missing",
+            )
+            replay = await _post_merge_train_controller_run_once(
+                app, request, idempotency_key="missing-scan"
+            )
+            self.assertTrue(replay.json()["replayed"])
+            before = store.list_merge_train_batch_candidate_records()
+            dry = await _post_merge_train_controller_run_once(app, {**request, "mutate": False})
+            self.assertEqual(dry.json()["result"]["reason_code"], "infrastructure_retry")
+            self.assertEqual(store.list_merge_train_batch_candidate_records(), before)
+            planned = await _post_merge_train_controller_run_once(app, request)
+            self.assertEqual(planned.json()["result"]["reason_code"], "infrastructure_retry")
+            retry = planned.json()["result"]["candidate"]
+            self.assertTrue(retry["infrastructure_retry_of"])
+            self.assertFalse(retry.get("check_retry_of"))
+            store = FilesystemRecordStore(state_dir)
+            actions = []
+            for _ in range(4):
+                final = await _post_merge_train_controller_run_once(app, request)
+                self.assertEqual(final.status_code, 202, final.text)
+                actions.append(final.json()["result"])
+            self.assertEqual(attempts, [99, 100], [r["controller_action"] for r in actions])
+            self.assertEqual(len(built), 2)
+            self.assertNotEqual(built[0], built[1])
+            if misses == 2:
+                store = FilesystemRecordStore(state_dir)
+                for _ in range(3):
+                    stopped = await _post_merge_train_controller_run_once(app, request)
+                    result = stopped.json()["result"]
+                    self.assertEqual(result["controller_action"], "candidate_failed")
+                    self.assertEqual(result["reason_code"], "required_code_scanning_missing")
+                    self.assertEqual(
+                        result["details"]["recovery_reason_code"], "infrastructure_retry_used"
+                    )
+                    self.assertEqual(
+                        result["last_controller_result"]["reason_code"], result["reason_code"]
+                    )
+                    self.assertFalse(result["candidate"]["held_out"])
+                self.assertEqual(attempts, [99, 100])
+                self.assertEqual(len(built), 2)
+                self.assertEqual(set(closed), {"built-1", "built-2"})
+                failed = [
+                    r
+                    for r in store.list_merge_train_batch_candidate_records()
+                    if r.candidate.status == "failed"
+                ]
+                self.assertTrue(all(r.candidate.required_checks_status == "pass" for r in failed))
+            else:
+                self.assertEqual(
+                    final.json()["result"]["landing_plan"]["entries"][0]["status"], "merged"
+                )
+                self.assertEqual(set(closed), {"built-1"})
+                self.assertNotEqual(
+                    final.json()["result"]["last_controller_result"]["reason_code"],
+                    "required_code_scanning_missing",
+                )
 
     async def test_stale_landing_returns_accepted_result_and_replays_idempotently(self) -> None:
         class PartialLandingThenStale(_StaleLandingMergeTrainGitHubClient):
