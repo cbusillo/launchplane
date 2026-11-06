@@ -18,6 +18,7 @@ from control_plane.npmplus import (
     PREVIEW_DNS_BINDING,
     PREVIEW_DNS_INTEGRATION,
     NpmplusClient,
+    NpmplusRequestRejected,
     NpmplusProxyHost,
     NpmplusProxyHostPayload,
 )
@@ -55,7 +56,7 @@ class NpmplusWildcardIngressOperation:
     context: str
     request: NpmplusIngressApplyRequest
     finish: Callable[[NpmplusIngressApplyResult, str], dict[str, object]]
-    pending: Callable[[], None]
+    pending: Callable[[str], None]
 
     def target_key(self) -> str:
         return "npmplus-wildcard:" + self.request.route.domain_names[0].lower()
@@ -127,6 +128,15 @@ class NpmplusWildcardIngressOperation:
                 for domain in self.request.route.domain_names
             ):
                 raise ValueError("An existing provider hostname overlaps this wildcard.")
+        if any(
+            _covers(name, domain) or _covers(domain, name)
+            for certificate in self.client.list_certificates()
+            for name in certificate.domain_names
+            for domain in self.request.route.domain_names
+        ):
+            raise ValueError(
+                "A provider certificate already covers this wildcard; use its integer ID."
+            )
         return result
 
     def _marked_request(self, provider_key: str) -> NpmplusIngressApplyRequest:
@@ -204,13 +214,20 @@ class NpmplusWildcardIngressOperation:
 
                 def before_dispatch() -> None:
                     nonlocal dispatched
-                    self.pending()
+                    self.pending(provider_operation_key)
                     lease.checkpoint_effect("create_wildcard_certificate_and_host")
                     dispatched = True
 
-                return self.client.create_dns_proxy_host(
-                    payload, token=token, before_dispatch=before_dispatch
-                )
+                try:
+                    return self.client.create_dns_proxy_host(
+                        payload, token=token, before_dispatch=before_dispatch
+                    )
+                except NpmplusRequestRejected as error:
+                    if dispatched:
+                        lease.checkpoint_effect(
+                            f"wildcard_provider_rejected_http_{error.status_code}"
+                        )
+                    raise
 
             lease.assert_current()
             apply_npmplus_ingress_route(
@@ -244,6 +261,9 @@ class NpmplusWildcardIngressOperation:
                 return ProviderObservation(
                     "present", response_payload=self.finish(result, provider_operation_key)
                 )
+            if provider_effect_phase.startswith("wildcard_provider_rejected_http_"):
+                self.plan()
+                return ProviderObservation("absent", retry_safe=True)
         except (ValueError, LookupError, OSError, click.ClickException):
             return ProviderObservation("unknown")
         return ProviderObservation("unknown")

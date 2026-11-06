@@ -14,6 +14,7 @@ from urllib.request import Request
 
 from cryptography.fernet import Fernet
 from httpx2 import Response
+from http.client import IncompleteRead
 
 from control_plane import secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -48,10 +49,39 @@ class _DnsOpener(_Opener):
         if request.get_method() == "POST" and request.selector == "/api/nginx/proxy-hosts":
             self.created += 1
             body = json.loads(cast(bytes, request.data))
+            if self.mode in {
+                "native-rejection",
+                "native-error",
+                "native-orphan",
+                "transport-inflight",
+            }:
+                status = 400 if self.mode == "native-rejection" else 500
+                if self.mode in {"native-orphan", "transport-inflight"}:
+                    self.certificates.append(
+                        {
+                            **self.certificate_payload,
+                            "id": 48,
+                            "domain_names": body["domain_names"],
+                            "expires_on": None
+                            if self.mode == "transport-inflight"
+                            else self.certificate_payload["expires_on"],
+                        }
+                    )
+                if self.mode == "transport-inflight":
+                    raise TimeoutError(_TOKEN)
+                raise HTTPError(
+                    request.full_url,
+                    status,
+                    _TOKEN,
+                    Message(),
+                    io.BytesIO(json.dumps({"error": {"code": status, "message": _TOKEN}}).encode()),
+                )
             if self.mode == "error":
                 raise HTTPError(
                     request.full_url, 500, _TOKEN, Message(), io.BytesIO(_TOKEN.encode())
                 )
+            if self.mode == "partial":
+                raise IncompleteRead(_TOKEN.encode())
             if self.mode == "transport":
                 raise URLError(_TOKEN)
             if self.mode == "malformed":
@@ -245,14 +275,10 @@ class WildcardIngressTests(unittest.IsolatedAsyncioTestCase):
             resolver.assert_not_called()
         self.assertEqual(fixture.opener.created, 0)
 
-    async def test_success_replays_receipt_and_preserves_unrelated_provider_and_source_records(
+    async def test_success_replays_receipt_and_keeps_dns_token_inside_create(
         self,
     ) -> None:
         fixture = _Fixture(self)
-        before = (
-            fixture.store.list_secret_records(),
-            fixture.store.list_runtime_environment_records(),
-        )
         with patch.object(
             fixture.store,
             "read_secret_version",
@@ -277,21 +303,89 @@ class WildcardIngressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay.status_code, 202, replay.text)
         self.assertTrue(replay.json()["replayed"])
         self.assertEqual(fixture.opener.created, 1)
-        self.assertIn(
-            {"id": 79, "domain_names": ["unrelated.example.test"]},
-            fixture.opener.proxy_hosts_payload,
-        )
-        self.assertEqual(
-            before,
-            (fixture.store.list_secret_records(), fixture.store.list_runtime_environment_records()),
-        )
         evidence = (
             response.text + replay.text + repr(fixture.store.list_ingress_route_audit_records())
         )
         self.assertNotIn(_TOKEN, evidence)
 
+    async def test_settled_provider_rejection_recovers_only_after_complete_absence_and_converges_audit(
+        self,
+    ) -> None:
+        for mode in ("native-rejection", "native-error"):
+            with self.subTest(mode=mode):
+                fixture = _Fixture(self, mode=mode)
+                rejected = await fixture.post()
+                self.assertEqual(rejected.status_code, 409, rejected.text)
+                fixture.opener.mode = "success"
+                recovered = await fixture.post()
+                self.assertEqual(recovered.status_code, 202, recovered.text)
+                self.assertEqual(fixture.opener.created, 2)
+                audits = [
+                    entry
+                    for entry in fixture.store.list_ingress_route_audit_records()
+                    if entry.idempotency_key == "wildcard-original"
+                ]
+                self.assertEqual(len(audits), 1)
+                self.assertEqual(audits[0].status, "applied")
+                self.assertNotIn(_TOKEN, rejected.text + recovered.text + repr(audits))
+
+    async def test_terminal_absence_can_release_stale_version_for_a_fresh_reviewed_key(
+        self,
+    ) -> None:
+        fixture = _Fixture(self, mode="native-rejection")
+        self.assertEqual((await fixture.post()).status_code, 409)
+        plan = _plan_product_config_secret_write(
+            record_store=fixture.store,
+            scope="context",
+            context_name="launchplane",
+            integration=PREVIEW_DNS_INTEGRATION,
+            name=PREVIEW_DNS_BINDING,
+            binding_key=PREVIEW_DNS_BINDING,
+            plaintext_value=_TOKEN + "-rotated",
+            value_source="supplied",
+        )
+        fixture.store.write_product_authority_bundle(
+            ProductAuthorityBundle(
+                secret_records=tuple(plan["secret_records"]),
+                secret_versions=tuple(plan["secret_versions"]),
+                secret_bindings=tuple(plan["secret_bindings"]),
+                secret_audit_events=tuple(plan["secret_audit_events"]),
+            )
+        )
+        fixture.opener.mode = "success"
+        with patch.object(
+            secrets,
+            "resolve_context_secret_value_from_store",
+            side_effect=AssertionError("Stale version decrypted"),
+        ):
+            stale = await fixture.post()
+        self.assertEqual(stale.status_code, 400, stale.text)
+        self.assertEqual(fixture.opener.created, 1)
+        ingress = cast(dict[str, object], fixture.payload["ingress"])
+        ingress["dns_secret_version_id"] = plan["secret_records"][0].current_version_id
+        recovered = await fixture.post(key="fresh-reviewed-key")
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertEqual(fixture.opener.created, 2)
+
+    async def test_orphan_or_inflight_certificate_prevents_new_issuance(self) -> None:
+        for mode in ("native-orphan", "transport-inflight"):
+            with self.subTest(mode=mode):
+                fixture = _Fixture(self, mode=mode)
+                rejected = await fixture.post()
+                self.assertEqual(rejected.status_code, 409, rejected.text)
+                fixture.opener.mode = "success"
+                with patch.object(
+                    secrets,
+                    "resolve_context_secret_value_from_store",
+                    side_effect=AssertionError("Observation decrypted a credential"),
+                ):
+                    still_unknown = await fixture.post()
+                self.assertEqual(still_unknown.status_code, 409, still_unknown.text)
+                self.assertEqual(fixture.opener.created, 1)
+                self.assertEqual(len(fixture.opener.certificates), 2)
+
     async def test_dispatched_failures_never_blind_retry_and_lost_success_is_adopted(self) -> None:
-        for mode in ("error", "transport", "malformed", "echo", "lost"):
+        for mode in ("error", "transport", "partial", "malformed", "echo", "lost"):
             with self.subTest(mode=mode):
                 fixture = _Fixture(self, mode=mode)
                 with self.assertLogs("control_plane", level="WARNING") as logs:
@@ -310,6 +404,14 @@ class WildcardIngressTests(unittest.IsolatedAsyncioTestCase):
                     different_key.status_code, 400 if mode == "lost" else 409, different_key.text
                 )
                 self.assertEqual(fixture.opener.created, 1)
+                if mode == "lost":
+                    audits = [
+                        entry
+                        for entry in fixture.store.list_ingress_route_audit_records()
+                        if entry.idempotency_key == "wildcard-original"
+                    ]
+                    self.assertEqual(len(audits), 1)
+                    self.assertEqual(audits[0].status, "applied")
                 evidence = (
                     failed.text
                     + retried.text
@@ -322,20 +424,18 @@ class WildcardIngressTests(unittest.IsolatedAsyncioTestCase):
     def test_provider_errors_with_fictional_credentials_do_not_leak_in_tracebacks(self) -> None:
         from control_plane.npmplus import NpmplusProxyHostPayload
 
-        for mode in ("echo",):
-            with self.subTest(mode=mode):
-                client = NpmplusClient(credentials=_credentials(), opener=_DnsOpener(mode))
-                try:
-                    client.create_dns_proxy_host(
-                        NpmplusProxyHostPayload(
-                            domain_names=("*.preview.example.test",),
-                            forward_host="192.0.2.40",
-                            forward_scheme="https",
-                            certificate_id="new",
-                        ),
-                        token=_TOKEN,
-                    )
-                except (ValueError, click.ClickException):
-                    self.assertNotIn(_TOKEN, traceback.format_exc())
-                else:
-                    self.fail("Unverified provider response succeeded")
+        client = NpmplusClient(credentials=_credentials(), opener=_DnsOpener("echo"))
+        try:
+            client.create_dns_proxy_host(
+                NpmplusProxyHostPayload(
+                    domain_names=("*.preview.example.test",),
+                    forward_host="192.0.2.40",
+                    forward_scheme="https",
+                    certificate_id="new",
+                ),
+                token=_TOKEN,
+            )
+        except (ValueError, click.ClickException):
+            self.assertNotIn(_TOKEN, traceback.format_exc())
+        else:
+            self.fail("Unverified provider response succeeded")

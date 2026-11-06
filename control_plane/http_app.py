@@ -21842,12 +21842,14 @@ def create_launchplane_fastapi_app(
         provider: str,
         request: NpmplusIngressApplyRequest,
         idempotency_key: str,
+        record_id: str = "",
     ) -> IngressRouteAuditRecord:
         certificate_id = request.route.certificate_id
         tls_owner: IngressRouteTlsOwner = "none" if certificate_id == 0 else "provider"
         provider_certificate_ref = "" if certificate_id == 0 else str(certificate_id)
         record = IngressRouteAuditRecord(
-            record_id=build_ingress_route_audit_record_id(
+            record_id=record_id
+            or build_ingress_route_audit_record_id(
                 trace_id=trace_id,
                 product=product,
                 context=context,
@@ -23521,6 +23523,8 @@ def create_launchplane_fastapi_app(
                     try:
                         audit = record_store.read_ingress_route_audit_record(record_id)
                     except FileNotFoundError:
+                        audit = None
+                    if audit is None or audit.status == "pending":
                         audit = write_ingress_route_audit_record(
                             ingress_store=ingress_store,
                             trace_id=trace_id,
@@ -23545,7 +23549,7 @@ def create_launchplane_fastapi_app(
                         result=result.model_dump(mode="json"),
                     ).model_dump(mode="json", exclude_none=True)
 
-                def pending_wildcard() -> None:
+                def pending_wildcard(provider_key: str) -> None:
                     write_ingress_route_pending_audit_record(
                         ingress_store=ingress_store,
                         trace_id=trace_id,
@@ -23554,6 +23558,12 @@ def create_launchplane_fastapi_app(
                         provider=ingress_provider.provider_id,
                         request=audit_ingress_request,
                         idempotency_key=normalized_key,
+                        record_id=build_ingress_route_audit_record_id(
+                            trace_id=provider_key,
+                            product=route_request.product,
+                            context=route_request.context,
+                            domains=audit_ingress_request.route.domain_names,
+                        ),
                     )
 
                 wildcard = NpmplusWildcardIngressOperation(

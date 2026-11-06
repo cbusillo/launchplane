@@ -103,7 +103,10 @@ Only the service's product wildcard create resolves this purpose. It is separate
 from NPMplus API authentication and application runtime bindings. It is never
 synced into an app or copied to host configuration. NPMplus receives the token
 in its existing DNS-01 quick-certificate create request and owns certificate
-renewal. Launchplane retains no provider credential response or diagnostic text.
+renewal, including its existing retained certificate credential and renewal
+input. Rotating the Launchplane version alone does not update that provider
+credential; qualify provider renewal before revoking a token it still uses.
+Launchplane retains no provider credential response or diagnostic text.
 The [ingress driver contract](driver-development.md#preview-wildcard-creation)
 owns planning, pinned-version application and unknown-effect reconciliation.
 

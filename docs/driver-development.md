@@ -483,8 +483,20 @@ A service-owned operation marker binds readback to that exact create. Readback
 requires the exact host, upstream and options, loaded nginx and matching current
 certificate metadata. A response lost after dispatch is unknown, even if an
 HTTP error or empty inventory appears. Keep the original key: reconciliation
-can adopt the exact marked route, but cannot issue again or delete an uncertain
-certificate. A new key cannot bypass the outstanding target reservation.
+can adopt the exact marked route. A complete native NPMplus error envelope
+records only its numeric HTTP status in the effect checkpoint. An original-key
+retry may reattempt only after fresh complete host, redirect/dead-host and
+certificate inventories prove absence. If the credential version changed, first
+reconcile the original request/key: its verified absent attempt refuses the stale
+version before decryption and releases the target. Then review a fresh plan and
+apply with that version and a new key. Proxy errors, invalid error bodies,
+transport loss and malformed success replies stay unknown; elapsed time never
+qualifies absence. A new key cannot bypass the outstanding target reservation.
+A retained certificate or mismatching host also prevents issuance. Qualify that
+exact resource through the existing integer-certificate route-apply path, under
+its original ownership and operational checks, rather than issuing again or
+deleting it. Preserve the operation marker during any existing-host repair so
+the original key can reconcile its exact readback.
 An interruption before the effect checkpoint is retryable under its original key.
 Post-dispatch absence is unknown while an issuance request could still be running.
 Unrelated hosts, certificates, source credentials and application records are
