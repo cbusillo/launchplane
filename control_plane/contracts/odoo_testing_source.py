@@ -52,6 +52,25 @@ class NativeTestingCopyArtifact(BaseModel):
     size: int = Field(gt=0)
 
 
+class MigratedOdooTestingSource(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["migrated"] = "migrated"
+    product: str = Field(min_length=1)
+    context: str = Field(min_length=1)
+    source_backup: str = Field(min_length=1, max_length=1024)
+    producer_run: str = Field(min_length=1, max_length=1024)
+    target_image: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    database: NativeTestingCopyArtifact
+    filestore: NativeTestingCopyArtifact
+    filestore_expanded_bytes: int = Field(gt=0)
+    filestore_files: int = Field(gt=0)
+
+    @property
+    def binding_sha256(self) -> str:
+        return canonical_json_sha256(self.model_dump(mode="json"))
+
+
 class NativeTestingCopyCapture(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -63,7 +82,7 @@ class NativeTestingCopyCapture(BaseModel):
     database: NativeTestingCopyArtifact
     filestore: NativeTestingCopyArtifact
     captured_at: str
-    source_observation: NativeOdooTestingSource
+    source_observation: NativeOdooTestingSource | MigratedOdooTestingSource
 
     @model_validator(mode="after")
     def _validate_source(self) -> "NativeTestingCopyCapture":

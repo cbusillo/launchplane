@@ -520,6 +520,36 @@ class HostCapacityTests(unittest.TestCase):
 
         self.enterContext(patch.object(Path, "read_text", read))
 
+    def test_migrated_capacity_counts_only_real_attachments_and_only_remaining_archive_bytes(
+        self,
+    ) -> None:
+        namespace: dict[str, Any] = {}
+        exec(STORAGE_MAINTENANCE_LIBRARY, namespace)
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            filestore = root / "filestore"
+            attachment = filestore / "aa" / ("a" * 40)
+            attachment.parent.mkdir(parents=True)
+            attachment.write_bytes(b"attachment")
+            (attachment.parent / ".lp-native-owned-temporary").write_bytes(b"not finished")
+            self.assertEqual(
+                namespace["populated_filestore_bytes"](filestore), attachment.stat().st_size
+            )
+            identity = "a" * 32
+            source = {"database": {"size": 20}, "filestore": {"size": 40}}
+            self.assertEqual(
+                namespace["remaining_migrated_staging"](root, identity, source),
+                sum(value["size"] for value in source.values()),
+            )
+            staged = root / (".lp-native-" + identity)
+            staged.mkdir()
+            (staged / "database.artifact").write_bytes(b"a" * source["database"]["size"])
+            (staged / "filestore.artifact.partial").write_bytes(b"b" * 12)
+            self.assertEqual(
+                namespace["remaining_migrated_staging"](root, identity, source),
+                source["filestore"]["size"] - 12,
+            )
+
     def test_shared_backing_demands_are_summed_and_unknown_overlay_is_refused(self) -> None:
         namespace: dict[str, Any] = {"Path": Path, "os": os, "json": json}
         tree = ast.parse(STORAGE_MAINTENANCE_LIBRARY)
@@ -560,6 +590,15 @@ class HostCapacityTests(unittest.TestCase):
                 self.assertFalse(
                     namespace["storage_capacity"](
                         spec, containers, budget, staged_bytes=40, assembly_bytes=40
+                    )
+                )
+                self.assertTrue(
+                    namespace["storage_capacity"](
+                        spec,
+                        containers,
+                        budget,
+                        runner_staging_bytes=10,
+                        filestore_existing_bytes=30,
                     )
                 )
                 budget["staging_bytes"] = 10

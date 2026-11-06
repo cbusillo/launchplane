@@ -2729,6 +2729,48 @@ recovery without the private cache. Missing original bytes in both places,
 without a database witness, are held for recovery, never silently replaced with
 a newer production snapshot.
 
+An offline migrated pair uses `data_source_mode=migrated_restore` on the same
+independent testing rebuild. Its `migrated_source` names the product/context,
+backup and migration run, selected immutable target image, dump and compressed
+filestore SHA256/lengths, and complete expanded filestore file/byte counts.
+This is the declared offline output, never a claimed observation of
+production. The compiler binds it to the selected artifact and generation.
+
+Once the normal worker has recorded its private candidate application, the
+original authenticated testing caller uploads one part at a time to
+`wss://SERVICE/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source/{part}`
+with its existing bearer authorization. The first JSON frame supplies `offset`,
+and `prefix_sha256`; wait for the matching `ready` offset, send
+binary frames of at most 1 MiB, then JSON `{"complete": true}`. The final JSON
+frame reports the original upload state. GET the same path without `/{part}` to
+inspect retained sizes and completion. The authenticated WebSocket avoids
+proxy request-body buffering. Use the documented private connection.
+A disconnect retains the original prefix; its digest must match before resume.
+An explicit start at offset zero with the empty-prefix digest restarts only an
+incomplete part under its existing lock; completed originals cannot be reset.
+The receiver hashes and fsyncs each completed upload. A reused completed pair is
+size-checked before its generation receipt and fully rehashed before delivery. GET never commits a receipt. The original caller,
+product, candidate custody and unstarted restore remain required.
+
+Migrated uploads reuse one private content cache for the same product and source
+binding across candidate attempts. Each generation still has its own immutable
+capture receipt. A terminal failed candidate retains its source bytes for retry;
+a prepared candidate removes the completed pair cache after the normal restore
+and private-readiness proof. Candidate volumes retain the normal disposable-copy
+custody and collection protections.
+
+Migrated uploads use actual free space, the lane's existing storage reserve and
+their declared complete inventories instead of the small live-capture limits
+above. Capacity charges the larger of the existing filestore allowance and the
+declared expanded bytes, even when clean snapshots are disabled. Streaming and
+extraction keep the same reserve if another writer consumes free space. Delivery streams windows through
+one registered terminal connection into the candidate data volume, preserving
+only an exact verified prefix on interruption. Receiver size/hash verification still
+precedes restore. Streaming extraction rejects unsafe or duplicate paths and
+requires the exact declared full filestore count and bytes before publishing the
+dump. The existing credential boundary, quarantine, restore witness, private
+readiness, route cutover and clean snapshot remain the normal rebuild path.
+
 Native rebuilds bind a capture to their original private candidate's recorded
 generation while its restore remains undispatched and its allocation custody
 and predecessor selection agree. The serving generation stays unchanged until

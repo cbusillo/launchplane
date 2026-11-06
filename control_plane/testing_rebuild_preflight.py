@@ -59,7 +59,7 @@ class TestingRebuildPreflight(BaseModel):
     base_url: str
     artifact_id: str
     source_git_ref: str
-    data_source_mode: Literal["empty", "production_restore", "upstream_restore"]
+    data_source_mode: Literal["empty", "production_restore", "upstream_restore", "migrated_restore"]
     observed_at: str
     # This is admission evidence. The worker still proves the actual independent
     # candidate's isolation, credentials, restore, health and cutover before use.
@@ -108,6 +108,21 @@ def inspect_testing_rebuild(
         ):
             raise TestingRebuildRefused(
                 "testing_rebuild_inputs_unverified", "The selected build differs from its product."
+            )
+    if apply.migrated_source is not None:
+        manifest = (
+            verified_build.manifest
+            if isinstance(verified_build, VerifiedBuildArtifact)
+            else store.read_artifact_manifest(apply.artifact_id)
+        )
+        if (
+            apply.migrated_source.product,
+            apply.migrated_source.context,
+            apply.migrated_source.target_image,
+        ) != (apply.product, lane.context, manifest.image.digest):
+            raise TestingRebuildRefused(
+                "testing_rebuild_inputs_unverified",
+                "Migrated output differs from the selected product, lane or build.",
             )
     now = utc_now_timestamp()
     # A local read identity, never persisted or passed to a provider executor.
@@ -227,7 +242,12 @@ def inspect_testing_rebuild(
         ) from error
     # Configuration is not a completed or healthy copy. The worker verifies the
     # real source and independent candidate before exposing it at the address.
-    assert apply.data_source_mode in {"empty", "production_restore", "upstream_restore"}
+    assert apply.data_source_mode in {
+        "empty",
+        "production_restore",
+        "upstream_restore",
+        "migrated_restore",
+    }
     return TestingRebuildPreflight(
         product=apply.product,
         context=lane.context,
