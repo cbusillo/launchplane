@@ -205,11 +205,26 @@ class _Fixture:
         )
 
     def use_director(self) -> str:
-        from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
+        from control_plane.service_auth import (
+            BearerIdentityConfig,
+            LaunchplaneAuthzPolicy,
+            LocalOperatorPolicyRule,
+        )
 
         self.app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
-            authz_policy=LaunchplaneAuthzPolicy(),
+            authz_policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_operators=(
+                    LocalOperatorPolicyRule(
+                        subjects=("director",),
+                        token_labels=("fixture",),
+                        products=("sample",),
+                        contexts=("sample-testing",),
+                        actions=("agent.read",),
+                    ),
+                ),
+            ),
             record_store_factory=lambda: self.store,
             npmplus_ingress_client_factory=lambda: self.client,
             bearer_identity_config=BearerIdentityConfig(
@@ -223,12 +238,18 @@ class _Fixture:
 
 class WildcardIngressTests(unittest.IsolatedAsyncioTestCase):
     async def test_director_can_plan_its_preview_namespace_without_write_authority(self) -> None:
+        from tests.support.auth import scoped_agent_transport
+
         fixture = _Fixture(self, supplied=False)
         authorization = fixture.use_director()
         with patch.object(secrets, "resolve_context_secret_value_from_store") as resolver:
             plan = await fixture.post(mode="dry-run", authorization=authorization)
             self.assertEqual(plan.status_code, 202, plan.text)
             self.assertFalse(plan.json()["records"]["dns_secret_ready"])
+            with scoped_agent_transport():
+                scoped = await fixture.post(mode="dry-run", authorization=authorization)
+                self.assertEqual(scoped.status_code, 400, scoped.text)
+                self.assertNotIn("dns_secret_version_id", scoped.text)
             ingress = cast(dict[str, object], fixture.payload["ingress"])
             route = cast(dict[str, object], ingress["route"])
             with patch.dict(route, {"dns_challenge": ""}):
@@ -285,7 +306,15 @@ class WildcardIngressTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(_TOKEN, created.text)
 
     async def test_recorded_lane_hosts_and_nested_preview_namespaces_block_issuance(self) -> None:
-        for source in ("lane", "public_hosts", "parent_preview", "child_preview"):
+        for source in (
+            "clear",
+            "lane",
+            "apex_lane",
+            "nested_lane",
+            "public_hosts",
+            "parent_preview",
+            "child_preview",
+        ):
             with self.subTest(source=source):
                 fixture = _Fixture(self)
                 profile = LaunchplaneProductProfileRecord.model_validate(
@@ -293,6 +322,10 @@ class WildcardIngressTests(unittest.IsolatedAsyncioTestCase):
                 )
                 if source == "lane":
                     profile.lanes[0].base_url = "https://app.preview.example.test"
+                elif source == "apex_lane":
+                    profile.lanes[0].base_url = "https://preview.example.test"
+                elif source == "nested_lane":
+                    profile.lanes[0].base_url = "https://a.b.preview.example.test"
                 fixture.store.write_product_profile_record(profile)
                 if source == "public_hosts":
                     fixture.store.write_dokploy_target_record(
@@ -318,7 +351,9 @@ class WildcardIngressTests(unittest.IsolatedAsyncioTestCase):
                     )
                 with patch.object(secrets, "resolve_context_secret_value_from_store") as resolver:
                     refused = await fixture.post(mode="dry-run")
-                    self.assertEqual(refused.status_code, 400, refused.text)
+                    self.assertEqual(
+                        refused.status_code, 202 if source == "clear" else 400, refused.text
+                    )
                     resolver.assert_not_called()
                 self.assertEqual(fixture.opener.created, 0)
 

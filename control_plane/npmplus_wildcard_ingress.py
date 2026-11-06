@@ -7,7 +7,7 @@ import click
 from control_plane import secrets
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.public_hosts import normalize_public_hosts, retained_hostname_identity
-from control_plane.ingress_route_scope import tracked_ingress_targets
+from control_plane.ingress_route_scope import lane_hostname_claims, tracked_ingress_targets
 from control_plane.contracts.product_profile_record import (
     is_exclusive_product_context,
     product_context_owner_map,
@@ -105,21 +105,7 @@ class NpmplusWildcardIngressOperation:
         if base.scheme != "https" or self.request.route.domain_names != ("*." + namespace,):
             raise ValueError("Wildcard issuance must use the recorded product preview namespace.")
         profiles = self.store.list_product_profile_records()
-        claimed_hosts = {
-            retained_hostname_identity(value)
-            for other in profiles
-            for lane in other.lanes
-            for value in (
-                lane.base_url,
-                lane.health_url,
-                *(
-                    check.url
-                    for check in lane.health_monitoring.checks
-                    if check.enabled and check.kind == "public_http"
-                ),
-            )
-            if value.strip()
-        } | {
+        claimed_hosts = {name for other in profiles for name in lane_hostname_claims(other)} | {
             name
             for other in profiles
             for target in tracked_ingress_targets(self.store, other)
@@ -127,7 +113,11 @@ class NpmplusWildcardIngressOperation:
         }
         wildcard_name = "*." + namespace
         if any(
-            _covers(name, wildcard_name) or _covers(wildcard_name, name) for name in claimed_hosts
+            name == namespace
+            or name.endswith("." + namespace)
+            or _covers(name, wildcard_name)
+            or _covers(wildcard_name, name)
+            for name in claimed_hosts
         ):
             raise ValueError("A product lane already claims this wildcard namespace.")
         for other in profiles:

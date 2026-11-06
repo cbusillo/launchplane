@@ -23439,6 +23439,7 @@ def create_launchplane_fastapi_app(
         )
         wildcard_context_plan = (
             route_request.ingress.mode == "dry-run"
+            and director_agent_identity(identity)
             and not instance_name
             and bool(route_request.ingress.route.dns_challenge)
         )

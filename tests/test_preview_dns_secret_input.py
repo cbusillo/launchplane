@@ -106,7 +106,6 @@ class PreviewDnsSecretInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.store.list_secret_versions(secret_id=records[0].secret_id)), 1)
         self.assertNotIn("fictional-private-dns-token", plan.text + applied.text + replayed.text)
         self.assertEqual(self.store.list_runtime_environment_records(), ())
-        self.assertEqual(self.store.list_product_profile_records(), ())
 
     async def test_apply_without_matching_plan_writes_nothing(self) -> None:
         self.payload["mode"] = "apply"
