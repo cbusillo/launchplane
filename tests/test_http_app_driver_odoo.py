@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -113,7 +114,7 @@ from tests.http_app_test_support import (
     _post_odoo_website_bootstrap_override,
 )
 from tests.support.openapi import openapi_response
-from tests.support.auth import _identity, _StubVerifier
+from tests.support.auth import _identity, _StubVerifier, scoped_agent_transport
 from tests.support.artifact_manifests import artifact_manifest_v2
 from tests.support.profiles import _odoo_preview_profile_payload
 from tests.support.stores import (
@@ -6413,6 +6414,79 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
+    async def test_director_records_override_intent_without_runtime_authority(self) -> None:
+        for transport, director in (
+            ("local_operator", True),
+            ("local_operator", False),
+            ("terminal_agent", True),
+        ):
+            with (
+                self.subTest(transport=transport, director=director),
+                TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                store = self._store_with_tenant_profile(root / "state")
+                config = BearerIdentityConfig.model_validate(
+                    {
+                        f"{transport}_token": "override-token",
+                        f"{transport}_subject": "override-agent",
+                        f"{transport}_token_label": "override-agent",
+                    }
+                )
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(self._identity()),
+                    authz_policy=LaunchplaneAuthzPolicy(schema_version=3),
+                    record_store_factory=lambda: store,
+                    control_plane_root_path=root,
+                    bearer_identity_config=config,
+                )
+                expected = 202 if director and transport == "local_operator" else 403
+                with (
+                    nullcontext() if director else scoped_agent_transport(),
+                    patch(
+                        "control_plane.odoo_post_deploy_http.execute_odoo_post_deploy"
+                    ) as execute,
+                ):
+                    for post, payload in (
+                        (_post_odoo_config_parameter_override, self._config_override_payload()),
+                        (_post_odoo_website_bootstrap_override, self._website_override_payload()),
+                    ):
+                        response = await post(app, payload, authorization="Bearer override-token")
+                        self.assertEqual(response.status_code, expected)
+                    runtime = await _post_odoo_post_deploy(
+                        app,
+                        {
+                            "product": "odoo-tenant-cm",
+                            "post_deploy": {"context": "cm", "instance": "testing"},
+                        },
+                        authorization="Bearer override-token",
+                    )
+                    self.assertEqual(runtime.status_code, 403)
+                    execute.assert_not_called()
+                if expected == 202:
+                    record = store.read_odoo_instance_override_record(
+                        context_name="cm", instance_name="testing"
+                    )
+                    self.assertEqual(
+                        record.config_parameters[0].value.value,
+                        cast(dict[str, object], self._config_override_payload()["override"])[
+                            "value"
+                        ],
+                    )
+                    self.assertEqual(
+                        record.website_bootstrap,
+                        OdooWebsiteBootstrapPayload.model_validate(
+                            cast(dict[str, object], self._website_override_payload()["override"])[
+                                "website_bootstrap"
+                            ]
+                        ),
+                    )
+                else:
+                    with self.assertRaises(FileNotFoundError):
+                        store.read_odoo_instance_override_record(
+                            context_name="cm", instance_name="testing"
+                        )
+
     async def test_connection_repair_preserves_uncertain_and_precondition_errors(self) -> None:
         from control_plane.dokploy.api import DokployScheduleExecutionFailed
         from control_plane.odoo_connection_isolation import ConnectionIsolationPreconditionFailed

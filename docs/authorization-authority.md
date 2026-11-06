@@ -127,6 +127,14 @@ Expected-configuration declaration authority and its authenticated Director-agen
 declaration exception are defined in the
 [product profile contract](service-boundary.md#product-profile-endpoints).
 
+The native Odoo config-parameter and website-bootstrap override writers also
+inherit standing permission. They only compare-and-write future instance intent;
+they cannot apply it to Odoo, change credentials or access, or start a release.
+The config-parameter writer remains limited to `web.base.url`. Both retain lane
+validation, idempotency and record merge checks. The Director's `local_operator`
+may write; terminal mutation restrictions and other callers' scoped grants remain.
+Actual post-deploy and production execution retain their separate authorization.
+
 The existing testing-retry route also admits the authenticated Director agent
 through the existing `local_operator` bearer transport under the standing
 permission. Terminal-agent credentials are not admitted on this retry route.

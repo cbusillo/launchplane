@@ -146,7 +146,9 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "odoo_app_maintenance.execute": ActionDeclaration("write"),
         WALKTHROUGH_ACTION: ActionDeclaration("write"),
         WALKTHROUGH_PLAN_ACTION: ActionDeclaration("plan"),
-        "odoo_config_parameter_override.write": ActionDeclaration("write"),
+        "odoo_config_parameter_override.write": ActionDeclaration(
+            "write", director_agent_write=True
+        ),
         "odoo_post_deploy.execute": ActionDeclaration("write"),
         ODOO_CONNECTION_ISOLATION_ACTIONS["dry-run"]: ActionDeclaration("plan"),
         ODOO_CONNECTION_ISOLATION_ACTIONS["readback"]: ActionDeclaration("read"),
@@ -166,7 +168,9 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "odoo_stable_bootstrap.execute": ActionDeclaration("write"),
         "odoo_target_replacement_apply.execute": ActionDeclaration("write"),
         "odoo_target_replacement_plan.read": ActionDeclaration("read"),
-        "odoo_website_bootstrap_override.write": ActionDeclaration("write"),
+        "odoo_website_bootstrap_override.write": ActionDeclaration(
+            "write", director_agent_write=True
+        ),
         "operations.read": ActionDeclaration("read"),
         "ordinary_agent_delivery_activation.approve": ActionDeclaration("write"),
         "ordinary_agent_delivery_activation.cancel": ActionDeclaration("write"),
