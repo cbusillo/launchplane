@@ -92,6 +92,9 @@ Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
+For the Director's capture-only permission and its durable authorization checks,
+see [production backups](production-backup-provider.md#service-contract).
+
 Route-binding reconcile admits the Director's existing `local_operator` transport
 to refresh evidence on an exclusively owned declared lane, including production,
 without granting `route_binding.apply`. The request must name the current record
@@ -305,8 +308,10 @@ policy grant through the existing Dokploy target setup dry-run/apply endpoint.
 This path creates only a new project, a new environment and an empty raw compose
 for an active product's exclusively owned context. It accepts no existing
 project, environment or target IDs, replacement reference, repository source,
-domain route or published port. The testing lane and all three target authority
-records must be absent. Production ownership on the same product does not block
+domain route or published port. All three target authority records must be
+absent. A testing lane may already be registered only if it never deployed or
+served, as when [native Odoo onboarding](operations.md#native-odoo-onboarding)
+records the lane first. Production ownership on the same product does not block
 this new-resource staging and acquires no new permission.
 
 The service checks eligibility before each provider effect and provider read,

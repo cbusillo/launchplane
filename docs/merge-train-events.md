@@ -89,25 +89,38 @@ an envelope's routing key remains a hint, independent of its optional receipt.
 Unreadable envelopes with no routing hint fall back to a full sweep. A due sweep
 still consumes queued hints and rereads all targets, retaining observed receipts.
 
-Worker stdout keeps its existing result list. Every loop pass also emits one
-structured `merge_train_pass` record on stderr. It contains the actual wake
-reason, loop-pass start, hint observation time, target-keyed receipts and any
-whole-pass error code, alongside the actual target/result status, controller
-action trace and record identifiers from that pass. This binds observations
-without joining by nearby timestamps or repeating receipts on continuation rows.
+Every loop pass emits `merge_train_pass` projections on stderr, each bound to
+its loop-pass start (`started_at`). The first contains the actual wake reason, hint observation
+time, any whole-pass error (`wake.error_code`), and counts of results, explicit target keys and
+receipts. A null target count denotes a full sweep. Subsequent records
+contain one explicit target key, one target-keyed receipt, or one result binding
+at a time. `wake.targets` and receipt/result `routing_key` retain the opaque
+controller identity through redaction. Result bindings keep repository, base,
+status, reason, controller
+action, trace and record identifiers. Full controller/runtime bodies and the
+duplicate stdout fleet array are omitted. The command's final stopped status
+remains on stdout; `run-once` retains its existing result response.
+
+The counts let a reader check whether all projections were retained. A receipt
+is emitted once even when a target continues through several actions. Empty or
+failed passes still emit their wake and counts, and unmatched hints remain
+visible without inventing an action. Each projection stays independent of fleet
+size and receipt count, so valid aggregate output no longer overwhelms the
+supported reader's per-message bound. The reader's limits, redaction and
+quarantine remain unchanged. These are correlation observations, never quota,
+admission or landing proof.
+
 Startup, event hints, timed sweeps, empty hints and listener fallback remain
 distinguishable. A timer sweep can also observe receipts, and a later pass does
 not reuse them as a new cause. The loop-pass start is not every action's start;
 use each controller's times and trace for its bounded continuations.
 
 A target disabled or skipped during shutdown can have a receipt with no result
-binding. That establishes no action or particular skip reason. Receipts remain
-bounded independently of the result bindings, whose size follows the actual
-actions in the pass; no fixed byte limit for the whole log record is claimed.
-Read both stdout and stderr. A receipt alone establishes neither an action nor
-a landing. Join the actual trace and record identifiers through existing
-admission/landing reads; immutable
-landing outcomes bind their `source` to `service:merge-landing-outcome:{trace_id}`.
+binding. That establishes no action or particular skip reason. Receipt retention
+remains bounded independently of result counts. Read the structured stderr
+projections together. A receipt alone establishes neither an action nor a landing.
+Join the actual trace and record identifiers through existing admission/landing
+reads; immutable landing outcomes bind their `source` to `service:merge-landing-outcome:{trace_id}`.
 No additional proof store, grant or reader credential is introduced. Retain raw
 timestamps and clock uncertainty when measuring latency; local rehearsals and
 nearby timestamps do not prove a natural event-to-landing chain or saved idle time.

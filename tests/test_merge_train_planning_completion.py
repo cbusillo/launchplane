@@ -416,6 +416,7 @@ class PlanningCompletionTests(TestCase):
             ):
                 for _ in range(2):
                     controller._finish_landed_merge_train_batch(
+                        candidate_store=store,
                         request=controller.MergeTrainControllerRunOnceEnvelope(
                             repository=_REPO, mutate=True
                         ),

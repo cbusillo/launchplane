@@ -26,6 +26,7 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationCaptureError,
     capture_durable_operation_authorization,
+    director_backup_capture_allowed,
     read_active_authz_policy_record,
 )
 from control_plane.http_routes.mutation_support import idempotency_scope
@@ -283,7 +284,11 @@ def register_production_backup_gate_routes(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", max_length=256)] = "",
     ) -> ProductionBackupGateResponse:
         trace_id = common.next_trace_id()
-        if not common.authorization_allows(
+        if not director_backup_capture_allowed(
+            identity=identity,
+            action=PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
+            instances=(request.instance,),
+        ) and not common.authorization_allows(
             identity=identity,
             action=PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
             product=request.product,

@@ -9,6 +9,8 @@ from typing import Callable, Protocol
 
 from control_plane.timestamps import utc_now_timestamp as _utc_now_timestamp
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
+from control_plane.contracts.production_backup_gate import PRODUCTION_BACKUP_GATE_EXECUTE_ACTION
 from control_plane.contracts.production_backup_failures import LEGACY_BACKUP_EXECUTION_RETIRED_CODE
 from control_plane.contracts.verireel_prod_backup_gate import (
     VeriReelProdBackupGateResult,
@@ -20,6 +22,7 @@ from control_plane.client_release import client_release_grant_allows
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
     DurableOperationAuthorizationGuard,
+    durable_operation_caller_identity,
     read_active_authz_policy_record,
 )
 from control_plane.workflows.production_backup_gate import (
@@ -36,6 +39,35 @@ DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_ERROR_BACKOFF_SECONDS = 30
 DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_ATTEMPTS = 3
 DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_CONSECUTIVE_ERRORS = 5
 SAFE_BACKUP_GATE_RETRY_PHASES = ("created", "running")
+
+
+def _director_backup_capture_allows(
+    *,
+    authorization: DurableOperationAuthorization,
+    operation: VeriReelProdBackupGateOperationRecord,
+    record_store: object,
+) -> bool:
+    from control_plane.service_auth import configured_local_operator_identity
+    from control_plane.service_agent_identities import load_service_agent_identities
+    from control_plane.service_bootstrap import _bearer_identity_config_from_env
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if not isinstance(record_store, PostgresRecordStore) or operation.binding is None:
+        return False
+    identity = configured_local_operator_identity(
+        load_service_agent_identities(
+            store=record_store, bootstrap=_bearer_identity_config_from_env()
+        )
+    )
+    return (
+        identity is not None
+        and authorization.grant == "director_backup_capture"
+        and authorization.action == PRODUCTION_BACKUP_GATE_EXECUTE_ACTION
+        and authorization.product == operation.product
+        and authorization.context == operation.context
+        and authorization.instances == (operation.instance,) == ("prod",)
+        and authorization.caller == durable_operation_caller_identity(identity)
+    )
 
 
 class ProductionBackupGateOperationWorkerStore(Protocol):
@@ -368,6 +400,9 @@ def _execute_operation(
         # A Client's accepted release queues the backup before its promotion.
         client_release_grant_allows=lambda authorization: client_release_grant_allows(
             record_store, authorization
+        ),
+        director_backup_capture_allows=lambda authorization: _director_backup_capture_allows(
+            authorization=authorization, operation=operation, record_store=record_store
         ),
     )
     running_operation = operation

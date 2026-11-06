@@ -25,6 +25,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
 from control_plane.merge_train_batch_candidate import (
     MergeTrainBatchCandidateRecordStore,
     read_merge_train_batch_candidate_record,
+    merge_train_batch_refs_in_use,
 )
 from control_plane.merge_admission import (
     GuardedMergeAdmission,
@@ -37,6 +38,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubError,
     MergeTrainGitHubStaleHeadError,
     UrllibMergeTrainGitHubTransport,
+    merge_train_batch_refs,
 )
 from control_plane.merge_train_stack_disposition import resolve_stack_child_disposition_label
 from control_plane.merge_train_stack_collapse import (
@@ -385,6 +387,7 @@ def _execute_land_mode(
             landing_plan.candidate_sha,
         )
     candidate_ref_cleanup_result = _cleanup_merge_train_batch_candidate_ref(
+        candidate_store=candidate_store,
         github_client=github_client,
         landing_plan=landing_plan,
         request_trace_id=trace_id,
@@ -503,12 +506,19 @@ def _read_and_validate_stack_record(
 
 def _cleanup_merge_train_batch_candidate_ref(
     *,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
     github_client: GitHubMergeTrainClient,
     landing_plan: MergeTrainBatchLandingPlan,
     request_trace_id: str,
 ) -> dict[str, object]:
+    if merge_train_batch_refs_in_use(record_store=candidate_store, candidate=landing_plan):
+        return {"candidate_ref_cleanup_status": "retained"}
     try:
         deleted = github_client.cleanup_batch_candidate_ref(landing_plan=landing_plan)
+        retained = any(
+            github_client.candidate_ref_exists(repository=landing_plan.repository, reference=ref)
+            for ref in merge_train_batch_refs(landing_plan)
+        )
     except MergeTrainGitHubError as error:
         message = str(error).strip() or "GitHub candidate ref cleanup failed."
         _LOGGER.warning(
@@ -529,5 +539,9 @@ def _cleanup_merge_train_batch_candidate_ref(
             result["candidate_ref_cleanup_github_status_code"] = error.status_code
         return result
     return {
-        "candidate_ref_cleanup_status": "deleted" if deleted else "already_missing",
+        "candidate_ref_cleanup_status": "retained"
+        if retained
+        else "deleted"
+        if deleted
+        else "already_missing",
     }

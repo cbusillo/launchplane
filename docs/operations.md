@@ -114,8 +114,10 @@ The web service and `service merge-train-workers run` / `run-once` enable INFO
 logging for GitHub request timing at startup. Each controller operation emits a
 `GitHub request tally` to stderr, including short and failed passes, with its
 repository/base and trace, total requests, `not_modified` responses and
-`non_304_requests`. Stdout retains the worker's JSON pass results. Existing
-Python logging handlers are preserved; other libraries' INFO logs stay disabled
+`non_304_requests`. The long-running worker emits bounded per-target
+`merge_train_pass` projections on stderr; `run-once` keeps its JSON result
+on stdout. See [wake observations](merge-train-events.md#wake-observations)
+for pass counts and correlation fields. Existing Python logging handlers are preserved; other libraries' INFO logs stay disabled
 by default. Use timestamped tallies across a full observation window to attribute
 controller traffic; non-304 attempts include failures and are not a substitute
 for the installation's quota response headers or GraphQL point costs.
@@ -1450,7 +1452,16 @@ apply this testing-only controller through its declared standing action, without
 controller grant. The Director's standing read authority is evaluated and audited
 for each native published binding. Renewal requires original publication custody and a fresh
 matching managed-route and running-backend observation before the atomic evidence
-write. Recorded host and alias roles follow that observed owned publication;
+write. Public domains come from the applied canonical-address receipt, or the
+original publication's binding when no address amendment exists. Retained origin
+aliases do not become public monitoring authority. The topology view also lists
+only aliases active in that public binding. An exact native testing request to
+`POST /v1/route-bindings/reconcile` uses this same verifier and source-checked CAS,
+so one lane can be corrected without running the batch controller. Dry-run first,
+then use the current record's `record_sha256` in `expected_current` for apply;
+the existing confirmation and idempotency requirements remain. Physical origin
+routes and their safety checks remain intact, and a change to public authority
+still invalidates an older rebuild or inverse plan. Existing
 immutable publication/address receipts and provider routes do not change. Drift
 or missing custody stays blocked. This
 alternative neither admits legacy bindings without their existing apply authority
@@ -3002,6 +3013,30 @@ recovery passed without policy changes. Partial server-checkpoint continuation
 remains rehearsal proof. This qualifies empty target and record onboarding;
 it does not establish working previews or real-repository artifact provenance.
 Verify those independently through [event-driven delivery](event-driven-deploys.md).
+
+#### Native Odoo onboarding
+
+An Odoo product's records come first, because its testing target is a compose
+that only an owned context can stage. The authenticated Director agent or a
+CSRF-checked signed-in administrator sends `POST /v1/product-onboarding/apply`
+with a typed `odoo` intent: the repository identity read as above, `context`,
+`image_repository`, `preview_base_url` and an optional `database_name`
+(default: the context). Start with `mode: dry_run`, then apply with the
+returned `plan_sha256` as `reviewed_plan_sha256` and an `Idempotency-Key`.
+Unchanged original-key replay returns the committed receipt.
+
+Apply records a new `odoo` product with one testing lane and previews on the
+same context. The lane's data is `resettable` from `empty`; its settings are
+`ODOO_DB_NAME` and `ODOO_DB_USER`, the context holds
+`LAUNCHPLANE_PREVIEW_BASE_URL`, and the profile declares the driver's three
+testing passwords as required managed secrets. Apply writes no target, secret
+value, deployment or grant. The product must be new and its context unowned and
+free of target and deployment records, checked again under the record-write lock.
+
+Then stage the empty testing compose through
+[first testing target creation](authorization-authority.md#first-testing-target-creation).
+Credentials, domains, data and the first deploy follow through their own
+operations; registration proves none of them.
 
 #### Compatibility workflow recovery
 

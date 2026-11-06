@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from control_plane import service_bootstrap
+from control_plane.contracts.merge_train_controller_state import build_merge_train_controller_key
 from control_plane.github_request_timing import github_request_tally
 from control_plane.github_request_timing import timed_github_request
 
@@ -46,8 +47,9 @@ class GitHubRequestTimingTests(unittest.TestCase):
             )
             wake = MergeTrainWake(
                 frozenset({key, skipped}), "event_hints",
-                receipts=(MergeTrainTargetReceipt(key, receipt),
-                          MergeTrainTargetReceipt(skipped, replace(receipt, request_trace_id="skipped-request"))),
+                receipts=tuple(MergeTrainTargetReceipt(key, replace(receipt, delivery_id=f"delivery-{index}"))
+                               for index in range(63)) +
+                         (MergeTrainTargetReceipt(skipped, replace(receipt, request_trace_id="skipped-request")),),
                 pass_started_at="2026-10-19T09:00:02Z",
                 hint_observed_at="2026-10-19T09:00:01Z",
             )
@@ -61,8 +63,13 @@ class GitHubRequestTimingTests(unittest.TestCase):
                                        records={"landing_id": "landing-record"})
                 refused = replace(row, repository="example/refused", status="deferred",
                                   reason_code="backoff_pending", trace_id="", records={})
-                kwargs["pass_callback"]((row, continuation, refused), wake)
-                kwargs["pass_callback"]((), replace(wake, pass_error_code="OSError"))
+                fleet = tuple(replace(row, repository=f"example/product-{index}",
+                                      trace_id=f"fleet-trace-{index}",
+                                      last_controller_result={"runtime_body": "withheld-runtime-body"})
+                              for index in range(32))
+                kwargs["pass_callback"]((row, continuation, refused, *fleet), wake)
+                kwargs["pass_callback"]((), replace(wake, pass_error_code="OSError",
+                                                  pass_started_at="2026-10-19T09:05:02Z"))
                 logging.getLogger("unrelated_library").info("unrelated INFO")
                 return 2
 
@@ -79,42 +86,79 @@ class GitHubRequestTimingTests(unittest.TestCase):
             [sys.executable, "-c", script], capture_output=True, text=True, check=False, timeout=30
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        lines = result.stdout.splitlines()
-        rows, empty = [json.loads(line) for line in lines[:2]]
-        stopped = json.loads("\n".join(lines[2:]))
-        self.assertEqual(empty, [])
-        self.assertEqual(stopped, {"status": "stopped"})
+        self.assertEqual(json.loads(result.stdout), {"status": "stopped"})
         diagnostics = [
-            value
-            for line in result.stderr.splitlines()
-            if line.startswith("{")
-            and (value := json.loads(line)).get("event") == "merge_train_pass"
+            json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")
         ]
-        self.assertEqual(len(diagnostics), 2)
-        observation, failed = diagnostics
-        for row, binding in zip(rows, observation["results"], strict=True):
-            self.assertEqual(binding["repository"], row["repository"])
-            self.assertEqual(binding["base_branch"], row["base_branch"])
-            self.assertEqual(binding["status"], row["status"])
-            self.assertEqual(binding["reason_code"], row["reason_code"])
-            self.assertEqual(binding["controller_action"], row["controller_action"])
-            self.assertEqual(binding["trace_id"], row["trace_id"])
-            self.assertEqual(binding["records"], row["records"])
-        self.assertNotEqual(
-            observation["results"][0]["trace_id"], observation["results"][1]["trace_id"]
-        )
-        self.assertEqual(observation["results"][2]["trace_id"], "")
-        receipts = observation["wake"]["receipts"]
-        self.assertEqual(len(receipts), 2)
-        result_keys = {row["target_key"] for row in observation["results"]}
-        unmatched = [item for item in receipts if item["target_key"] not in result_keys]
+        passes = [item for item in diagnostics if "counts" in item]
+        observation, failed = passes
+        self.assertEqual(observation["counts"], {"results": 35, "targets": 2, "receipts": 64})
+        self.assertEqual(failed["counts"], {"results": 0, "targets": 2, "receipts": 64})
+        started_at = observation["started_at"]
+        self.assertTrue(all(item["event"] == "merge_train_pass" for item in diagnostics))
         self.assertEqual(
-            [item["receipt"]["request_trace_id"] for item in unmatched], ["skipped-request"]
+            {item["started_at"] for item in diagnostics},
+            {started_at, failed["started_at"]},
         )
-        self.assertEqual(failed["wake"]["pass_error_code"], "OSError")
-        self.assertEqual(failed["wake"]["receipts"], receipts)
-        self.assertEqual(failed["results"], [])
-        self.assertIsInstance(observation["wake"]["target_keys"], list)
+        failed_index = diagnostics.index(failed)
+        for item in diagnostics[:failed_index]:
+            self.assertEqual(item["started_at"], started_at)
+        for item in diagnostics[failed_index:]:
+            self.assertEqual(item["started_at"], failed["started_at"])
+        for item in diagnostics:
+            self.assertLessEqual(len(item.get("results", [])), 1)
+            self.assertLessEqual(len(item.get("wake", {}).get("receipts", [])), 1)
+            self.assertLessEqual(len(item.get("wake", {}).get("targets", [])), 1)
+        bindings = [binding for item in diagnostics for binding in item.get("results", [])]
+        self.assertEqual(len(bindings), observation["counts"]["results"])
+        self.assertEqual(
+            [item["trace_id"] for item in bindings[:3]], ["action-trace", "continuation-trace", ""]
+        )
+        self.assertEqual(bindings[0]["records"], {"candidate_id": "candidate-record"})
+        self.assertEqual(bindings[1]["records"], {"landing_id": "landing-record"})
+        self.assertEqual(bindings[2]["status"], "deferred")
+        self.assertEqual(bindings[2]["reason_code"], "backoff_pending")
+        self.assertEqual(
+            {item["repository"] for item in bindings[3:]},
+            {f"example/product-{index}" for index in range(32)},
+        )
+        for binding in bindings:
+            self.assertEqual(
+                binding["routing_key"],
+                build_merge_train_controller_key(
+                    repository=binding["repository"], base_branch=binding["base_branch"]
+                ),
+            )
+        receipts = [
+            receipt for item in diagnostics for receipt in item.get("wake", {}).get("receipts", [])
+        ]
+        self.assertEqual(
+            len(receipts), observation["counts"]["receipts"] + failed["counts"]["receipts"]
+        )
+        result_keys = {item["routing_key"] for item in bindings}
+        self.assertEqual(
+            [
+                item["receipt"]["request_trace_id"]
+                for item in receipts
+                if item["routing_key"] not in result_keys
+            ],
+            ["skipped-request"] * 2,
+        )
+        target_keys = [
+            key for item in diagnostics for key in item.get("wake", {}).get("targets", [])
+        ]
+        self.assertEqual(
+            len(target_keys), observation["counts"]["targets"] + failed["counts"]["targets"]
+        )
+        self.assertEqual(
+            set(target_keys),
+            {
+                build_merge_train_controller_key(repository=repository, base_branch="main")
+                for repository in ("example/repo", "example/skipped")
+            },
+        )
+        self.assertEqual(failed["wake"]["error_code"], "OSError")
+        self.assertNotIn("withheld-runtime-body", result.stdout + result.stderr)
         self.assertNotIn("unrelated INFO", result.stderr)
 
     def test_worker_commands_emit_short_pass_tallies_to_stderr(self) -> None:

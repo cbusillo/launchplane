@@ -82,6 +82,7 @@ class ActionEffectTests(unittest.TestCase):
                 ("repository_inventory.write", True),
                 ("ingress_route.apply", False),
                 ("product_config.apply", False),
+                ("production_backup_gate.execute", False),
                 ("dokploy_target.repair_domain_authority", False),
                 ("route_binding.apply", False),
                 ("route_binding.odoo_testing_refresh.apply", True),

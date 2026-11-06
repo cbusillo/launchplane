@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
+    MergeTrainBatchLandingPlan,
     build_merge_train_batch_candidate,
     build_merge_train_batch_candidate_record,
 )
@@ -32,6 +33,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
     requires_full_odoo_build,
+    merge_train_batch_refs,
     is_canonical_candidate_ref,
 )
 
@@ -80,6 +82,30 @@ class MergeTrainBatchCandidateRecordStore(Protocol):
         status: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainBatchCandidateRecord, ...]: ...
+
+
+def merge_train_batch_refs_in_use(
+    *,
+    record_store: MergeTrainBatchCandidateRecordStore,
+    candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+) -> bool:
+    references = merge_train_batch_refs(candidate)
+    if candidate.candidate_ref not in references:
+        return True
+    for record in record_store.list_merge_train_batch_candidate_records(
+        repository=candidate.repository, status="active"
+    ):
+        other = record.candidate
+        if isinstance(candidate, MergeTrainBatchLandingPlan) and (
+            other.batch_id == candidate.batch_id
+            and other.base_branch == candidate.base_branch
+            and other.policy_sha256 == candidate.policy_sha256
+            and (not other.candidate_sha or other.candidate_sha == candidate.candidate_sha)
+        ):
+            continue
+        if set(references).intersection((other.candidate_ref, *merge_train_batch_refs(other))):
+            return True
+    return False
 
 
 class MergeTrainBatchCandidateBaseHistoryReadStore(Protocol):

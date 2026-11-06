@@ -626,6 +626,13 @@ class TestingAddressTests(unittest.TestCase):
         }
         binding = self.fixture.current().binding
         assert binding is not None
+        from control_plane.contracts.testing_route_refresh import testing_route_domains
+        from control_plane.testing_publication_storage import serving_snapshot_matches
+
+        self.store.write_route_binding_record(
+            binding.model_copy(update={"domains": testing_route_domains(route)})
+        )
+        stale_snapshot = self.fixture.current()
         with (
             patch.object(
                 api,
@@ -655,8 +662,14 @@ class TestingAddressTests(unittest.TestCase):
                 assert refreshed is not None
                 self.assertEqual(
                     {(item.domain_name, item.role) for item in refreshed.domains},
-                    {(route.host, "primary"), *((alias, "alias") for alias in route.aliases)},
+                    {(route.host, "primary")},
                 )
+                if key == "repair-alias":
+                    self.assertFalse(
+                        serving_snapshot_matches(
+                            self.fixture.current(), stale_snapshot, store=self.store
+                        )
+                    )
                 self.assertEqual(
                     published_testing_copy(self.store, product=self.product, context=self.context),
                     self.publication,

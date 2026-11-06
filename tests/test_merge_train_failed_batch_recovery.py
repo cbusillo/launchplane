@@ -1259,6 +1259,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             self.assertEqual(self.provider.body, original_body)
             self.assertTrue(self.provider.closed)
             self.assertTrue(all(method == "GET" for method, _, _ in self.provider.requests))
+            self.assertTrue(self.provider.refs)
             check_paths = [path for _, path, _ in self.provider.requests if "/check-runs?" in path]
             self.assertTrue(check_paths)
             self.assertTrue(
@@ -2256,7 +2257,11 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 client.read_merge_train_snapshot.side_effect = (removed, snapshot)
                 client.probe_batch_entry_conflicts.return_value = (hold,)
                 lease = Mock(
-                    record=Mock(ordinary_job_binding=None, updated_at=self.candidate.updated_at)
+                    record=Mock(
+                        ordinary_job_binding=None,
+                        updated_at=self.candidate.updated_at,
+                        step_payload={},
+                    )
                 )
 
                 def close_then_interrupt(
