@@ -1062,7 +1062,7 @@ def _run_merge_train_controller_with_github_tally(
     *, operation: str, **kwargs: Any
 ) -> MergeTrainControllerRunOnceResult:
     # Runs in the worker thread, so the tally sees this call's GitHub requests only.
-    with github_request_tally(operation):
+    with github_request_tally(operation, credential=kwargs.get("token")):
         return execute_merge_train_controller_run_once(**kwargs)
 
 

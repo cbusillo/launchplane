@@ -26,7 +26,7 @@ def read_job_log(request: Request, *, observer: GitHubResponseHeadersObserver | 
     except HTTPError as error:
         if error.code != 302:
             raise
-        record_github_response(error.code)
+        record_github_response(error.code, error.headers)
         notify_github_quota_response_headers(observer, error.headers)
         location = error.headers.get("Location", "")
         error.close()

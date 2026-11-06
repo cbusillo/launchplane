@@ -36,7 +36,7 @@ from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.github_response_headers import GitHubResponseHeadersObserver
 from control_plane.github_response_headers import notify_github_quota_response_headers
-from control_plane.github_request_timing import timed_github_request
+from control_plane.github_request_timing import timed_github_request, record_github_response
 
 RECENT_GENERATION_LIMIT = 3
 LAUNCHPLANE_PREVIEW_BASE_URL_ENV_KEYS = ("LAUNCHPLANE_PREVIEW_BASE_URL",)
@@ -318,9 +318,12 @@ def github_api_request(
     )
     try:
         with (
-            timed_github_request(method=method, path=path),
+            timed_github_request(method=method, path=path, token=token),
             urlopen(request, timeout=15) as response,
         ):
+            record_github_response(
+                getattr(response, "status", 200), getattr(response, "headers", None)
+            )
             response_text = response.read().decode("utf-8")
             notify_github_quota_response_headers(
                 response_headers_observer,

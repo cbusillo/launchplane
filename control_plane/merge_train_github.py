@@ -347,6 +347,7 @@ class UrllibMergeTrainGitHubTransport:
         response_headers_observer: GitHubResponseHeadersObserver | None = None,
         read_cache: GitHubReadCache | None = None,
     ) -> None:
+        self._quota_credential = token
         self.token_permissions = (
             token.permissions if isinstance(token, GitHubAppInstallationToken) else None
         )
@@ -395,19 +396,31 @@ class UrllibMergeTrainGitHubTransport:
             ):
                 from control_plane.merge_train_job_logs import read_job_log
 
-                with timed_github_request(method=method, path=path):
+                with timed_github_request(
+                    method=method,
+                    path=path,
+                    token=self._quota_credential,
+                    api_base_url=self.api_base_url,
+                ):
                     return read_job_log(request, observer=self.response_headers_observer)
             with (
-                timed_github_request(method=method, path=path),
+                timed_github_request(
+                    method=method,
+                    path=path,
+                    token=self._quota_credential,
+                    api_base_url=self.api_base_url,
+                ),
                 urlopen(request, timeout=15) as response,
             ):
+                record_github_response(
+                    getattr(response, "status", 200), getattr(response, "headers", None)
+                )
                 response_text = response.read().decode("utf-8")
                 notify_github_quota_response_headers(
                     self.response_headers_observer,
                     getattr(response, "headers", None),
                 )
                 payload = json.loads(response_text) if response_text.strip() else None
-                record_github_response(getattr(response, "status", 200))
                 if method == "GET":
                     etag = str(response.headers.get("ETag") or "")
                     if etag or immutable_contents:
@@ -422,7 +435,6 @@ class UrllibMergeTrainGitHubTransport:
                     )
                 return payload
         except HTTPError as error:
-            record_github_response(error.code)
             if error.code == 304 and cached is not None and method == "GET":
                 notify_github_quota_response_headers(self.response_headers_observer, error.headers)
                 return cached.payload

@@ -12,7 +12,9 @@ from urllib.parse import urlsplit
 from urllib.request import Request
 
 from control_plane.github_read_cache import GitHubReadCache
-from control_plane.github_request_timing import github_request_tally
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+from control_plane.github_request_timing import github_request_tally, github_request_phase
+from control_plane.workflows.launchplane import github_api_request
 from control_plane.merge_admission import MergeAdmissionEvaluator
 from control_plane.merge_train import build_merge_train_dry_run_result
 from control_plane.merge_train_controller_run_once import (
@@ -85,6 +87,127 @@ class _Provider:
 
 
 class MergeTrainReadCostTests(unittest.TestCase):
+    def test_unavailable_status_cannot_make_quota_logging_break_a_response(self) -> None:
+        response = _Response({"result": "available"}, Message())
+        transport = UrllibMergeTrainGitHubTransport(token="fixture", read_cache=GitHubReadCache())
+        with (
+            self.assertLogs("control_plane.github_request_timing", level="INFO") as logs,
+            github_request_tally("controller trace unavailable-status"),
+            patch.object(response, "status", Mock()),
+            patch("control_plane.merge_train_github.urlopen", return_value=response),
+        ):
+            self.assertEqual(transport.request(method="GET", path="/value"), response.payload)
+        (observation,) = [
+            json.loads(line.split("; ", 1)[1])
+            for line in logs.output
+            if "GitHub quota observation:" in line
+        ]
+        self.assertIsNone(observation["status"])
+        self.assertEqual(observation["charged_requests"], "UNKNOWN")
+
+    def test_quota_receipts_keep_shared_counters_separate_from_charged_cost(self) -> None:
+        credential = GitHubAppInstallationToken(
+            token="private-token",
+            app_id=17,
+            installation_id=23,
+            repository_id=41,
+            repository="example/repo",
+            expires_at="2030-01-01T00:00:00Z",
+        )
+        transport = UrllibMergeTrainGitHubTransport(token=credential, read_cache=GitHubReadCache())
+        headers = Message()
+        for name, value in {
+            "x-ratelimit-resource": "core",
+            "x-ratelimit-reset": "123456",
+            "x-ratelimit-used": "10",
+            "x-ratelimit-remaining": "90",
+            "x-ratelimit-limit": "100",
+            "Authorization": "private-authorization",
+            "Set-Cookie": "private-cookie",
+        }.items():
+            headers[name] = value
+        with (
+            self.assertLogs("control_plane.github_request_timing", level="INFO") as logs,
+            github_request_tally("controller trace quota", credential=credential),
+            patch("control_plane.merge_train_github.urlopen") as open_request,
+        ):
+            open_request.return_value = _Response({"private-body": "hidden"}, headers)
+            transport.request(method="GET", path="/value?private=query")
+            headers.replace_header("x-ratelimit-used", "70")
+            headers.replace_header("x-ratelimit-remaining", "30")
+            transport.request(method="GET", path="/value")
+            open_request.side_effect = HTTPError("url", 304, "unchanged", headers, None)
+            with self.assertRaises(MergeTrainGitHubError):
+                transport.request(method="GET", path="/uncached")
+            open_request.side_effect = HTTPError("url", 403, "refused", headers, None)
+            with self.assertRaises(MergeTrainGitHubError):
+                transport.request(method="GET", path="/value")
+        observations = [
+            json.loads(line.split("; ", 1)[1])
+            for line in logs.output
+            if "GitHub quota observation:" in line
+        ]
+        self.assertEqual(sum(row["requests"] for row in observations), 4)
+        by_status = {row["status"]: row for row in observations}
+        self.assertEqual(by_status[200]["first"]["used"], 10)
+        self.assertEqual(by_status[200]["last"]["used"], 70)
+        self.assertEqual(by_status[200]["charged_requests"], "UNKNOWN")
+        self.assertEqual(by_status[403]["charged_requests"], "UNKNOWN")
+        self.assertEqual(by_status[304]["charged_requests"], 0)
+        for row in observations:
+            self.assertEqual(row["app_id"], credential.app_id)
+            self.assertEqual(row["installation_id"], credential.installation_id)
+            self.assertEqual(row["resource"], "core")
+            self.assertEqual(row["reset"], 123456)
+            self.assertEqual(row["graphql_points"], "UNKNOWN")
+        for hidden in (
+            credential.token,
+            "private-authorization",
+            "private-cookie",
+            "private-body",
+            "private=query",
+        ):
+            self.assertNotIn(hidden, "\n".join(logs.output))
+
+    def test_admission_workflow_receipts_match_only_the_verified_credential(self) -> None:
+        credential = GitHubAppInstallationToken(
+            token="native-token",
+            app_id=71,
+            installation_id=82,
+            repository_id=93,
+            repository="example/repo",
+            expires_at="2030-01-01T00:00:00Z",
+        )
+        headers = Message()
+        headers["x-ratelimit-resource"] = "graphql"
+        headers["x-ratelimit-used"] = "999999999999999999999999999999999999999"
+        headers["x-ratelimit-reset"] = "123456"
+        with (
+            self.assertLogs("control_plane.github_request_timing", level="INFO") as logs,
+            github_request_tally("controller trace admission", credential=credential),
+            github_request_phase("admission"),
+            patch(
+                "control_plane.workflows.launchplane.urlopen", return_value=_Response({}, headers)
+            ),
+        ):
+            github_api_request(
+                path="/graphql", token=credential.token, method="POST", body={"secret": "hidden"}
+            )
+            github_api_request(path="/graphql", token="different-token", method="POST")
+        observations = [
+            json.loads(line.split("; ", 1)[1])
+            for line in logs.output
+            if "GitHub quota observation:" in line
+        ]
+        self.assertEqual(len(observations), 2)
+        self.assertEqual([row["installation_id"] for row in observations], [82, None])
+        for row in observations:
+            self.assertEqual(row["phase"], "admission")
+            self.assertEqual(row["first"]["used"], None)
+            self.assertEqual(row["charged_requests"], "UNKNOWN")
+            self.assertEqual(row["graphql_points"], "UNKNOWN")
+        self.assertNotIn("hidden", "\n".join(logs.output))
+
     def test_rejected_dependencies_cache_commit_and_handoff_evidence_on_repeat_pass(self) -> None:
         provider = _Provider()
         policy = build_test_merge_train_policy()

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import hashlib
 from typing import Protocol
 
+from control_plane.github_request_timing import github_request_phase
 from control_plane.repository_evidence import (
     RepositoryEvidenceError,
     RepositoryEvidenceStaleError,
@@ -254,6 +255,7 @@ class LiveMergeAdmissionEvaluator:
         ):
             raise ValueError("A transport-free check reader requires an explicit snapshot reader.")
 
+    @github_request_phase("admission")
     def evaluate(
         self,
         *,

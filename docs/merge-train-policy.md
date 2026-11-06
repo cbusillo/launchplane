@@ -133,21 +133,31 @@ denied or failed read never supplies a cached answer.
 A dry-run controller invocation reuses its snapshot within that invocation and
 releases it on success or failure. Mutating controllers retain their existing fresh
 reads at effect and reconciliation boundaries. Every controller tally logs request
-attempts, not-modified responses and non-304 attempts
-for instrumented clients, including short idle passes. Separate admission evidence
-clients are not included in that tally; provider counters remain the authority for
-total quota use. GraphQL attempts count as requests, not measured GraphQL point costs.
+attempts, not-modified responses and non-304 attempts for instrumented clients,
+including admission evidence and short idle passes. Feedback has a separate tally
+with the same trace after the controller completes. Admission responses carry an
+`admission` phase; other controller responses carry `controller`, and feedback
+responses carry `feedback`.
 
-Measure cold and immediately repeated idle dry runs with an isolated record store
-and the same authenticated provider transport. Compare response-header quota-used
-counters as well as per-pass attempts/304s; other users of a shared installation
-can increase its counter during the measurement. The HTTP fixture in
-`tests/test_merge_train_read_cost.py` exercises the controller with fifteen unqueued
-PRs. A cold pass now includes discussion evidence for each unlabelled PR, plus
-commit classification for dependency updates; its cost scales with that evidence.
-Immediately repeated unchanged passes revalidate those bodies without charging
-primary quota. An isolated read proof does not establish a whole night's installation-wide
-budget; correlate deployed pass tallies with hourly counter peaks after landing.
+The existing tally emits up to eight body-free `GitHub quota observation` records
+per operation, grouped by phase, API host, verified App/installation, HTTP status,
+resource and reset. Each retains first/last observed used, remaining and limit
+headers from the existing response allowlist. Additional groups are omitted with
+an explicit omitted-request count; the original attempt tally stays complete.
+Read these bounded records through the ordinary supported service-log reader,
+filtered by trace. Its tally-only projection retains the original controller counts
+and withholds quota observations. No bodies, tokens, token fingerprints or managed
+secret identities enter these records. A raw credential has unknown installation
+scope unless it matches the operation's verified issued credential.
+
+These counters belong to the provider's shared scope. Their difference is never
+a controller charge: concurrent callers can advance them. Authenticated REST 304s
+prove zero primary charge for those requests; other charges and GraphQL point
+costs remain explicit `UNKNOWN`. The receipt does not establish exclusive callers,
+continuity across container replacements, or a complete night. The HTTP fixture in
+`tests/test_merge_train_read_cost.py` exercises fifteen unqueued PRs with isolated
+provider semantics; it does not prove the natural single-target workload or overnight
+budget. Qualify those original criteria from naturally occurring work only.
 
 ## Preparing An Ordinary-Agent Target
 
