@@ -491,7 +491,12 @@ def live_temporary_hotfix(
 
 
 def _covering_decision(
-    store: object, product: str, *, decision_record_id: str = "", recovering: bool = False
+    store: object,
+    product: str,
+    *,
+    decision_record_id: str = "",
+    recovering: bool = False,
+    require_publication: bool = True,
 ) -> tuple[LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord] | None:
     record_store = cast(PostgresRecordStore, store)
     try:
@@ -523,7 +528,8 @@ def _covering_decision(
     if (
         (decision_record_id and decision.record_id != decision_record_id)
         or not decision.release_start
-        or not decision.release_issue_url
+        or require_publication
+        and not decision.release_issue_url
         or decision.checklist.owner_github_id != profile.owner.github_id
     ):
         return None
@@ -1611,6 +1617,37 @@ def advance_client_releases(
             _record_standing_acceptance(store, control_plane_root, profile, release_backoff)
         except (ClientReleaseNotReady, FileNotFoundError, ValueError, click.ClickException):
             _LOGGER.info("standing acceptance not ready product=%s", profile.product)
+        pending = _covering_decision(store, profile.product, require_publication=False)
+        if pending is not None and not pending[1].release_issue_url:
+            pending_profile, decision = pending
+            publication_key = f"publication:{decision.record_id}"
+            if release_backoff is not None:
+                blocked = release_backoff.blocked.get(profile.product)
+                if (
+                    blocked is not None
+                    and blocked[0] == publication_key
+                    and monotonic() < blocked[1]
+                ):
+                    continue
+                release_backoff.blocked[profile.product] = (publication_key, monotonic() + 300)
+            try:
+                issue_url = publish_release_decision(
+                    store=store,
+                    control_plane_root=control_plane_root,
+                    profile=pending_profile,
+                    decision=decision,
+                )
+                if issue_url:
+                    store.record_release_review_decision_publication(
+                        record_id=decision.record_id, release_issue_url=issue_url
+                    )
+                    if release_backoff is not None:
+                        release_backoff.blocked.pop(profile.product, None)
+            except (AttributeError, FileNotFoundError, ValueError, click.ClickException):
+                _LOGGER.warning(
+                    "saved release decision publication pending product=%s", profile.product
+                )
+                continue
         covered = _covering_decision(store, profile.product)
         if covered is None:
             continue

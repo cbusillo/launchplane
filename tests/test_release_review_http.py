@@ -130,6 +130,17 @@ class _ReleaseReviewHttpFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
+    async def test_accept_refuses_dynamic_settings_blockers_before_saving_a_decision(self) -> None:
+        review = build_release_review(store=self.store, profile=profile(), read=github_read)
+        incomplete = review.model_copy(update={"checklist_complete": False})
+        with patch("control_plane.http_app.current_release_review", return_value=incomplete):
+            response = await self.post()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product="example-site"), ()
+        )
+        self.publisher.assert_not_called()
+
     async def test_standing_settings_request_succeeds_without_an_invitation(self) -> None:
         from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
         from control_plane.release_review import checklist_digest

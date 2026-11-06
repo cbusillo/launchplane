@@ -109,83 +109,11 @@ def release_decision_issue_body(
         ),
         "",
     ]
-    if checklist.candidate.runtime_settings is not None:
-        settings = checklist.candidate.runtime_settings
-        production_settings = checklist.production.runtime_settings
-        changed = {
-            key
-            for key, value in settings.values.items()
-            if production_settings is None or production_settings.values.get(key) != value
-        }
-        removed = set(settings.absent_keys) - set(
-            production_settings.absent_keys if production_settings else ()
-        )
-        if changed or removed:
-            lines.extend(
-                [
-                    "## Production settings",
-                    "This release applies its saved non-secret production settings. Rollback restores the previous settings with the previous artifact.",
-                    _literal(
-                        "Set: "
-                        + ", ".join(sorted(changed))
-                        + "\nRemove: "
-                        + ", ".join(sorted(removed))
-                    ),
-                ]
-            )
-    lines.extend(["", "## Client checklist"])
-    for item in checklist.items:
-        lines.extend(
-            [
-                f"### Pull request #{item.pull_request_number}",
-                _literal(item.title),
-                item.url,
-                "Accepted in preview." if item.already_reviewed else "Not accepted in preview.",
-                _literal(item.owner_test_notes or "Client test notes are missing."),
-            ]
-        )
-    if not checklist.items:
-        lines.append(
-            "No product-repository pull request changes. Shared changes are listed below."
-            if checklist.shared_sources
-            else "No merged pull request changes between these versions."
-        )
-    for source in checklist.shared_sources:
-        lines.extend(
-            [
-                "## Shared release inputs",
-                _literal(
-                    f"Repository: {source.repository}\n"
-                    f"Production: {source.production_commit}\n"
-                    f"Testing: {source.candidate_commit}"
-                ),
-            ]
-        )
-        for item in source.items:
-            lines.extend(
-                [
-                    f"### Pull request {source.repository}#{item.pull_request_number}",
-                    _literal(item.title),
-                    item.url,
-                    _literal(item.owner_test_notes or "Client test notes are missing."),
-                ]
-            )
-        if source.untracked_commits:
-            lines.extend(
-                [
-                    "### Commits without pull request coverage",
-                    _literal("\n".join(source.untracked_commits)),
-                ]
-            )
-    if checklist.untracked_commits:
-        lines.extend(
-            [
-                "## Commits without pull request coverage",
-                _literal("\n".join(checklist.untracked_commits)),
-            ]
-        )
-    if checklist.additional_changes:
-        lines.extend(["## Additional changes", _literal("\n".join(checklist.additional_changes))])
+    lines.append(
+        "Launchplane retains the complete reviewed checklist with this decision and its digest."
+    )
+    if review_url and not hotfix:
+        lines.append(f"Review and release progress: {review_url}")
     if decision.reason:
         lines.extend(["## Decision reason", _literal(decision.reason)])
     if decision.release_during_business_hours:

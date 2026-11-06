@@ -512,8 +512,8 @@ def register_release_review_routes(
                 code="release_checklist_changed",
                 message="The release checklist changed or is unavailable. Reload it before deciding.",
             )
-        if envelope.decision in ("accepted", "temporary_hotfix") and checklist_blockers(
-            review.checklist, profile=profile
+        if envelope.decision in ("accepted", "temporary_hotfix") and (
+            not review.checklist_complete or checklist_blockers(review.checklist, profile=profile)
         ):
             raise common.http_error(
                 status_code=409,

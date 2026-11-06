@@ -79,6 +79,15 @@ retain their existing qualification path.
 
 ## Completed release records
 
+Decision posts carry the signed-in actor, saved action, exact release identities
+and checklist digest. Launchplane retains the complete checklist with the
+decision rather than copying every test note into GitHub. The release worker
+recovers a missing publication receipt for the newest eligible saved decision
+through the same publication path; it never records a replacement acceptance.
+The normal current-candidate, release-hold and backup gates still govern every
+production step. Settings preparation and readback blockers mark the checklist
+incomplete and refuse acceptance before a decision is saved.
+
 The notification worker posts a short outcome on each saved release record and
 closes its issue once the release's persisted operations have passed, failed or
 been cancelled. The outcome distinguishes a successful rejection rollback from a released

@@ -17,6 +17,7 @@ from control_plane.release_review_record import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.release_review import SharedSourceReview
 from tests.test_release_review import decision, profile, seed
 
 
@@ -304,7 +305,7 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         api.assert_not_called()
         token.assert_not_called()
 
-    def test_publishes_full_checklist_and_decision_to_tenant_repository(self) -> None:
+    def test_publishes_decision_without_copying_the_saved_checklist(self) -> None:
         with patch(
             "control_plane.release_review_record.github_api_request",
             side_effect=[[], {"number": 99}, None],
@@ -322,13 +323,60 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         self.assertEqual(write["method"], "POST")
         self.assertEqual(write["path"], "/repos/example/site/issues")
         body = write["body"]["body"]
-        self.assertIn("Check the repair prices.", body)
         self.assertIn(self.decision.checklist_digest, body)
         self.assertIn(self.decision.checklist.production.source_commit, body)
         self.assertIn(self.decision.checklist.candidate.source_commit, body)
         self.assertIn("site-owner", body)
-        self.assertIn("## Client checklist", body)
-        self.assertNotIn("Owner", body)
+        self.assertEqual(
+            self.store.read_release_review_decision_record(
+                product=self.decision.product, record_id=self.decision.record_id
+            ).checklist,
+            self.decision.checklist,
+        )
+
+    def test_large_checklist_can_publish_within_the_provider_body_limit(self) -> None:
+        item = self.decision.checklist.items[0].model_copy(
+            update={"owner_test_notes": "Check the repair prices.\n" * 4000}
+        )
+        checklist = self.decision.checklist.model_copy(
+            update={
+                "items": (item,),
+                "shared_sources": (
+                    SharedSourceReview(
+                        repository="example/addons",
+                        production_commit=self.decision.checklist.production.source_commit,
+                        candidate_commit=self.decision.checklist.candidate.source_commit,
+                        items=(item,),
+                    ),
+                ),
+            }
+        )
+        saved = self.decision.model_copy(
+            update={"record_id": "large-checklist", "checklist": checklist}
+        )
+        self.store.create_release_review_decision_record_if_absent(saved)
+        github = FakeReleaseIssues()
+        request = github.request
+
+        def bounded_request(
+            *, path: str, token: str, method: str = "GET", body: dict[str, str] | None = None
+        ) -> object:
+            if body is not None and isinstance(body.get("body"), str):
+                if len(body["body"]) > 65_536:
+                    raise ValueError("GitHub rejected an oversized body")
+            return request(path=path, token=token, method=method, body=body)
+
+        with patch(
+            "control_plane.release_review_record.github_api_request", side_effect=bounded_request
+        ):
+            url = publish_release_decision(
+                store=self.store, control_plane_root=self.root, profile=profile(), decision=saved
+            )
+        self.assertEqual(url, "https://github.com/example/site/issues/99")
+        stored = self.store.read_release_review_decision_record(
+            product=saved.product, record_id=saved.record_id
+        )
+        self.assertEqual(stored.checklist, checklist)
 
     def test_publication_uses_saved_action_after_client_settings_change(self) -> None:
         saved = self.decision.model_copy(

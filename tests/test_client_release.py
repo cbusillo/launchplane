@@ -726,6 +726,50 @@ class ClientReleaseTests(unittest.TestCase):
         )
         self.assertEqual(self.advance(), ())
 
+    def test_saved_acceptance_recovers_publication_before_starting_its_release(self) -> None:
+        self.switch("promote")
+        accepted = self.accept().model_copy(update={"release_issue_url": ""})
+        self.store.write_release_review_decision_record(accepted)
+        with patch("control_plane.client_release.publish_release_decision", side_effect=ValueError):
+            self.assertEqual(self.advance(), ())
+        with patch(
+            "control_plane.client_release.publish_release_decision",
+            return_value="https://github.com/example/site/issues/99",
+        ) as publish:
+            (backup,) = self.advance()
+            self.assertTrue(backup.startswith("production-backup-gate-"))
+            publish.assert_called_once_with(
+                store=self.store,
+                control_plane_root=self.root,
+                profile=self.store.read_product_profile_record(PRODUCT),
+                decision=accepted,
+            )
+            self.advance()
+            publish.assert_called_once()
+        (stored,) = self.store.list_release_review_decision_records(product=PRODUCT)
+        self.assertEqual(stored.model_copy(update={"release_issue_url": ""}), accepted)
+
+    def test_publication_recovery_does_not_release_a_changed_candidate(self) -> None:
+        self.switch("promote")
+        accepted = self.accept().model_copy(update={"release_issue_url": ""})
+        self.store.write_release_review_decision_record(accepted)
+        testing = self.store.read_release_tuple_record(context_name=CONTEXT, channel_name="testing")
+        self.store.write_release_tuple_record(
+            testing.model_copy(update={"artifact_id": "artifact-prod"})
+        )
+        with (
+            patch(
+                "control_plane.client_release.publish_release_decision",
+                return_value="https://github.com/example/site/issues/99",
+            ) as publish,
+            patch("control_plane.client_release._queue_backup") as enqueue,
+        ):
+            self.assertEqual(self.advance(), ())
+        publish.assert_called_once()
+        enqueue.assert_not_called()
+        (stored,) = self.store.list_release_review_decision_records(product=PRODUCT)
+        self.assertEqual(stored.model_copy(update={"release_issue_url": ""}), accepted)
+
     def test_progress_explains_a_hold_and_clears_it_without_starting_work(self) -> None:
         self.switch("promote")
         accepted = self.accept()
