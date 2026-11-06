@@ -2,7 +2,6 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 import re
 from typing import Literal, Protocol, cast
@@ -22,6 +21,8 @@ from control_plane.contracts.ingress_route_audit_record import (
 )
 from control_plane.dokploy import api, source
 from control_plane.npmplus import (
+    certificate_covers_hostname,
+    certificate_is_current,
     NpmplusHostIdentity,
     NpmplusAccessList,
     NpmplusCertificate,
@@ -47,6 +48,9 @@ from control_plane.route_binding_reconcile import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.workflows.ship import utc_now_timestamp
+
+_covers = certificate_covers_hostname
+_certificate_current = certificate_is_current
 
 ROUTE = TESTING_PUBLIC_INGRESS_ROUTE
 _AUDIT_PREFIX = "testing-public-ingress-"
@@ -94,23 +98,8 @@ class TestingPublicIngressClient(Protocol):
     def create_proxy_host(self, payload: NpmplusProxyHostPayload) -> NpmplusProxyHost: ...
 
 
-def _covers(pattern: str, hostname: str) -> bool:
-    pattern = pattern.lower().rstrip(".")
-    return pattern == hostname or (
-        pattern.startswith("*.")
-        and hostname.endswith(pattern[1:])
-        and hostname.count(".") == pattern.count(".")
-    )
-
-
 def _host_payload(host: NpmplusProxyHostPayload) -> dict[str, object]:
     return host.model_dump(mode="json", exclude={"id", "meta"})
-
-
-def _certificate_current(certificate: NpmplusCertificate) -> bool:
-    # NPMplus serializes its UTC SQL expiry without an offset on some versions.
-    expiry = datetime.fromisoformat(certificate.expires_on.replace("Z", "+00:00"))
-    return expiry.replace(tzinfo=expiry.tzinfo or timezone.utc) > datetime.now(timezone.utc)
 
 
 @dataclass

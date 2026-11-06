@@ -1,6 +1,8 @@
 import json
+from collections.abc import Callable
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from http.cookiejar import CookieJar
 from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
@@ -288,6 +290,20 @@ class NpmplusCertificate(BaseModel):
     expires_on: str
 
 
+def certificate_covers_hostname(pattern: str, hostname: str) -> bool:
+    pattern = pattern.lower().rstrip(".")
+    return pattern == hostname or (
+        pattern.startswith("*.")
+        and hostname.endswith(pattern[1:])
+        and hostname.count(".") == pattern.count(".")
+    )
+
+
+def certificate_is_current(certificate: NpmplusCertificate) -> bool:
+    expiry = datetime.fromisoformat(certificate.expires_on.replace("Z", "+00:00"))
+    return expiry.replace(tzinfo=expiry.tzinfo or timezone.utc) > datetime.now(timezone.utc)
+
+
 class NpmplusOtherHost(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -464,7 +480,11 @@ class NpmplusClient:
         return _validate_response(NpmplusProxyHost, response)
 
     def create_dns_proxy_host(
-        self, payload: NpmplusProxyHostPayload, *, token: str
+        self,
+        payload: NpmplusProxyHostPayload,
+        *,
+        token: str,
+        before_dispatch: Callable[[], None] | None = None,
     ) -> NpmplusProxyHost:
         if (
             payload.certificate_id != "new"
@@ -480,6 +500,10 @@ class NpmplusClient:
             npmplus_dns_provider="cloudflare",
             npmplus_dns_provider_credentials=f"dns_cloudflare_api_token = {token}",
         )
+        if not self._authenticated:
+            self.authenticate()
+        if before_dispatch is not None:
+            before_dispatch()
         response = self._request(method="POST", path="/api/nginx/proxy-hosts", payload=body)
         host = _validate_response(NpmplusProxyHost, response)
         if (

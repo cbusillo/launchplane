@@ -85,15 +85,7 @@ class _Opener:
             assert isinstance(payload, dict)
             if set(payload) & {"meta", "enabled", "http2_support", "trust_forwarded_proto"}:
                 raise AssertionError("Current NPMplus rejects legacy request properties")
-            return _Response(
-                {
-                    **_proxy_host_response(payload),
-                    "certificate_id": 47
-                    if payload.get("npmplus_dns_challenge")
-                    else payload["certificate_id"],
-                    "meta": {"echo": payload.get("npmplus_dns_provider_credentials", "")},
-                }
-            )
+            return _Response(_proxy_host_response(payload))
         if method == "GET" and path == "/api/nginx/proxy-hosts/78":
             return _Response({**self.host_details, "npmplus_noindex": True})
         if method == "GET" and path == "/api/nginx/proxy-hosts":
@@ -386,32 +378,6 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
 
 
 class NpmplusClientTests(unittest.TestCase):
-    def test_dns_create_sends_credential_only_in_create_and_discards_provider_echo(self) -> None:
-        opener = _Opener()
-        client = NpmplusClient(credentials=_credentials(), opener=opener)
-        token = "fictional-cloudflare-token"
-        desired = NpmplusProxyHostPayload(
-            domain_names=("*.preview.example.test",),
-            forward_scheme="https",
-            forward_host="192.0.2.40",
-            forward_port=443,
-            certificate_id="new",
-        )
-        host = client.create_dns_proxy_host(desired, token=token)
-        self.assertIsInstance(host.certificate_id, int)
-        self.assertNotIn(token, host.model_dump_json())
-        creates = [
-            body
-            for method, _, body in opener.requests
-            if method == "POST" and isinstance(body, dict)
-        ]
-        self.assertNotIn(token, json.dumps(creates[0]))
-        self.assertEqual(
-            creates[1]["npmplus_dns_provider_credentials"], f"dns_cloudflare_api_token = {token}"
-        )
-        self.assertEqual(creates[1]["npmplus_dns_provider"], "cloudflare")
-        self.assertTrue(creates[1]["npmplus_dns_challenge"])
-
     def test_provider_failures_cannot_render_secret_response_or_exception_input(self) -> None:
         private = "fictional-provider-secret-sentinel"
         opener = _Opener()

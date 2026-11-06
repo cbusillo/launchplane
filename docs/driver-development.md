@@ -472,18 +472,27 @@ authentication through its existing seam; this does not require source-record
 adoption or introduce another API credential store.
 
 Apply reuses the durable provider reservation and effect checkpoint. NPMplus's
-existing create issues the DNS-01 certificate and creates the proxy host on it.
+[existing quick-certificate create](https://github.com/ZoeyVid/NPMplus/blob/develop/backend/internal/proxy-host.js)
+issues the DNS-01 certificate before inserting the proxy host. Deployed
+`GET /api/schema`, read through the pinned existing automation principal on
+November 6, 2026, confirms the create fields `npmplus_dns_challenge`,
+`npmplus_dns_provider` and write-only `npmplus_dns_provider_credentials`.
+The Cloudflare credential is a certbot `dns_cloudflare_api_token` assignment;
+no additional agreement or email input is required by that create schema.
 A service-owned operation marker binds readback to that exact create. Readback
 requires the exact host, upstream and options, loaded nginx and matching current
 certificate metadata. A response lost after dispatch is unknown, even if an
 HTTP error or empty inventory appears. Keep the original key: reconciliation
 can adopt the exact marked route, but cannot issue again or delete an uncertain
 certificate. A new key cannot bypass the outstanding target reservation.
+An interruption before the effect checkpoint is retryable under its original key.
+Post-dispatch absence is unknown while an issuance request could still be running.
 Unrelated hosts, certificates, source credentials and application records are
-untouched. Preserve the existing snapshot/readiness, active-use, instance and
-principal pins, nginx checks, rollback preparation and unrelated-live-route
-checks for actual execution; strict public TLS verification is separate from a
-serving application test.
+untouched. Before runtime apply, run the existing operational snapshot/readiness,
+active-use, instance/principal pins, nginx, rollback and unrelated-live-route
+checks. These are operational prerequisites outside this route. The route
+checks nginx-online and exact provider readback; strict public TLS verification
+and a serving application test remain separate.
 
 Future edge-driver work should investigate Cloudflare Tunnel in #1215 as a
 Launchplane provider before deepening edge-provider assumptions beyond NPMplus.

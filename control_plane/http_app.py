@@ -21791,6 +21791,7 @@ def create_launchplane_fastapi_app(
         request: NpmplusIngressApplyRequest,
         result: NpmplusIngressApplyResult,
         idempotency_key: str,
+        record_id: str = "",
     ) -> IngressRouteAuditRecord:
         provider_host_id = result.proxy_host.id if result.proxy_host is not None else None
         certificate_id = (
@@ -21801,7 +21802,8 @@ def create_launchplane_fastapi_app(
         tls_owner: IngressRouteTlsOwner = "none" if certificate_id == 0 else "provider"
         provider_certificate_ref = "" if certificate_id == 0 else str(certificate_id)
         record = IngressRouteAuditRecord(
-            record_id=build_ingress_route_audit_record_id(
+            record_id=record_id
+            or build_ingress_route_audit_record_id(
                 trace_id=trace_id,
                 product=product,
                 context=context,
@@ -23507,17 +23509,29 @@ def create_launchplane_fastapi_app(
                         "Wildcard creation requires a context-scoped database service operation."
                     )
 
-                def finish_wildcard(result: NpmplusIngressApplyResult) -> dict[str, object]:
-                    audit = write_ingress_route_audit_record(
-                        ingress_store=ingress_store,
-                        trace_id=trace_id,
+                def finish_wildcard(
+                    result: NpmplusIngressApplyResult, provider_key: str = ""
+                ) -> dict[str, object]:
+                    record_id = build_ingress_route_audit_record_id(
+                        trace_id=provider_key or trace_id,
                         product=route_request.product,
                         context=route_request.context,
-                        provider=ingress_provider.provider_id,
-                        request=audit_ingress_request,
-                        result=result,
-                        idempotency_key=normalized_key,
+                        domains=audit_ingress_request.route.domain_names,
                     )
+                    try:
+                        audit = record_store.read_ingress_route_audit_record(record_id)
+                    except FileNotFoundError:
+                        audit = write_ingress_route_audit_record(
+                            ingress_store=ingress_store,
+                            trace_id=trace_id,
+                            product=route_request.product,
+                            context=route_request.context,
+                            provider=ingress_provider.provider_id,
+                            request=audit_ingress_request,
+                            result=result,
+                            idempotency_key=normalized_key,
+                            record_id=record_id,
+                        )
                     record = preview_dns_secret_record(record_store)
                     return accepted_evidence_response(
                         trace_id=trace_id,

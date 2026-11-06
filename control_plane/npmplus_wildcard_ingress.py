@@ -7,8 +7,14 @@ import click
 from control_plane import secrets
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.public_hosts import normalize_public_hosts
+from control_plane.contracts.product_profile_record import (
+    is_exclusive_product_context,
+    product_context_owner_map,
+)
 from control_plane.contracts.secret_record import SecretRecord
 from control_plane.npmplus import (
+    certificate_covers_hostname as _covers,
+    certificate_is_current as _certificate_current,
     PREVIEW_DNS_BINDING,
     PREVIEW_DNS_INTEGRATION,
     NpmplusClient,
@@ -23,7 +29,6 @@ from control_plane.provider_operations import (
     ProviderOperationLease,
 )
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.testing_public_ingress import _certificate_current, _covers
 from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyRequest,
     NpmplusIngressApplyResult,
@@ -33,31 +38,13 @@ from control_plane.workflows.npmplus_ingress import (
 
 
 def preview_dns_secret_record(store: PostgresRecordStore) -> SecretRecord | None:
-    bindings = tuple(
-        binding
-        for binding in store.list_secret_bindings(
-            integration=PREVIEW_DNS_INTEGRATION, context_name="launchplane"
-        )
-        if binding.binding_key == PREVIEW_DNS_BINDING
-        and binding.status == "configured"
-        and binding.context == "launchplane"
-        and not binding.instance
+    record = secrets.resolve_context_secret_record_from_store(
+        record_store=store,
+        integration=PREVIEW_DNS_INTEGRATION,
+        context_name="launchplane",
+        binding_key=PREVIEW_DNS_BINDING,
     )
-    if len(bindings) != 1:
-        return None
-    record = store.read_secret_record(bindings[0].secret_id)
-    if (
-        record.scope != "context"
-        or record.context != "launchplane"
-        or record.instance
-        or record.integration != PREVIEW_DNS_INTEGRATION
-        or record.name != PREVIEW_DNS_BINDING
-        or record.status != "configured"
-        or record.policy != "write_only"
-        or not record.current_version_id
-    ):
-        return None
-    return record
+    return record if record is not None and record.name == PREVIEW_DNS_BINDING else None
 
 
 @dataclass
@@ -67,7 +54,7 @@ class NpmplusWildcardIngressOperation:
     product: str
     context: str
     request: NpmplusIngressApplyRequest
-    finish: Callable[[NpmplusIngressApplyResult], dict[str, object]]
+    finish: Callable[[NpmplusIngressApplyResult, str], dict[str, object]]
     pending: Callable[[], None]
 
     def target_key(self) -> str:
@@ -89,10 +76,12 @@ class NpmplusWildcardIngressOperation:
             or not profile.preview.enabled
             or profile.preview.context != self.context
             or profile.preview.domain_certificate_type != "none"
-            or any(
-                other.product != self.product
-                and self.context in {other.preview.context, *(lane.context for lane in other.lanes)}
-                for other in self.store.list_product_profile_records()
+            or not is_exclusive_product_context(
+                product=self.product,
+                context=self.context,
+                owners=product_context_owner_map(
+                    self.store.list_product_profile_records(), config_scopes=True
+                ),
             )
         ):
             raise ValueError("Wildcard issuance requires the product's exclusive preview context.")
@@ -110,6 +99,15 @@ class NpmplusWildcardIngressOperation:
         namespace = normalize_public_hosts((base.hostname or "",))[0]
         if base.scheme != "https" or self.request.route.domain_names != ("*." + namespace,):
             raise ValueError("Wildcard issuance must use the recorded product preview namespace.")
+        for other in self.store.list_product_profile_records():
+            if other.product == self.product or not other.preview.enabled:
+                continue
+            for entry in self.store.list_runtime_environment_records(
+                scope="context", context_name=other.preview.context
+            ):
+                other_base = entry.env.get("LAUNCHPLANE_PREVIEW_BASE_URL")
+                if isinstance(other_base, str) and urlsplit(other_base).hostname == namespace:
+                    raise ValueError("Another product owns this preview namespace.")
         edge = self.store.read_edge_endpoint_record(self.request.route.edge_endpoint_key)
         if edge.status != "active" or (
             self.request.route.forward_host,
@@ -203,10 +201,16 @@ class NpmplusWildcardIngressOperation:
                 )
                 if not token:
                     raise ValueError("The DNS credential is unavailable.")
-                self.pending()
-                lease.checkpoint_effect("create_wildcard_certificate_and_host")
-                dispatched = True
-                return self.client.create_dns_proxy_host(payload, token=token)
+
+                def before_dispatch() -> None:
+                    nonlocal dispatched
+                    self.pending()
+                    lease.checkpoint_effect("create_wildcard_certificate_and_host")
+                    dispatched = True
+
+                return self.client.create_dns_proxy_host(
+                    payload, token=token, before_dispatch=before_dispatch
+                )
 
             lease.assert_current()
             apply_npmplus_ingress_route(
@@ -217,7 +221,7 @@ class NpmplusWildcardIngressOperation:
             result = self._readback(provider_operation_key)
             if result is None:
                 raise ValueError("The wildcard route readback is unverified.")
-            return ProviderMutationOutcome(202, self.finish(result))
+            return ProviderMutationOutcome(202, self.finish(result, provider_operation_key))
         except (ValueError, LookupError, OSError, click.ClickException):
             if dispatched:
                 raise ProviderMutationUnknownError(
@@ -230,10 +234,16 @@ class NpmplusWildcardIngressOperation:
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
+        if reconciliation_key != self.reconciliation_key():
+            return ProviderObservation("unknown")
+        if not provider_effect_phase:
+            return ProviderObservation("absent", retry_safe=True)
         try:
             result = self._readback(provider_operation_key)
             if result is not None:
-                return ProviderObservation("present", response_payload=self.finish(result))
+                return ProviderObservation(
+                    "present", response_payload=self.finish(result, provider_operation_key)
+                )
         except (ValueError, LookupError, OSError, click.ClickException):
             return ProviderObservation("unknown")
         return ProviderObservation("unknown")
