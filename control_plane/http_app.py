@@ -7752,9 +7752,10 @@ def create_launchplane_fastapi_app(
 
     async def write_odoo_website_bootstrap_override(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_bearer_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
     ) -> AcceptedEvidenceResponse | JSONResponse:
         trace_id = next_trace_id()
         try:
@@ -7783,6 +7784,9 @@ def create_launchplane_fastapi_app(
                 message="Request payload failed validation.",
             ) from error
         preview_bootstrap = bool(override_request.override.preview_original_reservation_id)
+        dry_run = override_request.override.mode == "dry-run"
+        if preview_bootstrap or not dry_run:
+            identity = read_write_identity(authorization=authorization)
         if preview_bootstrap and not director_agent_identity(identity):
             raise _launchplane_http_error(
                 status_code=403,
@@ -7827,26 +7831,40 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not preview_bootstrap and not native_routes.native_driver_route_authorization_allows(
-            endpoint=write_odoo_website_bootstrap_override,
-            authorization_allows=resolved_authz_policy_runtime.allows,
-            identity=identity,
-            product=authorization_product,
-            context=override_request.override.context,
-            instances=(override_request.override.instance,),
-        ):
+        if not preview_bootstrap and dry_run:
+            authorized = resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="operations.read",
+                product=_LAUNCHPLANE_SERVICE_CONTEXT,
+                context=override_request.override.context,
+                target=AuthorizationTarget(
+                    scope="instance", instances=(override_request.override.instance,)
+                ),
+            )
+        else:
+            authorized = (
+                preview_bootstrap
+                or native_routes.native_driver_route_authorization_allows(
+                    endpoint=write_odoo_website_bootstrap_override,
+                    authorization_allows=resolved_authz_policy_runtime.allows,
+                    identity=identity,
+                    product=authorization_product,
+                    context=override_request.override.context,
+                    instances=(override_request.override.instance,),
+                )
+            )
+        if not authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
                 message=(
-                    "Workflow cannot write Odoo website-bootstrap overrides for the requested"
+                    "Workflow cannot prepare Odoo website-bootstrap overrides for the requested"
                     " product/context."
                 ),
             )
 
-        preview_dry_run = preview_bootstrap and override_request.override.mode == "dry-run"
-        if preview_bootstrap and not preview_dry_run:
+        if preview_bootstrap and not dry_run:
             if not idempotency_key.strip():
                 raise _launchplane_http_error(
                     status_code=400,
@@ -7856,7 +7874,7 @@ def create_launchplane_fastapi_app(
                 )
 
         normalized_idempotency_key = payload_fingerprint = ""
-        if not preview_dry_run:
+        if not dry_run:
             (
                 normalized_idempotency_key,
                 payload_fingerprint,
@@ -7905,7 +7923,7 @@ def create_launchplane_fastapi_app(
             records={},
             result=driver_result,
         )
-        if preview_dry_run:
+        if dry_run:
             return response
         store_apply_idempotency(
             record_store=record_store,
