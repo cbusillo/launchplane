@@ -6574,7 +6574,6 @@ class PostgresRecordStore(HumanSessionStore):
     def write_preview_dns_secret_bundle(
         self, bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity
     ) -> None:
-        """Fill the fixed service slot without inventing a product profile."""
         from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION
         from control_plane.service_auth import (
             AuthorizationTarget,
