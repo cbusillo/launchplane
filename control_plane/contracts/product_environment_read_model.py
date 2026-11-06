@@ -109,7 +109,7 @@ from control_plane.production_backup_authority import (
     resolve_production_backup_authority,
 )
 from control_plane.integration_readback import integration_credential_warnings
-from control_plane.host_security_updates import host_security_update_warnings
+from control_plane.contracts.host_security_updates import host_security_update_warnings
 from control_plane.timestamps import utc_now_timestamp
 
 

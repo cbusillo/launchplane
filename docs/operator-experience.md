@@ -1101,10 +1101,10 @@ no successful security-update run, the last completion is more than two days old
 or current evidence is unavailable. A clean run with nothing to upgrade counts.
 This warning does not change application health or authorize a release.
 
-The service's existing production monitor collects bounded, read-only observations
+The service's existing background monitor worker collects bounded, read-only observations
 through the registered-server transport. Products on the same server reuse one
-host read per monitor batch. The existing provider-observation records retain the
-completion evidence and lane target binding; page loads read those records and
+host read per monitor batch. One replaceable observation per lane retains the
+completion evidence and target binding outside application health history; page loads read those records and
 never contact hosts. A changed target or expired observation cannot clear a warning.
 
 The reader pairs apt's `upgrade-stamp`, which `apt.systemd.daily` writes only after

@@ -485,6 +485,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
+from control_plane.contracts.host_security_updates import HostSecurityUpdateObservation
 from control_plane.contracts.public_ingress_monitoring import (
     public_ingress_incident_record_sha256,
 )
@@ -3493,6 +3494,14 @@ class LaunchplaneProductProfileRow(Base):
     repository: Mapped[str] = mapped_column(String, nullable=False)
     driver_id: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneHostSecurityUpdateRow(Base):
+    __tablename__ = "launchplane_host_security_updates"
+
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    instance: Mapped[str] = mapped_column(String, primary_key=True)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -29633,6 +29642,30 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 for row in session.scalars(statement)
             )
+
+    def write_host_security_update_observation(self, record: HostSecurityUpdateObservation) -> None:
+        self._write_row(
+            LaunchplaneHostSecurityUpdateRow(
+                context=record.context,
+                instance=record.instance,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_host_security_update_observation(
+        self,
+        *,
+        context_name: str,
+        instance_name: str,
+    ) -> HostSecurityUpdateObservation:
+        return self._read_model(
+            model_type=HostSecurityUpdateObservation,
+            orm_model=LaunchplaneHostSecurityUpdateRow,
+            filters=(
+                LaunchplaneHostSecurityUpdateRow.context == context_name,
+                LaunchplaneHostSecurityUpdateRow.instance == instance_name,
+            ),
+        )
 
     def write_public_ingress_observation_record(
         self, record: PublicIngressObservationRecord

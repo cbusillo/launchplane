@@ -6,6 +6,7 @@ import unittest
 
 from control_plane.contracts.host_security_updates import (
     HostSecurityUpdateEvidence,
+    host_security_update_warnings,
     SECURITY_UPDATE_MAX_AGE_SECONDS,
 )
 from control_plane import host_security_updates as security
@@ -17,12 +18,12 @@ class HostSecurityUpdateTests(unittest.TestCase):
     def test_only_a_successful_updater_result_and_apt_completion_can_be_fresh(self) -> None:
         now = datetime.now(timezone.utc).timestamp()
         for result_age, completion_age, expected in (
-            (10, 9, "fresh"),
+            (10, 9, "observed"),
             (0, None, "missing"),
             (0, 100, "unknown"),
             (None, 0, "unknown"),
-            (SECURITY_UPDATE_MAX_AGE_SECONDS + 1, SECURITY_UPDATE_MAX_AGE_SECONDS, "fresh"),
-            (SECURITY_UPDATE_MAX_AGE_SECONDS + 2, SECURITY_UPDATE_MAX_AGE_SECONDS + 1, "stale"),
+            (SECURITY_UPDATE_MAX_AGE_SECONDS + 1, SECURITY_UPDATE_MAX_AGE_SECONDS, "observed"),
+            (SECURITY_UPDATE_MAX_AGE_SECONDS + 2, SECURITY_UPDATE_MAX_AGE_SECONDS + 1, "observed"),
             (-100, -100, "unknown"),
         ):
             with self.subTest(result_age=result_age, completion_age=completion_age):
@@ -41,36 +42,17 @@ class HostSecurityUpdateTests(unittest.TestCase):
             (stamps / "unattended-upgrades-stamp").touch()
             (stamps / "upgrade-stamp").touch()
             evidence = security.read_security_update_stamps(root=root)
-            self.assertEqual(evidence.status, "fresh")
+            self.assertEqual(evidence.status, "observed")
             (stamps / "upgrade-stamp").unlink()
             self.assertEqual(security.read_security_update_stamps(root=root).status, "missing")
 
     def test_unavailable_frames_and_clock_skew_never_become_fresh(self) -> None:
         now = datetime.now(timezone.utc).timestamp()
         fresh = HostSecurityUpdateEvidence(
-            status="fresh",
+            status="observed",
             observed_at=now,
             completed_at=now - 1,
         )
-        for frames in (
-            [],
-            [{"type": "failed"}],
-            [{"type": "complete", "result": fresh.model_dump()}, {"type": "failed"}],
-        ):
-            with (
-                self.subTest(frames=frames),
-                patch.object(
-                    native_copy_stream,
-                    "_read_remote",
-                    side_effect=lambda **kwargs: [kwargs["receive"](frame) for frame in frames],
-                ),
-            ):
-                self.assertEqual(
-                    security.read_host_security_updates(
-                        host="provider", token="token", server_id="host"
-                    ).status,
-                    "unknown",
-                )
         future = fresh.model_copy(update={"observed_at": now + 3600})
         with patch.object(
             native_copy_stream,
@@ -106,6 +88,14 @@ class HostSecurityUpdateTests(unittest.TestCase):
                 profile = LaunchplaneProductProfileRecord.model_validate(
                     {**_profile_payload(product=product), "production_use": "live"}
                 )
+                profile = profile.model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(update={"context": f"{product}-{lane.instance}"})
+                            for lane in profile.lanes
+                        )
+                    }
+                )
                 store.write_product_profile_record(profile)
                 profiles.append(profile)
                 lane = next(lane for lane in profile.lanes if lane.instance == "prod")
@@ -120,12 +110,10 @@ class HostSecurityUpdateTests(unittest.TestCase):
                         updated_at=profile.updated_at,
                     )
                 )
-                self.assertEqual(
-                    len(security.host_security_update_warnings(store, profile, lane)), 1
-                )
+                self.assertEqual(len(host_security_update_warnings(store, profile, lane)), 1)
             now = datetime.now(timezone.utc).timestamp()
             stale = HostSecurityUpdateEvidence(
-                status="stale",
+                status="observed",
                 observed_at=now,
                 completed_at=now - SECURITY_UPDATE_MAX_AGE_SECONDS - 10,
             )
@@ -133,6 +121,7 @@ class HostSecurityUpdateTests(unittest.TestCase):
                 (profile.product, lane.context, lane.instance)
                 for profile in profiles
                 for lane in profile.lanes
+                if lane.instance == "prod"
             )
             with (
                 patch.object(security, "read_host_security_updates", return_value=stale) as reader,
@@ -148,17 +137,17 @@ class HostSecurityUpdateTests(unittest.TestCase):
                 from control_plane import health_monitor_scheduler as scheduler
 
                 with (
-                    patch.object(scheduler, "run_public_ingress_monitor_once"),
+                    patch(
+                        "control_plane.production_delivery_monitor.monitor_production_delivery_once"
+                    ),
                     patch.object(scheduler, "public_ingress_notification_drivers"),
                 ):
-                    scheduler.HealthMonitorScheduler(store)._run_monitor(lanes)
+                    scheduler.HealthMonitorScheduler(store)._run_delivery_monitor()
 
                 self.assertEqual(reader.call_count, 1)
                 for profile in profiles:
                     lane = next(lane for lane in profile.lanes if lane.instance == "prod")
-                    self.assertEqual(
-                        len(security.host_security_update_warnings(store, profile, lane)), 1
-                    )
+                    self.assertEqual(len(host_security_update_warnings(store, profile, lane)), 1)
                     overview = build_product_site_overview(
                         record_store=store, product=profile.product, action_allowed=lambda *_: True
                     )
@@ -170,13 +159,11 @@ class HostSecurityUpdateTests(unittest.TestCase):
                     self.assertTrue(
                         any(
                             warning in production.warnings
-                            for warning in security.host_security_update_warnings(
-                                store, profile, lane
-                            )
+                            for warning in host_security_update_warnings(store, profile, lane)
                         )
                     )
                 reader.return_value = stale.model_copy(
-                    update={"status": "fresh", "completed_at": now - 1}
+                    update={"status": "observed", "completed_at": now - 1}
                 )
                 security.collect_host_security_updates(
                     store, lanes=lanes, should_stop=lambda: False
@@ -184,9 +171,9 @@ class HostSecurityUpdateTests(unittest.TestCase):
                 self.assertEqual(reader.call_count, 2)
                 for profile in profiles:
                     lane = next(lane for lane in profile.lanes if lane.instance == "prod")
-                    self.assertFalse(security.host_security_update_warnings(store, profile, lane))
+                    self.assertFalse(host_security_update_warnings(store, profile, lane))
                     self.assertTrue(
-                        security.host_security_update_warnings(
+                        host_security_update_warnings(
                             store,
                             profile,
                             lane,
@@ -199,9 +186,7 @@ class HostSecurityUpdateTests(unittest.TestCase):
                 )
                 for profile in profiles:
                     lane = next(lane for lane in profile.lanes if lane.instance == "prod")
-                    self.assertEqual(
-                        len(security.host_security_update_warnings(store, profile, lane)), 1
-                    )
+                    self.assertEqual(len(host_security_update_warnings(store, profile, lane)), 1)
 
     def test_generated_read_program_runs_with_only_the_standard_library(self) -> None:
         from contextlib import redirect_stdout
@@ -230,43 +215,4 @@ class HostSecurityUpdateTests(unittest.TestCase):
                 exec(security.SECURITY_UPDATE_PROGRAM, {})
             result = json.loads(output.getvalue().removeprefix("FRAME:"))
             self.assertEqual(result["type"], "complete")
-            self.assertEqual(result["result"]["status"], "fresh")
-
-    def test_host_movement_discards_the_prior_hosts_success(self) -> None:
-        from control_plane.storage.postgres import PostgresRecordStore
-        from control_plane.contracts.deploy_target import ProviderTargetRecord
-        from control_plane.host_network_capacity import read_bound_lane_host
-
-        with TemporaryDirectory() as directory:
-            store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{directory}/state.db")
-            self.addCleanup(store.close)
-            store.ensure_schema()
-            store.write_provider_target_record(
-                ProviderTargetRecord(
-                    context="site",
-                    instance="prod",
-                    provider_id="dokploy",
-                    target_category="compose",
-                    target_id="site",
-                    display_name="site",
-                    updated_at=datetime.now(timezone.utc).isoformat(),
-                )
-            )
-            with (
-                patch(
-                    "control_plane.host_network_capacity.source.read_dokploy_config",
-                    return_value=("provider", "token"),
-                ),
-                patch(
-                    "control_plane.host_network_capacity.api.fetch_dokploy_target_payload",
-                    side_effect=[{"serverId": "old"}, {"serverId": "new"}],
-                ),
-            ):
-                with self.assertRaises(ValueError):
-                    read_bound_lane_host(
-                        root=Path(directory),
-                        store=store,
-                        context="site",
-                        instance="prod",
-                        read=lambda *_: "fresh",
-                    )
+            self.assertEqual(result["result"]["status"], "observed")

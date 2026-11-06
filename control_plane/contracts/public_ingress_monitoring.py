@@ -8,7 +8,6 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.data_provenance import FreshnessStatus
-from control_plane.contracts.host_security_updates import HostSecurityUpdateEvidence
 from control_plane.contracts.public_dns import PublicDnsObservation
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
@@ -410,12 +409,6 @@ class PublicIngressObservationRecord(BaseModel):
     notification_key: str = ""
     notification_sent: bool = False
     summary: str
-
-    host_security_updates: HostSecurityUpdateEvidence | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
 
     def unaccepted(
         self,

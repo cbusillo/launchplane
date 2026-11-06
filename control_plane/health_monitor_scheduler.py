@@ -316,6 +316,11 @@ class HealthMonitorScheduler:
             observed_at=_timestamp(self.clock()),
             should_stop=self._stop.is_set,
         )
+        if not self._stop.is_set():
+            try:
+                collect_host_security_updates(self.store, should_stop=self._stop.is_set)
+            except Exception:
+                _LOGGER.exception("Host security-update observation failed")
 
     def watch_once(self, instance: str = "prod") -> bool:
         now = self.clock()
@@ -383,7 +388,7 @@ class HealthMonitorScheduler:
                 seconds = min(seconds, max(0, deadline - self.clock()))
             self._wait(seconds)
 
-        result = run_public_ingress_monitor_once(
+        return run_public_ingress_monitor_once(
             record_store=self.store,
             notification_drivers=public_ingress_notification_drivers(record_store=self.store),
             runtime_identity_confirmation_delay_seconds=HEALTH_MONITOR_IDENTITY_CONFIRMATION_SECONDS,
@@ -392,9 +397,6 @@ class HealthMonitorScheduler:
             lane_keys=lanes,
             max_concurrent_probes=MONITOR_MAX_CONCURRENT_PROBES,
         )
-        if instance == "prod" and not should_stop():
-            collect_host_security_updates(self.store, lanes=lanes, should_stop=should_stop)
-        return result
 
     def _report_cadence(self, missed: bool, observed_at: str, lanes: frozenset[LaneKey]) -> None:
         record_monitor_cadence(
