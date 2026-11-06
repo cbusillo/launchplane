@@ -5420,10 +5420,7 @@ def try_reflow_failed_merge_train_candidate(
             merge_method=merge_method,
             dry_run_result=dry_run_result,
         ):
-            if (
-                _is_missing_scan_failure(active_candidate_record)
-                or failed.required_checks_status == "fail"
-            ):
+            if _is_missing_scan_failure(active_candidate_record):
                 recovery = _resume_known_failed_batch(
                     stack_collapse_store=stack_collapse_store,
                     candidate_store=candidate_store,
@@ -5438,9 +5435,6 @@ def try_reflow_failed_merge_train_candidate(
                     trace_id=trace_id,
                     mutate=mutate,
                     lease=lease,
-                    interrupted_parent_record=(
-                        active_candidate_record if failed.required_checks_status == "fail" else None
-                    ),
                 )
                 if recovery is not None:
                     return recovery
@@ -5747,10 +5741,29 @@ def _resume_known_failed_batch(
             )
         )
     )
+    if interrupted_parent_record is not None:
+        replacement_plan = _failed_candidate_replacement_dry_run(
+            policy=policy,
+            snapshot=snapshot,
+            failed=interrupted_parent_record.candidate,
+            holds=held_out,
+        )
+        if replacement_plan is None:
+            return None
+        dry_run_result = replacement_plan
     matching_records = tuple(
         record
         for record in compatible_history
-        if _merge_train_candidate_matches_dry_run_queue(
+        if (
+            interrupted_parent_record is None
+            or interrupted_parent_record.record_id
+            in {
+                record.candidate.check_retry_of,
+                record.candidate.infrastructure_retry_of,
+                record.candidate.batch_body_retry_of,
+            }
+        )
+        and _merge_train_candidate_matches_dry_run_queue(
             candidate=record.candidate,
             dry_run_result=dry_run_result,
             base_sha=snapshot.base_sha,
@@ -5772,10 +5785,6 @@ def _resume_known_failed_batch(
             ),
             None,
         )
-        if interrupted_parent_record is not None and (
-            parent is None or parent.record_id != interrupted_parent_record.record_id
-        ):
-            return None
         unfinished_retry = (
             parent is not None
             and latest.status == "superseded"
@@ -6109,6 +6118,27 @@ def _retry_closed_candidate_after_passing_checks(
         "required_checks_status": observed.required_checks_status,
         "closed_batch_pull_request_number": closed["number"],
     }
+    resumed = _resume_known_failed_batch(
+        stack_collapse_store=stack_collapse_store,
+        candidate_store=candidate_store,
+        github_client=github_client,
+        policy=policy,
+        policy_sha256=policy_sha256,
+        snapshot=snapshot,
+        dry_run_result=dry_run_result,
+        held_out=held_out,
+        merge_method=policy.find_repository_policy(
+            repository=repository, base_branch=base_branch
+        ).merge_method,
+        recorded_at=recorded_at,
+        trace_id=trace_id,
+        mutate=mutate,
+        lease=lease,
+        interrupted_parent_record=active_candidate_record,
+    )
+    if resumed is not None:
+        resumed["details"] = details
+        return resumed
     # One replacement per failed record, not per unchanged queue. A replacement
     # may itself fail transiently and later pass its exact-head rerun. Earlier
     # recovery on the same base must not leave that new failure stuck forever.
@@ -6391,6 +6421,27 @@ def _recover_failed_merge_train_candidate(
                 "reason_code": "candidate_checks_retry_pending",
             }
     if failures.infrastructure_only:
+        resumed = _resume_known_failed_batch(
+            stack_collapse_store=stack_collapse_store,
+            candidate_store=candidate_store,
+            github_client=github_client,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            snapshot=snapshot,
+            dry_run_result=dry_run_result,
+            held_out=held_out,
+            merge_method=policy.find_repository_policy(
+                repository=repository, base_branch=base_branch
+            ).merge_method,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=mutate,
+            lease=lease,
+            interrupted_parent_record=active_candidate_record,
+        )
+        if resumed is not None:
+            resumed["details"] = details
+            return resumed
         if _infrastructure_retry_used(
             candidate_store=candidate_store,
             failed=failed,
@@ -6843,6 +6894,38 @@ def _infrastructure_retry_used(
     )
 
 
+def _failed_candidate_replacement_dry_run(
+    *,
+    policy: MergeTrainPolicy,
+    snapshot: MergeTrainDryRunSnapshot,
+    failed: MergeTrainBatchCandidate,
+    holds: tuple[MergeTrainBatchHeldOutEntry, ...],
+) -> MergeTrainDryRunResult | None:
+    held = {(entry.pull_request_number, entry.head_sha) for entry in holds}
+    expected_order = tuple(
+        entry.pull_request_number
+        for entry in failed.entries
+        if (entry.pull_request_number, entry.head_sha) not in held
+    )
+    plan_dry_run = build_merge_train_dry_run_result(
+        policy=policy,
+        snapshot=_without_held_out_pull_requests(
+            snapshot=merge_train_snapshot_of(
+                snapshot, {entry.pull_request_number for entry in failed.entries}
+            ),
+            held_out=holds,
+        ),
+        batch_landing=True,
+    )
+    cap = policy.find_repository_policy(
+        repository=snapshot.repository, base_branch=snapshot.base_branch
+    ).max_batch_size
+    expected_order = expected_order[:cap]
+    if plan_dry_run.intended_next_action != "merge" or plan_dry_run.queue_order != expected_order:
+        return None
+    return plan_dry_run
+
+
 def _plan_failed_candidate_replacement(
     *,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
@@ -6863,27 +6946,10 @@ def _plan_failed_candidate_replacement(
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
     failed = active_candidate_record.candidate
-    held = {(entry.pull_request_number, entry.head_sha) for entry in holds}
-    expected_order = tuple(
-        entry.pull_request_number
-        for entry in failed.entries
-        if (entry.pull_request_number, entry.head_sha) not in held
+    plan_dry_run = _failed_candidate_replacement_dry_run(
+        policy=policy, snapshot=snapshot, failed=failed, holds=holds
     )
-    plan_dry_run = build_merge_train_dry_run_result(
-        policy=policy,
-        snapshot=_without_held_out_pull_requests(
-            snapshot=merge_train_snapshot_of(
-                snapshot, {entry.pull_request_number for entry in failed.entries}
-            ),
-            held_out=holds,
-        ),
-        batch_landing=True,
-    )
-    cap = policy.find_repository_policy(
-        repository=repository, base_branch=base_branch
-    ).max_batch_size
-    expected_order = expected_order[:cap]
-    if plan_dry_run.intended_next_action != "merge" or plan_dry_run.queue_order != expected_order:
+    if plan_dry_run is None:
         return None
     if reason_code == "failure_isolation":
         recovery = _resume_known_failed_batch(
