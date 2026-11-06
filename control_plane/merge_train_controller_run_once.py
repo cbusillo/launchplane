@@ -5339,6 +5339,24 @@ def try_reflow_failed_merge_train_candidate(
             merge_method=merge_method,
             dry_run_result=dry_run_result,
         ):
+            resumed = _resume_known_failed_batch(
+                stack_collapse_store=stack_collapse_store,
+                candidate_store=candidate_store,
+                github_client=github_client,
+                policy=policy,
+                policy_sha256=policy_sha256,
+                snapshot=snapshot,
+                dry_run_result=dry_run_result,
+                held_out=held_out,
+                merge_method=merge_method,
+                recorded_at=recorded_at,
+                trace_id=trace_id,
+                mutate=mutate,
+                lease=lease,
+                interrupted_parent_record=active_candidate_record,
+            )
+            if resumed is not None:
+                return resumed
             recovered = _retry_closed_candidate_after_passing_checks(
                 stack_collapse_store=stack_collapse_store,
                 candidate_store=candidate_store,
@@ -5620,6 +5638,7 @@ def _resume_known_failed_batch(
     mutate: bool,
     lease: MergeTrainControllerLeaseContext,
     conflict_probe: dict[str, object] | None = None,
+    interrupted_parent_record: MergeTrainBatchCandidateRecord | None = None,
 ) -> dict[str, object] | None:
     """Resume recorded failure isolation rather than rebuild identical failed inputs."""
     compatible_history = tuple(
@@ -5663,6 +5682,10 @@ def _resume_known_failed_batch(
             ),
             None,
         )
+        if interrupted_parent_record is not None and (
+            parent is None or parent.record_id != interrupted_parent_record.record_id
+        ):
+            return None
         unfinished_retry = (
             parent is not None
             and latest.status == "superseded"
@@ -5773,7 +5796,7 @@ def _resume_known_failed_batch(
             if mutate:
                 result["merge_train_batch_candidate_record_id"] = _persist_replacement_candidate(
                     candidate_store=candidate_store,
-                    active_candidate_record=latest,
+                    active_candidate_record=interrupted_parent_record or latest,
                     candidate=candidate,
                     repository=snapshot.repository,
                     base_branch=snapshot.base_branch,
@@ -5782,6 +5805,8 @@ def _resume_known_failed_batch(
                     lease=lease,
                 )
             return result
+    if interrupted_parent_record is not None:
+        return None
     failed_record = next(
         (
             record
