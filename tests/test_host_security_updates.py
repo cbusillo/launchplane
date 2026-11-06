@@ -14,7 +14,6 @@ from control_plane import host_security_updates as security
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.product_environment_read_model import build_product_site_overview
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.public_ingress_monitoring import health_monitor_freshness_seconds
 from control_plane.dokploy import native_copy_stream
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.storage.postgres import PostgresRecordStore
@@ -22,7 +21,7 @@ from tests.test_product_read_service import _profile_payload
 
 
 class HostSecurityUpdateTests(unittest.TestCase):
-    def test_read_program_observes_success_stamp_without_running_updates(self) -> None:
+    def test_read_program_distinguishes_success_from_timer_stamps(self) -> None:
         import pathlib
         import sys
 
@@ -43,20 +42,26 @@ class HostSecurityUpdateTests(unittest.TestCase):
                     ),
                     patch.object(sys, "argv", ["reader", "{}", "FRAME:"]),
                     redirect_stdout(output),
+                    patch.object(time, "time", return_value=1001.0),
                 ):
                     exec(security.SECURITY_UPDATE_PROGRAM, {})
                 result = json.loads(output.getvalue().removeprefix("FRAME:"))
-                self.assertEqual(result["result"]["completed_at"], completed_at)
+                self.assertEqual(
+                    result["result"]["age_seconds"],
+                    None if completed_at is None else 1001.0 - completed_at,
+                )
 
-    def test_invalid_remote_evidence_and_denial_never_become_observed(self) -> None:
+    def test_remote_ages_are_verified_and_denials_remain_unverified(self) -> None:
         for frames, error, status in (
             ([], None, "unknown"),
+            ([{"type": "complete", "result": {"age_seconds": 10}}], None, "observed"),
+            ([{"type": "complete", "result": {"age_seconds": None}}], None, "observed"),
             (
-                [{"type": "complete", "result": {"observed_at": time.time() + 3600}}],
+                [{"type": "complete", "result": {"age_seconds": -1}}],
                 None,
                 "unknown",
             ),
-            ([{"type": "complete", "result": {"observed_at": float("nan")}}], None, "unknown"),
+            ([{"type": "complete", "result": {"age_seconds": float("nan")}}], None, "unknown"),
             ([], OSError("unreachable"), "unknown"),
             ([], native_copy_stream.NativeSourceAuthorizationDenied("denied"), "denied"),
         ):
@@ -110,6 +115,7 @@ class HostSecurityUpdateTests(unittest.TestCase):
                     )
                 )
             now = time.time()
+            earlier_warnings: set[str] = set()
             with (
                 patch.object(security, "read_host_security_updates") as reader,
                 patch(
@@ -143,10 +149,12 @@ class HostSecurityUpdateTests(unittest.TestCase):
                     now += security.OBSERVATION_INTERVAL_SECONDS + 1
                     completed_at = None if age is None else now - age
                     reader.return_value = security.HostSecurityUpdateEvidence.model_validate(
-                        {"observed_at": now, "completed_at": completed_at, "status": status}
+                        {"completed_at": completed_at, "status": status}
                     )
                     reader.reset_mock()
                     HealthMonitorScheduler(store)._run_delivery_monitor()
+                    self.assertEqual(reader.call_count, 1)
+                    security.collect_host_security_updates(store, should_stop=lambda: False)
                     self.assertEqual(reader.call_count, 1)
                     for profile in profiles:
                         overview = build_product_site_overview(
@@ -161,15 +169,16 @@ class HostSecurityUpdateTests(unittest.TestCase):
                         warnings = security.host_security_update_warnings(store, profile, lane)
                         self.assertEqual(len(warnings), int(warned))
                         self.assertTrue(all(warning in production.warnings for warning in warnings))
+                        if warned:
+                            earlier_warnings.update(warnings)
+                        else:
+                            self.assertTrue(earlier_warnings.isdisjoint(production.warnings))
                         self.assertTrue(
                             security.host_security_update_warnings(
                                 store,
                                 profile,
                                 lane,
-                                now=now
-                                + security.OBSERVATION_INTERVAL_SECONDS
-                                + health_monitor_freshness_seconds("prod")
-                                + 1,
+                                now=now + security.OBSERVATION_VALID_SECONDS + 1,
                             )
                         )
                         receipt = store.read_idempotency_record(
@@ -178,6 +187,20 @@ class HostSecurityUpdateTests(unittest.TestCase):
                             idempotency_key=f"{lane.context}:prod",
                         )
                         self.assertIsNotNone(receipt)
+                        if not warned:
+                            self.assertFalse(
+                                security.host_security_update_warnings(
+                                    store,
+                                    profile,
+                                    lane,
+                                    now=now
+                                    + (
+                                        security.OBSERVATION_VALID_SECONDS
+                                        + security.OBSERVATION_INTERVAL_SECONDS
+                                    )
+                                    / 2,
+                                )
+                            )
                 security.collect_host_security_updates(store, should_stop=lambda: False)
                 self.assertEqual(reader.call_count, 1)
                 profile = profiles[0]
@@ -206,6 +229,7 @@ class HostSecurityUpdateTests(unittest.TestCase):
                     lane = next(lane for lane in profile.lanes if lane.instance == "prod")
                     self.assertTrue(security.host_security_update_warnings(store, profile, lane))
                 reader.side_effect = None
+                now += security.OBSERVATION_INTERVAL_SECONDS + 1
                 placement.side_effect = lambda **kwargs: {
                     "serverId": "moved" if placement.call_count % 2 == 0 else "shared"
                 }

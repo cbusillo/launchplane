@@ -1091,9 +1091,9 @@ Live products also warn when a production host has no successful security-update
 completion, or its last completion is over two days old. The delivery worker
 reads Debian's `upgrade-stamp` through the existing host transport; apt writes
 that stamp after a successful unattended run, including one with no upgrades.
-Successful observations are reused for an hour; receipt age uses Launchplane's
-clock, with the monitor's freshness grace. Shared hosts are read once per pass.
-Each lane's latest result replaces a
+The host reports the stamp's age, avoiding clock-offset assumptions. Results
+are reused for an hour, including failures; receipts expire after two hours on
+Launchplane's clock. Shared hosts are read once per pass. Each lane's result replaces a
 completion receipt in the existing store, outside uptime history. Missing,
 expired, denied, moved-target or invalid evidence remains unverified. A fresh
 read clears the warning. Launchplane does not run updates or reboot the host.

@@ -4,7 +4,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 
 import click
@@ -77,7 +76,7 @@ def read_lane_host_network_capacity(
 @dataclass(frozen=True)
 class BoundHostObservation[T]:
     server_id: str
-    target_sha256: str
+    target: ProviderTargetRecord
     observation: T
 
 
@@ -114,12 +113,6 @@ def read_bound_lane_host[T](
         raise ValueError("The lane host changed during observation.")
     return BoundHostObservation(
         server_id=server_id,
-        target_sha256=host_target_sha256(target),
+        target=target,
         observation=observation,
-    )
-
-
-def host_target_sha256(target: ProviderTargetRecord) -> str:
-    return nonvalidating_compact_sorted_json_sha256(
-        target.model_dump(include={"provider_id", "target_category", "target_id"})
     )

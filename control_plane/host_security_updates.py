@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 import time
+import math
 from typing import TYPE_CHECKING, Literal
 
 import click
@@ -13,11 +14,12 @@ from control_plane.contracts.idempotency_record import (
     build_launchplane_mutation_reservation_id,
     parse_launchplane_mutation_timestamp,
 )
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
-from control_plane.contracts.public_ingress_monitoring import health_monitor_freshness_seconds
 from control_plane.dokploy import api, native_copy_stream
 from control_plane.timestamps import utc_now_timestamp
 
@@ -26,6 +28,7 @@ if TYPE_CHECKING:
 
 MAX_UPDATE_AGE_SECONDS = 2 * 24 * 60 * 60
 OBSERVATION_INTERVAL_SECONDS = 60 * 60
+OBSERVATION_VALID_SECONDS = 2 * OBSERVATION_INTERVAL_SECONDS
 SCOPE = "launchplane:host-security-updates"
 ROUTE = "service:host-security-updates"
 
@@ -37,14 +40,13 @@ try:
 except FileNotFoundError:
     completed_at = None
 print(sys.argv[2]+json.dumps({'type':'complete','result': {
-    'observed_at': time.time(), 'completed_at': completed_at}}),flush=True)
+    'age_seconds': None if completed_at is None else time.time() - completed_at}}),flush=True)
 """
 
 
 class HostSecurityUpdateEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    observed_at: float = Field(ge=0)
     completed_at: float | None = Field(default=None, ge=0)
     status: Literal["observed", "unknown", "denied"] = "observed"
     target_sha256: str = ""
@@ -64,20 +66,26 @@ def read_host_security_updates(host: str, token: str, server_id: str) -> HostSec
         )
         if len(frames) != 1 or frames[0].get("type") != "complete":
             raise ValueError("Incomplete security-update observation.")
-        evidence = HostSecurityUpdateEvidence.model_validate(frames[0].get("result"))
-        if abs(evidence.observed_at - time.time()) > 30:
-            raise ValueError("Host clock differs from the observation clock.")
-        return evidence
+        result = frames[0].get("result")
+        if not isinstance(result, dict) or "age_seconds" not in result:
+            raise ValueError("Missing security-update age.")
+        age = result["age_seconds"]
+        now = time.time()
+        if age is not None and (
+            not isinstance(age, (int, float)) or not math.isfinite(age) or not 0 <= age <= now
+        ):
+            raise ValueError("Invalid security-update age.")
+        return HostSecurityUpdateEvidence(completed_at=None if age is None else now - age)
     except native_copy_stream.NativeSourceAuthorizationDenied:
-        return HostSecurityUpdateEvidence(status="denied", observed_at=time.time())
+        return HostSecurityUpdateEvidence(status="denied")
     except (ValueError, OSError, native_copy_stream.NativeSourceUnavailable):
-        return HostSecurityUpdateEvidence(status="unknown", observed_at=time.time())
+        return HostSecurityUpdateEvidence(status="unknown")
 
 
 def collect_host_security_updates(
     store: PostgresRecordStore, *, should_stop: Callable[[], bool]
 ) -> None:
-    from control_plane.host_network_capacity import read_bound_lane_host, host_target_sha256
+    from control_plane.host_network_capacity import read_bound_lane_host
 
     hosts: dict[tuple[str, str], HostSecurityUpdateEvidence] = {}
 
@@ -95,18 +103,16 @@ def collect_host_security_updates(
                 continue
             if should_stop():
                 return
+            target_sha256 = ""
             try:
-                previous = read_recent_host_update(
-                    store, lane, now=time.time(), max_age=OBSERVATION_INTERVAL_SECONDS
-                )
                 target = store.read_provider_target_record(
                     context_name=lane.context, instance_name=lane.instance
                 )
-                if (
-                    previous is not None
-                    and previous.status == "observed"
-                    and previous.target_sha256 == host_target_sha256(target)
-                ):
+                target_sha256 = host_target_sha256(target)
+                previous = read_recent_host_update(
+                    store, lane, now=time.time(), max_age=OBSERVATION_INTERVAL_SECONDS
+                )
+                if previous is not None and previous.target_sha256 == target_sha256:
                     continue
                 bound = read_bound_lane_host(
                     root=Path(__file__).parent.parent,
@@ -115,21 +121,15 @@ def collect_host_security_updates(
                     instance=lane.instance,
                     read=read,
                 )
-                evidence = bound.observation.model_copy(
-                    update={"target_sha256": bound.target_sha256}
-                )
-            except (
-                native_copy_stream.NativeSourceAuthorizationDenied,
-                api.DokployRequestFailed,
-            ) as error:
-                denied = isinstance(
-                    error, native_copy_stream.NativeSourceAuthorizationDenied
-                ) or error.status_code in {401, 403}
+                evidence = bound.observation
+                target_sha256 = host_target_sha256(bound.target)
+            except api.DokployRequestFailed as error:
                 evidence = HostSecurityUpdateEvidence(
-                    status="denied" if denied else "unknown", observed_at=time.time()
+                    status="denied" if error.status_code in {401, 403} else "unknown"
                 )
             except (ValueError, OSError, click.ClickException):
-                evidence = HostSecurityUpdateEvidence(status="unknown", observed_at=time.time())
+                evidence = HostSecurityUpdateEvidence(status="unknown")
+            evidence = evidence.model_copy(update={"target_sha256": target_sha256})
             key = f"{lane.context}:{lane.instance}"
             store.write_idempotency_record(
                 LaunchplaneIdempotencyRecord(
@@ -164,20 +164,16 @@ def host_security_update_warnings(
             store,
             lane,
             now=current,
-            max_age=OBSERVATION_INTERVAL_SECONDS + health_monitor_freshness_seconds(lane.instance),
+            max_age=OBSERVATION_VALID_SECONDS,
         )
         if evidence is None:
             return (warning,)
         if evidence.status == "denied":
             return ("The provider denied the production host security-update read.",)
-        from control_plane.host_network_capacity import host_target_sha256
-
         target = getattr(store, "read_provider_target_record")(
             context_name=lane.context, instance_name=lane.instance
         )
-        if evidence.target_sha256 != host_target_sha256(target) or (
-            evidence.completed_at is not None and evidence.completed_at > evidence.observed_at
-        ):
+        if evidence.target_sha256 != host_target_sha256(target):
             return (warning,)
         if evidence.status == "observed":
             if evidence.completed_at is None:
@@ -217,3 +213,9 @@ def read_recent_host_update(
     except (ValueError, OSError):
         return None
     return None
+
+
+def host_target_sha256(target: ProviderTargetRecord) -> str:
+    return nonvalidating_compact_sorted_json_sha256(
+        target.model_dump(include={"provider_id", "target_category", "target_id"})
+    )

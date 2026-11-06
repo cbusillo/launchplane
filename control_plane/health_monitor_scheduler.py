@@ -312,18 +312,16 @@ class HealthMonitorScheduler:
             _LOGGER.exception("Testing delivery monitor failed; continuing production monitoring")
         from control_plane.host_security_updates import collect_host_security_updates
 
-        try:
-            monitor_production_delivery_once(
-                self.store,
-                observed_at=_timestamp(self.clock()),
-                should_stop=self._stop.is_set,
-            )
-        finally:
-            if not self._stop.is_set():
-                try:
-                    collect_host_security_updates(self.store, should_stop=self._stop.is_set)
-                except Exception:
-                    _LOGGER.exception("Host security-update observation failed")
+        if not self._stop.is_set():
+            try:
+                collect_host_security_updates(self.store, should_stop=self._stop.is_set)
+            except Exception:
+                _LOGGER.exception("Host security-update observation failed")
+        monitor_production_delivery_once(
+            self.store,
+            observed_at=_timestamp(self.clock()),
+            should_stop=self._stop.is_set,
+        )
 
     def watch_once(self, instance: str = "prod") -> bool:
         now = self.clock()
