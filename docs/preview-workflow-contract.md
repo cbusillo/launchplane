@@ -226,17 +226,16 @@ authorize another effect or settle the original.
 
 For a source-free preview that never published a lifecycle, ordinary reconciliation
 and the existing original-bound preview apply can continue its retained recipient.
-They validate the original's source decision, exact target and environment, absence
-of preview/generation history, ownership and protected-use/needed-copy/resource holds.
+They reuse the existing original-bound and [disposable preview](disposable-lanes.md)
+checks; recorded or destroyed previews keep their existing refresh path.
 A creation original without a concrete receipt requires complete exact-original
 provider inventory; missing reads remain unknown. A held original must have expired
 past its recovery grace. Existing executor exclusion and original schedule quiescence
 then gate atomic supersession, which retains the original intent and records its
 effects as unverified. It does not turn a successful provider job into successful
 Odoo or serving evidence. The original-intent and lane binding stays stable across
-that settlement, while changed intent, target or runtime settings still refuse.
-The normal native resource and credential-isolation checks run before refresh
-effects. Only the refresh's actual verified success publishes a serving generation.
+that settlement, while changed authority still refuses. Only the refresh's actual
+verified success publishes a serving generation.
 
 When the preview template instance has a deploy-enabled website-bootstrap
 record, refresh also renders a preview-scoped copy of that website intent,
