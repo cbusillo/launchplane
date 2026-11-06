@@ -9,7 +9,12 @@ from unittest.mock import patch
 
 from control_plane import service_bootstrap
 from control_plane.contracts.merge_train_controller_state import build_merge_train_controller_key
-from control_plane.github_request_timing import github_request_tally
+from control_plane.github_request_timing import (
+    MAX_QUOTA_OBSERVATIONS,
+    github_request_tally,
+    github_request_phase,
+    record_github_response,
+)
 from control_plane.github_request_timing import timed_github_request
 
 
@@ -22,11 +27,59 @@ class _Clock:
 
 
 def _tally_counts(stderr: str, label: str) -> dict[str, int]:
-    (line,) = [line for line in stderr.splitlines() if label in line]
+    (line,) = [
+        line for line in stderr.splitlines() if label in line and "GitHub request tally:" in line
+    ]
     return {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)\b", line)}
 
 
 class GitHubRequestTimingTests(unittest.TestCase):
+    def test_quota_output_is_bounded_and_counts_every_omitted_request(self) -> None:
+        count = MAX_QUOTA_OBSERVATIONS * 3
+        with self.assertLogs("control_plane.github_request_timing", level="INFO") as logs:
+            with github_request_tally("controller trace bounded"):
+                for reset in range(count):
+                    with timed_github_request(method="GET", path="/value", token="private"):
+                        record_github_response(200, {"x-ratelimit-reset": str(reset)})
+                self.assertEqual(logs.output, [])
+        observations = [
+            json.loads(line.split("; ", 1)[1])
+            for line in logs.output
+            if "GitHub quota observation:" in line
+        ]
+        self.assertLessEqual(len(observations), MAX_QUOTA_OBSERVATIONS)
+        (coverage,) = [line for line in logs.output if "GitHub quota coverage:" in line]
+        match = re.search(r"omitted_requests=(\d+)", coverage)
+        assert match is not None
+        omitted = int(match[1])
+        self.assertEqual(sum(row["requests"] for row in observations) + omitted, count)
+        self.assertTrue(all(len(line.encode()) < 2048 for line in logs.output))
+
+    def test_failed_and_nested_phases_restore_request_and_credential_scope(self) -> None:
+        with self.assertLogs("control_plane.github_request_timing", level="INFO") as logs:
+            with github_request_tally("outer"):
+                with self.assertRaisesRegex(RuntimeError, "failed"):
+                    with github_request_phase("admission"):
+                        with timed_github_request(method="GET", path="/failed"):
+                            raise RuntimeError("failed")
+                with github_request_tally("inner", phase="feedback"):
+                    with timed_github_request(method="GET", path="/feedback"):
+                        record_github_response(201)
+                with timed_github_request(method="GET", path="/controller"):
+                    record_github_response(200, {"x-ratelimit-resource": "private-header-value"})
+        observations = [
+            json.loads(line.split("; ", 1)[1])
+            for line in logs.output
+            if "GitHub quota observation:" in line
+        ]
+        self.assertEqual(
+            [(row["phase"], row["status"]) for row in observations],
+            [("feedback", 201), ("admission", None), ("controller", 200)],
+        )
+        self.assertTrue(all(row["installation_id"] is None for row in observations))
+        self.assertTrue(all(row["charged_requests"] == "UNKNOWN" for row in observations))
+        self.assertNotIn("private-header-value", "\n".join(logs.output))
+
     def test_worker_binds_partial_pass_receipts_and_actual_actions_in_one_observation(self) -> None:
         script = textwrap.dedent("""
             import logging

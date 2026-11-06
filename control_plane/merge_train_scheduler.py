@@ -393,7 +393,8 @@ def _run_controller(
     )
     with github_request_tally(
         f"scheduled merge-train controller {request.repository}"
-        f"@{request.base_branch} trace {trace_id}"
+        f"@{request.base_branch} trace {trace_id}",
+        credential=token,
     ):
         controller_result = execute_merge_train_controller_run_once(
             request=request,
@@ -416,29 +417,36 @@ def _run_controller(
     failed = 0
     # Dry-run passes never comment on pull requests.
     if request.mutate:
-        delivered, failed = _deliver_controller_feedback(
-            record_store=record_store,
-            policy_record=policy_record,
-            repository_policy=repository_policy,
-            token=merge_train_github_token_value(token),
-            trace_id=trace_id,
-            response={
-                "result": controller_result.accepted_result,
-                "records": controller_result.records,
-            },
-            now=now,
-            planning_resolver=planning_scope_resolver(
-                policy=policy_record.policy,
-                source_repository=repository_policy.repository,
-                authorize=lambda target: target.service_authz == repository_policy.service_authz,
-                resolve_token=lambda target: resolve_merge_train_github_token(
-                    source=target.github_token,
-                    repository=target.repository,
-                    control_plane_root=control_plane_root,
-                    raise_resolution_errors=True,
+        with github_request_tally(
+            f"scheduled merge-train feedback {request.repository}@{request.base_branch} trace {trace_id}",
+            credential=token,
+            phase="feedback",
+        ):
+            delivered, failed = _deliver_controller_feedback(
+                record_store=record_store,
+                policy_record=policy_record,
+                repository_policy=repository_policy,
+                token=merge_train_github_token_value(token),
+                trace_id=trace_id,
+                response={
+                    "result": controller_result.accepted_result,
+                    "records": controller_result.records,
+                },
+                now=now,
+                planning_resolver=planning_scope_resolver(
+                    policy=policy_record.policy,
+                    source_repository=repository_policy.repository,
+                    authorize=lambda target: (
+                        target.service_authz == repository_policy.service_authz
+                    ),
+                    resolve_token=lambda target: resolve_merge_train_github_token(
+                        source=target.github_token,
+                        repository=target.repository,
+                        control_plane_root=control_plane_root,
+                        raise_resolution_errors=True,
+                    ),
                 ),
-            ),
-        )
+            )
     diagnosis = controller_result.accepted_result.get("last_controller_result")
     reason = (
         diagnosis.get("reason_code")
