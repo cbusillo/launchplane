@@ -12,7 +12,6 @@ import click
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.public_hosts import retained_hostname_identity
 from control_plane.contracts.disposable_lane import TESTING_PUBLIC_INGRESS_ROUTE
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
@@ -131,6 +130,25 @@ class TestingPublicIngressAdapter:
             {"operation": self.request.operation_id, "plan": self.request.reviewed_plan_sha256}
         )
 
+    @staticmethod
+    def _placement(
+        *, host: str, token: str, target_id: str
+    ) -> tuple[api.JsonObject, api.JsonObject]:
+        actual = api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="compose", target_id=target_id
+        )
+        server_id = actual.get("serverId")
+        if actual.get("composeId") != target_id or not isinstance(server_id, str):
+            raise ValueError("Testing placement is unavailable.")
+        server = api.as_json_object(
+            api.dokploy_request(
+                host=host, token=token, path="/api/server.one", query={"serverId": server_id}
+            )
+        )
+        if server is None or server.get("serverId") != server_id:
+            raise ValueError("Testing server identity is unavailable.")
+        return actual, server
+
     def _authority(self) -> tuple[dict[str, object], ProductAuthorityBundle]:
         generation = read_current_testing_generation(
             self.store, product=self.product, context=self.request.context, instance="testing"
@@ -164,11 +182,17 @@ class TestingPublicIngressAdapter:
             or provider.target_id != generation.target_id
         ):
             raise ValueError("Testing hostname authority changed.")
-        for other in self.store.list_dokploy_target_records():
-            if (other.context, other.instance) != (target.context, target.instance) and (
-                retained_hostname_identity(generation.domain_host) in other.hostname_claims
-            ):
-                raise ValueError("The testing hostname belongs to another target.")
+        from control_plane.dokploy_testing_domain import require_testing_hostname_claims_available
+
+        require_testing_hostname_claims_available(
+            product=self.product,
+            target=target,
+            domain=generation.domain_host,
+            targets=self.store.list_dokploy_target_records(),
+            profiles=self.store.list_product_profile_records(),
+            bindings=self.store.list_route_binding_records(),
+            allow_current_binding=True,
+        )
         binding = self.store.read_route_binding_record(
             product=self.product, context_name=self.request.context, instance_name="testing"
         )
@@ -185,20 +209,10 @@ class TestingPublicIngressAdapter:
             raise ValueError("Testing edge is not active.")
         # A fresh target on another server must never inherit the old edge's destination.
         host, token = source.read_dokploy_config(control_plane_root=self.root)
-        actual = api.fetch_dokploy_target_payload(
-            host=host, token=token, target_type="compose", target_id=generation.target_id
-        )
-        server_id = actual.get("serverId")
-        if actual.get("composeId") != generation.target_id or not isinstance(server_id, str):
-            raise ValueError("Testing placement is unavailable.")
-        server = api.as_json_object(
-            api.dokploy_request(
-                host=host, token=token, path="/api/server.one", query={"serverId": server_id}
-            )
-        )
-        if server is None or (
-            server.get("serverId") != server_id
-            or server.get("name") != endpoint.server_name
+        actual, server = self._placement(host=host, token=token, target_id=generation.target_id)
+        server_id = str(actual["serverId"])
+        if (
+            server.get("name") != endpoint.server_name
             or server.get("ipAddress") != endpoint.upstream_host
         ):
             raise ValueError("The recorded public edge does not reach this testing server.")

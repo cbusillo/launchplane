@@ -444,6 +444,51 @@ class FirstTestingPublicIngressTests(unittest.IsolatedAsyncioTestCase):
             require_complete=True,
         )
         self.assertEqual(held, (reserved.record,))
+        from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
+        from control_plane.generic_web_testing_exclusion import TestingExclusionRefused
+        from control_plane.provider_operations import build_provider_operation_key
+
+        row = reserved.record
+        adapter.current_provider_key = build_provider_operation_key(
+            scope=row.scope,
+            route_path=row.route_path,
+            idempotency_key=row.idempotency_key,
+            request_fingerprint=row.request_fingerprint,
+            reconciliation_key=row.reconciliation_key,
+        )
+        self.assertFalse(adapter.plan()["applied"])
+        origin = adapter.provider_target_origin().model_copy(
+            update={"product": "foreign-odoo", "context": "foreign"}
+        )
+        self.store.reserve_mutation(
+            scope="foreign-deploy",
+            route_path=GENERIC_WEB_DEPLOY_ROUTE,
+            idempotency_key="retained-deploy",
+            request_fingerprint="foreign-deploy",
+            provider_target_key=origin.target_key(),
+            provider_target_origin=origin,
+            reconciliation_key="legacy-undecodable-target",
+            lease_owner="foreign",
+            lease_seconds=300,
+        )
+        with self.assertRaises(TestingExclusionRefused):
+            adapter.plan()
+        self.assertNotIn("create", self.client.calls)
+
+    async def test_relative_foreign_health_path_does_not_claim_the_testing_hostname(self) -> None:
+        payload = self.profile.model_dump(mode="json")
+        payload["product"] = "foreign-odoo"
+        payload["lanes"][0]["context"] = "foreign"
+        payload["lanes"][0]["health_url"] = "/web/health"
+        payload["preview"]["context"] = "foreign"
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        result = self.reviewed().apply(
+            "initial-edge-key", Mock(spec=["assert_current", "checkpoint_effect"])
+        )
+        self.assertTrue(result.response_payload["result"]["public_tls_verified"])
+        self.assertEqual(self.client.calls.count("create"), 1)
 
     async def test_first_publication_can_template_a_later_restored_generation(self) -> None:
         from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
@@ -551,7 +596,7 @@ class FirstTestingPublicIngressTests(unittest.IsolatedAsyncioTestCase):
             self.adapter().plan()
         self.assertNotIn("create", self.client.calls)
 
-    async def test_hostname_setup_empty_optional_route_fields_remain_accepted(self) -> None:
+    async def test_first_ingress_empty_optional_route_fields_remain_accepted(self) -> None:
         self.routes[0]["customEntrypoint"] = ""
         self.assertFalse(self.adapter().plan()["applied"])
         self.assertNotIn("create", self.client.calls)

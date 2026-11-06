@@ -304,6 +304,30 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
 
 
 class TestingPublicIngressTests(TestingPublicIngressScenario):
+    def test_profile_hostname_claim_refuses_before_creating_the_restored_route(self) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from tests.support.profiles import _odoo_preview_profile_payload
+
+        generation = self.store.read_fresh_odoo_testing_generation(
+            self.profile.product, self.fixture.context
+        )
+        assert generation is not None
+        foreign = _odoo_preview_profile_payload("foreign-odoo")
+        foreign["lanes"] = (
+            {
+                "context": "foreign",
+                "instance": "testing",
+                "base_url": "https://" + generation.domain_host,
+            },
+        )
+        foreign["preview"] = {"enabled": False, "context": "foreign"}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(foreign)
+        )
+        with self.assertRaises(ValueError):
+            self.edge().plan()
+        self.assertNotIn("create", self.client.calls)
+
     def test_new_hostname_claim_after_effect_cannot_be_published_over(self) -> None:
         from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
         from tests.support.profiles import _odoo_preview_profile_payload

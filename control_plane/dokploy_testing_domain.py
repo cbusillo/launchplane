@@ -103,39 +103,32 @@ def require_testing_hostname_claims_available(
     bindings: Iterable[EnvironmentRouteBindingRecord],
     allow_current_binding: bool = False,
 ) -> None:
-    claims = (
-        {
-            retained_hostname_identity(value)
-            for other in targets
-            if (other.context, other.instance) != (target.context, "testing")
-            for value in other.hostname_claims
-        }
-        | {
-            retained_hostname_identity(value)
-            for other in profiles
-            for lane in other.lanes
-            if (other.product, lane.context, lane.instance) != (product, target.context, "testing")
-            for value in (lane.base_url, lane.health_url)
-            if value
-        }
-        | {
-            entry.domain_name
-            for binding in bindings
-            if not (
-                allow_current_binding
-                and (binding.product, binding.context, binding.instance)
-                == (product, target.context, "testing")
-            )
-            for entry in binding.domains
-        }
-    )
-    if any(
-        not claim
-        or claim.startswith("~")
-        or claim == domain
-        or claim.startswith("*.")
-        and domain.endswith(claim[1:])
-        for claim in claims
+    claims = {
+        retained_hostname_identity(value)
+        for other in targets
+        if (other.context, other.instance) != (target.context, "testing")
+        for value in other.hostname_claims
+    } | {
+        entry.domain_name
+        for binding in bindings
+        if not (
+            allow_current_binding
+            and (binding.product, binding.context, binding.instance)
+            == (product, target.context, "testing")
+        )
+        for entry in binding.domains
+    }
+    profile_claims = {
+        retained_hostname_identity(value)
+        for other in profiles
+        for lane in other.lanes
+        if (other.product, lane.context, lane.instance) != (product, target.context, "testing")
+        for value in (lane.base_url, lane.health_url)
+        if retained_hostname_identity(value)
+    }
+    if any(not claim or claim.startswith("~") for claim in claims) or any(
+        claim == domain or claim.startswith("*.") and domain.endswith(claim[1:])
+        for claim in claims | profile_claims
     ):
         raise ValueError("The hostname belongs to existing ingress authority.")
 

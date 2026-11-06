@@ -2411,17 +2411,9 @@ already stranded legacy operation.
 
 Use the same client below without `--operation-id` for a service-created Odoo
 testing lane that has never deployed or served. Complete its approved origin
-hostname first. The service derives that hostname, matches its recorded edge
-and selects an existing covering certificate. Missing or conflicting evidence,
-use, custody, holds and provider work refuse the operation. No certificate is
-issued and no credential, runtime, database or preview wildcard is changed.
-
-Review the dry-run, then apply and read back with the same saved evidence and
-stable key. Publication writes the first binding and testing URL together under
-the native testing fence. Lost or unverified effects stay with that original
-key; they are never created again. Readback verifies the loaded route and
-ordinary public TLS, and makes no serving, installation or health claim. The
-existing authority digest binds the first-use target; no generation is invented.
+hostname first. Review the dry-run, then apply and read back with the same saved
+evidence and stable key. Preserve that original key if the outcome is uncertain.
+Public TLS readback does not prove application serving or installed modules.
 
 ### Continue a restored generation's public edge
 

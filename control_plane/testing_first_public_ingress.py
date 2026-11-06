@@ -30,7 +30,7 @@ from control_plane.provider_operations import (
     ProviderObservation,
 )
 from control_plane.npmplus import NpmplusProxyHost, NpmplusProxyHostPayload
-from control_plane.route_binding_reconcile import provider_target_projection
+from control_plane.route_binding_reconcile import provider_target_projection, _EVIDENCE_SCAN_LIMIT
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.testing_public_ingress import (
@@ -201,11 +201,7 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
                 current_provider_key=self.current_provider_key,
             )
         host, token = source.read_dokploy_config(control_plane_root=self.root)
-        live = api.fetch_dokploy_target_payload(
-            host=host, token=token, target_type="compose", target_id=identity.target_id
-        )
-        if live.get("composeId") != identity.target_id or not isinstance(live.get("serverId"), str):
-            raise ValueError("Testing placement is unavailable.")
+        live, server = self._placement(host=host, token=token, target_id=identity.target_id)
         routes = api.dokploy_request(
             host=host,
             token=token,
@@ -220,18 +216,10 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
         )
         if not origin_id:
             raise ValueError("The approved origin hostname must exist before edge publication.")
-        server = api.as_json_object(
-            api.dokploy_request(
-                host=host,
-                token=token,
-                path="/api/server.one",
-                query={"serverId": str(live["serverId"])},
-            )
+        endpoints = self.store.list_edge_endpoint_records(
+            provider="dokploy", status="active", limit=_EVIDENCE_SCAN_LIMIT + 1
         )
-        if server is None or server.get("serverId") != live["serverId"]:
-            raise ValueError("Testing server identity is unavailable.")
-        endpoints = self.store.list_edge_endpoint_records(status="active", limit=101)
-        if len(endpoints) > 100:
+        if len(endpoints) > _EVIDENCE_SCAN_LIMIT:
             raise ValueError("The active edge inventory is incomplete.")
         matches = [
             endpoint
