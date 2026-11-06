@@ -6414,6 +6414,98 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
+    async def test_standing_override_intent_requires_active_exclusive_context(self) -> None:
+        for scope in (
+            "retiring",
+            "retired",
+            "historical",
+            "current_lane",
+            "other_lane",
+            "preview",
+            "empty_owners",
+            "missing_owners",
+            "invalid_owners",
+            "unavailable_owners",
+        ):
+            for post, payload in (
+                (_post_odoo_config_parameter_override, self._config_override_payload()),
+                (_post_odoo_website_bootstrap_override, self._website_override_payload()),
+            ):
+                with (
+                    self.subTest(scope=scope, writer=post.__name__),
+                    TemporaryDirectory() as directory,
+                ):
+                    root = Path(directory)
+                    store = self._store_with_tenant_profile(root / "state")
+                    if scope in {"retiring", "retired"}:
+                        profile = store.read_product_profile_record("odoo-tenant-cm")
+                        store.write_product_profile_record(
+                            LaunchplaneProductProfileRecord.model_validate(
+                                {
+                                    **profile.model_dump(mode="json"),
+                                    "lifecycle_state": scope,
+                                    "preview": {"enabled": False},
+                                }
+                            )
+                        )
+                    elif scope in {"historical", "current_lane", "other_lane", "preview"}:
+                        other = _odoo_preview_profile_payload("other-product")
+                        other["production_use"] = "live"
+                        other["lanes"] = [
+                            {
+                                "context": "cm"
+                                if scope in {"current_lane", "other_lane"}
+                                else "other",
+                                "instance": "testing" if scope == "current_lane" else "prod",
+                            }
+                        ]
+                        other["preview"] = {"enabled": scope == "preview", "context": "cm"}
+                        other["historical_contexts"] = ["cm"] if scope == "historical" else []
+                        store.write_product_profile_record(
+                            LaunchplaneProductProfileRecord.model_validate(other)
+                        )
+                    profiles = store.list_product_profile_records()
+
+                    def list_profiles(
+                        **filters: str,
+                    ) -> tuple[LaunchplaneProductProfileRecord, ...]:
+                        if filters or not scope.endswith("_owners"):
+                            return profiles
+                        if scope == "missing_owners":
+                            raise FileNotFoundError("Profile inventory unavailable")
+                        if scope == "invalid_owners":
+                            raise ValueError("Invalid profile inventory")
+                        if scope == "unavailable_owners":
+                            raise TypeError("Profile inventory unavailable")
+                        return ()
+
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(self._identity()),
+                        authz_policy=LaunchplaneAuthzPolicy(),
+                        record_store_factory=lambda: store,
+                        control_plane_root_path=root,
+                        bearer_identity_config=BearerIdentityConfig(
+                            local_operator_token="override-token",
+                            local_operator_subject="override-agent",
+                            local_operator_token_label="override-agent",
+                        ),
+                    )
+                    with patch.object(
+                        store, "list_product_profile_records", side_effect=list_profiles
+                    ):
+                        response = await post(app, payload, authorization="Bearer override-token")
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(
+                        response.json()["error"]["code"],
+                        "product_driver_mismatch"
+                        if scope == "current_lane"
+                        else "authorization_denied",
+                    )
+                    with self.assertRaises(FileNotFoundError):
+                        store.read_odoo_instance_override_record(
+                            context_name="cm", instance_name="testing"
+                        )
+
     async def test_director_records_override_intent_without_runtime_authority(self) -> None:
         for transport, director, instance, production_use, grant, expected in (
             ("local_operator", True, "testing", "unknown", False, 202),

@@ -7614,14 +7614,26 @@ def create_launchplane_fastapi_app(
         return response
 
     def director_testing_override_intent_allowed(
+        *,
         identity: LaunchplaneIdentity,
         profile: LaunchplaneProductProfileRecord,
+        context: str,
         instance: str,
+        record_store: object,
     ) -> bool:
-        return (
-            director_agent_identity(identity)
-            and instance == "testing"
-            and profile.production_use != "live"
+        if (
+            not director_agent_identity(identity)
+            or not profile.is_active
+            or instance != "testing"
+            or profile.production_use == "live"
+        ):
+            return False
+        try:
+            owners = product_context_owners(record_store, config_scopes=True)
+        except (TypeError, FileNotFoundError, ValueError):
+            return False
+        return is_exclusive_product_lane_context(
+            context=context, product=profile.product, owners=owners
         )
 
     async def write_odoo_config_parameter_override(
@@ -7685,7 +7697,11 @@ def create_launchplane_fastapi_app(
 
         authorization_product = product_profile.product
         director_testing_intent = director_testing_override_intent_allowed(
-            identity, product_profile, override_request.override.instance
+            identity=identity,
+            profile=product_profile,
+            context=override_request.override.context,
+            instance=override_request.override.instance,
+            record_store=record_store,
         )
         if (
             not director_testing_intent
@@ -7862,7 +7878,11 @@ def create_launchplane_fastapi_app(
             authorized = (
                 preview_bootstrap
                 or director_testing_override_intent_allowed(
-                    identity, product_profile, override_request.override.instance
+                    identity=identity,
+                    profile=product_profile,
+                    context=override_request.override.context,
+                    instance=override_request.override.instance,
+                    record_store=record_store,
                 )
                 or native_routes.native_driver_route_authorization_allows(
                     endpoint=write_odoo_website_bootstrap_override,

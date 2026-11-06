@@ -80,7 +80,6 @@ class ActionEffectTests(unittest.TestCase):
                 ("product_profile.health_monitoring.apply", True),
                 ("product_review.withdraw", True),
                 ("repository_inventory.write", True),
-                ("odoo_post_deploy.execute", False),
                 ("odoo_prod_promotion.execute", False),
                 ("ingress_route.apply", False),
                 ("product_config.apply", False),
