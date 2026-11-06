@@ -509,6 +509,7 @@ def require_unrecorded_preview_refresh(
     issued_plan: OdooPreviewApplyInputsResult,
     original_reservation_id: str,
     operation_record_id: str,
+    control_plane_root: Path | None = None,
 ) -> str:
     from control_plane.disposable_lanes import (
         disposable_lane_binding_sha256,
@@ -541,16 +542,32 @@ def require_unrecorded_preview_refresh(
     ):
         raise ValueError("Unrecorded preview recovery requires a source-free original.")
     result = original.response_payload.get("result")
-    if (
+    if original.state == "reconcile_required":
+        if _original_recovery_refusal(store, original):
+            raise ValueError("Unrecorded preview original is not ready for supersession.")
+    elif (
         original.state != "completed"
         or not isinstance(result, dict)
         or result.get("status") != "fail"
     ):
-        raise ValueError("Unrecorded preview recovery requires a completed failed original.")
+        raise ValueError("Unrecorded preview recovery requires a failed or held original.")
     previous_target = retained.issued_plan.dry_run_plan.compose_ref
-    receipt_target = str(result.get("compose_id") or "")
+    receipt_target = str(result.get("compose_id") or "") if isinstance(result, dict) else ""
     if previous_target.startswith("${created."):
         previous_target = receipt_target
+        if not previous_target and control_plane_root is not None:
+            from control_plane.workflows.odoo_preview_runtime import (
+                resolve_original_preview_compose_id,
+            )
+
+            try:
+                previous_target = resolve_original_preview_compose_id(
+                    control_plane_root=control_plane_root,
+                    request=retained.apply_request.apply,
+                    database_url=store.database_url,
+                )
+            except (ValueError, click.ClickException):
+                raise ValueError("Original preview target inventory is unavailable.") from None
     plan = issued_plan.dry_run_plan
     if (
         issued_plan.operation != "refresh"
@@ -576,7 +593,7 @@ def require_unrecorded_preview_refresh(
             )
         )
         or any(
-            held.record_id != operation_record_id
+            held.record_id not in {original.record_id, operation_record_id}
             for held in store.list_held_provider_target_reservations(
                 provider_target_key=original.provider_target_key
             )
@@ -619,9 +636,19 @@ def require_unrecorded_preview_refresh(
     )
     return nonvalidating_compact_sorted_json_sha256(
         {
-            "original": preview_reservation_reference(
-                original, store.read_original_mutation_intent(original)
+            "original": original.model_dump(
+                mode="json",
+                exclude={
+                    "state",
+                    "updated_at",
+                    "response_status_code",
+                    "response_trace_id",
+                    "response_payload",
+                    "recorded_at",
+                },
             ),
+            "original_intent": store.read_original_mutation_intent(original),
+            "original_target": previous_target,
             "lane": disposable_lane_binding_sha256(
                 profile,
                 target,

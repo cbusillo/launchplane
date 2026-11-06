@@ -99,6 +99,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.idempotency_record import (
+    build_launchplane_mutation_reservation_id,
     LaunchplaneIdempotencyRecord,
     parse_launchplane_mutation_timestamp,
 )
@@ -2528,6 +2529,53 @@ def _run_preview_operation(
         operation_plan: OdooPreviewApplyInputsResult, *, allow_mutation: bool
     ) -> DurableProviderOperationResult:
         preview_binding = ""
+        original_id = ""
+        existing = record_store.read_idempotency_record(
+            scope=reservation_scope, route_path=ODOO_PREVIEW_APPLY_ROUTE, idempotency_key=plan_id
+        )
+        if existing is not None and cast(
+            PostgresRecordStore, record_store
+        ).read_original_mutation_intent(existing):
+            from control_plane.preview_reservation_recovery import original_preview_intent
+
+            original_id = original_preview_intent(
+                existing, profile=profile, store=record_store
+            ).apply_request.unrecorded_original_reservation_id
+        elif (
+            existing is None
+            and operation == "refresh"
+            and profile.preview.data_transport_mode == "none"
+            and not profile.preview.clean_testing_snapshot
+            and not operation_plan.dry_run_plan.compose_ref.startswith("${created.")
+            and not any(
+                profile.preview.slug_template.format(number=item.anchor_pr_number)
+                == operation_plan.preview_slug
+                for item in record_store.list_preview_records(context_name=operation_plan.context)
+            )
+        ):
+            from control_plane.preview_reservation_recovery import (
+                require_unrecorded_preview_original,
+            )
+
+            originals = cast(PostgresRecordStore, record_store).list_odoo_preview_cleanup_originals(
+                product=profile.product, number=pull_request_number
+            )
+            for original in sorted(
+                originals,
+                key=lambda item: (item.state != "completed", item.created_at, item.record_id),
+                reverse=True,
+            ):
+                try:
+                    require_unrecorded_preview_original(
+                        cast(PostgresRecordStore, record_store),
+                        profile=profile,
+                        number=pull_request_number,
+                        reservation_id=original.record_id,
+                    )
+                except ValueError:
+                    continue
+                original_id = original.record_id
+                break
 
         def preview_checkpoint() -> None:
             nonlocal preview_binding
@@ -2541,12 +2589,30 @@ def _run_preview_operation(
             )
 
             try:
-                binding = require_disposable_preview_operation(
-                    cast(PostgresRecordStore, record_store),
-                    profile=profile,
-                    issued_plan=operation_plan,
-                    allow_unrecorded_creation=True,
-                )
+                if original_id:
+                    from control_plane.preview_reservation_recovery import (
+                        require_unrecorded_preview_refresh,
+                    )
+
+                    binding = require_unrecorded_preview_refresh(
+                        cast(PostgresRecordStore, record_store),
+                        profile=profile,
+                        issued_plan=operation_plan,
+                        original_reservation_id=original_id,
+                        operation_record_id=build_launchplane_mutation_reservation_id(
+                            scope=reservation_scope,
+                            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+                            idempotency_key=plan_id,
+                        ),
+                        control_plane_root=control_plane_root,
+                    )
+                else:
+                    binding = require_disposable_preview_operation(
+                        cast(PostgresRecordStore, record_store),
+                        profile=profile,
+                        issued_plan=operation_plan,
+                        allow_unrecorded_creation=True,
+                    )
                 if preview_binding and binding != preview_binding:
                     raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
                 preview_binding = binding
@@ -2560,6 +2626,7 @@ def _run_preview_operation(
             issued_plan=operation_plan,
             request=OdooPreviewApplyEnvelope(
                 product=profile.product,
+                unrecorded_original_reservation_id=original_id,
                 apply=OdooPreviewDokployApplyRequest(
                     dry_run_plan=operation_plan.dry_run_plan,
                     manifest=operation_plan.plan_request.manifest,
