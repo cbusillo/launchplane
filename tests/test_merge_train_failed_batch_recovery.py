@@ -1878,13 +1878,27 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "interrupted supersession"):
                     self._reflow(
-                        store, self.candidate, source=f"{_MISSING_SCAN_FAILURE_SOURCE}test"
+                        store,
+                        self.candidate,
+                        source=f"{_MISSING_SCAN_FAILURE_SOURCE}test",
+                        recorded_at=self.candidate.created_at,
                     )
             retry = next(
                 r.candidate
                 for r in store.list_merge_train_batch_candidate_records()
                 if r.candidate.infrastructure_retry_of
             )
+            for attempt in range(256):
+                prior_pass = build_merge_train_batch_candidate_record(
+                    candidate=self.candidate.model_copy(update={"status": "passed"}),
+                    source=f"service:controller:candidate-observe:{attempt}",
+                    updated_at=self.candidate.created_at,
+                ).model_copy(update={"status": "superseded"})
+                if prior_pass.record_id > max(
+                    record.record_id for record in store.list_merge_train_batch_candidate_records()
+                ):
+                    break
+            store.write_merge_train_batch_candidate_record(prior_pass)
             store = FilesystemRecordStore(Path(directory))
             before = store.list_merge_train_batch_candidate_records()
             dry = self._reflow(
@@ -1951,6 +1965,118 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             again = self._reflow(store, rebound.candidate, source=rebound.source)
             self.assertEqual(again["reason_code"], "required_code_scanning_missing")
             self.assertEqual(again["details"]["recovery_reason_code"], "infrastructure_retry_used")
+
+    def test_interrupted_same_ref_retry_preserves_reservation_and_conflict_holds(self) -> None:
+        for entry in ("direct", "history", "conflict"):
+            with self.subTest(entry=entry), TemporaryDirectory() as directory:
+                self._prepare()
+                store = FilesystemRecordStore(Path(directory))
+                failures = CandidateCheckFailures(
+                    checks=(CandidateCheckFailure(name="ci-gate", conclusion="failure", url=""),),
+                    retry_runs=((10, 1),),
+                )
+                publish = Mock()
+                with (
+                    patch.object(
+                        self.client, "prepare_candidate_check_retry", return_value=publish
+                    ),
+                    patch.object(self.client, "retry_candidate_checks") as resume,
+                    patch.object(self.client, "candidate_check_retry_finished", return_value=False),
+                ):
+                    with (
+                        patch(
+                            "control_plane.merge_train_controller_run_once."
+                            "_supersede_active_merge_train_batch_candidate_records",
+                            side_effect=RuntimeError("interrupted supersession"),
+                        ),
+                        self.assertRaisesRegex(RuntimeError, "interrupted supersession"),
+                    ):
+                        self._reflow(store, self.candidate, failure_evidence=failures)
+                    publish.assert_not_called()
+                    store = FilesystemRecordStore(Path(directory))
+                    reservation = next(
+                        record.candidate
+                        for record in store.list_merge_train_batch_candidate_records()
+                        if record.candidate.check_rerun_attempts
+                    )
+                    conflicts: tuple[MergeTrainBatchHeldOutEntry, ...] = ()
+                    if entry == "conflict":
+                        third = self.snapshot.pull_requests[-1].model_copy(
+                            update={
+                                "number": 3,
+                                "head_sha": "head-3",
+                                "head_ref": "third",
+                                "created_at": "2026-10-03T12:30:00Z",
+                            }
+                        )
+                        self.snapshot = self.snapshot.model_copy(
+                            update={"pull_requests": (*self.snapshot.pull_requests, third)}
+                        )
+                        conflicts = (
+                            MergeTrainBatchHeldOutEntry(
+                                pull_request_number=third.number,
+                                head_sha=third.head_sha,
+                                conflicts_with=tuple(
+                                    e.pull_request_number for e in reservation.entries
+                                ),
+                                probe_base_sha=self.snapshot.base_sha,
+                                conflicts_with_head_shas=tuple(
+                                    e.head_sha for e in reservation.entries
+                                ),
+                            ),
+                        )
+
+                    def recover(*, mutate: bool) -> dict[str, Any]:
+                        if entry == "direct":
+                            return self._reflow(
+                                store, self.candidate, mutate=mutate, failure_evidence=failures
+                            )
+                        return self._fresh_plan(
+                            store, mutate=mutate, conflicts=conflicts, failure_evidence=failures
+                        )
+
+                    before = store.list_merge_train_batch_candidate_records()
+                    recover(mutate=False)
+                    self.assertEqual(store.list_merge_train_batch_candidate_records(), before)
+                    original_failures = failures
+                    failures = CandidateCheckFailures(checks=failures.checks, retry_runs=((10, 2),))
+                    refused = recover(mutate=True)
+                    self.assertEqual(refused["reason_code"], "candidate_check_retry_unavailable")
+                    publish.assert_not_called()
+                    (held,) = store.list_merge_train_batch_candidate_records(status="active")
+                    self.assertEqual(held.candidate.held_out, conflicts)
+                    failures = original_failures
+                    resumed = recover(mutate=True)
+                    self.assertEqual(resumed["reason_code"], "candidate_checks_retry_requested")
+                    self.assertEqual(
+                        MergeTrainBatchCandidate.model_validate(resumed["candidate"]),
+                        reservation.model_copy(update={"held_out": conflicts}),
+                    )
+                    publish.assert_called_once()
+                    for active in store.list_merge_train_batch_candidate_records(status="active"):
+                        store.write_merge_train_batch_candidate_record(
+                            active.model_copy(
+                                update={
+                                    "status": "superseded",
+                                    "candidate": active.candidate.model_copy(
+                                        update={"held_out": ()}
+                                    ),
+                                }
+                            )
+                        )
+                    pending = self._fresh_plan(
+                        store, mutate=True, conflicts=conflicts, failure_evidence=failures
+                    )
+                    self.assertEqual(pending["reason_code"], "candidate_checks_retry_pending")
+                    (active,) = store.list_merge_train_batch_candidate_records(status="active")
+                    self.assertEqual(
+                        active.candidate.check_rerun_attempts, reservation.check_rerun_attempts
+                    )
+                    self.assertEqual(active.candidate.held_out, conflicts)
+                    self.assertEqual(pending["candidate"], active.candidate.model_dump(mode="json"))
+                    publish.assert_called_once()
+                    self.assertTrue(resume.call_args.kwargs["resume"])
+                    self.reflow_client.add_pull_request_label.assert_not_called()
 
     def test_capped_failure_isolation_excludes_arrivals_outside_the_failed_batch(self) -> None:
         self.policy = self.policy.model_copy(

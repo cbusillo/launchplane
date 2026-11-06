@@ -5420,24 +5420,6 @@ def try_reflow_failed_merge_train_candidate(
             merge_method=merge_method,
             dry_run_result=dry_run_result,
         ):
-            if _is_missing_scan_failure(active_candidate_record):
-                recovery = _resume_known_failed_batch(
-                    stack_collapse_store=stack_collapse_store,
-                    candidate_store=candidate_store,
-                    github_client=github_client,
-                    policy=policy,
-                    policy_sha256=policy_sha256,
-                    snapshot=snapshot,
-                    dry_run_result=dry_run_result,
-                    held_out=held_out,
-                    merge_method=merge_method,
-                    recorded_at=recorded_at,
-                    trace_id=trace_id,
-                    mutate=mutate,
-                    lease=lease,
-                )
-                if recovery is not None:
-                    return recovery
             recovered = _retry_closed_candidate_after_passing_checks(
                 stack_collapse_store=stack_collapse_store,
                 candidate_store=candidate_store,
@@ -5757,13 +5739,72 @@ def _resume_known_failed_batch(
         )
     )
     if matching_records:
+        parent_cutoffs: dict[str, str] = {}
+        for child in matching_records:
+            for ancestor in compatible_history:
+                if (
+                    ancestor.record_id
+                    not in {
+                        child.candidate.check_retry_of,
+                        child.candidate.infrastructure_retry_of,
+                        child.candidate.batch_body_retry_of,
+                    }
+                    or ancestor.candidate.batch_id == child.candidate.batch_id
+                ):
+                    continue
+                parent_cutoffs[ancestor.candidate.batch_id] = max(
+                    parent_cutoffs.get(ancestor.candidate.batch_id, ""), child.updated_at
+                )
+        progress_records = tuple(
+            record
+            for record in matching_records
+            if record.updated_at > parent_cutoffs.get(record.candidate.batch_id, "")
+        )
         latest = (
             cast(
                 MergeTrainBatchCandidateRecord,
-                latest_merge_train_batch_candidate_progress_record(matching_records),
+                latest_merge_train_batch_candidate_progress_record(progress_records),
             )
-            if interrupted_parent_record is not None
-            else matching_records[0]
+            if any(
+                record.candidate.check_retry_of
+                or record.candidate.infrastructure_retry_of
+                or record.candidate.batch_body_retry_of
+                for record in progress_records
+            )
+            else progress_records[0]
+        )
+        newest = next(
+            record
+            for record in progress_records
+            if record.candidate.batch_id == latest.candidate.batch_id
+        )
+        if newest.candidate.status == "passed" and (
+            newest.updated_at > latest.updated_at
+            or newest.source.startswith("service:controller:candidate-reobserve:")
+        ):
+            latest = newest
+        if latest.candidate.status == "failed":
+            latest = (
+                _candidate_check_retry_reservation(
+                    parent=latest.model_copy(update={"status": "active"}),
+                    history=compatible_history,
+                )
+                or latest
+            )
+        unpublished_parent = next(
+            (
+                record
+                for record in progress_records
+                if record.status == "active"
+                and _candidate_check_retry_reservation(parent=record, history=compatible_history)
+                is not None
+            ),
+            None,
+        )
+        latest = unpublished_parent or latest
+        matching_records = (
+            latest,
+            *(r for r in matching_records if r.record_id != latest.record_id),
         )
         retry = latest.candidate
         parent = next(
@@ -5979,7 +6020,27 @@ def _resume_known_failed_batch(
         "candidate": failed_record.candidate.model_dump(mode="json"),
         "reason_code": "failed_candidate_recovery_unavailable",
     }
-    if stopped["controller_action"] != "candidate_failed" and not (
+    if stopped.get("reason_code") in {
+        "candidate_checks_retry_requested",
+        "candidate_checks_retry_pending",
+    }:
+        result_record_id = stopped.get("merge_train_batch_candidate_record_id")
+        if mutate and isinstance(result_record_id, str):
+            failed_record = next(
+                record
+                for record in _candidate_history_on_base(
+                    candidate_store=candidate_store,
+                    repository=snapshot.repository,
+                    base_branch=snapshot.base_branch,
+                    base_sha=snapshot.base_sha,
+                )
+                if record.record_id == result_record_id
+            )
+        else:
+            failed_record = failed_record.model_copy(
+                update={"candidate": MergeTrainBatchCandidate.model_validate(stopped["candidate"])}
+            )
+    elif stopped["controller_action"] != "candidate_failed" and not (
         stopped["controller_action"] == "block" and held_out
     ):
         return stopped
@@ -6232,6 +6293,32 @@ def _candidate_check_retry_wait_expired(
     )
 
 
+def _candidate_check_retry_reservation(
+    *,
+    parent: MergeTrainBatchCandidateRecord,
+    history: tuple[MergeTrainBatchCandidateRecord, ...],
+) -> MergeTrainBatchCandidateRecord | None:
+    if parent.status != "active" or parent.candidate.check_rerun_attempts:
+        return None
+    return latest_merge_train_batch_candidate_progress_record(
+        tuple(
+            record
+            for record in history
+            if record.status == "superseded"
+            and record.ordinary_job_binding == parent.ordinary_job_binding
+            and record.candidate.check_rerun_attempts
+            and record.candidate.model_copy(
+                update={
+                    "check_rerun_attempts": {},
+                    "check_rerun_requested_at": "",
+                    "held_out": (),
+                }
+            )
+            == parent.candidate.model_copy(update={"held_out": ()})
+        )
+    )
+
+
 def _recover_failed_merge_train_candidate(
     *,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
@@ -6281,17 +6368,13 @@ def _recover_failed_merge_train_candidate(
                 **retry_result,
                 "details": {"recovery_reason_code": "candidate_retry_closed_unconfirmed"},
             }
-        if _infrastructure_retry_used(
+        retry_used = _infrastructure_retry_used(
             candidate_store=candidate_store,
             failed=failed,
             dry_run_result=dry_run_result,
             base_sha=snapshot.base_sha,
-        ):
-            return {
-                **retry_result,
-                "details": {"recovery_reason_code": "infrastructure_retry_used"},
-            }
-        return _plan_failed_candidate_replacement(
+        )
+        replacement = _plan_failed_candidate_replacement(
             stack_collapse_store=stack_collapse_store,
             reason_code="infrastructure_retry",
             candidate_store=candidate_store,
@@ -6308,7 +6391,21 @@ def _recover_failed_merge_train_candidate(
             trace_id=trace_id,
             mutate=mutate,
             lease=lease,
+            retry_used=retry_used,
         )
+        return replacement or {
+            **retry_result,
+            "details": {"recovery_reason_code": "infrastructure_retry_used"},
+        }
+    reservation = _candidate_check_retry_reservation(
+        parent=active_candidate_record,
+        history=_candidate_history_on_base(
+            candidate_store=candidate_store,
+            repository=repository,
+            base_branch=base_branch,
+            base_sha=snapshot.base_sha,
+        ),
+    )
     if failed.check_rerun_attempts and mutate:
         try:
             github_client.retry_candidate_checks(
@@ -6326,6 +6423,12 @@ def _recover_failed_merge_train_candidate(
     except MergeTrainGitHubError:
         lease.observe(reason_code="candidate_failure_read_unavailable")
         return None
+    if reservation is not None and (
+        not failures.conclusive
+        or failures.infrastructure_only
+        or dict(failures.retry_runs) != reservation.candidate.check_rerun_attempts
+    ):
+        return {**retry_result, "reason_code": "candidate_check_retry_unavailable"}
     if not failures.conclusive:
         # A re-run in progress or a failure no longer visible blames nobody yet.
         if failed.check_rerun_attempts:
@@ -6362,12 +6465,18 @@ def _recover_failed_merge_train_candidate(
             base_sha=snapshot.base_sha,
         )
     )
-    if not retry_used and not failures.infrastructure_only and failures.retry_runs:
-        retried = failed.model_copy(
-            update={
-                "check_rerun_attempts": dict(failures.retry_runs),
-                "check_rerun_requested_at": recorded_at,
-            }
+    if reservation is not None or (
+        not retry_used and not failures.infrastructure_only and failures.retry_runs
+    ):
+        retried = (
+            reservation.candidate.model_copy(update={"held_out": held_out})
+            if reservation
+            else failed.model_copy(
+                update={
+                    "check_rerun_attempts": dict(failures.retry_runs),
+                    "check_rerun_requested_at": recorded_at,
+                }
+            )
         )
         publish: Callable[[Callable[[], object]], None] | None = None
         if mutate:
