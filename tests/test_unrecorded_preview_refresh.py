@@ -5,6 +5,7 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
+import click
 from sqlalchemy import delete, select
 
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -22,6 +23,7 @@ from control_plane.odoo_preview_apply_http import (
     OdooPreviewApplyEnvelope,
     issue_odoo_preview_apply_plan,
 )
+from control_plane.workflows.odoo_preview_runtime import ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS
 from control_plane.storage.postgres import (
     PostgresRecordStore,
     LaunchplanePreviewRow,
@@ -115,6 +117,23 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
             assert row is not None
             self.store._sync_idempotency_row(row, self.original)
             session.commit()
+
+    def hold_original(self, *, expired: bool = True) -> None:
+        expiry = datetime.now(timezone.utc) - timedelta(
+            seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS + 60 if expired else 0
+        )
+        self.replace_original(
+            state="reconcile_required",
+            updated_at=(expiry - timedelta(seconds=1)).isoformat(),
+            lease_owner="original-executor",
+            lease_expires_at=expiry.isoformat(),
+            provider_effect_phase="post_deploy_schedule_trigger",
+            provider_effect_started_at=self.original.created_at,
+            response_status_code=None,
+            response_trace_id="",
+            recorded_at="",
+            response_payload={},
+        )
 
     @property
     def target_id(self) -> str:
@@ -290,6 +309,104 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         apply.assert_called_once()
         self.assertEqual(self.store.list_preview_records(), ())
         self.assert_original_preserved()
+
+    async def test_expired_held_original_continues_only_through_guarded_supersession(self) -> None:
+        for created in (False, True):
+            with self.subTest(created=created):
+                self.prepare_fixture(created=created)
+                self.hold_original()
+
+                def execute(**kwargs: Any) -> dict[str, object]:
+                    self.assertTrue(kwargs["qualify_existing_preview"])
+                    self.assertFalse(self.store.list_preview_records())
+                    settled = self.store.read_idempotency_record_by_id(self.original.record_id)
+                    assert settled is not None
+                    self.assertEqual(settled.state, "completed")
+                    self.assertEqual(settled.response_payload["result"]["status"], "fail")
+                    self.assertEqual(
+                        self.store.read_original_mutation_intent(settled), self.retained
+                    )
+                    kwargs["provider_effect_checkpoint"]("fixture-qualified-effect")
+                    return self.passing_result()
+
+                with (
+                    patch(
+                        "control_plane.http_app.execute_odoo_preview_apply_result",
+                        side_effect=execute,
+                    ) as apply,
+                    patch(
+                        "control_plane.http_app.odoo_preview_supersession_is_quiescent",
+                        return_value=True,
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
+                        return_value=self.target_id,
+                    ),
+                ):
+                    accepted = await self.fixture.preview_apply()
+                    self.assertEqual(accepted.status_code, 202, accepted.text)
+                    replayed = await self.fixture.preview_apply()
+                    self.assertEqual(replayed.status_code, 202, replayed.text)
+                    self.assertTrue(replayed.json()["replayed"])
+                    apply.assert_called_once()
+
+    async def test_held_original_grace_quiescence_target_and_protection_keep_the_fence(
+        self,
+    ) -> None:
+        @contextmanager
+        def busy(*_args: object, **_kwargs: object) -> Iterator[None]:
+            yield None
+
+        for refusal in (
+            "grace",
+            "quiescence",
+            "target",
+            "inventory",
+            "executor",
+            "in_use",
+            "only_copy",
+            "shared",
+        ):
+            with self.subTest(refusal=refusal):
+                self.prepare_fixture()
+                self.hold_original(expired=refusal != "grace")
+                if refusal in {"in_use", "only_copy", "shared"}:
+                    field = {
+                        "in_use": "usage",
+                        "only_copy": "data",
+                        "shared": "production_resources",
+                    }[refusal]
+                    self.fixture.safety(**{field: refusal})
+                with (
+                    patch.object(self.store, "testing_replacement_execution_lock", side_effect=busy)
+                    if refusal == "executor"
+                    else nullcontext(),
+                    patch("control_plane.http_app.execute_odoo_preview_apply_result") as apply,
+                    patch(
+                        "control_plane.http_app.odoo_preview_supersession_is_quiescent",
+                        return_value=refusal != "quiescence",
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
+                        return_value="different-target" if refusal == "target" else self.target_id,
+                        side_effect=click.ClickException("Unavailable original inventory")
+                        if refusal == "inventory"
+                        else None,
+                    ),
+                ):
+                    refused = await self.fixture.preview_apply()
+                self.assertEqual(refused.status_code, 409, refused.text)
+                self.assertEqual(
+                    refused.json()["error"]["code"],
+                    "mutation_reconciliation_required"
+                    if refusal == "quiescence"
+                    else "mutation_in_progress"
+                    if refusal == "executor"
+                    else "disposable_lane_safety_unknown",
+                )
+                apply.assert_not_called()
+                self.assertFalse(self.store.list_preview_records())
+                self.assert_original_preserved()
 
     async def test_failed_apply_and_original_observation_never_publish_success_or_reexecute(
         self,
