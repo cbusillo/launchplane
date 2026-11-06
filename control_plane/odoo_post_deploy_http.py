@@ -235,6 +235,9 @@ class OdooInstanceOverrideStore(Protocol):
         *,
         expected_record: OdooInstanceOverrideRecord | None = None,
         require_absent: bool = False,
+        required_context_owner: tuple[str, str] | None = None,
+        required_product_config_target: tuple[str, str, str] | None = None,
+        expected_product_profile: LaunchplaneProductProfileRecord | None = None,
     ) -> object: ...
 
 
@@ -327,10 +330,12 @@ def write_odoo_config_parameter_override_result(
     *,
     record_store: OdooInstanceOverrideStore,
     request: OdooConfigParameterOverrideEnvelope,
+    expected_product_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> dict[str, object]:
     override_record = write_odoo_config_parameter_override_record(
         record_store=record_store,
         request=request.override,
+        expected_product_profile=expected_product_profile,
     )
     return {
         "context": override_record.context,
@@ -345,6 +350,7 @@ def write_odoo_website_bootstrap_override_result(
     *,
     record_store: OdooInstanceOverrideStore,
     request: OdooWebsiteBootstrapOverrideEnvelope,
+    expected_product_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> dict[str, object]:
     if request.override.preview_original_reservation_id:
         from control_plane.preview_website_bootstrap_override import prepare_preview_bootstrap
@@ -353,6 +359,7 @@ def write_odoo_website_bootstrap_override_result(
     override_record = write_odoo_website_bootstrap_override_record(
         record_store=record_store,
         request=request.override,
+        expected_product_profile=expected_product_profile,
     )
     result: dict[str, object] = {
         "context": override_record.context,
@@ -374,6 +381,7 @@ def write_odoo_config_parameter_override_record(
     *,
     record_store: OdooInstanceOverrideStore,
     request: OdooConfigParameterOverrideRequest,
+    expected_product_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> OdooInstanceOverrideRecord:
     try:
         existing_record = record_store.read_odoo_instance_override_record(
@@ -416,7 +424,20 @@ def write_odoo_config_parameter_override_record(
         source_label=request.source_label,
     )
     record_store.write_odoo_instance_override_record(
-        record, expected_record=existing_record, require_absent=existing_record is None
+        record,
+        expected_record=existing_record,
+        require_absent=existing_record is None,
+        expected_product_profile=expected_product_profile,
+        required_context_owner=(expected_product_profile.product, request.context)
+        if expected_product_profile is not None
+        else None,
+        required_product_config_target=(
+            expected_product_profile.product,
+            request.context,
+            request.instance,
+        )
+        if expected_product_profile is not None
+        else None,
     )
     return record
 
@@ -425,6 +446,7 @@ def write_odoo_website_bootstrap_override_record(
     *,
     record_store: OdooInstanceOverrideStore,
     request: OdooWebsiteBootstrapOverrideRequest,
+    expected_product_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> OdooInstanceOverrideRecord:
     try:
         existing_record = record_store.read_odoo_instance_override_record(
@@ -458,7 +480,20 @@ def write_odoo_website_bootstrap_override_record(
     if request.mode == "dry-run":
         return record
     record_store.write_odoo_instance_override_record(
-        record, expected_record=existing_record, require_absent=existing_record is None
+        record,
+        expected_record=existing_record,
+        require_absent=existing_record is None,
+        expected_product_profile=expected_product_profile,
+        required_context_owner=(expected_product_profile.product, request.context)
+        if expected_product_profile is not None
+        else None,
+        required_product_config_target=(
+            expected_product_profile.product,
+            request.context,
+            request.instance,
+        )
+        if expected_product_profile is not None
+        else None,
     )
     return record
 
