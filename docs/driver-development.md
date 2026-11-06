@@ -461,8 +461,10 @@ regex claims, block creation. Existing-host updates still require an integer
 certificate ID and never resolve the DNS purpose.
 
 Dry-run uses metadata only and returns `dns_secret_ready`, `dns_secret_id` and
-`dns_secret_version_id` alongside the ordinary route plan/audit. Missing or
-ambiguous credentials cannot authorize a create. After confirmed entry or an
+`dns_secret_version_id` alongside the ordinary route plan/audit. Authorized context-wide wildcard
+plans validate the product's recorded preview namespace directly; standing read
+access does not substitute a stable testing hostname or gain apply authority.
+Missing or ambiguous credentials cannot authorize a create. After confirmed entry or an
 explicitly authorized initial transfer through the
 [existing managed-secret path](secrets.md#preview-wildcard-dns-credential),
 review the plan and pass its `dns_secret_version_id` in the ingress request for

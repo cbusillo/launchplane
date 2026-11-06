@@ -23431,7 +23431,12 @@ def create_launchplane_fastapi_app(
             else AuthorizationTarget(scope="context"),
             inherit_agent_read_role=False,
         )
-        if instance_name or role_only:
+        wildcard_context_plan = (
+            route_request.ingress.mode == "dry-run"
+            and not instance_name
+            and bool(route_request.ingress.route.dns_challenge)
+        )
+        if instance_name or (role_only and not wildcard_context_plan):
             try:
                 profile_store = require_product_profile_read_store(record_store)
                 profile = profile_store.read_product_profile_record(route_request.product)

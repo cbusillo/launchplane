@@ -185,18 +185,53 @@ class _Fixture:
             },
         }
 
-    async def post(self, *, mode: str = "apply", key: str = "wildcard-original") -> Response:
+    async def post(
+        self,
+        *,
+        mode: str = "apply",
+        key: str = "wildcard-original",
+        authorization: str = "Bearer valid-token",
+    ) -> Response:
         ingress = cast(dict[str, object], self.payload["ingress"])
         return await _asgi_request(
             self.app,
             "POST",
             _ROUTE,
             payload={**self.payload, "ingress": {**ingress, "mode": mode}},
-            headers={"Authorization": "Bearer valid-token", "Idempotency-Key": key},
+            headers={"Authorization": authorization, "Idempotency-Key": key},
         )
 
 
 class WildcardIngressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_director_can_plan_its_preview_namespace_without_write_authority(self) -> None:
+        from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
+
+        fixture = _Fixture(self, supplied=False)
+        fixture.app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: fixture.store,
+            npmplus_ingress_client_factory=lambda: fixture.client,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="director-token",
+                local_operator_subject="director",
+                local_operator_token_label="fixture",
+            ),
+        )
+        with patch.object(secrets, "resolve_context_secret_value_from_store") as resolver:
+            plan = await fixture.post(mode="dry-run", authorization="Bearer director-token")
+            self.assertEqual(plan.status_code, 202, plan.text)
+            self.assertFalse(plan.json()["records"]["dns_secret_ready"])
+            refused = await fixture.post(authorization="Bearer director-token")
+            self.assertEqual(refused.status_code, 403, refused.text)
+            ingress = cast(dict[str, object], fixture.payload["ingress"])
+            route = cast(dict[str, object], ingress["route"])
+            route["domain_names"] = ["*.foreign.example.test"]
+            foreign = await fixture.post(mode="dry-run", authorization="Bearer director-token")
+            self.assertEqual(foreign.status_code, 400, foreign.text)
+            resolver.assert_not_called()
+        self.assertEqual(fixture.opener.created, 0)
+
     async def test_plan_absence_and_invalid_scope_never_resolve_a_value(self) -> None:
         fixture = _Fixture(self, supplied=False)
         with patch.object(secrets, "resolve_context_secret_value_from_store") as resolver:
