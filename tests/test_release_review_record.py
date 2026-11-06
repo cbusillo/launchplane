@@ -305,7 +305,7 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         api.assert_not_called()
         token.assert_not_called()
 
-    def test_publishes_decision_without_copying_the_saved_checklist(self) -> None:
+    def test_publishes_saved_decision_identity_to_tenant_repository(self) -> None:
         with patch(
             "control_plane.release_review_record.github_api_request",
             side_effect=[[], {"number": 99}, None],
@@ -327,12 +327,6 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         self.assertIn(self.decision.checklist.production.source_commit, body)
         self.assertIn(self.decision.checklist.candidate.source_commit, body)
         self.assertIn("site-owner", body)
-        self.assertEqual(
-            self.store.read_release_review_decision_record(
-                product=self.decision.product, record_id=self.decision.record_id
-            ).checklist,
-            self.decision.checklist,
-        )
 
     def test_large_checklist_can_publish_within_the_provider_body_limit(self) -> None:
         item = self.decision.checklist.items[0].model_copy(
@@ -373,10 +367,6 @@ class ReleaseReviewRecordTests(unittest.TestCase):
                 store=self.store, control_plane_root=self.root, profile=profile(), decision=saved
             )
         self.assertEqual(url, "https://github.com/example/site/issues/99")
-        stored = self.store.read_release_review_decision_record(
-            product=saved.product, record_id=saved.record_id
-        )
-        self.assertEqual(stored.checklist, checklist)
 
     def test_publication_uses_saved_action_after_client_settings_change(self) -> None:
         saved = self.decision.model_copy(

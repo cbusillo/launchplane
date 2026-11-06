@@ -216,10 +216,17 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 return_value=transport,
             )
         )
+
+        def publish_saved(*, decision: ReleaseReviewDecisionRecord, **_kwargs: object) -> str:
+            return self.store.record_release_review_decision_publication(
+                record_id=decision.record_id,
+                release_issue_url="https://github.com/example/site/issues/99",
+            ).release_issue_url
+
         self.publish = self.enterContext(
             patch(
                 "control_plane.client_release.publish_release_decision",
-                return_value="https://github.com/example/site/issues/99",
+                wraps=publish_saved,
             )
         )
         self.enterContext(

@@ -16,6 +16,7 @@ from control_plane.client_release import (
     _generic_web_release_authority_allows,
     client_release_step_operation_id,
     client_release_steps,
+    ClientReleaseBackoff,
     read_client_release_run,
     release_start_for_acceptance,
 )
@@ -730,13 +731,33 @@ class ClientReleaseTests(unittest.TestCase):
         self.switch("promote")
         accepted = self.accept().model_copy(update={"release_issue_url": ""})
         self.store.write_release_review_decision_record(accepted)
-        with patch("control_plane.client_release.publish_release_decision", side_effect=ValueError):
-            self.assertEqual(self.advance(), ())
+        backoff = ClientReleaseBackoff()
+
+        def advance() -> tuple[str, ...]:
+            return advance_client_releases(
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
+            )
+
+        def publish_saved(**kwargs: object) -> str:
+            return self.store.record_release_review_decision_publication(
+                record_id=accepted.record_id,
+                release_issue_url="https://github.com/example/site/issues/99",
+            ).release_issue_url
+
         with patch(
-            "control_plane.client_release.publish_release_decision",
-            return_value="https://github.com/example/site/issues/99",
+            "control_plane.client_release.publish_release_decision", side_effect=ValueError
         ) as publish:
-            (backup,) = self.advance()
+            self.assertEqual(advance(), ())
+            self.assertEqual(advance(), ())
+            publish.assert_called_once()
+        deadline = max(value[1] for value in backoff.blocked.values())
+        with (
+            patch("control_plane.client_release.monotonic", return_value=deadline + 1),
+            patch(
+                "control_plane.client_release.publish_release_decision", side_effect=publish_saved
+            ) as publish,
+        ):
+            (backup,) = advance()
             self.assertTrue(backup.startswith("production-backup-gate-"))
             publish.assert_called_once_with(
                 store=self.store,
@@ -744,12 +765,12 @@ class ClientReleaseTests(unittest.TestCase):
                 profile=self.store.read_product_profile_record(PRODUCT),
                 decision=accepted,
             )
-            self.advance()
+            advance()
             publish.assert_called_once()
         (stored,) = self.store.list_release_review_decision_records(product=PRODUCT)
         self.assertEqual(stored.model_copy(update={"release_issue_url": ""}), accepted)
 
-    def test_publication_recovery_does_not_release_a_changed_candidate(self) -> None:
+    def test_publication_recovery_does_not_publish_or_release_a_changed_candidate(self) -> None:
         self.switch("promote")
         accepted = self.accept().model_copy(update={"release_issue_url": ""})
         self.store.write_release_review_decision_record(accepted)
@@ -765,7 +786,7 @@ class ClientReleaseTests(unittest.TestCase):
             patch("control_plane.client_release._queue_backup") as enqueue,
         ):
             self.assertEqual(self.advance(), ())
-        publish.assert_called_once()
+        publish.assert_not_called()
         enqueue.assert_not_called()
         (stored,) = self.store.list_release_review_decision_records(product=PRODUCT)
         self.assertEqual(stored.model_copy(update={"release_issue_url": ""}), accepted)
