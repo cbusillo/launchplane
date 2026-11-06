@@ -110,6 +110,15 @@ class OperationSpec:
 OPERATION_SPECS = (
     OperationSpec(
         "GET",
+        "/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source",
+        "Read the original migrated testing pair upload state without publishing bytes or changing a receipt.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "GET",
         "/v1/products/{product}/preview-evidence",
         "Read exact original intent, retained provider history and optional exact serving-generation probes without admission publication or effect settlement.",
         ("service_api",),

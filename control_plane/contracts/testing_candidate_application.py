@@ -11,7 +11,10 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.prepared_public_site import FrozenRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
-from control_plane.contracts.odoo_testing_source import NativeOdooSourceAuthority
+from control_plane.contracts.odoo_testing_source import (
+    NativeOdooSourceAuthority,
+    MigratedOdooTestingSource,
+)
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 
 
@@ -28,9 +31,9 @@ class TestingCandidateApplicationPlan(FrozenRecord):
     base_url: str = Field(min_length=1)
     artifact: ArtifactIdentityManifest
     runtime_identity: RuntimeIdentity
-    source: Literal["empty", "production", "upstream"]
+    source: Literal["empty", "production", "upstream", "migrated"]
     generation: FreshOdooTestingGeneration | None = None
-    native_source: NativeOdooSourceAuthority | None = None
+    native_source: NativeOdooSourceAuthority | MigratedOdooTestingSource | None = None
     upstream_source: dict[str, str] = Field(default_factory=dict)
     authority_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     credential_bindings_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -80,7 +83,7 @@ class TestingCandidateApplicationPlan(FrozenRecord):
             raise ValueError("Candidate requires the unchanged HTTPS lane origin.")
         if (self.source == "empty") != (self.generation is None):
             raise ValueError("Only a copy restore requires a generation/source binding.")
-        if (self.source == "production") != (self.native_source is not None) or (
+        if (self.source in {"production", "migrated"}) != (self.native_source is not None) or (
             self.source == "upstream"
         ) != bool(self.upstream_source):
             raise ValueError("Candidate source coordinates must match its admitted source kind.")
@@ -104,7 +107,7 @@ class TestingCandidateApplicationPlan(FrozenRecord):
             )
             or generation.completed_at
             or generation.source_mode
-            != ("container-export" if self.source == "production" else "ssh")
+            != ("container-export" if self.source in {"production", "migrated"} else "ssh")
             or set(generation.omitted_runtime_keys) != set(self.omitted_runtime_keys)
         ):
             raise ValueError("Copy generation differs from the admitted candidate/source.")
@@ -116,6 +119,17 @@ class TestingCandidateApplicationPlan(FrozenRecord):
             raise ValueError("Native copy must retain its original managed source descriptor.")
         if self.native_source is not None and self.native_source.product != self.product:
             raise ValueError("Native source must belong to the candidate's product.")
+        if self.source == "production" and isinstance(
+            self.native_source, MigratedOdooTestingSource
+        ):
+            raise ValueError("A migrated output cannot claim production source authority.")
+        if self.source == "migrated" and (
+            not isinstance(self.native_source, MigratedOdooTestingSource)
+            or self.native_source.target_image != self.artifact.image.digest
+            or generation is None
+            or generation.migrated_source != self.native_source
+        ):
+            raise ValueError("Migrated input must bind the selected artifact and generation.")
         if self.upstream_source:
             from control_plane.dokploy.post_deploy import (
                 resolve_upstream_restore_workflow_environment,

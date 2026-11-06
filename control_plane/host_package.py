@@ -40,6 +40,7 @@ def host_package() -> HostPackage:
         NATIVE_ODOO_SOURCE_READ_PROGRAM,
         NATIVE_TESTING_CHUNK_WRITE_PROGRAM,
     )
+    from control_plane.dokploy.native_testing_stream import NATIVE_TESTING_STREAM_WRITE_PROGRAM
     from control_plane._odoo_rehearsal_preflight_program import REHEARSAL_PREFLIGHT_PROGRAM
     from control_plane.preview_clean_snapshot import PREVIEW_CLEAN_SNAPSHOT_PROGRAM
     from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
@@ -60,6 +61,7 @@ def host_package() -> HostPackage:
         "resources": ODOO_TESTING_RESOURCE_PROGRAM,
         "capture": NATIVE_ODOO_SOURCE_READ_PROGRAM,
         "chunk": NATIVE_TESTING_CHUNK_WRITE_PROGRAM,
+        "stream": NATIVE_TESTING_STREAM_WRITE_PROGRAM,
         "preflight": REHEARSAL_PREFLIGHT_PROGRAM,
         "preview_snapshot": PREVIEW_CLEAN_SNAPSHOT_PROGRAM,
         "stale_lock": FRESH_TESTING_STALE_LOCK_PROGRAM,
@@ -81,6 +83,7 @@ def host_package() -> HostPackage:
             "resources",
             "capture",
             "chunk",
+            "stream",
             "preflight",
             "preview_snapshot",
             "preview_fixture",

@@ -54,6 +54,29 @@
         "modes": [
           "read"
         ],
+        "operation_id": "read_state_v1_products__product__testing_rebuild__operation_id__migrated_source_get",
+        "path": "/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source",
+        "purpose": "Read the original migrated testing pair upload state without publishing bytes or changing a receipt.",
+        "response_statuses": [
+          "200",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "5ef833f2a312a77431c414e427c52d83ee28001d1603c65a193aa42dedc38397",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
         "operation_id": "read_exact_preview_evidence",
         "path": "/v1/products/{product}/preview-evidence",
         "purpose": "Read exact original intent, retained provider history and optional exact serving-generation probes without admission publication or effect settlement.",
@@ -1391,8 +1414,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "d87da40ba30d4e0de1391bf8a40be4fc7838be65"
+    "source_commit_sha": "5fc4988eaf0e4f56fd9b8f283bd5a431c40a1223"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "9d3b39d27facdf5965288910b0cbc3c8f06f36d2cb6e87f9cb131dbc9384c1dd"
+  "semantic_digest_sha256": "b355dd718261f97ad26825b85e23817c07d1763f55096621f4473ee6e3d59825"
 }

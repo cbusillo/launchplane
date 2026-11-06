@@ -871,6 +871,39 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertEqual(frame["predicate"], ReadbackPredicate.CLEANUP_DATABASE)
         self.assertEqual(frame["kind"], "refused")
 
+    def test_migrated_receiver_checks_whole_restore_capacity_before_streaming_with_snapshots_off(
+        self,
+    ) -> None:
+        from types import SimpleNamespace
+        from tests.test_migrated_testing_source import MigratedTestingRequestTests
+
+        source = MigratedTestingRequestTests().request().migrated_source
+        assert source is not None
+        self.spec.update(inspection_only=True)
+        self.spec["generation"].update(
+            source_mode="container-export",
+            source_binding_sha256=source.binding_sha256,
+            migrated_source=source.model_dump(mode="json"),
+            clean_snapshot_enabled=False,
+            drill_storage_budget={
+                "database_bytes": 1024,
+                "filestore_bytes": 1024,
+                "staging_bytes": 1024,
+                "reserve_bytes": 1024,
+            },
+        )
+        self.containers["script-runner"]["GraphDriver"] = {"Data": {"UpperDir": str(self.root)}}
+        with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=100000, f_frsize=1)):
+            status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.calls.clear()
+        with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=0, f_frsize=1)):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0, output)
+        frame = json.loads(output.strip().removeprefix("fixture:"))
+        self.assertEqual(frame["predicate"], ReadbackPredicate.BACKING_STORAGE)
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+
     def test_native_file_inspection_failure_does_not_report_database_read(self) -> None:
         self.spec.update(inspection_only=True, native_capture={})
         original = self.command
