@@ -262,6 +262,19 @@ def candidate_runtime_inputs(
         for lane in profile.lanes
         if (lane.context, lane.instance) == (allocation.context, "testing")
     )
+    if isinstance(migrated_source, MigratedOdooTestingSource):
+        if lane.odoo_testing_drill_storage is None:
+            raise CandidateRuntimeInputsChanged(
+                "The migrated copy needs the lane's existing testing storage headroom."
+            )
+        snapshot_budget = lane.odoo_testing_drill_storage.model_copy(
+            update={
+                "filestore_bytes": max(
+                    lane.odoo_testing_drill_storage.filestore_bytes,
+                    migrated_source.filestore_expanded_bytes,
+                )
+            }
+        )
     artifact = store.read_artifact_manifest(artifact_id)
     if not artifact_manifest_matches_image_repository(
         artifact, expected_repository=profile.image.repository

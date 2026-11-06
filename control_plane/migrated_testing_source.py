@@ -8,8 +8,9 @@ import hashlib
 import os
 import shutil
 import stat
+import tempfile
 from pathlib import Path
-from typing import BinaryIO, Literal, Protocol
+from typing import BinaryIO, Literal, Protocol, cast
 
 from control_plane.contracts.odoo_testing_source import (
     MigratedOdooTestingSource,
@@ -50,21 +51,24 @@ def migrated_candidate(
     if (
         app.plan.source != "migrated"
         or app.plan.generation is None
-        or app.phase == "abandoned"
         or not allow_complete
-        and (app.phase == "prepared" or app.restore_workflow_started is True)
+        and (app.phase in {"prepared", "abandoned"} or app.restore_workflow_started is True)
         or app.plan.native_source != operation.request.migrated_source
     ):
         raise ValueError("Migrated input no longer belongs to an unstarted testing restore")
     return allocation
 
 
-def upload_directory(allocation: TestingCandidateAllocation) -> Path:
+def upload_directory(allocation: TestingCandidateAllocation, *, create: bool = True) -> Path:
     assert allocation.application is not None and allocation.application.plan.generation is not None
-    binding = generation_binding(allocation.application.plan.generation)
-    path = _cache_directory(binding) / binding[:32]
-    path.mkdir(mode=0o700, exist_ok=True)
-    if path.is_symlink() or not path.is_dir():
+    source = allocation.application.plan.generation.migrated_source
+    if source is None:
+        raise ValueError("The candidate has no migrated source")
+    binding = source.binding_sha256
+    path = _cache_directory(binding, create=create) / binding[:32]
+    if create:
+        path.mkdir(mode=0o700, exist_ok=True)
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
         raise ValueError("The original migrated source directory changed")
     return path
 
@@ -77,7 +81,7 @@ def file_digest(path: Path) -> str:
 
 
 def upload_state(allocation: TestingCandidateAllocation) -> dict[str, dict[str, object]]:
-    directory = upload_directory(allocation)
+    directory = upload_directory(allocation, create=False)
     result: dict[str, dict[str, object]] = {}
     for part in ("database", "filestore"):
         complete = directory / part
@@ -96,10 +100,14 @@ class MigratedUpload:
     handle: BinaryIO
     remaining: int
     digest: UploadDigest
+    reserve_bytes: int = 0
 
     def write(self, data: bytes) -> None:
         if len(data) > self.remaining:
             raise ValueError("Migrated input exceeds its admitted artifact size")
+        space = os.fstatvfs(self.handle.fileno())
+        if space.f_bavail * space.f_frsize < len(data) + self.reserve_bytes:
+            raise ValueError("The upload must preserve the existing testing storage reserve")
         self.handle.write(data)
         self.digest.update(data)
         self.remaining -= len(data)
@@ -147,9 +155,27 @@ def receive_migrated_part(
                 or digest.hexdigest() != prefix_sha256
             ):
                 raise ValueError("The retained partial differs from the original upload prefix")
-            if shutil.disk_usage(directory).free < expected.size - offset:
-                raise ValueError("Private copy volume cannot hold the remaining artifact")
-            upload = MigratedUpload(handle, expected.size - offset, digest)
+            generation = allocation.application.plan.generation
+            if generation is None or generation.drill_storage_budget is None:
+                raise ValueError("The original testing storage headroom is unavailable")
+            state = upload_state(allocation)
+            required = sum(
+                max(0, getattr(source, key).size - cast(int, item["size"]))
+                for key, item in state.items()
+            )
+            if (
+                shutil.disk_usage(directory).free
+                < required + generation.drill_storage_budget.reserve_bytes
+            ):
+                raise ValueError(
+                    "Private copy volume cannot hold the remaining pair and testing reserve"
+                )
+            upload = MigratedUpload(
+                handle,
+                expected.size - offset,
+                digest,
+                generation.drill_storage_budget.reserve_bytes,
+            )
             yield upload
             handle.flush()
             os.fsync(handle.fileno())
@@ -187,9 +213,9 @@ def finish_migrated_upload(
         if not path.exists():
             return None
         expected = getattr(source, part)
-        if path.stat().st_size != expected.size or file_digest(path) != expected.sha256:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size != expected.size:
             raise ValueError("The saved migrated artifact changed before receipt commit")
-    saved = directory / "capture.json"
+    saved = directory / ("capture-" + binding + ".json")
     if saved.is_symlink():
         raise ValueError("The retained migrated receipt is unsafe")
     if saved.exists():
@@ -200,16 +226,33 @@ def finish_migrated_upload(
             context=generation.context,
             generation_binding_sha256=binding,
             source_binding_sha256=source.binding_sha256,
-            capture_id=binding[:32],
+            capture_id=source.binding_sha256[:32],
             database=source.database,
             filestore=source.filestore,
             captured_at=utc_now_timestamp(),
             source_observation=source,
         )
-        with saved.open("x") as handle:
-            handle.write(capture.model_dump_json())
-            handle.flush()
-            os.fsync(handle.fileno())
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", dir=directory, prefix=".capture-", delete=False
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(capture.model_dump_json())
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temporary, saved, follow_symlinks=False)
+            except FileExistsError:
+                capture = NativeTestingCopyCapture.model_validate_json(saved.read_text())
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
     if (
         capture.source_observation != source
         or capture.database != source.database

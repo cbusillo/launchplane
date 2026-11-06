@@ -39,6 +39,7 @@ filestore.mkdir(parents=True,exist_ok=True)
 seen=set();directories={filestore,filestore.parent,filestore.parent.parent};total=0
 with tarfile.open(artifacts['filestore'],'r|gz') as archive:
     for member in archive:
+        archive.members.clear()
         relative=PurePosixPath(member.name)
         if relative.is_absolute() or '..' in relative.parts or member.issym() or member.islnk() or not (member.isdir() or member.isfile()):
             raise RuntimeError('Unsafe migrated archive entry')
@@ -65,7 +66,7 @@ with tarfile.open(artifacts['filestore'],'r|gz') as archive:
                 if original.read(1):
                     raise RuntimeError('Existing migrated attachment differs')
             continue
-        if not path.exists() and shutil.disk_usage(filestore).free < member.size:
+        if not path.exists() and shutil.disk_usage(filestore).free < member.size+spec.get('reserve_bytes',0):
             raise RuntimeError('Insufficient space for the next migrated attachment')
         temporary=None
         try:
@@ -73,6 +74,9 @@ with tarfile.open(artifacts['filestore'],'r|gz') as archive:
             with archive.extractfile(member) as content, tempfile.NamedTemporaryFile(dir=path.parent,prefix='.lp-native-'+identity+'-',delete=False) as output:
                 temporary=Path(output.name)
                 while data:=content.read(1024*1024):
+                    space=os.fstatvfs(output.fileno())
+                    if space.f_bavail*space.f_frsize<len(data)+spec.get('reserve_bytes',0):
+                        raise RuntimeError('Migrated extraction must preserve testing reserve')
                     size+=len(data);output.write(data)
                 output.flush();os.fsync(output.fileno())
             if size!=member.size:

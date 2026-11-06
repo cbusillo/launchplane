@@ -2750,10 +2750,20 @@ The service hashes and fsyncs both complete files before committing their
 existing native-copy receipt. GET never commits a receipt. The original caller,
 product, candidate custody and unstarted restore remain required.
 
-Migrated uploads use actual free space and their declared complete inventories
-instead of the small live-capture limits above. Delivery streams windows through
+Migrated uploads reuse one private content cache for the same product and source
+binding across candidate attempts. Each generation still has its own immutable
+capture receipt. A terminal failed candidate retains its source bytes for retry;
+a prepared candidate removes the completed pair cache after the normal restore
+and private-readiness proof. Candidate volumes retain the normal disposable-copy
+custody and collection protections.
+
+Migrated uploads use actual free space, the lane's existing storage reserve and
+their declared complete inventories instead of the small live-capture limits
+above. Capacity charges the larger of the existing filestore allowance and the
+declared expanded bytes, even when clean snapshots are disabled. Streaming and
+extraction keep the same reserve if another writer consumes free space. Delivery streams windows through
 one registered terminal connection into the candidate data volume, preserving
-only an exact verified prefix on interruption. Receiver size/hash readback still
+only an exact verified prefix on interruption. Receiver size/hash verification still
 precedes restore. Streaming extraction rejects unsafe or duplicate paths and
 requires the exact declared full filestore count and bytes before publishing the
 dump. The existing credential boundary, quarantine, restore witness, private

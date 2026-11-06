@@ -269,8 +269,14 @@ def require_private_copy_mount(private: Path) -> None:
     )
 
 
+def capture_cache_binding(capture: NativeTestingCopyCapture) -> str:
+    if isinstance(capture.source_observation, MigratedOdooTestingSource):
+        return capture.source_binding_sha256
+    return capture.generation_binding_sha256
+
+
 def verify_native_capture_files(capture: NativeTestingCopyCapture) -> tuple[Path, Path]:
-    directory = _cache_directory(capture.generation_binding_sha256) / capture.capture_id
+    directory = _cache_directory(capture_cache_binding(capture), create=False) / capture.capture_id
     files = []
     for part in ("database", "filestore"):
         path = directory / part
@@ -487,14 +493,12 @@ def prepare_native_testing_delivery(
                 part=cast(Literal["database", "filestore"], part),
                 path=path,
                 artifact=getattr(capture, part),
+                reserve_bytes=generation.drill_storage_budget.reserve_bytes
+                if generation.drill_storage_budget
+                else 0,
             )
-        final_runner, resume, _, actual = inspect(capture)
-        if (
-            final_runner != runner
-            or resume
-            or actual
-            != {part: getattr(capture, part).model_dump() for part in ("database", "filestore")}
-        ):
+        final_runner, resume, _, _ = inspect(None)
+        if final_runner != runner or resume:
             raise ValueError("Migrated output failed receiver integrity readback.")
         return capture
     expected: dict[tuple[str, int], dict[str, object]] = {}
@@ -551,6 +555,6 @@ def prepare_native_testing_delivery(
 
 
 def remove_completed_native_capture_cache(capture: NativeTestingCopyCapture) -> None:
-    root = _cache_directory(capture.generation_binding_sha256, create=False)
+    root = _cache_directory(capture_cache_binding(capture), create=False)
     if root.exists():
         shutil.rmtree(root)

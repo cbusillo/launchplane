@@ -71,12 +71,13 @@ def register_migrated_testing_source_routes(
                 code="database_storage_required",
                 message="Migrated input needs the original testing operation.",
             )
+        policy = read_active_authz_policy_record(store)
         operation = store.read_odoo_stable_target_replacement_operation_record(operation_id)
         allowed = director_testing_rebuild_allowed(
             identity=identity, request=operation.request, context=operation.context, store=store
         )
         if isinstance(identity, GitHubHumanIdentity):
-            allowed = read_active_authz_policy_record(store).policy.names_administrator(identity)
+            allowed = policy.policy.names_administrator(identity)
         if (
             not allowed
             or operation.product != product
@@ -200,11 +201,17 @@ def register_migrated_testing_source_routes(
             await blocking(lambda: finish_migrated_upload(store, allocation))
             completed = await blocking(lambda: response(store, allocation))
             await websocket.send_json(completed.model_dump(mode="json"))
-        except (HTTPException, ValueError, OSError, WebSocketDisconnect, KeyError):
-            if websocket.application_state != WebSocketState.DISCONNECTED:
+        except (HTTPException, ValueError, OSError, WebSocketDisconnect, LookupError):
+            if (
+                websocket.client_state != WebSocketState.DISCONNECTED
+                and websocket.application_state != WebSocketState.DISCONNECTED
+            ):
                 await websocket.close(code=1008)
             return
-        if websocket.application_state != WebSocketState.DISCONNECTED:
+        if (
+            websocket.client_state != WebSocketState.DISCONNECTED
+            and websocket.application_state != WebSocketState.DISCONNECTED
+        ):
             await websocket.close()
 
     route = "/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source"

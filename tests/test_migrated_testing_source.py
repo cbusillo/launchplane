@@ -69,7 +69,10 @@ class MigratedUploadTests(unittest.TestCase):
         from unittest.mock import Mock, patch
         from control_plane.storage.postgres import PostgresRecordStore
         from tests.test_odoo_testing_restore import generation
+        from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+        from control_plane.migrated_testing_source import upload_directory
 
+        self.original_upload_directory = upload_directory
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
@@ -82,6 +85,12 @@ class MigratedUploadTests(unittest.TestCase):
                 "context": source.context,
                 "source_mode": "container-export",
                 "migrated_source": source,
+                "drill_storage_budget": OdooTestingDrillStorageBudget(
+                    database_bytes=1024,
+                    filestore_bytes=1024,
+                    staging_bytes=1024,
+                    reserve_bytes=1024,
+                ),
                 "source_binding_sha256": source.binding_sha256,
             }
         )
@@ -104,6 +113,72 @@ class MigratedUploadTests(unittest.TestCase):
                 return_value=self.directory,
             )
         )
+
+    def test_storage_preserves_existing_reserve_for_the_entire_remaining_pair(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from control_plane.migrated_testing_source import receive_migrated_part
+
+        budget = self.generation.drill_storage_budget
+        assert budget is not None
+        free = self.source.database.size + self.source.filestore.size + budget.reserve_bytes - 1
+        with (
+            patch(
+                "control_plane.migrated_testing_source.shutil.disk_usage",
+                return_value=SimpleNamespace(free=free),
+            ),
+            self.assertRaisesRegex(ValueError, "reserve"),
+        ):
+            with receive_migrated_part(
+                self.allocation, "database", 0, hashlib.sha256().hexdigest()
+            ):
+                self.fail("The upload consumed reserved shared storage")
+        self.assertFalse((self.directory / "database").exists())
+
+    def test_other_writers_cannot_consume_the_reserve_during_an_upload(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from control_plane.migrated_testing_source import receive_migrated_part
+
+        with self.assertRaisesRegex(ValueError, "reserve"):
+            with receive_migrated_part(
+                self.allocation, "database", 0, hashlib.sha256().hexdigest()
+            ) as upload:
+                with patch(
+                    "control_plane.migrated_testing_source.os.fstatvfs",
+                    return_value=SimpleNamespace(f_bavail=1, f_frsize=1),
+                ):
+                    upload.write(b"database")
+        self.assertEqual((self.directory / "database.partial").stat().st_size, 0)
+
+    def test_same_pair_reuses_content_across_candidates_and_get_creates_no_directory(self) -> None:
+        from unittest.mock import patch
+        from control_plane.migrated_testing_source import upload_state
+
+        root = self.directory / "not-created"
+        with patch("control_plane.migrated_testing_source._cache_directory", return_value=root):
+            first = self.original_upload_directory(self.allocation, create=False)
+            assert self.allocation.application is not None
+            self.allocation.application.plan.generation = self.generation.model_copy(
+                update={"operation_id": "another-operation", "prepared_at": "another-time"}
+            )
+            second = self.original_upload_directory(self.allocation, create=False)
+        self.assertEqual(first, second)
+        self.assertFalse(root.exists())
+        with (
+            patch(
+                "control_plane.migrated_testing_source.upload_directory",
+                side_effect=lambda allocation, *, create: self.original_upload_directory(
+                    allocation, create=create
+                ),
+            ),
+            patch("control_plane.migrated_testing_source._cache_directory", return_value=root),
+        ):
+            self.assertEqual(
+                upload_state(self.allocation),
+                {part: {"complete": False, "size": 0} for part in ("database", "filestore")},
+            )
+        self.assertFalse(root.exists())
 
     def test_interrupted_upload_resumes_only_its_exact_prefix(self) -> None:
         from control_plane.migrated_testing_source import receive_migrated_part
@@ -345,6 +420,7 @@ class MigratedStreamTests(unittest.TestCase):
                     part="filestore",
                     path=path,
                     artifact=artifact,
+                    reserve_bytes=1024,
                 )
 
             def wrong_prefix(**kwargs: Any) -> None:
@@ -368,6 +444,7 @@ class MigratedStreamTests(unittest.TestCase):
                     part="filestore",
                     path=path,
                     artifact=artifact,
+                    reserve_bytes=1024,
                 )
 
     def test_receiver_process_keeps_partial_bytes_and_resumes_the_original_artifact(self) -> None:
@@ -398,6 +475,7 @@ class MigratedStreamTests(unittest.TestCase):
                 "capture_id": "b" * 32,
                 "part": "filestore",
                 "artifact": artifact,
+                "reserve_bytes": 1024,
             }
             command = [
                 sys.executable,
@@ -473,6 +551,9 @@ class MigratedUploadRouteTests(unittest.IsolatedAsyncioTestCase):
         )
         self.enterContext(
             patch.object(routes, "migrated_candidate", return_value=self.fixture.allocation)
+        )
+        self.policy = self.enterContext(
+            patch.object(routes, "read_active_authz_policy_record", return_value=SimpleNamespace())
         )
         self.allowed = self.enterContext(
             patch.object(routes, "director_testing_rebuild_allowed", return_value=True)
@@ -571,7 +652,8 @@ class MigratedUploadRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_foreign_product_caller_scope_and_authority_are_rejected_before_body_storage(
         self,
     ) -> None:
-        for denied in ("product", "scope", "authority", "token"):
+        for denied in ("product", "scope", "authority", "token", "policy"):
+            self.policy.side_effect = LookupError("unavailable") if denied == "policy" else None
             original_scope = self.operation.idempotency_scope
             self.operation.idempotency_scope = (
                 "another-caller" if denied == "scope" else original_scope

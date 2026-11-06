@@ -20,6 +20,7 @@ def write_native_testing_stream(
     part: Literal["database", "filestore"],
     path: Path,
     artifact: NativeTestingCopyArtifact,
+    reserve_bytes: int,
 ) -> None:
     from control_plane.dokploy.native_copy_stream import (
         run_managed_server_program,
@@ -76,6 +77,7 @@ def write_native_testing_stream(
                 "capture_id": capture_id,
                 "part": part,
                 "artifact": artifact.model_dump(),
+                "reserve_bytes": reserve_bytes,
             },
             receive=frames.append,
             timeout_seconds=90,
@@ -95,6 +97,8 @@ try:
         raise RuntimeError('Invalid migrated receiver')
     if type(spec['artifact']['size']) is not int or spec['artifact']['size']<=0 or not re.fullmatch(r'[a-f0-9]{64}',spec['artifact']['sha256']):
         raise RuntimeError('Invalid migrated artifact')
+    if type(spec['reserve_bytes']) is not int or spec['reserve_bytes']<0:
+        raise RuntimeError('Invalid testing storage reserve')
     writer=r"""
 import hashlib,json,os,shutil,stat,sys
 from pathlib import Path
@@ -131,7 +135,7 @@ else:
         offset=handle.tell()
         if offset>expected['size']:
             raise RuntimeError('Existing migrated prefix is too long')
-        if shutil.disk_usage(root).free < expected['size']-offset:
+        if shutil.disk_usage(root).free < expected['size']-offset+spec['reserve_bytes']:
             raise RuntimeError('Insufficient space for migrated staging')
         print(json.dumps({'offset':offset,'prefix_sha256':digest.hexdigest()}),flush=True)
         remaining=expected['size']-offset
@@ -139,6 +143,9 @@ else:
             data=sys.stdin.buffer.read(min(remaining,65536))
             if not data:
                 raise RuntimeError('Migrated stream is incomplete')
+            space=os.fstatvfs(handle.fileno())
+            if space.f_bavail*space.f_frsize<len(data)+spec['reserve_bytes']:
+                raise RuntimeError('Migrated staging must preserve testing reserve')
             handle.write(data);digest.update(data);remaining-=len(data)
         handle.flush();os.fsync(handle.fileno())
         if digest.hexdigest()!=expected['sha256']:

@@ -528,6 +528,17 @@ def prepare_candidate_application(
                 before_mutation=before_mutation,
             ).model_dump(mode="json")
 
+        migrated = inputs.plan.generation.migrated_source if inputs.plan.generation else None
+        schedule_timeout = None
+        if migrated is not None:
+            schedule_timeout = max(
+                post_deploy.resolve_data_workflow_execution_timeout_seconds(
+                    deploy_timeout_seconds=inputs.target.deploy_timeout_seconds or 0,
+                    run_destructive_restore=True,
+                ),
+                (migrated.filestore_expanded_bytes + migrated.database.size) // (4 * 1024 * 1024)
+                + 1,
+            )
         evidence = post_deploy.run_compose_post_deploy_update(
             host=host,
             token=token,
@@ -539,6 +550,7 @@ def prepare_candidate_application(
             bootstrap_missing_database=inputs.plan.source == "empty",
             before_provider_mutation=before_mutation,
             deployment_title=title,
+            schedule_execution_timeout_seconds=schedule_timeout,
             fresh_testing_generation=inputs.plan.generation,
             fresh_restore_source_environment=inputs.plan.upstream_source,
             prepare_native_source=native if inputs.native_source else None,

@@ -152,13 +152,34 @@ class CandidateApplicationTests(unittest.TestCase):
                 "target_image": self.artifact.image.digest,
             }
         )
+        from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+
+        budget = OdooTestingDrillStorageBudget(
+            database_bytes=1024, filestore_bytes=1, staging_bytes=1024, reserve_bytes=1024
+        )
+        self.profile = self.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"odoo_testing_drill_storage": budget})
+                    if lane.instance == "testing"
+                    else lane
+                    for lane in self.profile.lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(self.profile)
+        self.fixture.before = self.fixture.authority()
         allocation = self.allocate("migrated", migrated)
         inputs = self.inputs(allocation, "migrated", migrated)
         app = TestingCandidateApplication(plan=inputs.plan)
         recorded = allocation.model_copy(update={"application": app})
         self.store.compare_and_write_testing_candidate(allocation, recorded)
         generation = inputs.plan.generation
-        assert generation is not None
+        assert generation is not None and generation.drill_storage_budget is not None
+        self.assertEqual(
+            generation.drill_storage_budget.filestore_bytes, migrated.filestore_expanded_bytes
+        )
+        self.assertEqual(generation.drill_storage_budget.reserve_bytes, budget.reserve_bytes)
         capture = NativeTestingCopyCapture(
             product=migrated.product,
             context=migrated.context,

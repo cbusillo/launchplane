@@ -93,8 +93,10 @@ class FreshOdooTestingGeneration(BaseModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> "FreshOdooTestingGeneration":
-        if self.clean_snapshot_enabled and self.drill_storage_budget is None:
-            raise ValueError("Clean testing snapshots require reviewed storage headroom.")
+        if (
+            self.clean_snapshot_enabled or self.migrated_source is not None
+        ) and self.drill_storage_budget is None:
+            raise ValueError("Clean snapshots and migrated copies require existing testing storage headroom.")
         if (self.source_mode == "container-export") != bool(self.source_binding_sha256):
             raise ValueError("A native source needs its exact binding; SSH generations carry none.")
         if self.migrated_source is not None and (
@@ -1131,8 +1133,9 @@ def restore_main():
         capture = spec.get('native_capture')
         if capture is None:
             raise RuntimeError('Native copy lacks its original capture receipt')
-        files = json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
-        staged_bytes = sum(item['size'] for item in files['chunks'])
+        if capture.get('source_observation',{}).get('kind') != 'migrated':
+            files = json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
+            staged_bytes = sum(item['size'] for item in files['chunks'])
         assembly_bytes = (capture['database']['size'] if capture.get('source_observation',{}).get('kind')=='migrated'
             else sum(capture[part]['size'] for part in ('database','filestore')))
     data_backing = Path(json.loads(docker("volume", "inspect", namespace + "-data"))[0]["Mountpoint"]).resolve(strict=True)
@@ -1160,7 +1163,7 @@ def restore_main():
             capture=spec.get('native_capture')
             if capture is None or capture['generation_binding_sha256']!=spec['copy_binding_sha256'] or capture['source_binding_sha256']!=gen['source_binding_sha256']:
                 raise RuntimeError('Native copy lacks its original capture receipt')
-            docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'prepare','database_name':database,'dump_path':dump_path}).encode()).decode(),stdin=spec['native_files_program'].encode())
+            docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'prepare','database_name':database,'dump_path':dump_path,'reserve_bytes':(gen.get('drill_storage_budget') or {}).get('reserve_bytes',0)}).encode()).decode(),stdin=spec['native_files_program'].encode())
         elif not resume:
             source = spec["source"]
             for key in ("ODOO_UPSTREAM_HOST", "ODOO_UPSTREAM_USER", "ODOO_UPSTREAM_DB_USER", "ODOO_UPSTREAM_DB_NAME"):
