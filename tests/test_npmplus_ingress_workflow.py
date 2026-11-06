@@ -104,6 +104,19 @@ def _location(**overrides: object) -> dict[str, object]:
 
 
 class NpmplusIngressWorkflowTests(unittest.TestCase):
+    def test_new_certificate_refuses_existing_host_without_writing(self) -> None:
+        for mode in ("dry-run", "apply"):
+            with self.subTest(mode=mode):
+                client = _FakeNpmplusClient((_proxy_host(),))
+                with self.assertRaises(click.ClickException):
+                    apply_npmplus_ingress_route(
+                        client=client,
+                        request=_request(mode=mode, route=_desired_route(certificate_id="new")),
+                    )
+                self.assertFalse(
+                    any(call.startswith(("create", "update")) for call in client.calls)
+                )
+
     def test_plan_uses_selected_host_read_for_configuration(self) -> None:
         claimed = _proxy_host(forward_port=8080)
         current = _proxy_host()
