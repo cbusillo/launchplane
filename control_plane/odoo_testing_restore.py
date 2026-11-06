@@ -96,7 +96,9 @@ class FreshOdooTestingGeneration(BaseModel):
         if (
             self.clean_snapshot_enabled or self.migrated_source is not None
         ) and self.drill_storage_budget is None:
-            raise ValueError("Clean snapshots and migrated copies require existing testing storage headroom.")
+            raise ValueError(
+                "Clean snapshots and migrated copies require existing testing storage headroom."
+            )
         if (self.source_mode == "container-export") != bool(self.source_binding_sha256):
             raise ValueError("A native source needs its exact binding; SSH generations carry none.")
         if self.migrated_source is not None and (
