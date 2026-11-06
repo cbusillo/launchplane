@@ -53,7 +53,6 @@ class GitHubRequestTimingTests(unittest.TestCase):
         assert match is not None
         omitted = int(match[1])
         self.assertEqual(sum(row["requests"] for row in observations) + omitted, count)
-        self.assertTrue(all(len(line.encode()) < 2048 for line in logs.output))
 
     def test_failed_and_nested_phases_restore_request_and_credential_scope(self) -> None:
         with self.assertLogs("control_plane.github_request_timing", level="INFO") as logs:

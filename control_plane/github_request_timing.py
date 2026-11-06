@@ -125,7 +125,7 @@ def _request_label(*, method: str, path: str) -> str:
 def record_github_response(status: int, headers: object = None) -> None:
     response = _ACTIVE_RESPONSE.get()
     if response is not None:
-        response.status = status
+        response.status = status if type(status) is int and 100 <= status <= 599 else None
         response.headers = normalized_github_quota_response_headers(headers)
 
 

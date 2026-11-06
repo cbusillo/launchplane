@@ -87,6 +87,24 @@ class _Provider:
 
 
 class MergeTrainReadCostTests(unittest.TestCase):
+    def test_unavailable_status_cannot_make_quota_logging_break_a_response(self) -> None:
+        response = _Response({"result": "available"}, Message())
+        transport = UrllibMergeTrainGitHubTransport(token="fixture", read_cache=GitHubReadCache())
+        with (
+            self.assertLogs("control_plane.github_request_timing", level="INFO") as logs,
+            github_request_tally("controller trace unavailable-status"),
+            patch.object(response, "status", Mock()),
+            patch("control_plane.merge_train_github.urlopen", return_value=response),
+        ):
+            self.assertEqual(transport.request(method="GET", path="/value"), response.payload)
+        (observation,) = [
+            json.loads(line.split("; ", 1)[1])
+            for line in logs.output
+            if "GitHub quota observation:" in line
+        ]
+        self.assertIsNone(observation["status"])
+        self.assertEqual(observation["charged_requests"], "UNKNOWN")
+
     def test_quota_receipts_keep_shared_counters_separate_from_charged_cost(self) -> None:
         credential = GitHubAppInstallationToken(
             token="private-token",
