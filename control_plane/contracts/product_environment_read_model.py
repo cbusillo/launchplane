@@ -109,6 +109,7 @@ from control_plane.production_backup_authority import (
     resolve_production_backup_authority,
 )
 from control_plane.integration_readback import integration_credential_warnings
+from control_plane.host_security_updates import host_security_update_warnings
 from control_plane.timestamps import utc_now_timestamp
 
 
@@ -929,6 +930,7 @@ def build_product_environment_detail(
         for warning in (
             descriptor_warning,
             *integration_credential_warnings(lane_summary, record_store=record_store),
+            *host_security_update_warnings(record_store, profile, lane),
             *(
                 topology_warning.detail
                 for topology_warning in topology.warnings
@@ -2413,6 +2415,7 @@ def _build_environment_summary(
         deploy_hold=_testing_deploy_hold(record_store=record_store, lane=lane),
         warnings=(
             *integration_credential_warnings(lane_summary, record_store=record_store),
+            *host_security_update_warnings(record_store, profile, lane),
             *(warning.detail for warning in topology.warnings if warning.severity != "info"),
         ),
         available_actions=_action_availability(

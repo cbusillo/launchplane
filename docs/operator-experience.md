@@ -1093,3 +1093,26 @@ sidebar reasons and attention and warning reasons, plus the product's warnings. 
 fails the read rather than implying healthy. Omitted lanes are not recorded,
 as shown by the sidebar's absent-lane icon. The read does not change a lane,
 resolve an incident or authorize a deployment.
+
+### Production host security updates
+
+Live products receive one production-lane warning when their provider host has
+no successful security-update run, the last completion is more than two days old,
+or current evidence is unavailable. A clean run with nothing to upgrade counts.
+This warning does not change application health or authorize a release.
+
+The service's existing production monitor collects bounded, read-only observations
+through the registered-server transport. Products on the same server reuse one
+host read per monitor batch. The existing provider-observation records retain the
+completion evidence and lane target binding; page loads read those records and
+never contact hosts. A changed target or expired observation cannot clear a warning.
+
+The reader pairs apt's `upgrade-stamp`, which `apt.systemd.daily` writes only after
+a successful updater exit, with the updater's result stamp immediately preceding
+it. The result stamp alone is insufficient: failed and dry runs can write it.
+A timer firing or an updater returning early without a result cannot supply the
+pair. Missing files, denied reads, inconsistent stamps and host clock skew remain
+unverified. Launchplane does not run apt, install packages, reboot hosts, change
+permissions or create credentials. The existing unattended-upgrades policy remains
+the updater; this observes run completion rather than asserting that every package
+or process is current. See [apt's completion path](https://sources.debian.org/src/apt/3.0.3/debian/apt.systemd.daily/#L491).

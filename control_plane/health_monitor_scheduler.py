@@ -19,6 +19,7 @@ from control_plane.contracts.idempotency_record import (
     complete_launchplane_mutation_reservation,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.host_security_updates import collect_host_security_updates
 from control_plane.contracts.public_ingress_monitoring import (
     HEALTH_MONITOR_IDENTITY_CONFIRMATION_SECONDS,
     HEALTH_MONITOR_POLL_SECONDS,
@@ -382,7 +383,7 @@ class HealthMonitorScheduler:
                 seconds = min(seconds, max(0, deadline - self.clock()))
             self._wait(seconds)
 
-        return run_public_ingress_monitor_once(
+        result = run_public_ingress_monitor_once(
             record_store=self.store,
             notification_drivers=public_ingress_notification_drivers(record_store=self.store),
             runtime_identity_confirmation_delay_seconds=HEALTH_MONITOR_IDENTITY_CONFIRMATION_SECONDS,
@@ -391,6 +392,9 @@ class HealthMonitorScheduler:
             lane_keys=lanes,
             max_concurrent_probes=MONITOR_MAX_CONCURRENT_PROBES,
         )
+        if instance == "prod" and not should_stop():
+            collect_host_security_updates(self.store, lanes=lanes, should_stop=should_stop)
+        return result
 
     def _report_cadence(self, missed: bool, observed_at: str, lanes: frozenset[LaneKey]) -> None:
         record_monitor_cadence(
