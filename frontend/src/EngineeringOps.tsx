@@ -25,7 +25,7 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 
 const ENGINEERING_SURFACES = [
   { detail: "Read credential names, source coverage, collection freshness and drift.",
-    icon: KeyRound, label: "Director controls", title: "Credentials", view: "credentials" as const },
+    icon: KeyRound, label: "Read only", title: "Credentials", view: "credentials" as const },
   { detail: "Read waiting requests and their next actions. Unowned requests go to the Supervisor.",
     icon: Wrench, label: "Read only", title: "Waiting requests", view: "request-attention" as const },
   { detail: "Review exact stored plain-setting removals and approve them as the signed-in administrator.",
