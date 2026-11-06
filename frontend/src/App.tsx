@@ -54,6 +54,7 @@ type AuthState =
   | {
       status: "signed_in";
       identity: GitHubHumanIdentityResponse;
+      isAdministrator: boolean;
       error: "";
       traceId: "";
     }
@@ -132,6 +133,7 @@ export function App() {
             setAuthState({
               status: "signed_in",
               identity: fixtures.fixtureIdentity,
+              isAdministrator: fixtures.fixtureIdentity.role === "admin",
               error: "",
               traceId: "",
             });
@@ -143,6 +145,7 @@ export function App() {
           setAuthState({
             status: "signed_in",
             identity: payload.identity,
+            isAdministrator: payload.is_administrator === true,
             error: "",
             traceId: "",
           });
@@ -388,6 +391,7 @@ export function App() {
       {route.kind === "engineering" ? (
         <EngineeringOpsRoute
           admin={authState.identity.role === "admin"}
+          administrator={authState.isAdministrator}
           actorId={authState.identity?.github_id ?? 0}
           fixtureMode={fixtureMode}
           key={`engineering:${route.view}:${fixtureMode}`}
