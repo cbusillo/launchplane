@@ -11,6 +11,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy.compose import compose_web_domain_route_payload
+from control_plane.dokploy import api, compose, post_deploy
 from control_plane.dokploy_target_setup_http import CREATE_COMPOSE_SOURCE_LABEL
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.npmplus import NpmplusCertificate
@@ -54,6 +55,7 @@ class FirstTestingPublicIngressTests(unittest.IsolatedAsyncioTestCase):
             context="example",
             instance="testing",
             target_type="compose",
+            target_name="Initial testing",
             source_type="github",
             domains=(self.domain,),
             updated_at=self.profile.updated_at,
@@ -242,6 +244,208 @@ class FirstTestingPublicIngressTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.store.list_deployment_records(), ())
         self.assertTrue(adapter.readback()["public_tls_verified"])
+
+    def capture_first_empty_rebuild(self) -> Any:
+        from control_plane import testing_rebuild_service as rebuild
+        from control_plane.contracts.odoo_stable_target_replacement import (
+            OdooStableTargetReplacementApplyRequest,
+        )
+        from control_plane.contracts.odoo_stable_target_replacement_operation import (
+            OdooStableTargetReplacementOperationRecord,
+        )
+        from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
+
+        adapter = self.reviewed()
+        adapter.apply("initial-edge-key", Mock(spec=["assert_current", "checkpoint_effect"]))
+        self.live["name"] = self.target.target_name
+        now = datetime.now(timezone.utc).isoformat()
+        operation = OdooStableTargetReplacementOperationRecord(
+            operation_id="first-empty-rebuild",
+            product=self.profile.product,
+            context=self.target.context,
+            instance="testing",
+            idempotency_key="first-empty",
+            request_fingerprint="fictional-first-empty",
+            request=OdooStableTargetReplacementApplyRequest(
+                product=self.profile.product,
+                instance="testing",
+                strategy="replace-and-cutover",
+                data_source_mode="empty",
+                allow_empty_data=True,
+                artifact_id="first-qualified-artifact",
+                source_git_ref="a" * 40,
+            ),
+            created_at=now,
+            updated_at=now,
+        )
+        self.first_rebuild_operation = operation
+        retained: dict[str, Any] = {
+            "availability": "absent",
+            "observation_sha256": "b" * 64,
+            "inventory_sha256": "c" * 64,
+            "container_ids": [],
+            "volumes": [],
+        }
+        self.first_rebuild_retained = retained
+        frame: dict[str, Any] = {
+            "raw": {"routers": {}, "services": {}, "middlewares": {}},
+            "owned_file": None,
+            "old_endpoints": (),
+            "old_availability": retained["availability"],
+            "old_inventory_sha256": retained["inventory_sha256"],
+            "static_configuration": "entryPoints:\n  web:\n    address: ':80'\n  websecure:\n    address: ':443'\n",
+        }
+        self.first_rebuild_frame = frame
+        for provider_patch in (
+            patch.object(rebuild, "retained_copy_operation", return_value=retained),
+            patch.object(rebuild, "unavailable_provider_placement", return_value="d" * 64),
+            patch.object(DokployTestingRouteTransport, "read", return_value=frame),
+            patch.object(compose, "fetch_dokploy_converted_compose_file", return_value=""),
+        ):
+            self.enterContext(provider_patch)
+        return rebuild.capture_rebuild_intent(self.root, self.store, operation)
+
+    def first_empty_worker(self) -> Any:
+        from control_plane import testing_rebuild_service as rebuild
+        from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+
+        intent = self.capture_first_empty_rebuild()
+        adapter = rebuild.NativeTestingRebuildAdapter(
+            self.root, self.store, self.first_rebuild_operation, intent, Mock()
+        )
+        execution = rebuild.NativeTestingRebuildExecution(
+            adapter, Mock(spec=["assert_current"]), Mock()
+        )
+        execution.host, execution.token = "provider.invalid", "fictional"
+        execution.transport = DokployTestingRouteTransport(
+            host=execution.host,
+            token=execution.token,
+            server_id=intent.server_id,
+            old_project=intent.project,
+            product=intent.profile.product,
+            context=intent.before.target.context,
+            public_host=self.domain,
+            entrypoints=intent.public_entrypoints,
+            old_runtime_identity=None,
+            unavailable_predecessor={
+                "project": intent.project,
+                "availability": intent.retained["availability"],
+                "inventory_sha256": intent.retained["inventory_sha256"],
+            },
+        )
+        self.enterContext(
+            patch.object(
+                rebuild, "read_odoo_testing_usage", return_value=OdooTestingUsage("unknown")
+            )
+        )
+        self.enterContext(patch.object(api, "list_deployments_for_target", return_value=[]))
+        self.enterContext(
+            patch.object(post_deploy, "compose_data_workflow_is_quiescent", return_value=True)
+        )
+        return execution
+
+    async def test_published_first_hostname_admits_empty_rebuild_without_converted_services(
+        self,
+    ) -> None:
+        intent = self.capture_first_empty_rebuild()
+        self.assertIsNone(intent.before.generation)
+        self.assertIsNone(intent.old.runtime_identity)
+        route = intent.unavailable_route
+        self.assertIsNotNone(route)
+        self.assertEqual(route.host, self.domain)
+        self.assertIsNone(route.old_backend)
+        self.assertTrue(
+            all("tls" in router for router in route.template["http"]["routers"].values())
+        )
+        self.assertEqual(self.store.list_deployment_records(), ())
+        self.assertEqual(self.client.calls.count("create"), 1)
+
+    async def test_first_empty_forward_guard_preserves_origin_and_source_authority(self) -> None:
+        from control_plane import testing_rebuild_service as rebuild
+
+        execution = self.first_empty_worker()
+        execution.guard()
+        self.routes[0]["domainId"] = "replacement-origin"
+        with self.assertRaises(rebuild.NativeTestingRebuildAdmissionChanged):
+            execution.guard()
+        self.routes[0]["domainId"] = "initial-domain"
+        self.live.update(sourceType="git", customGitUrl="https://example.invalid/foreign.git")
+        with self.assertRaises(rebuild.NativeTestingRebuildPending):
+            execution.guard()
+        self.assertEqual(self.store.list_deployment_records(), ())
+        self.assertEqual(self.client.calls.count("create"), 1)
+
+    async def test_first_empty_ingress_refuses_missing_or_foreign_authority(self) -> None:
+        from control_plane import testing_rebuild_service as rebuild
+
+        intent = self.capture_first_empty_rebuild()
+        changes: tuple[tuple[dict[str, Any], str, Any], ...] = (
+            (self.live, "env", "UNQUALIFIED=value"),
+            (self.live, "autoDeploy", True),
+            (self.routes[0], "serviceName", "foreign"),
+            (self.routes[0], "port", self.profile.runtime_port + 1),
+            (self.routes[0], "customEntrypoint", "foreign"),
+            (self.first_rebuild_retained, "volumes", ["retained-data"]),
+            (
+                self.first_rebuild_frame,
+                "static_configuration",
+                "entryPoints: {websecure: {address: ':8443'}}",
+            ),
+        )
+        for payload, key, changed in changes:
+            with self.subTest(key=key, changed=changed):
+                original = payload.get(key)
+                payload[key] = changed
+                with self.assertRaises(rebuild.TestingRebuildRefused):
+                    rebuild.capture_rebuild_intent(
+                        self.root, self.store, self.first_rebuild_operation
+                    )
+                if original is None:
+                    payload.pop(key)
+                else:
+                    payload[key] = original
+        foreign_creator = intent.before.target_id.model_copy(update={"source_label": "external"})
+        self.store.write_dokploy_target_id_record(foreign_creator)
+        with self.assertRaises(rebuild.TestingRebuildRefused):
+            rebuild.capture_rebuild_intent(self.root, self.store, self.first_rebuild_operation)
+        self.assertEqual(self.store.list_deployment_records(), ())
+
+    async def test_first_empty_rebuild_keeps_published_protection_and_audit_guards(self) -> None:
+        from control_plane import testing_rebuild_service as rebuild
+        from tests.support.disposable_lanes import record_safety
+
+        intent = self.capture_first_empty_rebuild()
+        for changes in (
+            {"usage": "in_use"},
+            {"data": "only_copy"},
+            {"production_resources": "shared"},
+        ):
+            with self.subTest(changes=changes):
+                record_safety(
+                    self.store, self.profile.product, self.target.context, "testing", **changes
+                )
+                with self.assertRaises(rebuild.TestingRebuildRefused):
+                    rebuild.capture_rebuild_intent(
+                        self.root, self.store, self.first_rebuild_operation
+                    )
+        record_safety(self.store, self.profile.product, self.target.context, "testing")
+        binding = intent.before.binding
+        assert binding is not None
+        self.store.write_route_binding_record(binding.model_copy(update={"status": "disabled"}))
+        with self.assertRaises(rebuild.TestingRebuildRefused):
+            rebuild.capture_rebuild_intent(self.root, self.store, self.first_rebuild_operation)
+        self.store.write_route_binding_record(binding)
+        audit = self.store.read_ingress_route_audit_record(
+            binding.ingress.provider_evidence["audit_record"]
+        )
+        self.store.write_ingress_route_audit_record(
+            audit.model_copy(update={"testing_authority_sha256": ""})
+        )
+        with self.assertRaises(rebuild.TestingRebuildRefused):
+            rebuild.capture_rebuild_intent(self.root, self.store, self.first_rebuild_operation)
+        self.assertEqual(self.store.list_deployment_records(), ())
+        self.assertEqual(self.client.calls.count("create"), 1)
 
     async def test_holds_and_protected_data_refuse_before_effect(
         self,

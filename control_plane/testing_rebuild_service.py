@@ -13,6 +13,7 @@ from typing import Any, NoReturn, Self
 from urllib.parse import urlsplit
 
 import click
+import yaml
 from pydantic import Field, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -292,8 +293,158 @@ def unavailable_provider_placement(
 
 
 def unavailable_ingress_declaration(
-    *, host: str, token: str, compose_id: str, provider: dict[str, Any], public_host: str
-) -> str:
+    *,
+    host: str,
+    token: str,
+    compose_id: str,
+    provider: dict[str, Any],
+    public_host: str,
+    store: PostgresRecordStore,
+    operation: OdooStableTargetReplacementOperationRecord,
+    retained: dict[str, Any],
+    static_configuration: str,
+) -> dict[str, str]:
+    from control_plane.contracts.deploy_target import ProviderTargetRecord
+    from control_plane.dokploy.target_source_setup import require_empty_compose_source
+    from control_plane.dokploy_testing_domain import (
+        match_first_testing_origin,
+        require_first_testing_hostname_available,
+        require_first_testing_target_unprotected,
+    )
+    from control_plane.dokploy_target_setup_http import CREATE_COMPOSE_SOURCE_LABEL
+    from control_plane.generic_web_testing_exclusion import require_quiescent_testing_provider_work
+    from control_plane.route_binding_reconcile import (
+        RouteBindingReconcileRequest,
+        build_route_binding_candidate,
+        provider_target_projection,
+    )
+
+    try:
+        require_empty_compose_source(provider, compose_id)
+    except ValueError:
+        empty_source = False
+    else:
+        empty_source = True
+    if empty_source:
+        try:
+            static = yaml.safe_load(static_configuration)
+        except yaml.YAMLError as error:
+            raise ValueError("The managed testing listener configuration is malformed.") from error
+        points = static.get("entryPoints") if isinstance(static, dict) else None
+        listener = points.get("websecure") if isinstance(points, dict) else None
+        if (
+            not isinstance(listener, dict)
+            or not isinstance(listener.get("address"), str)
+            or listener["address"].rsplit(":", 1)[-1] not in {"443", "443/tcp"}
+        ):
+            raise ValueError("The first testing HTTPS origin has no matching managed listener.")
+        before = read_snapshot(store, product=operation.product, context=operation.context)
+        profile = store.read_product_profile_record(operation.product)
+        lane = next(
+            lane
+            for lane in profile.lanes
+            if lane.context == operation.context and lane.instance == "testing"
+        )
+        binding = before.binding
+        if (
+            operation.instance != "testing"
+            or operation.request.data_source_mode != "empty"
+            or retained.get("availability") != "absent"
+            or retained.get("container_ids") != []
+            or retained.get("volumes") != []
+            or provider.get("env") != ""
+            or provider.get("autoDeploy") is not False
+            or before.target_id.source_label != CREATE_COMPOSE_SOURCE_LABEL
+            or before.target_id.target_id != compose_id
+            or before.target.domains != (public_host,)
+            or before.target.policies.staff_testing_hold is not None
+            or before.inventory is not None
+            or before.generation is not None
+            or store.list_deployment_records(
+                context_name=operation.context, instance_name="testing"
+            )
+            or lane.odoo_data_policy.data_authority != "resettable"
+            or "empty" not in lane.odoo_data_policy.allowed_rebuild_sources
+            or binding is None
+            or binding.status != "active"
+            or binding.source.source_kind != "service"
+            or binding.ingress.provider != "npmplus"
+            or binding.ingress.termination_kind != "edge"
+            or binding.tls.owner != "provider"
+            or "testing_publication" in binding.source.source_versions
+            or provider_target_projection(before.provider)
+            != provider_target_projection(
+                ProviderTargetRecord.from_dokploy_records(
+                    target_record=before.target, target_id_record=before.target_id
+                )
+            )
+        ):
+            raise ValueError("The empty testing target has no first-use ingress authority.")
+        audit_id = binding.ingress.provider_evidence.get("audit_record", "")
+        audit = store.read_ingress_route_audit_record(audit_id)
+        if (
+            not audit_id.startswith("testing-public-ingress-")
+            or audit.mode != "apply"
+            or audit.status != "applied"
+            or not audit.testing_authority_sha256
+            or audit.testing_generation_sha256
+        ):
+            raise ValueError("The first testing hostname has no applied publication receipt.")
+        expected = build_route_binding_candidate(
+            record_store=store,
+            audit_record=audit,
+            request=RouteBindingReconcileRequest(
+                product=operation.product,
+                context=operation.context,
+                instance="testing",
+                evaluated_at=datetime.now(UTC).isoformat(),
+            ),
+        ).record
+        if expected is None or expected.model_dump(
+            exclude={"source", "updated_at"}
+        ) != binding.model_dump(exclude={"source", "updated_at"}):
+            raise ValueError("The first testing hostname differs from its publication receipt.")
+        require_first_testing_target_unprotected(
+            store, product=operation.product, context=operation.context, provider=before.provider
+        )
+        require_first_testing_hostname_available(
+            product=operation.product,
+            target=before.target,
+            domain=public_host,
+            targets=store.list_dokploy_target_records(),
+            profiles=store.list_product_profile_records(),
+            bindings=store.list_route_binding_records(),
+            allow_current_binding=True,
+        )
+        require_quiescent_testing_provider_work(
+            host=host, token=token, target_id=compose_id, never_deployed=True
+        )
+        origin = match_first_testing_origin(
+            api.dokploy_request(
+                host=host,
+                token=token,
+                path="/api/domain.byComposeId",
+                query={"composeId": compose_id},
+            ),
+            target_id=compose_id,
+            domain=public_host,
+            runtime_port=profile.runtime_port,
+        )
+        if not origin:
+            raise ValueError("The first testing hostname has no owned provider origin.")
+        prefix = "traefik.http.routers.web."
+        return {
+            "first_use_authority_sha256": canonical_json_sha256(
+                {"origin": origin, "audit": audit_id}
+            ),
+            "traefik.enable": "true",
+            "traefik.docker.network": "dokploy-network",
+            prefix + "rule": f"Host(`{public_host}`)",
+            prefix + "entrypoints": "websecure",
+            prefix + "tls": "true",
+            prefix + "service": "web",
+            "traefik.http.services.web.loadbalancer.server.port": str(profile.runtime_port),
+        }
     if provider.get("sourceType") == "raw":
         configured = provider.get("composeFile")
         if not isinstance(configured, str):
@@ -305,9 +456,9 @@ def unavailable_ingress_declaration(
             and host_rule_may_match(value, public_host)
             for key, value in labels.items()
         ):
-            return configured
-    return compose.fetch_dokploy_converted_compose_file(
-        host=host, token=token, compose_id=compose_id
+            return labels
+    return declared_testing_ingress(
+        compose.fetch_dokploy_converted_compose_file(host=host, token=token, compose_id=compose_id)
     )
 
 
@@ -472,7 +623,7 @@ def capture_rebuild_intent(
         )
         try:
             configured = (
-                ""
+                None
                 if template is not None
                 else unavailable_ingress_declaration(
                     host=host,
@@ -480,6 +631,10 @@ def capture_rebuild_intent(
                     compose_id=before.target_id.target_id,
                     provider=provider,
                     public_host=str(urlsplit(lane.base_url).hostname),
+                    store=store,
+                    operation=operation,
+                    retained=retained,
+                    static_configuration=frame["static_configuration"],
                 )
             )
             route = compile_unavailable_testing_route(
@@ -491,7 +646,8 @@ def capture_rebuild_intent(
                 file_content=frame["owned_file"],
                 observation_sha256=retained["observation_sha256"],
                 static_configuration=frame["static_configuration"],
-                configured_compose=configured,
+                configured_compose="",
+                declared_ingress=configured,
                 recorded_template=template,
                 aliases=aliases,
                 recorded_backend=previous_route.new_backend if previous_route else None,
@@ -516,7 +672,7 @@ def capture_rebuild_intent(
                 is not None
             ):
                 raise ValueError("Testing ingress changed while binding its declared listeners.")
-        except ValueError as error:
+        except (ValueError, FileNotFoundError) as error:
             raise TestingRebuildRefused(
                 "testing_unavailable_ingress_unverified",
                 "The stopped or absent testing copy needs its provider-owned router declaration and current managed listener configuration.",
@@ -1138,6 +1294,7 @@ class NativeTestingRebuildExecution:
                 )
             preimage = self.intent.unavailable_route.unavailable_preimage
             assert preimage is not None
+            frame = self.transport.read()
             if preimage.declaration_sha256:
                 try:
                     declared = unavailable_ingress_declaration(
@@ -1146,20 +1303,22 @@ class NativeTestingRebuildExecution:
                         compose_id=self.intent.old.target_id,
                         provider=provider,
                         public_host=self.intent.unavailable_route.host,
+                        store=self.store,
+                        operation=self.operation,
+                        retained=self.intent.retained,
+                        static_configuration=frame["static_configuration"],
                     )
-                    declaration = declared_testing_ingress(declared)
                 except api.DokployRequestFailed:
                     raise
-                except (ValueError, click.ClickException) as error:
+                except (ValueError, FileNotFoundError, click.ClickException) as error:
                     raise NativeTestingRebuildPending(
                         "The current provider-owned testing ingress declaration is unavailable."
                     ) from error
-                if canonical_json_sha256(declaration) != preimage.declaration_sha256:
+                if canonical_json_sha256(declared) != preimage.declaration_sha256:
                     raise NativeTestingRebuildAdmissionChanged(
                         "The provider-owned testing router declaration changed."
                     )
             if not self.cutover_started():
-                frame = self.transport.read()
                 if not self.transport.unavailable_predecessor_matches(frame):
                     raise NativeTestingRebuildAdmissionChanged(
                         "The admitted unavailable testing predecessor changed."

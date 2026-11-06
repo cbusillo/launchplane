@@ -319,6 +319,16 @@ template or the provider's explicit raw web-router declaration for this host.
 When no raw rule may match that host, the provider's converted declaration
 supplies its domain routes. Ambiguous or malformed matching raw rules refuse
 instead of falling back. Generated aliases do not replace explicit raw authority.
+Before the first deployment, an empty service-created Compose target can instead
+use its already-published first-hostname receipt and exact provider origin domain.
+This requires an absent original with no containers or volumes, an empty source
+and provider environment, no serving inventory, generation or deployment history,
+and a quiescent provider. The existing first-hostname ownership and protection
+checks still apply. Its HTTPS origin must reach the managed HTTPS listener;
+the same unavailable-route compiler checks conflicts and captures the file preimage.
+Admission and forward rechecks bind the origin identity and publication receipt
+in the existing declaration witness. Desired runtime settings do not establish
+a running original, and this path does not create a generation or clear old operations.
 The same selection runs at admission and forward rechecks, and the selected declaration is
 checked against current proxy listeners, TLS resolver and applied conflicts.
 Missing placement or ingress declaration is a record/capability prerequisite;

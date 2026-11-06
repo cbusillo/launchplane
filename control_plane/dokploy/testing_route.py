@@ -923,6 +923,7 @@ def compile_unavailable_testing_route(
     observation_sha256: str,
     static_configuration: str,
     configured_compose: str,
+    declared_ingress: dict[str, str] | None = None,
     recorded_template: dict[str, Any] | None = None,
     aliases: tuple[str, ...] = (),
     recorded_backend: str | None = None,
@@ -937,7 +938,11 @@ def compile_unavailable_testing_route(
     if template is None:
         if file_content is not None:
             raise ValueError("The existing testing route has no recorded template authority.")
-        labels = declared_testing_ingress(configured_compose)
+        labels = (
+            declared_testing_ingress(configured_compose)
+            if declared_ingress is None
+            else declared_ingress
+        )
         if (
             labels.get("traefik.enable", "").lower() != "true"
             or labels.get("traefik.docker.network") != "dokploy-network"
@@ -1163,9 +1168,7 @@ def compile_unavailable_testing_route(
             observation_sha256=observation_sha256,
             applied=bool(matches),
             static_sha256=testing_route_static_sha256(static_configuration, template),
-            declaration_sha256=canonical_json_sha256(declared_testing_ingress(configured_compose))
-            if recorded_template is None
-            else "",
+            declaration_sha256=canonical_json_sha256(labels) if recorded_template is None else "",
         ),
     )
 
