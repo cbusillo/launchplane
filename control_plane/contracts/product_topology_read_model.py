@@ -585,7 +585,11 @@ def _published_testing_aliases(
     route = retained_testing_route(record_store, binding)
     if route is None or _url_domain(lane.base_url)[0] != route.host:
         return ()
-    return route.aliases
+    return tuple(
+        domain.domain_name
+        for domain in binding.domains
+        if domain.role == "alias" and domain.domain_name in route.aliases
+    )
 
 
 def product_lane_public_domains(lane: ProductLaneProfile) -> tuple[ProductTopologyDomain, ...]:

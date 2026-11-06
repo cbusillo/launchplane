@@ -22317,6 +22317,27 @@ def create_launchplane_fastapi_app(
             ),
         )
 
+    def refresh_native_binding(
+        record_store: object,
+        current: EnvironmentRouteBindingRecord,
+        trace_id: str,
+    ) -> control_plane_route_binding_reconcile.RouteBindingReconcilePlan:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise TypeError("Native testing route refresh requires database-backed custody.")
+        try:
+            return plan_native_testing_route_refresh(
+                record_store,
+                root=resolved_control_plane_root,
+                current=current,
+            )
+        except NativeSourceAuthorizationDenied as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The managed testing route observation was denied.",
+            ) from error
+
     async def reconcile_route_binding(
         request: Request,
         binding_request: RouteBindingReconcileEnvelope,
@@ -22476,6 +22497,36 @@ def create_launchplane_fastapi_app(
                 and isinstance(identity, GitHubHumanIdentity),
             ),
         )
+        if (
+            binding_request.browser_review is None
+            and binding_request.external_ingress is None
+            and reconcile_plan.current_record is not None
+            and any(
+                finding.code
+                == control_plane_route_binding_reconcile.NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER
+                for finding in reconcile_plan.findings
+            )
+            and isinstance(record_store, PostgresRecordStore)
+        ):
+            if director_agent_identity(identity) and not resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="route_binding.read",
+                product=binding_request.product,
+                context=binding_request.context,
+                target=AuthorizationTarget(scope="instance", instances=(binding_request.instance,)),
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="The native testing route observation was denied.",
+                )
+            reconcile_plan = await run_in_threadpool(
+                refresh_native_binding,
+                record_store,
+                reconcile_plan.current_record,
+                trace_id,
+            )
 
         if binding_request.mode == "apply" and any(
             finding.code == "split_ingress_authority_change_requires_review"
@@ -22489,6 +22540,7 @@ def create_launchplane_fastapi_app(
             )
         if (
             director_evidence_refresh
+            and reconcile_plan.native_review_sources is None
             and reconcile_plan.status in {"ready", "unchanged"}
             and not control_plane_route_binding_reconcile.is_evidence_only_route_binding_refresh(
                 reconcile_plan
@@ -22593,6 +22645,7 @@ def create_launchplane_fastapi_app(
         if (
             binding_request.browser_review is not None
             or director_evidence_refresh
+            or reconcile_plan.native_review_sources is not None
             or reconcile_plan.record.external_ingress is not None
         ):
             assert isinstance(record_store, PostgresRecordStore)
@@ -22603,12 +22656,13 @@ def create_launchplane_fastapi_app(
                     mutation=mutation,
                     reviewed_sources=reconcile_plan.review_sources,
                     reviewed_product=binding_request.product,
+                    native_sources=reconcile_plan.native_review_sources,
                 )
             except (
                 control_plane_route_binding_reconcile.RouteBindingSourceChanged,
                 ProductContextOwnershipError,
             ) as error:
-                if director_evidence_refresh:
+                if director_evidence_refresh or reconcile_plan.native_review_sources is not None:
                     raise _launchplane_http_error(
                         status_code=409,
                         trace_id=trace_id,
@@ -22749,25 +22803,6 @@ def create_launchplane_fastapi_app(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-
-        def refresh_native_binding(
-            current: EnvironmentRouteBindingRecord,
-        ) -> control_plane_route_binding_reconcile.RouteBindingReconcilePlan:
-            if not isinstance(record_store, PostgresRecordStore):
-                raise TypeError("Native testing route refresh requires database-backed custody.")
-            try:
-                return plan_native_testing_route_refresh(
-                    record_store,
-                    root=resolved_control_plane_root,
-                    current=current,
-                )
-            except NativeSourceAuthorizationDenied as error:
-                raise _launchplane_http_error(
-                    status_code=403,
-                    trace_id=trace_id,
-                    code="authorization_denied",
-                    message="The managed testing route observation was denied.",
-                ) from error
 
         def binding_refresh_action(binding_record: EnvironmentRouteBindingRecord | None) -> str:
             if (
@@ -22993,7 +23028,9 @@ def create_launchplane_fastapi_app(
                     outcome.reconcile_plan.current_record if outcome.reconcile_plan else None
                 )
                 if native_current is not None and is_native_testing_binding(native_current):
-                    native_plan = await run_in_threadpool(refresh_native_binding, native_current)
+                    native_plan = await run_in_threadpool(
+                        refresh_native_binding, record_store, native_current, trace_id
+                    )
                     outcome = control_plane_route_binding_refresh_controller.route_binding_refresh_outcome(
                         native_current, native_plan
                     )

@@ -127,6 +127,37 @@ class RuntimeKeySafetyAuthorityTests(unittest.TestCase):
 
 
 class RuntimeKeySafetyTests(unittest.TestCase):
+    def test_local_testing_password_classification_preserves_value_origin_boundaries(self) -> None:
+        target = RuntimeKeySafetyTarget(
+            context="new-tenant", instance="testing", environment_class="testing"
+        )
+        rule = RuntimeSecretSafetyRule(
+            binding_key="ODOO_DB_PASSWORD",
+            secret_class="shared_safe",
+            allowed_contexts=("older-tenant",),
+            allowed_instances=("testing", "prod"),
+        )
+        binding = _binding(binding_key=rule.binding_key, context=target.context).model_copy(
+            update={"declared_secret_class": "testing"}
+        )
+        for value_source, expected in (
+            ("supplied", "pass"),
+            ("generated", "pass"),
+            ("copy", "fail"),
+            ("provider", "fail"),
+            (None, "fail"),
+        ):
+            with self.subTest(value_source=value_source):
+                evaluation = evaluate_runtime_key_safety(
+                    target=target,
+                    required_binding_keys=(rule.binding_key,),
+                    secret_bindings=(binding.model_copy(update={"value_source": value_source}),),
+                    secret_rules=(rule,),
+                )
+                self.assertEqual(evaluation.status, expected)
+                if expected == "fail":
+                    self.assertEqual(evaluation.findings[0].code, "context_not_allowed")
+
     def test_testing_environment_rejects_prod_only_secret(self) -> None:
         evaluation = evaluate_runtime_key_safety(
             target=RuntimeKeySafetyTarget(

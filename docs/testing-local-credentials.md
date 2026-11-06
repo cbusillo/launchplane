@@ -53,6 +53,9 @@ in `runtime_environment`. A shared source is shadowed by a new testing record,
 never rotated. Source provenance is `generated`; audit metadata records
 `value_source: service_generated` and, for lifecycle writes, the generation.
 
+Generating local testing passwords needs no per-product policy edit, even when
+a historical shared-key policy only names older products.
+
 Apply independently reads local-credential separation and provenance back. Run
 this separately as well:
 
