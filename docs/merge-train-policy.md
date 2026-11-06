@@ -1523,7 +1523,11 @@ not mistaken for an exhausted failed retry. This also applies when replacement
 persistence was interrupted before superseding its failed parent: resume only
 that parent's recorded unfinished replacement, then retire the parent through
 replacement persistence. Unfinished construction without a candidate SHA restarts
-validation. A retry with a recorded SHA rereads its current checks: a concluded
+validation. Recovery selects the recorded retry before its parent's earlier
+observations, including same-second progress, while retaining later observations
+and the existing progress ranking within a retry. Scan recovery uses this same
+parent-scoped replacement path before treating its allowance as exhausted.
+A retry with a recorded SHA rereads its current checks: a concluded
 failure resumes isolation, and an open retry
 resumes observation at that SHA. A closed retry with no conclusive failure stays
 stopped; it is not reopened or rebuilt. When the controller retires an open
@@ -2174,9 +2178,13 @@ Controller actions have these retry/stop semantics:
   Actions write. Each write rechecks the controller lease. The original execution
   IDs/attempts and `check_rerun_requested_at` are persisted after prerequisite
   reads and before publication, reserving the retry for this queue/base across
-  restarts. Read failures leave that budget unused. A crash after reservation
-  but before deletion conservatively retains the reservation: an existing ref
-  cannot prove whether publication happened before a reply was lost.
+  restarts. Read failures leave that budget unused. Recovery after a crash between
+  reservation and parent supersession resumes the saved reservation, with its original
+  execution attempts and request time, after fresh prerequisite reads. Changed
+  execution attempts stop publication. Conflict holds survive both that refusal
+  and pending recovery from retired history, with one active record. A crash after
+  parent supersession but before deletion conservatively retains the reservation:
+  an existing ref cannot prove whether publication happened before a reply was lost.
   A replacement already carrying
   check, infrastructure or generated-body retry lineage gets no additional retry;
   infrastructure-only failures keep their existing rebuild budget.
