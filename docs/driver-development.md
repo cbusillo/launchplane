@@ -448,6 +448,43 @@ Odoo routes inherit the extra NPMplus config used for the current password-gated
 edge path. Passing `advanced_config` explicitly replaces the provider value;
 passing an explicit empty string clears it.
 
+### Preview wildcard creation
+
+Use the same `POST /v1/drivers/ingress/route-apply` operation with
+`route.dns_challenge="cloudflare"` and `route.certificate_id="new"` for one
+product preview wildcard. The product must exclusively own the preview context,
+have previews enabled with `domain_certificate_type="none"`, and have a stored
+HTTPS `LAUNCHPLANE_PREVIEW_BASE_URL`. The requested wildcard must exactly name
+that namespace. A recorded active `edge_endpoint_key` supplies its upstream.
+Existing host and redirect/dead-host claims, including overlaps and uncertain
+regex claims, block creation. Existing-host updates still require an integer
+certificate ID and never resolve the DNS purpose.
+
+Dry-run uses metadata only and returns `dns_secret_ready`, `dns_secret_id` and
+`dns_secret_version_id` alongside the ordinary route plan/audit. Missing or
+ambiguous credentials cannot authorize a create. After the Director confirms
+entry through the [existing form](secrets.md#preview-wildcard-dns-credential),
+review the plan and pass its `dns_secret_version_id` in the ingress request for
+apply, with the original `Idempotency-Key`. Authorization remains
+`ingress_route.plan` or `ingress_route.apply`; instance-scoped audit authority
+cannot create a wildcard. The configured NPMplus service client supplies API
+authentication through its existing seam; this does not require source-record
+adoption or introduce another API credential store.
+
+Apply reuses the durable provider reservation and effect checkpoint. NPMplus's
+existing create issues the DNS-01 certificate and creates the proxy host on it.
+A service-owned operation marker binds readback to that exact create. Readback
+requires the exact host, upstream and options, loaded nginx and matching current
+certificate metadata. A response lost after dispatch is unknown, even if an
+HTTP error or empty inventory appears. Keep the original key: reconciliation
+can adopt the exact marked route, but cannot issue again or delete an uncertain
+certificate. A new key cannot bypass the outstanding target reservation.
+Unrelated hosts, certificates, source credentials and application records are
+untouched. Preserve the existing snapshot/readiness, active-use, instance and
+principal pins, nginx checks, rollback preparation and unrelated-live-route
+checks for actual execution; strict public TLS verification is separate from a
+serving application test.
+
 Future edge-driver work should investigate Cloudflare Tunnel in #1215 as a
 Launchplane provider before deepening edge-provider assumptions beyond NPMplus.
 The intended spike is a shadow hostname routed through `cloudflared` running in

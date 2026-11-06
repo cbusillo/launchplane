@@ -8,6 +8,7 @@ from fastapi import Depends, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from control_plane import secrets
+from control_plane.npmplus import PREVIEW_DNS_INTEGRATION, PREVIEW_DNS_BINDING
 from control_plane.contracts.authz_policy_record import AuthzPolicyConflictError
 from control_plane.artifact_scan import GHCR_ARTIFACT_READ_INTEGRATION
 from control_plane.github_app_configuration import ONBOARDING_GITHUB_APP_INTEGRATION
@@ -43,6 +44,11 @@ OWNER_SECRET_INPUT_ROUTE = "/v1/owner-secret-inputs"
 OWNER_SECRET_SUBMIT_ROUTE = "/v1/owner-secret-inputs/submit"
 
 _SERVICE_CREDENTIAL_FIELDS = {
+    PREVIEW_DNS_INTEGRATION: (
+        "Preview wildcard DNS credential",
+        "Enter the Cloudflare DNS-edit token scoped to the preview zone. Launchplane uses it only for NPMplus wildcard certificate creation. It is never shown again.",
+        ((PREVIEW_DNS_BINDING, "Preview-zone Cloudflare DNS-edit token"),),
+    ),
     GHCR_ARTIFACT_READ_INTEGRATION: (
         "Artifact scan credentials",
         "Only the Director can save this credential. It is used for artifact reads and is never shown again.",

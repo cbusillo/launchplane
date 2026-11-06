@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from typing import Literal, Protocol
@@ -15,6 +16,10 @@ from control_plane.http_error_evidence import ProviderResponseValidationError
 type JsonPrimitive = str | int | float | bool | None
 type JsonValue = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
 type JsonObject = dict[str, JsonValue]
+
+PREVIEW_DNS_INTEGRATION = "preview_dns_cloudflare"
+PREVIEW_DNS_BINDING = "api_token"
+
 
 NpmplusForwardScheme = Literal["http", "https", "path", "empty", "grpc", "grpcs"]
 NpmplusAuthRequest = Literal[
@@ -457,6 +462,34 @@ class NpmplusClient:
         if not isinstance(response, dict):
             raise click.ClickException("NPMplus proxy-host create returned an invalid payload.")
         return _validate_response(NpmplusProxyHost, response)
+
+    def create_dns_proxy_host(
+        self, payload: NpmplusProxyHostPayload, *, token: str
+    ) -> NpmplusProxyHost:
+        if (
+            payload.certificate_id != "new"
+            or not payload.enabled
+            or len(payload.domain_names) != 1
+            or not payload.domain_names[0].startswith("*.")
+            or re.fullmatch(r"[A-Za-z0-9_-]+", token) is None
+        ):
+            raise click.ClickException("Wildcard DNS certificate input is unavailable.")
+        body = payload.to_api_payload()
+        body.update(
+            npmplus_dns_challenge=True,
+            npmplus_dns_provider="cloudflare",
+            npmplus_dns_provider_credentials=f"dns_cloudflare_api_token = {token}",
+        )
+        response = self._request(method="POST", path="/api/nginx/proxy-hosts", payload=body)
+        host = _validate_response(NpmplusProxyHost, response)
+        if (
+            type(host.certificate_id) is not int
+            or host.certificate_id < 1
+            or host.model_dump(exclude={"id", "meta", "certificate_id"})
+            != payload.model_dump(exclude={"meta", "certificate_id"})
+        ):
+            raise click.ClickException("Wildcard proxy-host result is unverified; output withheld.")
+        return host
 
     def update_proxy_host(
         self, *, host_id: int, payload: NpmplusProxyHostPayload

@@ -88,7 +88,11 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
     async def test_service_inputs_keep_onboarding_and_maintenance_secrets_separate(self) -> None:
         self.seed_director()
         director = _human("director", 9004, "admin")
-        for environment in ("onboarding_github_app", "trusted_maintenance_webhook"):
+        for environment in (
+            "onboarding_github_app",
+            "trusted_maintenance_webhook",
+            "preview_dns_cloudflare",
+        ):
             with self.subTest(environment=environment):
                 read = await self.service_read(director, environment)
                 self.assertEqual(read.status_code, 200, read.text)

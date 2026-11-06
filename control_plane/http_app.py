@@ -960,6 +960,10 @@ from control_plane.workflows.ingress_provider import (
     NpmplusIngressProvider,
     default_ingress_provider,
 )
+from control_plane.npmplus_wildcard_ingress import (
+    NpmplusWildcardIngressOperation,
+    preview_dns_secret_record,
+)
 from control_plane.workflows.npmplus_ingress import (
     NpmplusExistingCertificateRequired,
     NpmplusIngressApplyRequest,
@@ -23464,7 +23468,8 @@ def create_launchplane_fastapi_app(
             route_path=_INGRESS_ROUTE_APPLY_ROUTE,
             idempotency_key=idempotency_key,
             trace_id=trace_id,
-            check_replay=route_request.ingress.mode == "apply",
+            check_replay=route_request.ingress.mode == "apply"
+            and not route_request.ingress.route.dns_challenge,
         )
         if replayed_response is not None:
             return replayed_response
@@ -23492,6 +23497,73 @@ def create_launchplane_fastapi_app(
         guarded_instance_apply = False
         try:
             ingress_provider = resolved_ingress_provider_factory()
+            if resolved_ingress_request.route.dns_challenge:
+                if (
+                    instance_name
+                    or not isinstance(record_store, PostgresRecordStore)
+                    or not isinstance(ingress_provider, NpmplusIngressProvider)
+                ):
+                    raise ValueError(
+                        "Wildcard creation requires a context-scoped database service operation."
+                    )
+
+                def finish_wildcard(result: NpmplusIngressApplyResult) -> dict[str, object]:
+                    audit = write_ingress_route_audit_record(
+                        ingress_store=ingress_store,
+                        trace_id=trace_id,
+                        product=route_request.product,
+                        context=route_request.context,
+                        provider=ingress_provider.provider_id,
+                        request=audit_ingress_request,
+                        result=result,
+                        idempotency_key=normalized_key,
+                    )
+                    record = preview_dns_secret_record(record_store)
+                    return accepted_evidence_response(
+                        trace_id=trace_id,
+                        records={
+                            "ingress_provider": ingress_provider.provider_id,
+                            "ingress_route_audit_record_id": audit.record_id,
+                            "dns_secret_ready": record is not None,
+                            "dns_secret_id": record.secret_id if record else "",
+                            "dns_secret_version_id": record.current_version_id if record else "",
+                        },
+                        result=result.model_dump(mode="json"),
+                    ).model_dump(mode="json", exclude_none=True)
+
+                def pending_wildcard() -> None:
+                    write_ingress_route_pending_audit_record(
+                        ingress_store=ingress_store,
+                        trace_id=trace_id,
+                        product=route_request.product,
+                        context=route_request.context,
+                        provider=ingress_provider.provider_id,
+                        request=audit_ingress_request,
+                        idempotency_key=normalized_key,
+                    )
+
+                wildcard = NpmplusWildcardIngressOperation(
+                    record_store,
+                    ingress_provider.wildcard_client(),
+                    route_request.product,
+                    route_request.context,
+                    resolved_ingress_request,
+                    finish_wildcard,
+                    pending_wildcard,
+                )
+                if resolved_ingress_request.mode == "apply":
+                    return await run_provider_mutation(
+                        record_store=record_store,
+                        identity=identity,
+                        route_path=_INGRESS_ROUTE_APPLY_ROUTE,
+                        idempotency_key=normalized_key,
+                        request_fingerprint=payload_fingerprint,
+                        trace_id=trace_id,
+                        adapter=wildcard,
+                        in_progress_message="The wildcard create is running under its original key.",
+                        reconcile_message="Wildcard certificate or host effects are unknown; retain the original key for reconciliation.",
+                    )
+                return AcceptedEvidenceResponse.model_validate(finish_wildcard(wildcard.plan()))
             if instance_name and resolved_ingress_request.mode == "apply":
                 if resolved_ingress_request.expected_host_id is None:
                     raise _launchplane_http_error(

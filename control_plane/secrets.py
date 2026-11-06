@@ -438,6 +438,7 @@ def resolve_context_secret_value_from_store(
     integration: str,
     context_name: str,
     binding_key: str,
+    expected_version_id: str = "",
 ) -> str:
     if not context_name.strip():
         return ""
@@ -462,6 +463,7 @@ def resolve_context_secret_value_from_store(
         or record.instance
         or record.integration != integration
         or record.policy != "write_only"
+        or (expected_version_id and record.current_version_id != expected_version_id)
         or record.status != SECRET_STATUS_CONFIGURED
     ):
         return ""

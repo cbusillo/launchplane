@@ -37,6 +37,11 @@ class NpmplusIngressProvider:
     def __init__(self, *, client: NpmplusIngressClient) -> None:
         self._client = client
 
+    def wildcard_client(self) -> NpmplusClient:
+        if not isinstance(self._client, NpmplusClient):
+            raise click.ClickException("Wildcard issuance requires the NPMplus service client.")
+        return self._client
+
     def apply_route(
         self,
         *,
