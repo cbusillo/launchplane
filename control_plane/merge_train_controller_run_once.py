@@ -6012,14 +6012,17 @@ def _persist_replacement_candidate(
     )
     candidate_store.write_merge_train_batch_candidate_record(candidate_record)
     try:
-        _supersede_active_merge_train_batch_candidate_records(
-            lease=lease,
-            record_store=candidate_store,
-            repository=repository,
-            base_branch=base_branch,
-            batch_id=active_candidate_record.candidate.batch_id,
-            replacement_record_id=candidate_record.record_id,
-        )
+        for batch_id in dict.fromkeys(
+            (active_candidate_record.candidate.batch_id, candidate.batch_id)
+        ):
+            _supersede_active_merge_train_batch_candidate_records(
+                lease=lease,
+                record_store=candidate_store,
+                repository=repository,
+                base_branch=base_branch,
+                batch_id=batch_id,
+                replacement_record_id=candidate_record.record_id,
+            )
     except Exception:
         _supersede_merge_train_batch_candidate_record(
             record_store=candidate_store,
