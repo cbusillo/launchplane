@@ -4,7 +4,7 @@ title: Python Style
 
 Read the full shared
 [Python and Odoo style](https://github.com/cbusillo/codex-skills/blob/main/skills/references/python-odoo-style.md)
-before writing Python. Odoo-specific sections apply only to Odoo; Launchplane's
+before writing Python. Odoo-specific rules apply only to Odoo; Launchplane's
 supported Python versions and Ruff settings remain in its package metadata.
 
 - Use `pydantic` models for persisted contract data.
