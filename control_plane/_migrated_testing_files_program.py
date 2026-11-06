@@ -36,6 +36,10 @@ filestore=Path('/volumes/data/filestore')/database
 if filestore.resolve()!=filestore.absolute():
     raise RuntimeError('Unsafe testing filestore')
 filestore.mkdir(parents=True,exist_ok=True)
+for temporary in filestore.rglob('.lp-native-'+identity+'-*'):
+    if temporary.is_symlink() or not temporary.is_file():
+        raise RuntimeError('Interrupted migrated extraction contains an unsafe path')
+    temporary.unlink()
 seen=set();directories={filestore,filestore.parent,filestore.parent.parent};total=0
 with tarfile.open(artifacts['filestore'],'r|gz') as archive:
     for member in archive:

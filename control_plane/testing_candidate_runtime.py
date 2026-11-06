@@ -269,10 +269,13 @@ def candidate_runtime_inputs(
             )
         snapshot_budget = lane.odoo_testing_drill_storage.model_copy(
             update={
+                "database_bytes": max(
+                    lane.odoo_testing_drill_storage.database_bytes, migrated_source.database.size
+                ),
                 "filestore_bytes": max(
                     lane.odoo_testing_drill_storage.filestore_bytes,
                     migrated_source.filestore_expanded_bytes,
-                )
+                ),
             }
         )
     artifact = store.read_artifact_manifest(artifact_id)

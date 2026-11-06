@@ -146,6 +146,8 @@ def receive_migrated_part(
         with os.fdopen(descriptor, "r+b") as handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 raise ValueError("Partial upload is not a regular file")
+            if offset == 0 and prefix_sha256 == hashlib.sha256().hexdigest():
+                handle.truncate(0)
             digest = hashlib.sha256()
             while content := handle.read(1024 * 1024):
                 digest.update(content)

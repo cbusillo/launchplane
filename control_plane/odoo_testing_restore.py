@@ -1108,6 +1108,16 @@ def restore_main():
                 return
             print(prefix+json.dumps({'type':'complete','recent_signins':used=='t'}),flush=True)
             return
+        migrated=gen.get('migrated_source')
+        if migrated is not None and present=='0':
+            inspection_predicate = ReadbackPredicate.BACKING_STORAGE
+            data_backing=Path(json.loads(docker('volume','inspect',namespace+'-data'))[0]['Mountpoint']).resolve(strict=True)
+            if not storage_capacity(spec,containers,gen['drill_storage_budget'],
+                    runner_staging_bytes=migrated['database']['size'],
+                    filestore_existing_bytes=populated_filestore_bytes(data_backing/'filestore'/database),
+                    data_staging_bytes=remaining_migrated_staging(data_backing,gen['source_binding_sha256'][:32],migrated),
+                    probe_clones=False):
+                raise RuntimeError('Testing storage capacity is insufficient before migrated delivery')
         capture=spec.get('native_capture')
         artifacts={}
         if capture is not None and present=='0':
@@ -1136,8 +1146,7 @@ def restore_main():
         if capture.get('source_observation',{}).get('kind') != 'migrated':
             files = json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
             staged_bytes = sum(item['size'] for item in files['chunks'])
-        assembly_bytes = (capture['database']['size'] if capture.get('source_observation',{}).get('kind')=='migrated'
-            else sum(capture[part]['size'] for part in ('database','filestore')))
+            assembly_bytes = sum(capture[part]['size'] for part in ('database','filestore'))
     data_backing = Path(json.loads(docker("volume", "inspect", namespace + "-data"))[0]["Mountpoint"]).resolve(strict=True)
     restore_staging = restore_staging_path(data_backing)
     discard_interrupted_restore_staging(restore_staging)
@@ -1237,7 +1246,7 @@ def restore_main():
         readback = docker("exec", "-i", runner, "python3", "-", database, spec["readback_spec"], stdin=spec["readback_program"].encode()).decode()
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
-        if spec.get('native_capture') is not None and gen.get('migrated_source') is not None:
+        if spec.get('native_capture') is not None:
             docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':spec['native_capture'],'mode':'cleanup'}).encode()).decode(),stdin=spec['native_files_program'].encode())
         if gen.get('clean_snapshot_enabled'):
             snapshot = capture_clean_snapshot(spec, containers, clones.get('snapshot'))
@@ -1252,8 +1261,6 @@ def restore_main():
         docker("exec", runner, "python3", "-c",
             "import hashlib,os;from pathlib import Path;Path(" + repr(marker) + ").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+'\\n'+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
         docker("exec", "-u", "root", runner, "rm", "-f", dump_path)
-        if spec.get('native_capture') is not None:
-            docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':spec['native_capture'],'mode':'cleanup'}).encode()).decode(),stdin=spec['native_files_program'].encode())
         docker("start", web)
         # Disposal is reconciled by the service against fresh use/custody facts,
         # independently of the new copy's health and its long-running admission.

@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal, NoReturn, Protocol
 from fastapi import Depends, HTTPException, Path, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.odoo_testing_source import MigratedOdooTestingSource
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
@@ -37,7 +38,6 @@ class MigratedUploadStart(BaseModel):
     model_config = ConfigDict(extra="forbid")
     offset: int = Field(ge=0)
     prefix_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    size: int = Field(ge=0)
 
 
 class MigratedSourceUploadResponse(BaseModel):
@@ -71,7 +71,22 @@ def register_migrated_testing_source_routes(
                 code="database_storage_required",
                 message="Migrated input needs the original testing operation.",
             )
-        policy = read_active_authz_policy_record(store)
+        try:
+            policy = read_active_authz_policy_record(store)
+        except (
+            LookupError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            SQLAlchemyError,
+        ) as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace,
+                code="authz_policy_unavailable",
+                message="Launchplane active authz policy is unavailable.",
+            ) from error
         operation = store.read_odoo_stable_target_replacement_operation_record(operation_id)
         allowed = director_testing_rebuild_allowed(
             identity=identity, request=operation.request, context=operation.context, store=store
@@ -154,11 +169,8 @@ def register_migrated_testing_source_routes(
                 lambda: context(record_store, identity, product, operation_id)
             )
             assert allocation.application is not None
-            source = allocation.application.plan.native_source
             await websocket.accept()
             start = MigratedUploadStart.model_validate(await websocket.receive_json())
-            if start.size != getattr(source, part).size - start.offset:
-                raise ValueError("Upload differs from the admitted remaining bytes")
             receiver = receive_migrated_part(allocation, part, start.offset, start.prefix_sha256)
             entered = []
 

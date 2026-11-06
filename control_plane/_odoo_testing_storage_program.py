@@ -6,6 +6,7 @@ TXG_SYNC_WAIT_SECONDS = 6
 
 STORAGE_MAINTENANCE_LIBRARY = r"""
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -86,15 +87,35 @@ def populated_filestore_bytes(root):
     for path in root.rglob('*'):
         metadata=path.lstat()
         if stat.S_ISREG(metadata.st_mode):
-            size+=metadata.st_size
+            if re.fullmatch(r'(?:checklist/)?[a-f0-9]{2}/[a-f0-9]{40}',str(path.relative_to(root))):
+                size+=metadata.st_size
         elif not stat.S_ISDIR(metadata.st_mode):
             raise RuntimeError('Migrated partial filestore contains an unsupported entry')
     return size
 
 
+def remaining_migrated_staging(data_root, identity, source):
+    root=Path(data_root)/('.lp-native-'+identity)
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        raise RuntimeError('Migrated staging volume is unsafe')
+    remaining=0
+    for part in ('database','filestore'):
+        path=root/(part+'.artifact')
+        if not path.exists():
+            path=root/(part+'.artifact.partial')
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise RuntimeError('Migrated staging artifact is unsafe')
+        size=path.stat().st_size if path.exists() else 0
+        if size>source[part]['size']:
+            raise RuntimeError('Migrated staging exceeds its declared artifact')
+        remaining+=source[part]['size']-size
+    return remaining
+
+
 def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0, *,
         runner_staging_bytes=None, host_staging_bytes=None, database_staging_bytes=0,
-        filestore_clone_source=None, clone_decisions=None, filestore_existing_bytes=0):
+        filestore_clone_source=None, clone_decisions=None, filestore_existing_bytes=0,
+        data_staging_bytes=0, probe_clones=True):
     gen = spec['generation']
     decisions = {} if clone_decisions is None else clone_decisions
     filestore_charged_as_staging = host_staging_bytes is None and gen.get('source_mode', 'ssh') != 'container-export'
@@ -132,6 +153,8 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         elif role == 'data' and filestore_clone_source is not None:
             decisions['data'] = filestore_clone_proved(filestore_clone_source, backings[role])
         demand(backings[role], max(0,size-filestore_existing_bytes) if role=='data' else size)
+    if data_staging_bytes:
+        demand(backings['data'], data_staging_bytes)
     # SSH capture stages on the host; native capture/assembly stages in the
     # runner's writable layer. Require known backing rather than guessing overlay space.
     driver = containers['script-runner'][1].get('GraphDriver', {})
@@ -155,7 +178,8 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         snapshot_path = clean_snapshot_root(spec['copy_binding_sha256'], create=False).parent
         while not snapshot_path.exists():
             snapshot_path = snapshot_path.parent
-        decisions['snapshot'] = filestore_clone_proved(backings['data'], snapshot_path)
+        if probe_clones:
+            decisions['snapshot'] = filestore_clone_proved(backings['data'], snapshot_path)
         demand(snapshot_path, budget['database_bytes'] + budget['filestore_bytes'])
     capacity = all(available[backing] >= size + budget['reserve_bytes'] for backing, size in required.items())
     return capacity

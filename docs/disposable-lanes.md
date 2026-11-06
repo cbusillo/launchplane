@@ -2733,21 +2733,23 @@ An offline migrated pair uses `data_source_mode=migrated_restore` on the same
 independent testing rebuild. Its `migrated_source` names the product/context,
 backup and migration run, selected immutable target image, dump and compressed
 filestore SHA256/lengths, and complete expanded filestore file/byte counts.
-This is the operator's declared offline output, never a claimed observation of
+This is the declared offline output, never a claimed observation of
 production. The compiler binds it to the selected artifact and generation.
 
 Once the normal worker has recorded its private candidate application, the
-original authenticated testing caller uploads each part to
+original authenticated testing caller uploads one part at a time to
 `wss://SERVICE/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source/{part}`
 with its existing bearer authorization. The first JSON frame supplies `offset`,
-`prefix_sha256` and remaining `size`; wait for the matching `ready` offset, send
+and `prefix_sha256`; wait for the matching `ready` offset, send
 binary frames of at most 1 MiB, then JSON `{"complete": true}`. The final JSON
 frame reports the original upload state. GET the same path without `/{part}` to
 inspect retained sizes and completion. The authenticated WebSocket avoids
-proxy request-body buffering. Use the documented private operator connection.
+proxy request-body buffering. Use the documented private connection.
 A disconnect retains the original prefix; its digest must match before resume.
-The service hashes and fsyncs both complete files before committing their
-existing native-copy receipt. GET never commits a receipt. The original caller,
+An explicit start at offset zero with the empty-prefix digest restarts only an
+incomplete part under its existing lock; completed originals cannot be reset.
+The receiver hashes and fsyncs each completed upload. A reused completed pair is
+size-checked before its generation receipt and fully rehashed before delivery. GET never commits a receipt. The original caller,
 product, candidate custody and unstarted restore remain required.
 
 Migrated uploads reuse one private content cache for the same product and source

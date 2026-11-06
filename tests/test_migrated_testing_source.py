@@ -180,6 +180,23 @@ class MigratedUploadTests(unittest.TestCase):
             )
         self.assertFalse(root.exists())
 
+    def test_explicit_restart_replaces_wrong_partial_without_resetting_completed_original(
+        self,
+    ) -> None:
+        from control_plane.migrated_testing_source import receive_migrated_part
+
+        (self.directory / "database.partial").write_bytes(b"wrong bytes")
+        with receive_migrated_part(
+            self.allocation, "database", 0, hashlib.sha256().hexdigest()
+        ) as upload:
+            upload.write(b"database")
+        with self.assertRaises(ValueError):
+            with receive_migrated_part(
+                self.allocation, "database", 0, hashlib.sha256().hexdigest()
+            ):
+                self.fail("A completed original was reset")
+        self.assertEqual((self.directory / "database").read_bytes(), b"database")
+
     def test_interrupted_upload_resumes_only_its_exact_prefix(self) -> None:
         from control_plane.migrated_testing_source import receive_migrated_part
 
@@ -253,6 +270,39 @@ class MigratedArtifactConsumptionTests(unittest.TestCase):
             fixture.consume(capture, mode="inspect")
         self.assertEqual(exited.exception.code, 0)
         self.assertEqual(json.loads(output.getvalue())["artifacts"], {})
+
+    def test_extraction_retry_removes_only_its_owned_interrupted_temporary(self) -> None:
+        from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
+
+        fixture = NativeArtifactConsumptionTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        capture = fixture.stage()
+        capture["source_observation"] = {
+            "kind": "migrated",
+            "filestore_expanded_bytes": len(fixture.attachment),
+            "filestore_files": 1,
+        }
+        staging = fixture.root / "volumes/data" / (".lp-native-" + fixture.identity)
+        staging.mkdir(parents=True)
+        for part in ("database", "filestore"):
+            (fixture.root / "tmp" / f"lp-native-{fixture.identity}-{part}-0").rename(
+                staging / (part + ".artifact")
+            )
+        filestore = fixture.root / "volumes/data/filestore" / fixture.database
+        filestore.mkdir(parents=True)
+        owned = filestore / (".lp-native-" + fixture.identity + "-interrupted")
+        other_identity = f"{int(fixture.identity, 16) ^ 1:032x}"
+        other = filestore / (".lp-native-" + other_identity + "-other")
+        owned.write_bytes(b"partial")
+        other.write_bytes(b"retained other owner")
+        with self.assertRaises(SystemExit):
+            fixture.consume(capture)
+        self.assertFalse(owned.exists())
+        self.assertEqual(other.read_bytes(), b"retained other owner")
+        self.assertEqual(
+            fixture.mapped_path(fixture.dump_path).read_bytes(), b"custom database fixture"
+        )
 
     def test_checklist_subdirectories_are_preserved_in_the_full_filestore(self) -> None:
         from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
@@ -620,7 +670,6 @@ class MigratedUploadRouteTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "offset": offset,
                         "prefix_sha256": hashlib.sha256(data[:offset]).hexdigest(),
-                        "size": len(data) - offset,
                     }
                 ),
             }
