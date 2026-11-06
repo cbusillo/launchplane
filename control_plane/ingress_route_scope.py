@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from control_plane.contracts.public_hosts import canonical_dns_hostname
+from control_plane.contracts.public_hosts import canonical_dns_hostname, retained_hostname_identity
 
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -136,11 +136,7 @@ def _tracked_domains(
         ) from error
 
 
-def _lane_public_domains(
-    lane: ProductLaneProfile,
-    *,
-    require_domains: bool,
-) -> frozenset[str]:
+def _lane_public_urls(lane: ProductLaneProfile) -> list[tuple[str, str]]:
     urls: list[tuple[str, str]] = [
         ("base_url", lane.base_url),
         ("health_url", lane.health_url),
@@ -150,8 +146,27 @@ def _lane_public_domains(
         for check in lane.health_monitoring.checks
         if check.enabled and check.kind == "public_http" and check.url.strip()
     )
+    return urls
+
+
+def lane_hostname_claims(profile: LaunchplaneProductProfileRecord) -> frozenset[str]:
+    return frozenset(
+        retained_hostname_identity(value)
+        for lane in profile.lanes
+        for _, value in _lane_public_urls(lane)
+        if value.strip()
+    )
+
+
+def _lane_public_domains(
+    lane: ProductLaneProfile,
+    *,
+    require_domains: bool,
+) -> frozenset[str]:
     domains = {
-        _public_https_domain(value=value, label=label) for label, value in urls if value.strip()
+        _public_https_domain(value=value, label=label)
+        for label, value in _lane_public_urls(lane)
+        if value.strip()
     }
     if require_domains and not domains:
         raise IngressRouteInstanceScopeError(

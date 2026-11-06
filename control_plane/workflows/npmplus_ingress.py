@@ -220,6 +220,48 @@ class NpmplusIngressApplyRequest(BaseModel):
     dns_secret_version_id: str = Field(default="", exclude_if=lambda value: not value)
     reason: str = ""
 
+    def is_preview_wildcard_create(self) -> bool:
+        return (
+            self.mode == "apply"
+            and self.expected_host_id is None
+            and not self.require_exact_expected_host_domains
+            and self.allow_create
+            and not self.model_fields_set
+            - {
+                "schema_version",
+                "mode",
+                "route",
+                "expected_host_id",
+                "require_exact_expected_host_domains",
+                "allow_create",
+                "allow_update",
+                "allow_enable_disable",
+                "dns_secret_version_id",
+                "reason",
+            }
+            and not self.route.model_fields_set
+            - {
+                "domain_names",
+                "edge_endpoint_key",
+                "forward_host",
+                "dns_challenge",
+                "certificate_id",
+                "ssl_forced",
+                "enabled",
+            }
+            and self.route.dns_challenge == "cloudflare"
+            and self.route.certificate_id == "new"
+            and self.route.enabled
+            and self.route.ssl_forced
+            and bool(self.route.edge_endpoint_key)
+            and not self.route.forward_host
+            and not self.route.advanced_config
+            and not self.route.locations
+            and self.route.identity_access is None
+            and self.route.npmplus_auth_request == "none"
+            and self.route.access_list_id == 0
+        )
+
     @model_validator(mode="after")
     def _validate_schema_version(self) -> "NpmplusIngressApplyRequest":
         if self.schema_version != 1:

@@ -6571,6 +6571,84 @@ class PostgresRecordStore(HumanSessionStore):
                 caller_identity=identity,
             )
 
+    def write_preview_dns_secret_bundle(
+        self, bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity
+    ) -> None:
+        from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION
+        from control_plane.service_auth import (
+            AuthorizationTarget,
+            LocalOperatorIdentity,
+            director_agent_identity,
+        )
+
+        secret_ids = {record.secret_id for record in bundle.secret_records}
+        remaining = bundle.model_copy(
+            update={
+                "secret_records": (),
+                "secret_versions": (),
+                "secret_bindings": (),
+                "secret_audit_events": (),
+                "idempotency_record": None,
+            }
+        )
+        if (
+            remaining.requires_write()
+            or len(bundle.secret_records) != 1
+            or len(bundle.secret_versions) != 1
+            or len(bundle.secret_bindings) != 1
+            or len(bundle.secret_audit_events) != 1
+            or bundle.absent_secret_ids
+            or bundle.expected_secret_records
+            or any(
+                (record.scope, record.context, record.instance, record.integration, record.name)
+                != ("context", "launchplane", "", PREVIEW_DNS_INTEGRATION, PREVIEW_DNS_BINDING)
+                for record in bundle.secret_records
+            )
+            or any(
+                (binding.context, binding.instance, binding.integration, binding.binding_key)
+                != ("launchplane", "", PREVIEW_DNS_INTEGRATION, PREVIEW_DNS_BINDING)
+                or binding.secret_id not in secret_ids
+                for binding in bundle.secret_bindings
+            )
+            or any(
+                item.secret_id not in secret_ids
+                for item in (*bundle.secret_versions, *bundle.secret_audit_events)
+            )
+        ):
+            raise ServiceIdentityAuthorityError(
+                "Only the absent preview DNS service credential can be filled."
+            )
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_active_authz_policy(session)
+            try:
+                policy = self._locked_active_authz_policy_record(session).policy
+            except AuthzPolicyConflictError as error:
+                raise ServiceIdentityAuthorityError(
+                    "Current Director-agent authority is unavailable."
+                ) from error
+            if (
+                not isinstance(identity, LocalOperatorIdentity)
+                or not director_agent_identity(identity)
+                or not policy.allows(
+                    identity=identity,
+                    action="product_config.apply",
+                    product="launchplane",
+                    context="launchplane",
+                    target=AuthorizationTarget(scope="context"),
+                    inherit_agent_read_role=False,
+                )
+            ):
+                raise ServiceIdentityAuthorityError(
+                    "The DNS credential transfer requires current Director-agent authority."
+                )
+            self._write_product_authority_bundle(
+                bundle.model_copy(update={"absent_secret_ids": tuple(secret_ids)}),
+                write_session=session,
+                write_transaction_started=True,
+                caller_identity=identity,
+            )
+
     @staticmethod
     def _require_service_identity_administrator(
         policy: LaunchplaneAuthzPolicy, identity: LaunchplaneIdentity | None

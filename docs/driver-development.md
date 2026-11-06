@@ -456,18 +456,27 @@ product preview wildcard. The product must exclusively own the preview context,
 have previews enabled with `domain_certificate_type="none"`, and have a stored
 HTTPS `LAUNCHPLANE_PREVIEW_BASE_URL`. The requested wildcard must exactly name
 that namespace. A recorded active `edge_endpoint_key` supplies its upstream.
-Existing host and redirect/dead-host claims, including overlaps and uncertain
+Recorded product lane hostnames and parent or child preview namespaces owned by
+other products also block creation. Existing host and redirect/dead-host claims, including overlaps and uncertain
 regex claims, block creation. Existing-host updates still require an integer
 certificate ID and never resolve the DNS purpose.
 
 Dry-run uses metadata only and returns `dns_secret_ready`, `dns_secret_id` and
-`dns_secret_version_id` alongside the ordinary route plan/audit. Missing or
-ambiguous credentials cannot authorize a create. After the Director confirms
-entry through the [existing form](secrets.md#preview-wildcard-dns-credential),
+`dns_secret_version_id` alongside the ordinary route plan/audit. Authorized context-wide wildcard
+plans validate the product's recorded preview namespace directly; standing read
+access does not substitute a stable testing hostname or gain apply authority.
+Missing or ambiguous credentials cannot authorize a create. After confirmed entry or an
+explicitly authorized initial transfer through the
+[existing managed-secret path](secrets.md#preview-wildcard-dns-credential),
 review the plan and pass its `dns_secret_version_id` in the ingress request for
-apply, with the original `Idempotency-Key`. Authorization remains
-`ingress_route.plan` or `ingress_route.apply`; instance-scoped audit authority
-cannot create a wildcard. The configured NPMplus service client supplies API
+apply, with the original `Idempotency-Key`. Authorization uses
+`ingress_route.plan` or `ingress_route.apply`. The transport-marked Director
+agent can conditionally create this new preview wildcard with a minimal
+route: `domain_names`, `edge_endpoint_key`, `dns_challenge`, `certificate_id`,
+`ssl_forced` and `enabled`. Omitted options keep their defaults; arbitrary NGINX
+text, extra locations, authentication forwarding and upstream overrides are
+outside this conditional path. Instance-scoped audit authority cannot create a
+wildcard. The configured NPMplus service client supplies API
 authentication through its existing seam; this does not require source-record
 adoption or introduce another API credential store.
 
