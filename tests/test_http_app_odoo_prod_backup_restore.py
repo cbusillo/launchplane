@@ -14,6 +14,7 @@ from control_plane.odoo_prod_backup_restore_http import (
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _asgi_request
+from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
 from tests.support.auth import _identity, _StubVerifier
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.test_odoo_prod_backup_restore_storage import _verification_failed_restore_operation
@@ -21,6 +22,33 @@ from tests.test_odoo_stable_operation_worker import _restore_operation
 
 
 class OdooProdBackupRestoreHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_director_backup_capture_authority_cannot_restore_production(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                bearer_identity_config=_local_operator_bearer_config(),
+                authz_policy=LaunchplaneAuthzPolicy(schema_version=2),
+                record_store_factory=lambda: self._store(root / "state"),
+                control_plane_root_path=root,
+            )
+            with patch(
+                "control_plane.http_app.enqueue_odoo_prod_backup_restore_operation"
+            ) as enqueue:
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/drivers/odoo/prod-backup-restore-apply",
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "refused-restore",
+                    },
+                    payload=self._payload(apply=True),
+                )
+            self.assertEqual(response.status_code, 403, response.text)
+            self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+            enqueue.assert_not_called()
+
     def _policy(self, *, action: str) -> LaunchplaneAuthzPolicy:
         return LaunchplaneAuthzPolicy.model_validate(
             {

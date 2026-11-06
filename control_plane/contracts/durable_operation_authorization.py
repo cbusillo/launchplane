@@ -12,6 +12,7 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
+from control_plane.contracts.production_backup_gate import PRODUCTION_BACKUP_GATE_EXECUTE_ACTION
 
 
 DurableOperationIdentityType = Literal[
@@ -39,6 +40,7 @@ DurableOperationGrant = Literal[
     "client_release_acceptance",
     "temporary_hotfix",
     "director_testing_rebuild",
+    "director_backup_capture",
 ]
 # Grants that name a release decision Launchplane's release worker runs.
 RELEASE_DECISION_GRANTS: frozenset[str] = frozenset(
@@ -202,6 +204,15 @@ class DurableOperationAuthorization(BaseModel):
         if self.caller.identity_type == "launchplane_reconcile":
             raise ValueError("The Launchplane reconcile identity has no policy-rule grant.")
         required_text_fields: tuple[str, ...] = _POLICY_RULE_TEXT_FIELDS
+        if self.grant == "director_backup_capture":
+            if (
+                self.caller.identity_type != "local_operator"
+                or self.action != PRODUCTION_BACKUP_GATE_EXECUTE_ACTION
+                or self.instances != ("prod",)
+                or any(getattr(self, field_name) for field_name in _MANAGED_RULE_TEXT_FIELDS)
+            ):
+                raise ValueError("Director backup authority permits production capture only.")
+            required_text_fields = _POLICY_PROVENANCE_TEXT_FIELDS
         if self.grant == "policy_administrator":
             if self.caller.identity_type != "github_human" or self.caller.role != "admin":
                 raise ValueError("An admin grant requires a GitHub human caller with role admin.")
@@ -229,7 +240,7 @@ class DurableOperationAuthorization(BaseModel):
                 payload.pop("release_decision_record_id", None)
             if self.grant == "policy_rule":
                 payload.pop("grant", None)
-            elif self.grant == "policy_administrator":
+            elif self.grant in {"policy_administrator", "director_backup_capture"}:
                 for field_name in _MANAGED_RULE_TEXT_FIELDS:
                     payload.pop(field_name, None)
             else:
