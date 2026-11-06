@@ -655,6 +655,7 @@ def execute_dokploy_target_setup(
     disposable_before_create: Callable[[str], None] | None = None,
     disposable_placement: tuple[str, str] | None = None,
     director_source_completion: bool = False,
+    director_testing_domain: bool = False,
     application_mutate: Callable[
         [str, str, str, dict[str, dokploy_api.JsonValue]], dict[str, dokploy_api.JsonValue]
     ]
@@ -681,6 +682,7 @@ def execute_dokploy_target_setup(
             disposable_before_create=disposable_before_create,
             disposable_placement=disposable_placement,
             director_source_completion=director_source_completion,
+            director_testing_domain=director_testing_domain,
             application_mutate=application_mutate,
         )
 
@@ -695,6 +697,7 @@ def _execute_dokploy_target_setup(
     disposable_before_create: Callable[[str], None] | None = None,
     disposable_placement: tuple[str, str] | None = None,
     director_source_completion: bool = False,
+    director_testing_domain: bool = False,
     application_mutate: Callable[
         [str, str, str, dict[str, dokploy_api.JsonValue]], dict[str, dokploy_api.JsonValue]
     ]
@@ -826,6 +829,12 @@ def _execute_dokploy_target_setup(
             if disposable_checkpoint
             else fetch_dokploy_target_payload_for_setup,
             fetch_target_domains=fetch_dokploy_target_domains_for_setup,
+        )
+    elif request.operation == "reconcile-compose-domain" and director_testing_domain:
+        from control_plane.dokploy_testing_domain import setup_empty_testing_domain
+
+        result = setup_empty_testing_domain(
+            record_store=record_store, request=request, host=host, token=token
         )
     elif request.operation == "reconcile-compose-domain":
         result = _execute_dokploy_compose_domain_reconcile(
