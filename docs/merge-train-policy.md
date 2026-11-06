@@ -1640,6 +1640,22 @@ after its checks pass and before any admission; an unresolved thread there,
 such as a code-scanning finding on the combined change, blocks with
 `batch_pull_request_conversations_unresolved` instead of a refused merge.
 
+A managed batch with a confirmed `required_code_scanning_missing` refusal
+records that cause before closing the batch and making its landing plan stale
+through the existing failure path. A later pass can replace it on the unchanged
+queue using the existing infrastructure replacement budget, after rereading the
+exact batch as closed and unmerged. This shares the queue/base allowance with
+runner failures. An interruption resumes the recorded replacement and ref;
+returning to the same heads and base does not reset the allowance. Once spent,
+the controller retains the scan-specific reason and reports
+`infrastructure_retry_used` as the recovery detail. Passing checks remain
+passing, and no member PR is blamed. Source PRs remain open, and the next
+candidate still needs every protected-branch gate. An unknown provider effect
+still requires reconciliation; a recorded scan diagnosis does not prove that
+closure or merging had no effect. Individual source-PR landings report the
+diagnosis without being closed. See [merge refusal diagnosis](merge-admission.md)
+for the evidence.
+
 ## Example Policy Entries
 
 The example below is documentation/import material only. It is not packaged as a
