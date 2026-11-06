@@ -74,6 +74,15 @@ _CHANGE_CATEGORY_FIELDS: dict[NpmplusIngressChangeCategory, frozenset[str]] = {
 }
 
 
+class NpmplusExistingCertificateRequired(click.ClickException):
+    code = "npmplus_existing_certificate_required"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Select a current NPMplus certificate's integer ID to update an existing host."
+        )
+
+
 class NpmplusIngressClient(Protocol):
     def list_proxy_hosts(self) -> tuple[NpmplusHostIdentity, ...]: ...
 
@@ -389,6 +398,8 @@ def _plan_operations(
         )
 
     operations: list[NpmplusIngressOperation] = []
+    if desired_payload.certificate_id == "new":
+        raise NpmplusExistingCertificateRequired()
     change_categories = _update_change_categories(existing_host, desired_payload)
     if change_categories:
         if not request.allow_update:

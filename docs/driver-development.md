@@ -353,6 +353,11 @@ proxy-host create/read/update/disable/enable/delete lifecycle that was proven
 against a disposable canary route. Future ingress driver routes should use this
 adapter instead of direct NPMplus SQLite or generated nginx config writes.
 
+The adapter discards provider metadata on host reads and withholds response bodies
+and transport reasons from failures. `certificate_id="new"` is create-only.
+For an existing host, select the current certificate in NPMplus's certificate
+inventory and supply its integer ID for the reviewed update.
+
 The service-backed ingress route is `POST /v1/drivers/ingress/route-apply`.
 Callers send a product/context envelope plus a typed route request. `mode` is
 `dry-run` by default for CLI callers; `apply` must be explicit. The route uses

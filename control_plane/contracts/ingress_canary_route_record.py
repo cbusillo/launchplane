@@ -16,7 +16,7 @@ class IngressCanaryRouteRecord(BaseModel):
     domain_name: str
     expected_host_id: int = Field(ge=1)
     edge_endpoint_key: str
-    certificate_id: int | Literal["new"]
+    certificate_id: int = Field(ge=0)
     status: IngressCanaryRouteStatus = "active"
     source_label: str = ""
     updated_at: str
@@ -67,6 +67,4 @@ class IngressCanaryRouteRecord(BaseModel):
     def _validate_record(self) -> "IngressCanaryRouteRecord":
         if self.schema_version != 1:
             raise ValueError("Unsupported ingress canary route record schema version")
-        if self.certificate_id != "new" and self.certificate_id < 0:
-            raise ValueError("ingress canary route certificate_id must be non-negative")
         return self
