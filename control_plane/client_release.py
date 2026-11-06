@@ -112,7 +112,6 @@ from control_plane.release_review import (
     current_release_review,
     release_version,
     recorded_generic_web_testing_version,
-    checklist_blockers,
 )
 from control_plane.release_review_record import publish_release_decision
 from control_plane.generic_web_promotion_http import (
@@ -1387,7 +1386,7 @@ def _record_standing_acceptance(
     if (
         checklist is None
         or checklist.production == checklist.candidate
-        or checklist_blockers(checklist, profile=profile)
+        or not review.checklist_complete
     ):
         return
     existing = review.latest_decision
@@ -1624,7 +1623,9 @@ def advance_client_releases(
                     continue
                 release_backoff.blocked[publication_key] = (decision.record_id, monotonic() + 300)
             try:
-                _require_current_release_versions(store, pending_profile, decision)
+                _require_current_release(
+                    store, control_plane_root, pending_profile, decision, require_publication=False
+                )
                 publish_release_decision(
                     store=store,
                     control_plane_root=control_plane_root,
@@ -1637,13 +1638,19 @@ def advance_client_releases(
                         release_backoff.blocked.pop(profile.product, None)
             except (
                 ClientReleaseNotReady,
-                AttributeError,
                 FileNotFoundError,
                 ValueError,
                 click.ClickException,
             ):
                 _LOGGER.warning(
                     "saved release decision publication pending product=%s", profile.product
+                )
+                continue
+            except Exception as error:
+                _LOGGER.error(
+                    "saved release decision publication failed product=%s error_type=%s",
+                    profile.product,
+                    type(error).__name__,
                 )
                 continue
         covered = _covering_decision(store, profile.product)
@@ -1886,10 +1893,13 @@ def _require_qualified_generic_web_release_source(
         raise GenericWebPromotionSourceRefused("The accepted testing release changed.")
 
 
-def _require_current_release_versions(
+def _require_current_release(
     store: PostgresRecordStore,
+    control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
+    *,
+    require_publication: bool = True,
 ) -> None:
     checklist = decision.checklist
     # Cheap reads first, so a stale acceptance does not read GitHub on every poll.
@@ -1908,16 +1918,6 @@ def _require_current_release_versions(
             raise ClientReleaseNotReady("release_record_missing") from error
         if candidate != checklist.candidate:
             raise ClientReleaseNotReady("release_changed")
-
-
-def _require_current_release(
-    store: PostgresRecordStore,
-    control_plane_root: Path,
-    profile: LaunchplaneProductProfileRecord,
-    decision: ReleaseReviewDecisionRecord,
-) -> None:
-    _require_current_release_versions(store, profile, decision)
-    checklist = decision.checklist
     review = current_release_review(
         control_plane_root=control_plane_root, record_store=store, profile=profile
     )
@@ -1940,7 +1940,7 @@ def _require_current_release(
             if review.checklist.candidate != checklist.candidate:
                 raise GenericWebPromotionSourceRefused("The accepted testing release changed.")
     if (
-        not review.approved
+        not (review.approved if require_publication else review.checklist_complete)
         or review.checklist_digest != decision.checklist_digest
         or review.latest_decision is None
         or review.latest_decision.record_id != decision.record_id

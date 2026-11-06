@@ -117,7 +117,9 @@ class ReleaseReviewStore(GenericWebSourceQualificationStore, ReleaseSettingsStor
     ) -> ReleaseReviewDecisionRecord: ...
 
 
-RELEASE_RECORD_PENDING = "The decision is saved. Launchplane will retry publishing its release record automatically while the accepted version is current."
+RELEASE_RECORD_PENDING = (
+    "The decision is saved, but the release record could not be published. Try recording it again."
+)
 CLIENT_APPROVAL_REQUIRED = "Client approval of this release is required."
 
 RELEASE_EVIDENCE_MESSAGES: dict[ReleaseEvidenceReason, str] = {
