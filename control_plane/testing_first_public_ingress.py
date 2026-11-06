@@ -1,6 +1,4 @@
 from urllib.parse import urlsplit
-from collections.abc import Iterator
-from contextlib import contextmanager
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -40,9 +38,6 @@ from control_plane.testing_public_ingress import (
     _host_payload,
     _marker,
 )
-from control_plane.workflows.generic_web_deploy_provider import (
-    dokploy_generic_web_provider_target_key,
-)
 
 
 class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
@@ -64,34 +59,20 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
     def target_key(self) -> str:
         return self.provider_target_origin().target_key()
 
-    @contextmanager
-    def _original_provider_operation(self, provider_key: str) -> Iterator[None]:
-        previous = self.current_provider_key
-        self.current_provider_key = provider_key
-        try:
-            yield
-        finally:
-            self.current_provider_key = previous
-
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
-        with self._original_provider_operation(provider_operation_key):
-            return super().apply(provider_operation_key, lease)
+        self.current_provider_key = provider_operation_key
+        return super().apply(provider_operation_key, lease)
 
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        with self._original_provider_operation(provider_operation_key):
-            return super().observe(
-                provider_operation_key, provider_effect_phase, reconciliation_key
-            )
+        self.current_provider_key = provider_operation_key
+        return super().observe(provider_operation_key, provider_effect_phase, reconciliation_key)
 
     def _execution_lock_name(self) -> str:
-        provider = self.store.read_provider_target_record(
-            context_name=self.request.context, instance_name="testing"
-        )
-        return testing_event_execution_lock_name(dokploy_generic_web_provider_target_key(provider))
+        return testing_event_execution_lock_name(self.target_key())
 
     def _authority(self) -> tuple[dict[str, object], ProductAuthorityBundle]:
         profile = self.store.read_product_profile_record(self.product)
@@ -277,7 +258,7 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
         )
 
     def _authority_witness(self, material: dict[str, object]) -> str:
-        return str(material["first_use"])
+        return ""
 
     def _verify_readback_authority(
         self, material: dict[str, object], audit: IngressRouteAuditRecord, current: NpmplusProxyHost
@@ -296,20 +277,20 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
 
     def _custody_binding(self, material: dict[str, object]) -> str:
         profile = LaunchplaneProductProfileRecord.model_validate(material["profile"])
-        normalized = profile.model_copy(
-            update={
-                "lanes": tuple(
-                    lane.model_copy(update={"base_url": "", "health_url": ""})
-                    if (lane.context, lane.instance) == (self.request.context, "testing")
-                    else lane
-                    for lane in profile.lanes
-                )
-            }
+        lane = next(
+            lane
+            for lane in profile.lanes
+            if (lane.context, lane.instance) == (self.request.context, "testing")
         )
         return canonical_json_sha256(
             {
                 "first_use": material["first_use"],
-                "profile": normalized.model_dump(mode="json", exclude={"updated_at"}),
+                "product": profile.product,
+                "driver_id": profile.driver_id,
+                "is_active": profile.is_active,
+                "runtime_port": profile.runtime_port,
+                "health_path": profile.health_path,
+                "lane": lane.model_dump(mode="json", exclude={"base_url", "health_url"}),
                 "provider": provider_target_projection(
                     ProviderTargetRecord.model_validate(material["provider"])
                 ),
@@ -351,7 +332,7 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
             desired,
             endpoint,
             domain,
-            str(material["first_use"]),
+            "",
             self.client.list_proxy_hosts(),
             custody,
         )

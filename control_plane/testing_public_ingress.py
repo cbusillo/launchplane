@@ -423,7 +423,7 @@ class TestingPublicIngressAdapter:
             or custody.status not in {"pending", "applied"}
             or custody.requested_domains != desired.domain_names
             or custody.edge_endpoint_key != endpoint.endpoint_key
-            or custody.testing_generation_sha256 != (witness if self.request.operation_id else "")
+            or custody.testing_generation_sha256 != witness
             or custody.testing_authority_sha256 != self._custody_binding(material)
             or custody.provider_route_sha256 != canonical_json_sha256(_host_payload(desired))
         ):
@@ -525,7 +525,7 @@ class TestingPublicIngressAdapter:
             tls_owner="provider",
             provider_certificate_ref=str(payload.certificate_id),
             provider_route_sha256=canonical_json_sha256(_host_payload(payload)),
-            testing_generation_sha256=witness if self.request.operation_id else "",
+            testing_generation_sha256=witness,
             testing_authority_sha256=custody_sha256,
             provider_host_id=host.id if host else None,
             operations=(
@@ -613,7 +613,7 @@ class TestingPublicIngressAdapter:
             or audit.edge_endpoint_key != endpoint.endpoint_key
             or audit.provider_certificate_ref != str(current.certificate_id)
             or audit.provider_route_sha256 != canonical_json_sha256(_host_payload(current))
-            or audit.testing_generation_sha256 != (witness if self.request.operation_id else "")
+            or audit.testing_generation_sha256 != witness
         ):
             raise ValueError("The provider route differs from its original publication receipt.")
         if binding.model_dump(exclude={"source", "updated_at"}) != self._candidate(

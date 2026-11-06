@@ -344,16 +344,14 @@ class FirstTestingPublicIngressTests(unittest.IsolatedAsyncioTestCase):
             adapter.plan()
         self.assertNotIn("create", self.client.calls)
 
-    async def test_profile_drift_after_creation_keeps_the_original_effect_fenced(self) -> None:
+    def observe_after_profile_drift(self, changes: dict[str, Any]) -> str:
         from control_plane.provider_operations import ProviderMutationUnknownError
 
         adapter = self.reviewed()
         publish = adapter._publish
 
         def change_profile(*args: Any, **kwargs: Any) -> Any:
-            self.store.write_product_profile_record(
-                self.profile.model_copy(update={"display_name": "Changed while publishing"})
-            )
+            self.store.write_product_profile_record(self.profile.model_copy(update=changes))
             return publish(*args, **kwargs)
 
         with patch.object(adapter, "_publish", side_effect=change_profile):
@@ -365,13 +363,26 @@ class FirstTestingPublicIngressTests(unittest.IsolatedAsyncioTestCase):
             self.store.read_route_binding_record(
                 product=self.profile.product, context_name="example", instance_name="testing"
             )
-        self.assertEqual(
-            adapter.observe(
-                "initial-edge-key", "create_testing_public_route", adapter.reconciliation_key()
-            ).outcome,
-            "unknown",
+        observation = adapter.observe(
+            "initial-edge-key", "create_testing_public_route", adapter.reconciliation_key()
         )
         self.assertEqual(self.client.calls.count("create"), 1)
+        return str(observation.outcome)
+
+    async def test_route_relevant_profile_drift_keeps_the_original_effect_fenced(self) -> None:
+        self.assertEqual(
+            self.observe_after_profile_drift({"runtime_port": self.profile.runtime_port + 1}),
+            "unknown",
+        )
+
+    async def test_profile_metadata_drift_does_not_strand_original_observation(self) -> None:
+        self.assertEqual(
+            self.observe_after_profile_drift({"display_name": "Changed while publishing"}),
+            "present",
+        )
+        current = self.store.read_product_profile_record(self.profile.product)
+        self.assertNotEqual(current.display_name, self.profile.display_name)
+        self.assertEqual(current.lanes[0].base_url, "https://" + self.domain)
 
     async def test_busy_testing_executor_stops_before_any_route_effect(self) -> None:
         from contextlib import nullcontext
