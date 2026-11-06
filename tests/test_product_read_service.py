@@ -224,20 +224,22 @@ class ProductReadServiceTests(unittest.TestCase):
         self.store = _ProductReadStore(self.profile)
 
     def test_live_product_warns_when_host_updates_have_never_been_observed(self) -> None:
-        baseline = build_product_environment_list_service_payload(
-            record_store=self.store, action_allowed=lambda *_: True
-        )
+        from unittest.mock import patch
+        from control_plane.host_security_updates import host_security_update_warnings
+
         self.store.profile = self.profile.model_copy(update={"production_use": "live"})
-        result = build_product_environment_list_service_payload(
-            record_store=self.store, action_allowed=lambda *_: True
-        )
+        lane = next(lane for lane in self.profile.lanes if lane.instance == "prod")
+        with patch.object(self.store, "read_idempotency_record", return_value=None, create=True):
+            expected = host_security_update_warnings(self.store, self.store.profile, lane)
+            result = build_product_environment_list_service_payload(
+                record_store=self.store, action_allowed=lambda *_: True
+            )
+        self.assertTrue(expected)
         product = cast(list[dict[str, object]], result["products"])[0]
-        before = cast(list[dict[str, object]], baseline["products"])[0]
-        previous = cast(list[dict[str, object]], before["environments"])
         environments = cast(list[dict[str, object]], product["environments"])
-        for old, new in zip(previous, environments, strict=True):
-            added = set(cast(list[str], new["warnings"])) - set(cast(list[str], old["warnings"]))
-            self.assertEqual(len(added), int(new["environment"] == "prod"))
+        for environment in environments:
+            warnings = cast(list[str], environment["warnings"])
+            self.assertEqual(set(expected).issubset(warnings), environment["environment"] == "prod")
 
     def test_product_read_model_store_requires_db_summary_capabilities(self) -> None:
         class PartialStore:

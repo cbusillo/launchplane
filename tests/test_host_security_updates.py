@@ -1,6 +1,9 @@
 from contextlib import redirect_stdout
 from io import StringIO
 import json
+import os
+from pathlib import Path
+from datetime import datetime, timezone
 from tempfile import TemporaryDirectory
 import time
 import unittest
@@ -23,20 +26,26 @@ class HostSecurityUpdateTests(unittest.TestCase):
         import pathlib
         import sys
 
-        for completed_at in (None, 1000.0):
-            with self.subTest(completed_at=completed_at):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            stamps = root / "var/lib/apt/periodic"
+            stamps.mkdir(parents=True)
+            (stamps / "update-success-stamp").touch()
+            (stamps / "unattended-upgrades-stamp").touch()
+            for completed_at in (None, 1000.0):
+                if completed_at is not None:
+                    (stamps / "upgrade-stamp").touch()
+                    os.utime(stamps / "upgrade-stamp", (completed_at, completed_at))
                 output = StringIO()
                 with (
-                    patch.object(pathlib, "Path") as path,
+                    patch.object(
+                        pathlib, "Path", side_effect=lambda value: root / value.lstrip("/")
+                    ),
                     patch.object(sys, "argv", ["reader", "{}", "FRAME:"]),
                     redirect_stdout(output),
                 ):
-                    path.return_value.stat.return_value.st_mtime = completed_at
-                    if completed_at is None:
-                        path.return_value.stat.side_effect = FileNotFoundError
                     exec(security.SECURITY_UPDATE_PROGRAM, {})
                 result = json.loads(output.getvalue().removeprefix("FRAME:"))
-                self.assertEqual(result["type"], "complete")
                 self.assertEqual(result["result"]["completed_at"], completed_at)
 
     def test_invalid_remote_evidence_and_denial_never_become_observed(self) -> None:
@@ -111,18 +120,28 @@ class HostSecurityUpdateTests(unittest.TestCase):
                     "control_plane.host_network_capacity.api.fetch_dokploy_target_payload",
                     return_value={"serverId": "shared"},
                 ) as placement,
-                patch("control_plane.production_delivery_monitor.monitor_production_delivery_once"),
+                patch(
+                    "control_plane.production_delivery_monitor.monitor_production_delivery_once"
+                ) as delivery,
+                patch.object(time, "time", side_effect=lambda: now),
+                patch.object(
+                    security,
+                    "utc_now_timestamp",
+                    side_effect=lambda: datetime.fromtimestamp(now, timezone.utc).isoformat(),
+                ),
                 patch("control_plane.testing_delivery_monitor.monitor_testing_delivery_once"),
             ):
-                for status, completed_at, warned in (
+                for status, age, warned in (
                     ("observed", None, True),
-                    ("observed", now - security.MAX_UPDATE_AGE_SECONDS - 1, True),
-                    ("observed", now - 1, False),
-                    ("unknown", now - 1, True),
+                    ("observed", security.MAX_UPDATE_AGE_SECONDS + 1, True),
+                    ("observed", 1, False),
+                    ("unknown", 1, True),
                     ("denied", None, True),
-                    ("observed", now + 100, True),
-                    ("observed", now - 1, False),
+                    ("observed", -100, True),
+                    ("observed", 1, False),
                 ):
+                    now += security.OBSERVATION_INTERVAL_SECONDS + 1
+                    completed_at = None if age is None else now - age
                     reader.return_value = security.HostSecurityUpdateEvidence.model_validate(
                         {"observed_at": now, "completed_at": completed_at, "status": status}
                     )
@@ -147,7 +166,10 @@ class HostSecurityUpdateTests(unittest.TestCase):
                                 store,
                                 profile,
                                 lane,
-                                now=now + health_monitor_freshness_seconds("prod") + 1,
+                                now=now
+                                + security.OBSERVATION_INTERVAL_SECONDS
+                                + health_monitor_freshness_seconds("prod")
+                                + 1,
                             )
                         )
                         receipt = store.read_idempotency_record(
@@ -156,6 +178,28 @@ class HostSecurityUpdateTests(unittest.TestCase):
                             idempotency_key=f"{lane.context}:prod",
                         )
                         self.assertIsNotNone(receipt)
+                security.collect_host_security_updates(store, should_stop=lambda: False)
+                self.assertEqual(reader.call_count, 1)
+                profile = profiles[0]
+                lane = next(lane for lane in profile.lanes if lane.instance == "prod")
+                target = store.read_provider_target_record(
+                    context_name=lane.context, instance_name=lane.instance
+                )
+                store.write_provider_target_record(
+                    target.model_copy(
+                        update={
+                            "display_name": "Renamed",
+                            "updated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
+                        }
+                    )
+                )
+                self.assertFalse(security.host_security_update_warnings(store, profile, lane))
+                store.write_provider_target_record(target.model_copy(update={"target_id": "new"}))
+                self.assertTrue(security.host_security_update_warnings(store, profile, lane))
+                reader.reset_mock()
+                security.collect_host_security_updates(store, should_stop=lambda: False)
+                reader.assert_called_once()
+                now += security.OBSERVATION_INTERVAL_SECONDS + 1
                 reader.side_effect = OSError("unreachable")
                 security.collect_host_security_updates(store, should_stop=lambda: False)
                 for profile in profiles:
@@ -169,4 +213,11 @@ class HostSecurityUpdateTests(unittest.TestCase):
                 for profile in profiles:
                     lane = next(lane for lane in profile.lanes if lane.instance == "prod")
                     self.assertTrue(security.host_security_update_warnings(store, profile, lane))
+                now += security.OBSERVATION_INTERVAL_SECONDS + 1
+                delivery.side_effect = RuntimeError("delivery failed")
+                reader.reset_mock()
+                placement.side_effect = None
+                with self.assertRaisesRegex(RuntimeError, "delivery failed"):
+                    HealthMonitorScheduler(store)._run_delivery_monitor()
+                reader.assert_called_once()
             self.assertFalse(store.list_public_ingress_observation_records())

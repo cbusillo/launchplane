@@ -8,10 +8,10 @@ from typing import TYPE_CHECKING, Literal
 import click
 from pydantic import BaseModel, ConfigDict, Field
 
-from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_mutation_reservation_id,
+    parse_launchplane_mutation_timestamp,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from control_plane.storage.postgres import PostgresRecordStore
 
 MAX_UPDATE_AGE_SECONDS = 2 * 24 * 60 * 60
+OBSERVATION_INTERVAL_SECONDS = 60 * 60
 SCOPE = "launchplane:host-security-updates"
 ROUTE = "service:host-security-updates"
 
@@ -76,7 +77,7 @@ def read_host_security_updates(host: str, token: str, server_id: str) -> HostSec
 def collect_host_security_updates(
     store: PostgresRecordStore, *, should_stop: Callable[[], bool]
 ) -> None:
-    from control_plane.host_network_capacity import read_bound_lane_host
+    from control_plane.host_network_capacity import read_bound_lane_host, host_target_sha256
 
     hosts: dict[tuple[str, str], HostSecurityUpdateEvidence] = {}
 
@@ -95,6 +96,18 @@ def collect_host_security_updates(
             if should_stop():
                 return
             try:
+                previous = read_recent_host_update(
+                    store, lane, now=time.time(), max_age=OBSERVATION_INTERVAL_SECONDS
+                )
+                target = store.read_provider_target_record(
+                    context_name=lane.context, instance_name=lane.instance
+                )
+                if (
+                    previous is not None
+                    and previous.status == "observed"
+                    and previous.target_sha256 == host_target_sha256(target)
+                ):
+                    continue
                 bound = read_bound_lane_host(
                     root=Path(__file__).parent.parent,
                     store=store,
@@ -147,39 +160,60 @@ def host_security_update_warnings(
     current = time.time() if now is None else now
     warning = "Production host security-update completion could not be verified."
     try:
-        reader = getattr(store, "read_idempotency_record", None)
-        receipt = (
-            reader(scope=SCOPE, route_path=ROUTE, idempotency_key=f"{lane.context}:{lane.instance}")
-            if callable(reader)
-            else None
+        evidence = read_recent_host_update(
+            store,
+            lane,
+            now=current,
+            max_age=OBSERVATION_INTERVAL_SECONDS + health_monitor_freshness_seconds(lane.instance),
         )
-        if receipt is None or receipt.state != "completed":
-            return (warning,)
-        evidence = HostSecurityUpdateEvidence.model_validate(receipt.response_payload)
-        if (
-            not 0
-            <= current - evidence.observed_at
-            <= health_monitor_freshness_seconds(lane.instance)
-        ):
+        if evidence is None:
             return (warning,)
         if evidence.status == "denied":
             return ("The provider denied the production host security-update read.",)
+        from control_plane.host_network_capacity import host_target_sha256
+
         target = getattr(store, "read_provider_target_record")(
             context_name=lane.context, instance_name=lane.instance
         )
-        if evidence.target_sha256 != nonvalidating_compact_sorted_json_sha256(
-            target.model_dump(mode="json")
-        ) or (evidence.completed_at is not None and evidence.completed_at > evidence.observed_at):
+        if evidence.target_sha256 != host_target_sha256(target) or (
+            evidence.completed_at is not None and evidence.completed_at > evidence.observed_at
+        ):
             return (warning,)
         if evidence.status == "observed":
             if evidence.completed_at is None:
                 warning = "A production host has no recorded successful security-update run."
             elif 0 <= current - evidence.completed_at <= MAX_UPDATE_AGE_SECONDS:
                 return ()
-            elif evidence.completed_at <= current:
+            elif evidence.completed_at < current:
                 warning = (
                     "A production host has not completed security updates in more than two days."
                 )
     except (ValueError, OSError, AttributeError):
         return (warning,)
     return (warning,)
+
+
+def read_recent_host_update(
+    store: object, lane: ProductLaneProfile, *, now: float, max_age: float
+) -> HostSecurityUpdateEvidence | None:
+    reader = getattr(store, "read_idempotency_record", None)
+    if not callable(reader):
+        return None
+    try:
+        receipt = reader(
+            scope=SCOPE, route_path=ROUTE, idempotency_key=f"{lane.context}:{lane.instance}"
+        )
+        if (
+            receipt is not None
+            and receipt.state == "completed"
+            and 0
+            <= now
+            - parse_launchplane_mutation_timestamp(
+                receipt.recorded_at, field_name="recorded_at"
+            ).timestamp()
+            <= max_age
+        ):
+            return HostSecurityUpdateEvidence.model_validate(receipt.response_payload)
+    except (ValueError, OSError):
+        return None
+    return None
