@@ -7162,6 +7162,7 @@ class FilesystemRecordStore:
         required_product_config_target: tuple[str, str, str] | None = None,
         expected_record: OdooInstanceOverrideRecord | None = None,
         require_absent: bool = False,
+        expected_product_profile: LaunchplaneProductProfileRecord | None = None,
     ) -> Path:
         with self._product_authority_bundle_lock():
             if expected_record is not None or require_absent:
@@ -7175,13 +7176,22 @@ class FilesystemRecordStore:
                     current = None
                 if not odoo_instance_override_records_match(current, expected_record):
                     raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
+            profiles = (
+                self._list_product_profile_records_locked()
+                if expected_product_profile is not None
+                or required_context_owner is not None
+                or required_product_config_target is not None
+                else ()
+            )
+            if expected_product_profile is not None and expected_product_profile not in profiles:
+                raise OdooInstanceOverrideConflictError("Product profile changed before commit.")
             if required_context_owner is not None or required_product_config_target is not None:
                 require_bundle_context_owner(
                     ProductAuthorityBundle(
                         required_context_owner=required_context_owner,
                         required_product_config_target=required_product_config_target,
                     ),
-                    self._list_product_profile_records_locked(),
+                    profiles,
                 )
             return self._write_model_locked(
                 "odoo_instance_overrides", f"{record.context}-{record.instance}", record

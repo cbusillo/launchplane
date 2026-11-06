@@ -7744,7 +7744,15 @@ def create_launchplane_fastapi_app(
             driver_result = write_odoo_config_parameter_override_result(
                 record_store=cast(OdooInstanceOverrideStore, record_store),
                 request=override_request,
+                expected_product_profile=product_profile if director_testing_intent else None,
             )
+        except ProductContextOwnershipError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The context must belong to the named product only.",
+            ) from error
         except OdooInstanceOverrideConflictError as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -7864,6 +7872,17 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
+        director_testing_intent = (
+            not preview_bootstrap
+            and not dry_run
+            and director_testing_override_intent_allowed(
+                identity=identity,
+                profile=product_profile,
+                context=override_request.override.context,
+                instance=override_request.override.instance,
+                record_store=record_store,
+            )
+        )
         if not preview_bootstrap and dry_run:
             authorized = resolved_authz_policy_runtime.allows(
                 identity=identity,
@@ -7877,13 +7896,7 @@ def create_launchplane_fastapi_app(
         else:
             authorized = (
                 preview_bootstrap
-                or director_testing_override_intent_allowed(
-                    identity=identity,
-                    profile=product_profile,
-                    context=override_request.override.context,
-                    instance=override_request.override.instance,
-                    record_store=record_store,
-                )
+                or director_testing_intent
                 or native_routes.native_driver_route_authorization_allows(
                     endpoint=write_odoo_website_bootstrap_override,
                     authorization_allows=resolved_authz_policy_runtime.allows,
@@ -7935,7 +7948,15 @@ def create_launchplane_fastapi_app(
             driver_result = write_odoo_website_bootstrap_override_result(
                 record_store=cast(OdooInstanceOverrideStore, record_store),
                 request=override_request,
+                expected_product_profile=product_profile if director_testing_intent else None,
             )
+        except ProductContextOwnershipError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The context must belong to the named product only.",
+            ) from error
         except OdooInstanceOverrideConflictError as error:
             raise _launchplane_http_error(
                 status_code=409,

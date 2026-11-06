@@ -131,7 +131,8 @@ The Director's `local_operator` may use the Odoo config-parameter and stable
 website-bootstrap writers to record testing intent for an active product not
 recorded as Live, on a context exclusively owned by that product. Ownership
 includes historical and preview contexts; unavailable ownership data does not
-admit a standing write. Production and recorded-live lanes retain their existing
+admit a standing write. Storage rechecks the admitted product profile and context
+ownership before committing the intent. Production and recorded-live lanes retain their existing
 scoped authorization. The intent applies on the lane's next deploy, including an
 event-driven deploy, and previews may inherit testing website-bootstrap intent.
 Writing it does not prove runtime safety or completion. Terminal mutation
