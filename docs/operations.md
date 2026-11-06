@@ -120,7 +120,10 @@ on stdout. See [wake observations](merge-train-events.md#wake-observations)
 for pass counts and correlation fields. Existing Python logging handlers are preserved; other libraries' INFO logs stay disabled
 by default. Use timestamped tallies across a full observation window to attribute
 controller traffic; non-304 attempts include failures and are not a substitute
-for the installation's quota response headers or GraphQL point costs.
+for the installation's quota response headers or GraphQL point costs. The same
+trace's feedback tally is separate. Capped `GitHub quota observation` records retain
+body-free provider counters and explicit unknown charges; see
+[request accounting](merge-train-policy.md) for scope, omitted groups and reader limits.
 
 When a controller call keeps returning `merge_train_controller_lease_held`
 because an earlier call is still running, read the service log before calling

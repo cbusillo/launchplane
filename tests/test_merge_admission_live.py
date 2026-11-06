@@ -41,6 +41,12 @@ from control_plane.contracts.merge_train_structural_provenance import (
 from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
 from control_plane.merge_admission import MergeAdmissionDeniedError, MergeAdmissionEvaluation
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
+from control_plane.github_request_timing import (
+    github_request_tally,
+    timed_github_request,
+    record_github_response,
+)
+import json
 from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
@@ -501,6 +507,39 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     else:
                         with self.assertRaises(MergeAdmissionDeniedError):
                             evaluate()
+
+    def test_admission_labels_real_evidence_reads_and_restores_controller_phase(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            evidence = _repository_evidence()
+            evaluator, evaluate = _live_evaluator(
+                store=store,
+                provider=_EvidenceProvider(evidence),
+                evidence=evidence,
+            )
+            reader = evaluator.snapshot_reader
+            assert reader is not None
+            original = reader.read_merge_train_snapshot
+
+            def read(**kwargs: str) -> MergeTrainDryRunSnapshot:
+                with timed_github_request(method="GET", path="/snapshot"):
+                    record_github_response(200)
+                return original(**kwargs)
+
+            with (
+                patch.object(reader, "read_merge_train_snapshot", side_effect=read),
+                self.assertLogs("control_plane.github_request_timing", level="INFO") as logs,
+                github_request_tally("controller trace admission"),
+            ):
+                self.assertEqual(evaluate().readiness.state, "ready")
+                with timed_github_request(method="GET", path="/controller"):
+                    record_github_response(200)
+        observations = [
+            json.loads(line.split("; ", 1)[1])
+            for line in logs.output
+            if "GitHub quota observation:" in line
+        ]
+        self.assertEqual([row["phase"] for row in observations], ["admission", "controller"])
 
     def test_merge_admission_needs_no_retired_owner_or_impact_records(self) -> None:
         with TemporaryDirectory() as directory:
