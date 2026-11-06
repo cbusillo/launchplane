@@ -961,6 +961,7 @@ from control_plane.workflows.ingress_provider import (
     default_ingress_provider,
 )
 from control_plane.workflows.npmplus_ingress import (
+    NpmplusExistingCertificateRequired,
     NpmplusIngressApplyRequest,
     NpmplusIngressApplyResult,
     NpmplusIngressClient,
@@ -23477,6 +23478,10 @@ def create_launchplane_fastapi_app(
                     }
                 )
             if resolved_ingress_request.mode == "apply":
+                if resolved_ingress_request.route.certificate_id == "new":
+                    ingress_provider.apply_route(
+                        request=provider_ingress_request.model_copy(update={"mode": "dry-run"})
+                    )
                 write_ingress_route_pending_audit_record(
                     ingress_store=ingress_store,
                     trace_id=trace_id,
@@ -23491,6 +23496,10 @@ def create_launchplane_fastapi_app(
                 ingress_result = preflight_result
             else:
                 ingress_result = ingress_provider.apply_route(request=provider_ingress_request)
+        except NpmplusExistingCertificateRequired as error:
+            raise _launchplane_http_error(
+                status_code=400, trace_id=trace_id, code=error.code, message=str(error)
+            ) from None
         except (ValueError, click.ClickException) as error:
             if guarded_instance_apply:
                 raise _launchplane_http_error(

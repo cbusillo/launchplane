@@ -287,7 +287,6 @@ class NpmplusOtherHost(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     domain_names: tuple[str, ...] = Field(min_length=1)
-    enabled: bool
 
 
 def _validate_response[Model: BaseModel](model: type[Model], value: object) -> Model:
@@ -505,11 +504,11 @@ class NpmplusClient:
             status = error.code
             error.close()
             raise click.ClickException(
-                f"NPMplus API request failed ({status}); provider output withheld."
+                f"NPMplus API {method} request failed ({status}); provider output withheld."
             ) from None
-        except (URLError, TimeoutError, OSError):
+        except (URLError, TimeoutError, OSError) as error:
             raise click.ClickException(
-                "NPMplus API request failed; provider output withheld."
+                f"NPMplus API {method} request failed ({type(error).__name__}); provider output withheld."
             ) from None
 
         if not raw_payload:

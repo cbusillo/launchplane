@@ -27,6 +27,7 @@ from control_plane.service_human_auth import (
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.npmplus_ingress import (
+    NpmplusExistingCertificateRequired,
     NpmplusIngressApplyResult,
     NpmplusIngressOperation,
 )
@@ -1119,6 +1120,33 @@ class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_existing_host_new_certificate_returns_supported_update_error(self) -> None:
+        client = _FakeNpmplusIngressClient((_npmplus_proxy_host(),))
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_route.apply", product="launchplane", context="reon-prod"
+                ),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/ingress/route-apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "existing-new-certificate",
+                },
+                payload=_npmplus_ingress_route_payload(mode="apply", certificate_id="new"),
+            )
+            self.assertEqual(store.list_ingress_route_audit_records(), ())
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], NpmplusExistingCertificateRequired.code)
+        self.assertFalse(any(call.startswith(("create", "update")) for call in client.calls))
+
     async def test_ingress_route_instance_scope_uses_exact_instance_authority(self) -> None:
         client = _FakeNpmplusIngressClient()
         with TemporaryDirectory() as temporary_directory_name:
@@ -2091,6 +2119,33 @@ class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiIngressCanaryRouteApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_existing_host_canary_rejects_new_certificate_before_storing(self) -> None:
+        payload = _ingress_canary_route_record_apply_payload(mode="apply")
+        cast(dict[str, object], payload["route"])["certificate_id"] = "new"
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_canary_route.apply",
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/records/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "invalid-canary-new",
+                },
+                payload=payload,
+            )
+            self.assertEqual(store.list_ingress_canary_route_records(), ())
+        self.assertEqual(response.status_code, 400)
+
     async def test_ingress_canary_route_record_apply_writes_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

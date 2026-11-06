@@ -17,7 +17,7 @@ from tests.test_npmplus import _Opener, _credentials
 class Failure:
     evidence: dict[str, Any]
     text: str
-    error: ValueError
+    original: ValidationError
 
 
 class ProviderValidationEvidenceTests(unittest.TestCase):
@@ -25,13 +25,15 @@ class ProviderValidationEvidenceTests(unittest.TestCase):
         opener = _Opener()
         opener.host_details.update(changes)
         client = npmplus.NpmplusClient(credentials=_credentials(), opener=opener)
+        with self.assertRaises(ValidationError) as original:
+            npmplus.NpmplusProxyHost.model_validate(opener.host_details)
         try:
             client.get_proxy_host(78, public_only=True)
         except ValueError as error:
             with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
                 http_error_evidence.log_handled_error_cause(error, "provider-validation-test")
             text = logs.records[-1].getMessage()
-            return Failure(json.loads(text), text, error)
+            return Failure(json.loads(text), text, original.exception)
         self.fail("Invalid provider data was accepted")
 
     def test_selected_read_reports_only_model_fields_and_error_kinds(self) -> None:
@@ -39,15 +41,11 @@ class ProviderValidationEvidenceTests(unittest.TestCase):
         field = "certificate_id"
         failure = self.capture_failure({field: private, "meta": {private: private}})
         validation = failure.evidence["validation"]
-        original = (
-            failure.error if isinstance(failure.error, ValidationError) else failure.error.__cause__
-        )
-        assert isinstance(original, ValidationError)
         self.assertTrue(validation)
         self.assertTrue(all(row["loc"][0] == field for row in validation))
         self.assertEqual(
             [row["type"] for row in validation],
-            [row["type"] for row in original.errors()],
+            [row["type"] for row in failure.original.errors()],
         )
         self.assertNotIn(private, failure.text)
 
@@ -55,11 +53,7 @@ class ProviderValidationEvidenceTests(unittest.TestCase):
         failure = self.capture_failure(
             {"npmplus_access_list_type": "custom", "npmplus_access_list_ids": [-1]}
         )
-        original = (
-            failure.error if isinstance(failure.error, ValidationError) else failure.error.__cause__
-        )
-        assert isinstance(original, ValidationError)
-        root = original.errors(include_input=False, include_url=False)[0]["ctx"]["error"]
+        root = failure.original.errors(include_input=False, include_url=False)[0]["ctx"]["error"]
         frame, line = list(walk_tb(root.__traceback__))[-1]
         self.assertEqual(Path(frame.f_code.co_filename), Path(npmplus.__file__))
         validation = failure.evidence["validation"]
