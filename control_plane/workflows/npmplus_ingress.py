@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Literal, Protocol
 
 import click
@@ -136,6 +137,7 @@ class NpmplusIngressRouteDesiredState(BaseModel):
     forward_scheme: NpmplusForwardScheme = "https"
     forward_host: str = ""
     forward_port: int | None = Field(default=None, ge=1, le=65535)
+    dns_challenge: Literal["", "cloudflare"] = Field(default="", exclude_if=lambda value: not value)
     certificate_id: int | Literal["new"] = 0
     ssl_forced: bool = True
     hsts_enabled: bool = False
@@ -182,9 +184,25 @@ class NpmplusIngressRouteDesiredState(BaseModel):
         self.npmplus_auth_request = mapped_auth_request
         return self
 
+    @model_validator(mode="after")
+    def _validate_dns_certificate(self) -> "NpmplusIngressRouteDesiredState":
+        if self.dns_challenge and (
+            self.certificate_id != "new"
+            or len(self.domain_names) != 1
+            or not self.domain_names[0].startswith("*.")
+            or not self.enabled
+            or not self.edge_endpoint_key
+        ):
+            raise ValueError(
+                "DNS issuance requires a new enabled wildcard route on a recorded edge."
+            )
+        return self
+
     def to_proxy_host_payload(self) -> NpmplusProxyHostPayload:
         return NpmplusProxyHostPayload.model_validate(
-            self.model_dump(mode="json", exclude={"edge_endpoint_key", "identity_access"})
+            self.model_dump(
+                mode="json", exclude={"edge_endpoint_key", "identity_access", "dns_challenge"}
+            )
         )
 
 
@@ -199,6 +217,7 @@ class NpmplusIngressApplyRequest(BaseModel):
     allow_create: bool = True
     allow_update: bool = True
     allow_enable_disable: bool = True
+    dns_secret_version_id: str = Field(default="", exclude_if=lambda value: not value)
     reason: str = ""
 
     @model_validator(mode="after")
@@ -237,6 +256,7 @@ def apply_npmplus_ingress_route(
     *,
     client: NpmplusIngressClient,
     request: NpmplusIngressApplyRequest,
+    create_host: Callable[[NpmplusProxyHostPayload], NpmplusProxyHost] | None = None,
 ) -> NpmplusIngressApplyResult:
     desired_payload = request.route.to_proxy_host_payload()
     claim = find_npmplus_proxy_host_by_domains(
@@ -274,7 +294,11 @@ def apply_npmplus_ingress_route(
     final_host = existing_host
     for operation in operations:
         if operation.action == "create":
-            final_host = client.create_proxy_host(desired_payload)
+            if request.route.dns_challenge and create_host is None:
+                raise click.ClickException(
+                    "Managed wildcard creation requires the service operation."
+                )
+            final_host = (create_host or client.create_proxy_host)(desired_payload)
         elif operation.action == "update":
             if final_host is None:
                 raise click.ClickException("Cannot update missing NPMplus proxy host.")

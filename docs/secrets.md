@@ -87,6 +87,29 @@ the value or the displayed receipt time. Superseded requests remain encrypted
 history and are not runtime-bound; automatic removal of retained secret history is
 not part of this input flow.
 
+## Preview wildcard DNS credential
+
+The Director enters the preview-zone-scoped Cloudflare DNS-edit token in the
+existing signed-in write-only form at
+`/ui/owner-secrets?product=launchplane&environment=preview_dns_cloudflare`.
+The purpose/integration is `preview_dns_cloudflare`, binding and secret name
+`api_token`, context `launchplane`, with no instance. The same encrypted version,
+request revision, administrator check and atomic write apply. Agents handle only
+readiness, secret IDs and version IDs. They never obtain the value from another
+store or ask for it in a message. Entry does not prove the provider permissions;
+confirm entry with the Director before executing the first product setup.
+
+Only the service's product wildcard create resolves this purpose. It is separate
+from NPMplus API authentication and application runtime bindings. It is never
+synced into an app or copied to host configuration. NPMplus receives the token
+in its existing DNS-01 quick-certificate create request and owns certificate
+renewal, including its existing retained certificate credential and renewal
+input. Rotating the Launchplane version alone does not update that provider
+credential; qualify provider renewal before revoking a token it still uses.
+Launchplane retains no provider credential response or diagnostic text.
+The [ingress driver contract](driver-development.md#preview-wildcard-creation)
+owns planning, pinned-version application and unknown-effect reconciliation.
+
 ## Odoo diagnostic identities
 
 Non-production Odoo mail-status, company-calendar and import-status reads use

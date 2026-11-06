@@ -448,6 +448,65 @@ Odoo routes inherit the extra NPMplus config used for the current password-gated
 edge path. Passing `advanced_config` explicitly replaces the provider value;
 passing an explicit empty string clears it.
 
+### Preview wildcard creation
+
+Use the same `POST /v1/drivers/ingress/route-apply` operation with
+`route.dns_challenge="cloudflare"` and `route.certificate_id="new"` for one
+product preview wildcard. The product must exclusively own the preview context,
+have previews enabled with `domain_certificate_type="none"`, and have a stored
+HTTPS `LAUNCHPLANE_PREVIEW_BASE_URL`. The requested wildcard must exactly name
+that namespace. A recorded active `edge_endpoint_key` supplies its upstream.
+Existing host and redirect/dead-host claims, including overlaps and uncertain
+regex claims, block creation. Existing-host updates still require an integer
+certificate ID and never resolve the DNS purpose.
+
+Dry-run uses metadata only and returns `dns_secret_ready`, `dns_secret_id` and
+`dns_secret_version_id` alongside the ordinary route plan/audit. Missing or
+ambiguous credentials cannot authorize a create. After the Director confirms
+entry through the [existing form](secrets.md#preview-wildcard-dns-credential),
+review the plan and pass its `dns_secret_version_id` in the ingress request for
+apply, with the original `Idempotency-Key`. Authorization remains
+`ingress_route.plan` or `ingress_route.apply`; instance-scoped audit authority
+cannot create a wildcard. The configured NPMplus service client supplies API
+authentication through its existing seam; this does not require source-record
+adoption or introduce another API credential store.
+
+Apply reuses the durable provider reservation and effect checkpoint. NPMplus's
+[existing quick-certificate create](https://github.com/ZoeyVid/NPMplus/blob/develop/backend/internal/proxy-host.js)
+issues the DNS-01 certificate before inserting the proxy host. That public
+source is not proof of the installed image revision. Deployed
+`GET /api/schema`, read through the pinned existing automation principal on
+November 6, 2026, confirms the create fields `npmplus_dns_challenge`,
+`npmplus_dns_provider` and write-only `npmplus_dns_provider_credentials`.
+The Cloudflare credential is a certbot `dns_cloudflare_api_token` assignment;
+no additional agreement or email input is required by that create schema.
+A service-owned operation marker binds readback to that exact create. Readback
+requires the exact host, upstream and options, loaded nginx and matching current
+certificate metadata. A response lost after dispatch is unknown, even if an
+HTTP error or empty inventory appears. Keep the original key: reconciliation
+can adopt the exact marked route. A complete native NPMplus error envelope
+records only its numeric HTTP status in the effect checkpoint. An original-key
+retry may reattempt only after fresh complete host, redirect/dead-host and
+certificate inventories prove absence. If the credential version changed, first
+reconcile the original request/key: its verified absent attempt refuses the stale
+version before decryption and releases the target. Then review a fresh plan and
+apply with that version and a new key. Proxy errors, invalid error bodies,
+transport loss and malformed success replies stay unknown; elapsed time never
+qualifies absence. A new key cannot bypass the outstanding target reservation.
+A retained certificate or mismatching host also prevents issuance. Qualify that
+exact resource through the existing integer-certificate route-apply path, under
+its original ownership and operational checks, rather than issuing again or
+deleting it. Preserve the original operation marker when completing or repairing that route so
+the original key can reconcile its exact readback.
+An interruption before the effect checkpoint is retryable under its original key.
+Post-dispatch absence is unknown while an issuance request could still be running.
+Unrelated hosts, certificates, source credentials and application records are
+untouched. Before runtime apply, run the existing operational snapshot/readiness,
+active-use, instance/principal pins, nginx, rollback and unrelated-live-route
+checks. These are operational prerequisites outside this route. The route
+checks nginx-online and exact provider readback; strict public TLS verification
+and a serving application test remain separate.
+
 Future edge-driver work should investigate Cloudflare Tunnel in #1215 as a
 Launchplane provider before deepening edge-provider assumptions beyond NPMplus.
 The intended spike is a shadow hostname routed through `cloudflared` running in

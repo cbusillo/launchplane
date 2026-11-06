@@ -432,15 +432,15 @@ def resolve_context_secret_value(
         store.close()
 
 
-def resolve_context_secret_value_from_store(
+def resolve_context_secret_record_from_store(
     *,
     record_store: SecretReadStore,
     integration: str,
     context_name: str,
     binding_key: str,
-) -> str:
+) -> SecretRecord | None:
     if not context_name.strip():
-        return ""
+        return None
     bindings = tuple(
         binding
         for binding in record_store.list_secret_bindings(
@@ -453,7 +453,7 @@ def resolve_context_secret_value_from_store(
         and binding.status == SECRET_STATUS_CONFIGURED
     )
     if len(bindings) != 1:
-        return ""
+        return None
     record = record_store.read_secret_record(bindings[0].secret_id)
     if (
         record.secret_id != bindings[0].secret_id
@@ -464,6 +464,25 @@ def resolve_context_secret_value_from_store(
         or record.policy != "write_only"
         or record.status != SECRET_STATUS_CONFIGURED
     ):
+        return None
+    return record
+
+
+def resolve_context_secret_value_from_store(
+    *,
+    record_store: SecretReadStore,
+    integration: str,
+    context_name: str,
+    binding_key: str,
+    expected_version_id: str = "",
+) -> str:
+    record = resolve_context_secret_record_from_store(
+        record_store=record_store,
+        integration=integration,
+        context_name=context_name,
+        binding_key=binding_key,
+    )
+    if record is None or (expected_version_id and record.current_version_id != expected_version_id):
         return ""
     version = record_store.read_secret_version(record.current_version_id)
     if version.version_id != record.current_version_id or version.secret_id != record.secret_id:
