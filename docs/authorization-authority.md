@@ -127,6 +127,18 @@ Expected-configuration declaration authority and its authenticated Director-agen
 declaration exception are defined in the
 [product profile contract](service-boundary.md#product-profile-endpoints).
 
+The Director's `local_operator` may use the Odoo config-parameter and stable
+website-bootstrap writers to record testing intent for an active product not
+recorded as Live, on a context exclusively owned by that product. Ownership
+includes historical and preview contexts; unavailable ownership data does not
+admit a standing write. Storage rechecks the admitted product profile and context
+ownership before committing the intent. Production and recorded-live lanes retain their existing
+scoped authorization. The intent applies on the lane's next deploy, including an
+event-driven deploy, and previews may inherit testing website-bootstrap intent.
+Writing it does not prove runtime safety or completion. Terminal mutation
+restrictions, other callers' grants, validation, idempotency and compare-and-write
+behavior remain in place.
+
 The existing testing-retry route also admits the authenticated Director agent
 through the existing `local_operator` bearer transport under the standing
 permission. Terminal-agent credentials are not admitted on this retry route.
