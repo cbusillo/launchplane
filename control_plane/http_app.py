@@ -16892,8 +16892,8 @@ def create_launchplane_fastapi_app(
             authority_bundle = authority_bundle.model_copy(
                 update={"expected_product_profiles": (expected_product_profile,)}
             )
-        authority_bundle = (
-            authority_bundle.model_copy(
+        if not service_dns_input:
+            authority_bundle = authority_bundle.model_copy(
                 update={
                     "required_product_config_target": (
                         product_config_request.product,
@@ -16902,15 +16902,6 @@ def create_launchplane_fastapi_app(
                     )
                 }
             )
-            if not service_dns_input
-            else authority_bundle.model_copy(
-                update={
-                    "absent_secret_ids": tuple(
-                        record.secret_id for record in authority_bundle.secret_records
-                    )
-                }
-            )
-        )
         driver_result: dict[str, object] = {
             **planned_driver_result,
             "reason": product_config_request.reason,
@@ -17122,12 +17113,17 @@ def create_launchplane_fastapi_app(
                 message="The secret copy source changed. Read metadata and review a fresh dry-run.",
             ) from error
         except SecretRecordConflictError as error:
+            dns_input = product_config_request.is_preview_dns_service_input()
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
-                code="provider_secret_already_recorded",
+                code="service_secret_already_configured"
+                if dns_input
+                else "provider_secret_already_recorded",
                 message=(
-                    "A secret named for provider adoption was recorded before commit. "
+                    "The DNS credential was configured before commit. Use the signed-in form to rotate it."
+                    if dns_input
+                    else "A secret named for provider adoption was recorded before commit. "
                     "Review a fresh dry-run."
                 ),
             ) from error

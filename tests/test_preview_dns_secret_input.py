@@ -13,7 +13,6 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION
 from control_plane.service_auth import (
     BearerIdentityConfig,
-    LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
 )
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
@@ -38,7 +37,7 @@ class PreviewDnsSecretInputTests(unittest.IsolatedAsyncioTestCase):
             subject="director",
             token_label="test",
         )
-        self.store.seed_authz_policy_if_absent(
+        self.policy_record = self.store.seed_authz_policy_if_absent(
             LaunchplaneAuthzPolicyRecord(
                 record_id="policy",
                 source="test",
@@ -130,20 +129,98 @@ class PreviewDnsSecretInputTests(unittest.IsolatedAsyncioTestCase):
     async def test_policy_is_rechecked_inside_the_atomic_write(self) -> None:
         await self.request(self.payload)
         self.payload["mode"] = "apply"
+        writer = self.store.write_preview_dns_secret_bundle
+
+        def revoke_before_commit(
+            bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity
+        ) -> None:
+            result = self.store.compare_and_write_authz_policy_record(
+                expected_record=self.policy_record,
+                replacement_record=LaunchplaneAuthzPolicyRecord(
+                    record_id="revoked",
+                    revision=self.policy_record.revision + 1,
+                    source="test",
+                    updated_at=self.policy_record.updated_at,
+                    policy=self.policy.model_copy(update={"local_operators": ()}),
+                ),
+            )
+            self.assertEqual(result.status, "written")
+            writer(bundle, identity=identity)
+
         with patch.object(
-            self.store,
-            "_locked_active_authz_policy_record",
-            return_value=LaunchplaneAuthzPolicyRecord(
-                record_id="revoked",
-                source="test",
-                updated_at="2026-11-06T00:00:00Z",
-                policy=LaunchplaneAuthzPolicy(),
-            ),
+            self.store, "write_preview_dns_secret_bundle", side_effect=revoke_before_commit
         ):
             response = await self.request(self.payload, "revoked")
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(self.store.list_secret_records(), ())
         self.assertNotIn("fictional-private-dns-token", response.text)
+
+    def test_store_refuses_unavailable_policy_without_writing(self) -> None:
+        from control_plane.product_config import plan_product_config_authority_bundle
+        from control_plane.service_auth import LocalOperatorIdentity
+        from control_plane.storage.product_authority_bundle import ServiceIdentityAuthorityError
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=sqlite_database_url(Path(directory) / "empty.sqlite")
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            _, bundle = plan_product_config_authority_bundle(
+                record_store=store,
+                payload=self.payload,
+                mode="apply",
+                actor="test",
+                source_label="test",
+            )
+            with self.assertRaises(ServiceIdentityAuthorityError):
+                store.write_preview_dns_secret_bundle(
+                    bundle,
+                    identity=LocalOperatorIdentity(
+                        subject="director",
+                        token_label="test",
+                        director_agent=True,
+                    ),
+                )
+            self.assertEqual(store.list_secret_records(), ())
+
+    def test_store_refuses_a_mixed_bundle_even_after_http_planning(self) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+        from control_plane.product_config import plan_product_config_authority_bundle
+        from control_plane.service_auth import LocalOperatorIdentity
+        from control_plane.storage.product_authority_bundle import ServiceIdentityAuthorityError
+
+        _, bundle = plan_product_config_authority_bundle(
+            record_store=self.store,
+            payload=self.payload,
+            mode="apply",
+            actor="test",
+            source_label="test",
+        )
+        bundle = bundle.model_copy(
+            update={
+                "runtime_environments": (
+                    RuntimeEnvironmentRecord(
+                        scope="context",
+                        context="launchplane",
+                        env={"UNRELATED_SETTING": "value"},
+                        updated_at=self.policy_record.updated_at,
+                        source_label="test",
+                    ),
+                )
+            }
+        )
+        with self.assertRaises(ServiceIdentityAuthorityError):
+            self.store.write_preview_dns_secret_bundle(
+                bundle,
+                identity=LocalOperatorIdentity(
+                    subject="director",
+                    token_label="test",
+                    director_agent=True,
+                ),
+            )
+        self.assertEqual(self.store.list_secret_records(), ())
+        self.assertEqual(self.store.list_runtime_environment_records(), ())
 
     async def test_racing_entry_cannot_replace_a_committed_secret(self) -> None:
         from control_plane.product_config import plan_product_config_authority_bundle
@@ -170,6 +247,7 @@ class PreviewDnsSecretInputTests(unittest.IsolatedAsyncioTestCase):
         ):
             response = await self.request(self.payload, "racing-entry")
         self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "service_secret_already_configured")
         records = self.store.list_secret_records()
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].updated_by, "test")

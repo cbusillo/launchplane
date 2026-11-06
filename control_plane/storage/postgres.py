@@ -6598,7 +6598,7 @@ class PostgresRecordStore(HumanSessionStore):
             or len(bundle.secret_versions) != 1
             or len(bundle.secret_bindings) != 1
             or len(bundle.secret_audit_events) != 1
-            or set(bundle.absent_secret_ids) != secret_ids
+            or bundle.absent_secret_ids
             or bundle.expected_secret_records
             or any(
                 (record.scope, record.context, record.instance, record.integration, record.name)
@@ -6622,7 +6622,12 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_active_authz_policy(session)
-            policy = self._locked_active_authz_policy_record(session).policy
+            try:
+                policy = self._locked_active_authz_policy_record(session).policy
+            except AuthzPolicyConflictError as error:
+                raise ServiceIdentityAuthorityError(
+                    "Current Director-agent authority is unavailable."
+                ) from error
             if (
                 not isinstance(identity, LocalOperatorIdentity)
                 or not director_agent_identity(identity)
@@ -6639,7 +6644,7 @@ class PostgresRecordStore(HumanSessionStore):
                     "The DNS credential transfer requires current Director-agent authority."
                 )
             self._write_product_authority_bundle(
-                bundle,
+                bundle.model_copy(update={"absent_secret_ids": tuple(secret_ids)}),
                 write_session=session,
                 write_transaction_started=True,
                 caller_identity=identity,
