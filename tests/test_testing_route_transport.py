@@ -8,6 +8,7 @@ import json
 import hashlib
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 from traceback import walk_tb
@@ -237,17 +238,18 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.device_offset.write_text("0")
         self.script(
             "cat",
-            "import sys;from pathlib import Path\n"
-            "if len(sys.argv)==1: sys.stdout.buffer.write(sys.stdin.buffer.read());sys.exit(0)\n"
-            "p=sys.argv[1]\n"
-            "if p=='/proc/sys/kernel/random/boot_id': print(Path("
-            + repr(str(self.process_boot))
-            + ").read_text())\n"
-            "elif p=='/proc/1/stat': print('1 (proxy) S '+'0 '*18+Path("
-            + repr(str(self.process_start))
-            + ").read_text()+' 0')\n"
-            "elif p=='/proc/uptime': print('1000000.00 0.00')\n"
-            "else: sys.stdout.buffer.write(Path(p).read_bytes())",
+            'case "${1-}" in\n'
+            "/proc/sys/kernel/random/boot_id)\n"
+            f"/bin/cat {shlex.quote(str(self.process_boot))} || exit $?\n"
+            "printf '\\n';;\n"
+            "/proc/1/stat)\n"
+            f"printf %s {shlex.quote('1 (proxy) S ' + '0 ' * 18)}\n"
+            f"/bin/cat {shlex.quote(str(self.process_start))} || exit $?\n"
+            "printf ' 0\\n';;\n"
+            "/proc/uptime) printf '1000000.00 0.00\\n';;\n"
+            '*) exec /bin/cat "$@";;\n'
+            "esac",
+            interpreter="/bin/sh",
         )
         self.script(
             "sha256sum",
@@ -321,9 +323,9 @@ class TestingRouteTransportTests(unittest.TestCase):
             self.effect_count = self.guards = 0
             self.remote_modes.clear()
 
-    def script(self, name: str, body: str) -> None:
+    def script(self, name: str, body: str, *, interpreter: str = sys.executable) -> None:
         path = self.bin / name
-        path.write_text("#!" + sys.executable + "\n" + body + "\n")
+        path.write_text("#!" + interpreter + "\n" + body + "\n")
         path.chmod(0o700)
 
     def guard(self, dispatch: Any) -> None:
