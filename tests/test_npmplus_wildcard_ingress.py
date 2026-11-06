@@ -224,6 +224,9 @@ class WildcardIngressTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(plan.json()["records"]["dns_secret_ready"])
             refused = await fixture.post(authorization="Bearer director-token")
             self.assertEqual(refused.status_code, 403, refused.text)
+            with patch.dict(fixture.payload, {"product": "unknown-product"}):
+                missing = await fixture.post(mode="dry-run", authorization="Bearer director-token")
+                self.assertEqual(missing.status_code, 400, missing.text)
             ingress = cast(dict[str, object], fixture.payload["ingress"])
             route = cast(dict[str, object], ingress["route"])
             route["domain_names"] = ["*.foreign.example.test"]

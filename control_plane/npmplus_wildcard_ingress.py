@@ -71,7 +71,10 @@ class NpmplusWildcardIngressOperation:
         )
 
     def plan(self) -> NpmplusIngressApplyResult:
-        profile = self.store.read_product_profile_record(self.product)
+        try:
+            profile = self.store.read_product_profile_record(self.product)
+        except (FileNotFoundError, LookupError) as error:
+            raise ValueError("The product preview configuration is unavailable.") from error
         if (
             not profile.is_active
             or not profile.preview.enabled
@@ -109,7 +112,10 @@ class NpmplusWildcardIngressOperation:
                 other_base = entry.env.get("LAUNCHPLANE_PREVIEW_BASE_URL")
                 if isinstance(other_base, str) and urlsplit(other_base).hostname == namespace:
                     raise ValueError("Another product owns this preview namespace.")
-        edge = self.store.read_edge_endpoint_record(self.request.route.edge_endpoint_key)
+        try:
+            edge = self.store.read_edge_endpoint_record(self.request.route.edge_endpoint_key)
+        except (FileNotFoundError, LookupError) as error:
+            raise ValueError("The reviewed edge endpoint is unavailable.") from error
         if edge.status != "active" or (
             self.request.route.forward_host,
             self.request.route.forward_port,
