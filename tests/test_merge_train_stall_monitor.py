@@ -209,6 +209,184 @@ class StallMonitorTests(TestCase):
                 store.read_merge_train_stall_record(snapshot.repository).issue_state, "closed"
             )
 
+    def test_preview_held_ready_or_dependency_change_does_not_accrue_ready_stall_clock(
+        self,
+    ) -> None:
+        from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
+        from control_plane.merge_train import CURRENT_HEAD_PREVIEW_FAILED
+        from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
+        from tests.http_app_test_support import (
+            _preview_generation_read_record,
+            _preview_read_record,
+        )
+        from tests.merge_train_policy_fixtures import dependency_repository_policy
+        from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
+        from tests.support.profiles import product_profile_payload
+        from tests.test_merge_train_dependency_updates import INDIRECT_PATCH
+        from tests.test_merge_train_github import (
+            _ReconcileRequestStore,
+            _combined_status,
+            _conversation_rule,
+            _github_branch,
+            _github_commit,
+            _github_pull_request,
+            _label_events,
+            _protected_branch_with_checks,
+            _required_check_run,
+        )
+
+        repository = "cbusillo/sellyouroutboard"
+        target = dependency_repository_policy(repository=repository).model_copy(
+            update={"scheduler": MergeTrainSchedulerPolicy(enabled=True, mutate=True)}
+        )
+        policy = _policy_record((repository, target.scheduler))
+        policy.policy.policies = (target,)
+
+        def build_transport(*, bot_update: bool) -> RecordingMergeTrainGitHubTransport:
+            pull_request = _github_pull_request(16, author_association="CONTRIBUTOR")
+            dependency_reads: tuple[object, ...] = ()
+            if bot_update:
+                pull_request["user"] = {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"}
+                dependency_reads = (
+                    [_github_commit(49699333, INDIRECT_PATCH, sha="head-16")],
+                    [],
+                    {"files": [{"filename": "package.json", "status": "modified"}]},
+                )
+            return RecordingMergeTrainGitHubTransport(
+                responses=(
+                    _protected_branch_with_checks("ci-status", app_id=None),
+                    [],
+                    _github_branch(),
+                    [pull_request],
+                    pull_request,
+                    MergeTrainGitHubError("permission not found", status_code=404)
+                    if bot_update
+                    else {"permission": "admin"},
+                    _label_events(),
+                    *dependency_reads,
+                    _protected_branch_with_checks("ci-status", app_id=None),
+                    [],
+                    _combined_status(),
+                    {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
+                    _conversation_rule(),
+                    [],
+                )
+            )
+
+        def generation(head_sha: str, sequence: int = 1) -> PreviewGenerationRecord:
+            record = _preview_generation_read_record(anchor_pr_number=16, sequence=sequence)
+            summary = record.anchor_summary.model_copy(update={"head_sha": head_sha})
+            return record.model_copy(update={"anchor_summary": summary})
+
+        scan_refused = ProductReconcileRequestRecord(
+            target_key="example-site:preview:16",
+            product="example-site",
+            target_kind="preview",
+            pull_request_number=16,
+            state="done",
+            requested_at="2026-11-06T00:00:00Z",
+            updated_at="2026-11-06T00:00:00Z",
+            request_count=1,
+            last_plan={
+                "action": "wait",
+                "held": True,
+                "reason": "artifact_scan_refused",
+                "head_sha": "head-16",
+            },
+        )
+        for bot_update in (True, False):
+            with (
+                self.subTest(bot_update=bot_update),
+                TemporaryDirectory() as directory,
+                patch("control_plane.merge_train_codeowners._read_patterns", return_value=()),
+            ):
+                root = Path(directory)
+                store = _ReconcileRequestStore(state_dir=root, reconcile_request=scan_refused)
+                profile = product_profile_payload("example-site")
+                profile["repository"] = repository
+                profile["preview"] = {"enabled": True, "context": "example-site"}
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(profile)
+                )
+                store.write_preview_record(
+                    _preview_read_record(anchor_pr_number=16).model_copy(
+                        update={"anchor_repo": "sellyouroutboard", "state": "active"}
+                    )
+                )
+                store.write_preview_generation_record(generation("older-head"))
+                controller = GitHubMergeTrainClient(
+                    transport=RecordingMergeTrainGitHubTransport(
+                        responses=tuple(build_transport(bot_update=bot_update).responses[2:])
+                    ),
+                    source_screening=True,
+                    branch_refresh_store=store,
+                )
+                controller.begin_snapshot_pass(policy=target, read_only=False)
+                snapshot = controller.read_merge_train_snapshot(
+                    repository=repository, base_branch="main"
+                )
+                entry = build_merge_train_dry_run_result(
+                    policy=policy.policy, snapshot=snapshot, batch_landing=True
+                ).queue[0]
+                self.assertFalse(entry.eligible)
+                self.assertIn(CURRENT_HEAD_PREVIEW_FAILED, entry.ineligible_reasons)
+
+                reporter = Mock()
+                with (
+                    patch(
+                        "control_plane.merge_train_stall_monitor.resolve_merge_train_policy_record",
+                        return_value=policy,
+                    ),
+                    patch(
+                        "control_plane.merge_train_stall_monitor.resolve_merge_train_github_token",
+                        return_value="test-token",
+                    ),
+                    patch(
+                        "control_plane.merge_train_stall_monitor.UrllibMergeTrainGitHubTransport",
+                        side_effect=lambda **_: build_transport(bot_update=bot_update),
+                    ),
+                    patch(
+                        "control_plane.merge_train_stall_monitor.resolve_stall_workflow",
+                        return_value=MergeTrainStallWorkflow(
+                            repository="example/control", ref="main"
+                        ),
+                    ),
+                ):
+                    for seconds in (0, STALL_SECONDS):
+                        run_stall_monitor_pass(
+                            store=store,
+                            root=root,
+                            now=lambda: _time(seconds),
+                            notifier_factory=lambda **_: reporter,
+                        )
+                    held = store.read_merge_train_stall_record(repository)
+                    self.assertEqual(held.issue_state, "closed")
+                    self.assertEqual(held.observations["main"].ready_since, {})
+                    self.assertEqual(held.observations["main"].reasons, ())
+                    reporter.notify.assert_not_called()
+
+                    store.write_preview_generation_record(generation("head-16", 2))
+                    for seconds in (STALL_SECONDS * 2, STALL_SECONDS * 3):
+                        run_stall_monitor_pass(
+                            store=store,
+                            root=root,
+                            now=lambda: _time(seconds),
+                            notifier_factory=lambda **_: reporter,
+                        )
+                    stalled = store.read_merge_train_stall_record(repository)
+                    self.assertEqual(stalled.issue_state, "open")
+                    self.assertEqual(
+                        stalled.observations["main"].ready_since,
+                        {"16:head-16": _time(STALL_SECONDS * 2)},
+                    )
+                    self.assertEqual(
+                        stalled.observations["main"].reasons,
+                        ("controller_unchanged", "ready_change_not_moving"),
+                    )
+                    reporter.notify.assert_called_once()
+
     def test_missing_target_setting_alerts_at_once_and_resolves_when_added(self) -> None:
         snapshot = _FakeExpandedMergeTrainSnapshotReader(
             transport=object()
