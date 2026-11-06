@@ -562,6 +562,15 @@ class HostCapacityTests(unittest.TestCase):
                         spec, containers, budget, staged_bytes=40, assembly_bytes=40
                     )
                 )
+                self.assertTrue(
+                    namespace["storage_capacity"](
+                        spec,
+                        containers,
+                        budget,
+                        runner_staging_bytes=10,
+                        filestore_existing_bytes=30,
+                    )
+                )
                 budget["staging_bytes"] = 10
                 self.assertTrue(namespace["storage_capacity"](spec, containers, budget))
                 containers["script-runner"][1]["GraphDriver"] = {}

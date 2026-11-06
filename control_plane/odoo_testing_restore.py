@@ -1133,12 +1133,19 @@ def restore_main():
             raise RuntimeError('Native copy lacks its original capture receipt')
         files = json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
         staged_bytes = sum(item['size'] for item in files['chunks'])
-        assembly_bytes = sum(capture[part]['size'] for part in ('database', 'filestore'))
+        assembly_bytes = (capture['database']['size'] if capture.get('source_observation',{}).get('kind')=='migrated'
+            else sum(capture[part]['size'] for part in ('database','filestore')))
     data_backing = Path(json.loads(docker("volume", "inspect", namespace + "-data"))[0]["Mountpoint"]).resolve(strict=True)
     restore_staging = restore_staging_path(data_backing)
     discard_interrupted_restore_staging(restore_staging)
     clones = {}
-    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes, clone_decisions=clones):
+    migrated_staging = {}
+    if not resume and gen.get('migrated_source') is not None:
+        migrated_staging = {
+            'runner_staging_bytes': gen['migrated_source']['database']['size'],
+            'filestore_existing_bytes': populated_filestore_bytes(data_backing / 'filestore' / database),
+        }
+    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes, clone_decisions=clones, **migrated_staging):
         raise RuntimeError('Testing storage capacity is insufficient')
     docker("exec", "-u", "root", runner, "rm", "-f", spec["web_gate_path"])
     docker("stop", web)
@@ -1227,6 +1234,8 @@ def restore_main():
         readback = docker("exec", "-i", runner, "python3", "-", database, spec["readback_spec"], stdin=spec["readback_program"].encode()).decode()
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
+        if spec.get('native_capture') is not None and gen.get('migrated_source') is not None:
+            docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':spec['native_capture'],'mode':'cleanup'}).encode()).decode(),stdin=spec['native_files_program'].encode())
         if gen.get('clean_snapshot_enabled'):
             snapshot = capture_clean_snapshot(spec, containers, clones.get('snapshot'))
             print('clean_testing_snapshot_completed=true')

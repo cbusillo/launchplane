@@ -75,9 +75,26 @@ def storage_maintenance(spec, containers):
     print(sys.argv[2] + json.dumps({'type':'complete', 'disposals':results, 'capacity':capacity}), flush=True)
 
 
+def populated_filestore_bytes(root):
+    import stat
+    root=Path(root)
+    if not root.exists():
+        return 0
+    if root.resolve()!=root.absolute() or not root.is_dir():
+        raise RuntimeError('Migrated partial filestore is aliased')
+    size=0
+    for path in root.rglob('*'):
+        metadata=path.lstat()
+        if stat.S_ISREG(metadata.st_mode):
+            size+=metadata.st_size
+        elif not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError('Migrated partial filestore contains an unsupported entry')
+    return size
+
+
 def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0, *,
         runner_staging_bytes=None, host_staging_bytes=None, database_staging_bytes=0,
-        filestore_clone_source=None, clone_decisions=None):
+        filestore_clone_source=None, clone_decisions=None, filestore_existing_bytes=0):
     gen = spec['generation']
     decisions = {} if clone_decisions is None else clone_decisions
     filestore_charged_as_staging = host_staging_bytes is None and gen.get('source_mode', 'ssh') != 'container-export'
@@ -114,7 +131,7 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
             size = 0
         elif role == 'data' and filestore_clone_source is not None:
             decisions['data'] = filestore_clone_proved(filestore_clone_source, backings[role])
-        demand(backings[role], size)
+        demand(backings[role], max(0,size-filestore_existing_bytes) if role=='data' else size)
     # SSH capture stages on the host; native capture/assembly stages in the
     # runner's writable layer. Require known backing rather than guessing overlay space.
     driver = containers['script-runner'][1].get('GraphDriver', {})

@@ -2741,7 +2741,7 @@ original authenticated testing caller uploads each part to
 `POST /v1/products/{product}/testing-rebuild/{operation_id}/migrated-source/{part}`
 with `application/octet-stream`, `Content-Length`, `Upload-Offset`, and
 `Upload-Prefix-SHA256`. Read that route without `/{part}` to inspect retained
-sizes/digests. Upload only over the documented private operator connection.
+sizes and completion. Upload only over the documented private operator connection.
 A disconnect retains the original prefix; its digest must match before resume.
 The service hashes and fsyncs both complete files before committing their
 existing native-copy receipt. GET never commits a receipt. The original caller,

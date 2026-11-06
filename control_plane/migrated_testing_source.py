@@ -77,14 +77,15 @@ def file_digest(path: Path) -> str:
 
 def upload_state(allocation: TestingCandidateAllocation) -> dict[str, dict[str, object]]:
     directory = upload_directory(allocation)
-    result = {}
+    result: dict[str, dict[str, object]] = {}
     for part in ("database", "filestore"):
         complete = directory / part
         path = complete if complete.exists() else directory / (part + ".partial")
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError("Migrated upload state contains an unsafe file")
         result[part] = {
             "complete": complete.exists(),
             "size": path.stat().st_size if path.exists() else 0,
-            "sha256": file_digest(path) if path.exists() else hashlib.sha256().hexdigest(),
         }
     return result
 

@@ -162,6 +162,55 @@ class MigratedUploadTests(unittest.TestCase):
 
 
 class MigratedArtifactConsumptionTests(unittest.TestCase):
+    def test_fresh_receiver_inspects_no_artifacts_before_the_first_stream(self) -> None:
+        import io
+        import json
+        from contextlib import redirect_stdout
+        from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
+
+        fixture = NativeArtifactConsumptionTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        capture = fixture.stage()
+        capture["source_observation"] = {"kind": "migrated"}
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as exited:
+            fixture.consume(capture, mode="inspect")
+        self.assertEqual(exited.exception.code, 0)
+        self.assertEqual(json.loads(output.getvalue())["artifacts"], {})
+
+    def test_checklist_subdirectories_are_preserved_in_the_full_filestore(self) -> None:
+        from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
+
+        fixture = NativeArtifactConsumptionTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        capture = fixture.stage(name="checklist/" + fixture.name)
+        capture["source_observation"] = {
+            "kind": "migrated",
+            "filestore_expanded_bytes": len(fixture.attachment),
+            "filestore_files": 1,
+        }
+        staging = fixture.root / "volumes/data" / (".lp-native-" + fixture.identity)
+        staging.mkdir(parents=True)
+        for part in ("database", "filestore"):
+            (fixture.root / "tmp" / f"lp-native-{fixture.identity}-{part}-0").rename(
+                staging / (part + ".artifact")
+            )
+        with self.assertRaises(SystemExit) as exited:
+            fixture.consume(capture)
+        self.assertEqual(exited.exception.code, 0)
+        self.assertEqual(
+            (
+                fixture.root
+                / "volumes/data/filestore"
+                / fixture.database
+                / "checklist"
+                / fixture.name
+            ).read_bytes(),
+            fixture.attachment,
+        )
+
     def test_complete_filestore_is_streamed_and_checked_before_database_publication(self) -> None:
         from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
 
@@ -192,6 +241,38 @@ class MigratedArtifactConsumptionTests(unittest.TestCase):
             ).read_bytes(),
             fixture.attachment,
         )
+
+    def test_retry_does_not_allocate_another_copy_of_matching_attachments(self) -> None:
+        from unittest.mock import patch
+        from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
+
+        fixture = NativeArtifactConsumptionTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        capture = fixture.stage()
+        capture["source_observation"] = {
+            "kind": "migrated",
+            "filestore_expanded_bytes": len(fixture.attachment),
+            "filestore_files": 1,
+        }
+        staging = fixture.root / "volumes/data" / (".lp-native-" + fixture.identity)
+        staging.mkdir(parents=True)
+        for part in ("database", "filestore"):
+            (fixture.root / "tmp" / f"lp-native-{fixture.identity}-{part}-0").rename(
+                staging / (part + ".artifact")
+            )
+        with self.assertRaises(SystemExit):
+            fixture.consume(capture)
+        fixture.mapped_path(fixture.dump_path).unlink()
+        with (
+            patch(
+                "tests.test_odoo_testing_native_source.NamedTemporaryFile",
+                side_effect=OSError("No room for a duplicate attachment"),
+            ),
+            self.assertRaises(SystemExit) as exited,
+        ):
+            fixture.consume(capture)
+        self.assertEqual(exited.exception.code, 0)
 
     def test_incomplete_declared_inventory_does_not_publish_database(self) -> None:
         from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
