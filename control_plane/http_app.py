@@ -7613,6 +7613,17 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    def director_testing_override_intent_allowed(
+        identity: LaunchplaneIdentity,
+        profile: LaunchplaneProductProfileRecord,
+        instance: str,
+    ) -> bool:
+        return (
+            director_agent_identity(identity)
+            and instance == "testing"
+            and profile.production_use != "live"
+        )
+
     async def write_odoo_config_parameter_override(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
@@ -7673,13 +7684,19 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes.native_driver_route_authorization_allows(
-            endpoint=write_odoo_config_parameter_override,
-            authorization_allows=resolved_authz_policy_runtime.allows,
-            identity=identity,
-            product=authorization_product,
-            context=override_request.override.context,
-            instances=(override_request.override.instance,),
+        director_testing_intent = director_testing_override_intent_allowed(
+            identity, product_profile, override_request.override.instance
+        )
+        if (
+            not director_testing_intent
+            and not native_routes.native_driver_route_authorization_allows(
+                endpoint=write_odoo_config_parameter_override,
+                authorization_allows=resolved_authz_policy_runtime.allows,
+                identity=identity,
+                product=authorization_product,
+                context=override_request.override.context,
+                instances=(override_request.override.instance,),
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -7844,6 +7861,9 @@ def create_launchplane_fastapi_app(
         else:
             authorized = (
                 preview_bootstrap
+                or director_testing_override_intent_allowed(
+                    identity, product_profile, override_request.override.instance
+                )
                 or native_routes.native_driver_route_authorization_allows(
                     endpoint=write_odoo_website_bootstrap_override,
                     authorization_allows=resolved_authz_policy_runtime.allows,
