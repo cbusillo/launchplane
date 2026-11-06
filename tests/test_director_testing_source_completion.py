@@ -66,7 +66,7 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
             self.payload
         ).expected_confirmation
         self.in_source_transaction = False
-        complete = self.store.complete_dokploy_compose_source
+        complete = self.store.complete_dokploy_compose_setup
 
         def commit(**kwargs: Any) -> None:
             self.in_source_transaction = True
@@ -76,7 +76,7 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
                 self.in_source_transaction = False
 
         self.enterContext(
-            patch.object(self.store, "complete_dokploy_compose_source", side_effect=commit)
+            patch.object(self.store, "complete_dokploy_compose_setup", side_effect=commit)
         )
 
     async def post(self, *, key: str = "source-test", **changes: Any) -> Any:

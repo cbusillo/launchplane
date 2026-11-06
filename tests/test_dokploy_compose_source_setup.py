@@ -315,7 +315,7 @@ class ComposeSourceSetupTests(unittest.TestCase):
                         self.provider.model_copy(update={"updated_at": "2026-10-03T01:00:00Z"})
                     )
                 with self.assertRaises(ValueError):
-                    self.store.complete_dokploy_compose_source(
+                    self.store.complete_dokploy_compose_setup(
                         expected_profile=self.profile,
                         expected_record=self.target,
                         expected_target_id=self.target_id,
