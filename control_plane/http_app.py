@@ -26352,6 +26352,7 @@ def create_launchplane_fastapi_app(
         )
         director_testing_domain = (
             director_agent_identity(identity)
+            and setup_request.mode == "apply"
             and setup_request.operation == "reconcile-compose-domain"
             and setup_request.instance == "testing"
             and bool(lane_owner)
@@ -26395,6 +26396,9 @@ def create_launchplane_fastapi_app(
             isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
         )
         director_source_completion = director_source_completion and (
+            isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
+        )
+        director_testing_domain = director_testing_domain and (
             isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
         )
         can_setup_target = (

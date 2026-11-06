@@ -4635,14 +4635,16 @@ reviewed target identity, rather than selecting a replacement at apply time.
 
 This bounded continuation requires an active exclusive product owner, no
 deployments or serving inventory, empty provider source/settings/mounts/networks,
-no existing domains, and no active or unknown provider work. Holds, positive use,
+no conflicting domains, and no active or unknown provider work. Holds, positive use,
 needed data, retained custody, shared targets and conflicting hostname authority
 refuse it. Lane execution and authority locks fence the provider effect and
 record commit. The operation creates one HTTPS `web` route with the default
-certificate and verifies it before recording the domain; it does not deploy,
+certificate, or records an already-existing route only when every routing field
+matches exactly. It verifies the route before recording the domain; it does not deploy,
 initialize a database, change external ingress, or qualify public TLS. A partial
-provider result retains recovery evidence and requires reconciliation before
-retrying. General target mutation and production remain on their existing paths.
+provider result retains recovery evidence. Reinspect it, keep the original
+request and key, and use the same continuation for an exact record-only
+reconciliation; conflicting routes remain refused. General target mutation and production remain on their existing paths.
 
 Use `operation=prune-compose-domain` only to remove stale provider domain routes
 from an already-tracked Dokploy compose target. The service reads the tracked

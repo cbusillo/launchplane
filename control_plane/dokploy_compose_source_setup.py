@@ -130,9 +130,11 @@ def complete_compose_source(
         if not director_apply:
             return
         from control_plane.disposable_lanes import require_disposable_lane
-        from control_plane.generic_web_testing_exclusion import _inventory, _target_reservations
+        from control_plane.generic_web_testing_exclusion import (
+            _target_reservations,
+            require_quiescent_testing_provider_work,
+        )
         from control_plane.private_testing_activation import _placement
-        from control_plane.dokploy import api
 
         # An empty source cannot auto-deploy. The single source update disables
         # that provider default atomically, and its readback requires False.
@@ -153,27 +155,9 @@ def complete_compose_source(
             target_id=target_id.target_id,
         ):
             raise ValueError("Testing target has an unresolved provider operation.")
-        inspections: tuple[tuple[str, str, dict[str, str | int]], ...] = (
-            (
-                "deployments",
-                "/api/deployment.allByType",
-                {"id": target_id.target_id, "type": "compose"},
-            ),
-            ("queue", "/api/deployment.queueList", {}),
-            (
-                "schedules",
-                "/api/schedule.list",
-                {"id": target_id.target_id, "scheduleType": "compose"},
-            ),
+        require_quiescent_testing_provider_work(
+            host=host, token=token, target_id=target_id.target_id
         )
-        for kind, path, query in inspections:
-            facet = _inventory(
-                lambda: api.dokploy_request(host=host, token=token, path=path, query=query),
-                kind=kind,
-                target_id=target_id.target_id,
-            )
-            if facet.code != "proved":
-                raise ValueError("Provider testing work is active or unknown.")
         if (
             fetch_dokploy_target_payload_for_setup(host, token, "compose", target_id.target_id)
             != before

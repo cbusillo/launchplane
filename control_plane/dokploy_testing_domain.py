@@ -7,7 +7,10 @@ from control_plane.contracts.product_profile_record import (
     product_context_owner_map,
 )
 from control_plane.dokploy import api, compose
-from control_plane.dokploy.application_domains import require_exclusive_testing_application_hostname
+from control_plane.dokploy.application_domains import (
+    _domain_value_matches,
+    require_exclusive_testing_application_hostname,
+)
 from control_plane.dokploy.target_source_setup import require_empty_compose_source
 from control_plane.dokploy_target_setup_http import (
     CREATE_COMPOSE_SOURCE_LABEL,
@@ -16,7 +19,10 @@ from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     _lane_has_usage_or_data_commitments,
 )
-from control_plane.generic_web_testing_exclusion import _inventory, _target_reservations
+from control_plane.generic_web_testing_exclusion import (
+    _target_reservations,
+    require_quiescent_testing_provider_work,
+)
 from control_plane.private_testing_activation import _placement
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
@@ -35,7 +41,6 @@ def setup_empty_testing_domain(
 ) -> DokployComposeDomainReconcileResult:
     from control_plane.dokploy_target_setup_http import (
         fetch_dokploy_target_payload_for_setup,
-        fetch_dokploy_compose_domains_for_target_setup,
     )
 
     allowed = {
@@ -144,7 +149,53 @@ def setup_empty_testing_domain(
         ):
             raise ValueError("Testing bindings changed during hostname qualification.")
 
-    def checkpoint() -> None:
+    def matching_route(routes: object) -> str:
+        if not isinstance(routes, list) or len(routes) > 1:
+            raise ValueError(
+                "First hostname setup requires zero routes or one exact reviewed route."
+            )
+        if not routes:
+            return ""
+        route = routes[0]
+        expected = compose.compose_web_domain_route_payload(
+            compose_id=target_id.target_id,
+            domain_host=domain,
+            runtime_port=profile.runtime_port,
+        )
+        defaults: api.JsonObject = {
+            "customEntrypoint": None,
+            "middlewares": [],
+            "forwardAuthEnabled": False,
+            "enabled": True,
+        }
+        if (
+            not isinstance(route, dict)
+            or not isinstance(route.get("domainId"), str)
+            or not route["domainId"].strip()
+            or any(
+                not _domain_value_matches(route.get(key), value) for key, value in expected.items()
+            )
+            or any(
+                not _domain_value_matches(route.get(key, value), value)
+                for key, value in defaults.items()
+            )
+        ):
+            raise ValueError(
+                "An existing provider route differs from the exact reviewed first hostname."
+            )
+        return str(route["domainId"])
+
+    def read_route() -> str:
+        return matching_route(
+            api.dokploy_request(
+                host=host,
+                token=token,
+                path="/api/domain.byComposeId",
+                query={"composeId": target_id.target_id},
+            )
+        )
+
+    def checkpoint() -> str:
         from control_plane.application_state_volume import require_no_held_state_volume
 
         require_no_held_state_volume(record_store, request.context)
@@ -191,31 +242,17 @@ def setup_empty_testing_domain(
             raise ValueError("A provider operation still owns the testing target.")
         live = fetch_dokploy_target_payload_for_setup(host, token, "compose", target_id.target_id)
         require_empty_compose_source(live, target_id.target_id)
-        _placement({**live, "autoDeploy": False}, target_id.target_id)
+        matching_route(live.get("domains"))
+        _placement({**live, "autoDeploy": False, "domains": []}, target_id.target_id)
         if live.get("env") not in (None, ""):
             raise ValueError("First hostname setup requires empty provider runtime settings.")
-        if fetch_dokploy_compose_domains_for_target_setup(
-            host=host, token=token, compose_id=target_id.target_id
-        ):
-            raise ValueError("First hostname setup never rewrites existing provider routes.")
-        inspections: tuple[tuple[str, str, dict[str, str | int]], ...] = (
-            (
-                "deployments",
-                "/api/deployment.allByType",
-                {"id": target_id.target_id, "type": "compose"},
-            ),
-            ("queue", "/api/deployment.queueList", {}),
-            (
-                "schedules",
-                "/api/schedule.list",
-                {"id": target_id.target_id, "scheduleType": "compose"},
-            ),
+        existing_route = read_route()
+        require_quiescent_testing_provider_work(
+            host=host,
+            token=token,
+            target_id=target_id.target_id,
+            never_deployed=True,
         )
-        for kind, path, query in inspections:
-            rows = api.dokploy_request(host=host, token=token, path=path, query=query)
-            facet = _inventory(lambda: rows, kind=kind, target_id=target_id.target_id)
-            if facet.code != "proved" or kind == "deployments" and rows != []:
-                raise ValueError("Provider testing work or serving history is present or unknown.")
         if (
             fetch_dokploy_target_payload_for_setup(host, token, "compose", target_id.target_id)
             != live
@@ -223,43 +260,35 @@ def setup_empty_testing_domain(
             raise ValueError("Provider placement changed during first hostname checks.")
         require_unprotected_binding()
         check()
+        return existing_route
 
     def before_write(existing: bool) -> None:
         nonlocal effect_started
         if existing:
             raise ValueError("First hostname setup cannot rewrite an existing route.")
-        checkpoint()
+        if checkpoint():
+            raise ValueError(
+                "A provider route appeared before first hostname creation; inspect it again."
+            )
         effect_started = True
 
     def apply_provider() -> None:
 
-        route_ids.append(
-            compose.ensure_compose_web_domain_route(
-                host=host,
-                token=token,
-                compose_id=target_id.target_id,
-                domain_host=domain,
-                runtime_port=profile.runtime_port,
-                before_write=before_write,
+        existing_route = checkpoint()
+        if existing_route:
+            route_ids.append(existing_route)
+        else:
+            route_ids.append(
+                compose.ensure_compose_web_domain_route(
+                    host=host,
+                    token=token,
+                    compose_id=target_id.target_id,
+                    domain_host=domain,
+                    runtime_port=profile.runtime_port,
+                    before_write=before_write,
+                )
             )
-        )
-        routes = fetch_dokploy_compose_domains_for_target_setup(
-            host=host, token=token, compose_id=target_id.target_id
-        )
-        if len(routes) != 1 or any(
-            routes[0].get(key) != value
-            for key, value in {
-                "domainId": route_ids[0],
-                "composeId": target_id.target_id,
-                "host": domain,
-                "serviceName": "web",
-                "port": profile.runtime_port,
-                "https": True,
-                "path": "/",
-                "internalPath": "/",
-                "certificateType": "none",
-            }.items()
-        ):
+        if read_route() != route_ids[0]:
             raise ValueError("First hostname provider readback does not match the exact route.")
         check()
 

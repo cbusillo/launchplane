@@ -387,6 +387,25 @@ def _inventory(read: Callable[[], object], *, kind: str, target_id: str) -> Test
     )
 
 
+def require_quiescent_testing_provider_work(
+    *,
+    host: str,
+    token: str,
+    target_id: str,
+    never_deployed: bool = False,
+) -> None:
+    inspections: tuple[tuple[str, str, dict[str, str | int]], ...] = (
+        ("deployments", "/api/deployment.allByType", {"id": target_id, "type": "compose"}),
+        ("queue", "/api/deployment.queueList", {}),
+        ("schedules", "/api/schedule.list", {"id": target_id, "scheduleType": "compose"}),
+    )
+    for kind, path, query in inspections:
+        rows = dokploy_api.dokploy_request(host=host, token=token, path=path, query=query)
+        facet = _inventory(lambda: rows, kind=kind, target_id=target_id)
+        if facet.code != "proved" or never_deployed and kind == "deployments" and rows != []:
+            raise ValueError("Provider testing work or serving history is present or unknown.")
+
+
 def _provider_target(payload: object, target_id: str) -> TestingExclusionFacet:
     if (
         not isinstance(payload, dict)

@@ -719,6 +719,31 @@ class DokployComposeDomainRoutePreflightError(click.ClickException):
     """The route operation failed before attempting a provider write."""
 
 
+def compose_web_domain_route_payload(
+    *,
+    compose_id: str,
+    domain_host: str,
+    runtime_port: int,
+    certificate_type: str = "none",
+    service_name: str = "web",
+) -> api.JsonObject:
+    return {
+        "host": domain_host,
+        "path": "/",
+        "internalPath": "/",
+        "port": runtime_port,
+        "https": True,
+        "applicationId": None,
+        "certificateType": certificate_type,
+        "customCertResolver": None,
+        "composeId": compose_id,
+        "serviceName": service_name,
+        "domainType": "compose",
+        "previewDeploymentId": None,
+        "stripPath": False,
+    }
+
+
 def ensure_compose_web_domain_route(
     *,
     host: str,
@@ -772,21 +797,13 @@ def ensure_compose_web_domain_route(
             existing = domain
             break
 
-    payload: api.JsonObject = {
-        "host": normalized_domain_host,
-        "path": "/",
-        "internalPath": "/",
-        "port": runtime_port,
-        "https": True,
-        "applicationId": None,
-        "certificateType": normalized_certificate_type,
-        "customCertResolver": None,
-        "composeId": normalized_compose_id,
-        "serviceName": service_name,
-        "domainType": "compose",
-        "previewDeploymentId": None,
-        "stripPath": False,
-    }
+    payload = compose_web_domain_route_payload(
+        compose_id=normalized_compose_id,
+        domain_host=normalized_domain_host,
+        runtime_port=runtime_port,
+        certificate_type=normalized_certificate_type,
+        service_name=service_name,
+    )
     if before_write is not None:
         before_write(existing is not None)
     if existing is not None:

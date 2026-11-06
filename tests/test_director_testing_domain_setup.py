@@ -150,7 +150,7 @@ class DirectorTestingDomainSetupTests(_DirectorTestingSetupFixture):
                 self.assertGreaterEqual(response.status_code, 400, response.text)
                 self.assertEqual(self.writes, [])
 
-    async def test_existing_or_partial_routes_never_get_rewritten(self) -> None:
+    async def test_conflicting_or_partial_routes_never_get_rewritten(self) -> None:
         self.routes = [{"domainId": "existing", "host": self.payload["domains"][0]}]
         response = await self.post()
         self.assertGreaterEqual(response.status_code, 400, response.text)
@@ -175,7 +175,18 @@ class DirectorTestingDomainSetupTests(_DirectorTestingSetupFixture):
     async def test_unknown_or_active_provider_work_prevents_hostname_effects(self) -> None:
         original = self.provider_request
         for path, rows in (
-            ("/api/deployment.allByType", [{"status": "done"}]),
+            (
+                "/api/deployment.allByType",
+                [
+                    {
+                        "composeId": self.target_id.target_id,
+                        "deploymentId": "finished",
+                        "status": "done",
+                        "startedAt": self.profile.updated_at,
+                        "finishedAt": self.profile.updated_at,
+                    }
+                ],
+            ),
             ("/api/deployment.queueList", {"items": [], "truncated": True}),
             ("/api/schedule.list", [{"enabled": False}]),
         ):
@@ -252,9 +263,14 @@ class DirectorTestingDomainSetupTests(_DirectorTestingSetupFixture):
             ),
             self.target,
         )
-        for key in ("first-testing-setup", "new-key"):
-            refused = await self.post(idempotency_key=key)
-            self.assertEqual(refused.status_code, 400, refused.text)
+        recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).domains,
+            tuple(self.payload["domains"]),
+        )
         self.assertEqual(len(self.writes), 1)
 
     async def test_active_testing_executor_prevents_hostname_effects(self) -> None:
@@ -266,3 +282,81 @@ class DirectorTestingDomainSetupTests(_DirectorTestingSetupFixture):
             response = await self.post()
         self.assertEqual(response.status_code, 400, response.text)
         self.assertEqual(self.writes, [])
+
+    async def test_established_testing_domain_dry_run_remains_available(self) -> None:
+        self.store.write_dokploy_target_record(
+            self.target.model_copy(update={"domains": ("old.example.invalid",)})
+        )
+        planned = await self.post(mode="dry-run")
+        self.assertEqual(planned.status_code, 202, planned.text)
+        self.assertEqual(self.writes, [])
+
+    async def test_profile_hostname_claim_prevents_effect_without_a_target_claim(self) -> None:
+        self.profile = self.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"base_url": "https://" + self.payload["domains"][0]})
+                    if lane.instance == "prod"
+                    else lane
+                    for lane in self.profile.lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(self.profile)
+        refused = await self.post()
+        self.assertEqual(refused.status_code, 400, refused.text)
+        self.assertIn("ingress authority", refused.json()["error"]["message"])
+        self.assertEqual(self.writes, [])
+
+    async def test_route_binding_hostname_claim_prevents_effect_without_a_target_claim(
+        self,
+    ) -> None:
+        from tests.test_route_binding_record import _route_binding_record
+
+        self.store.write_route_binding_record(
+            _route_binding_record(domain=self.payload["domains"][0])
+        )
+        refused = await self.post()
+        self.assertEqual(refused.status_code, 400, refused.text)
+        self.assertIn("ingress authority", refused.json()["error"]["message"])
+        self.assertEqual(self.writes, [])
+
+    async def test_terminal_agent_uses_the_bounded_continuation(self) -> None:
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        config = _local_operator_bearer_config().model_copy(
+            update={
+                "local_operator_token": "",
+                "terminal_agent_token": "local-operator-token",
+                "terminal_agent_subject": "fixture-director",
+                "terminal_agent_token_label": "fixture-terminal",
+            }
+        )
+        self.app = self.make_app(config)
+        response = await self.post()
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(len(self.writes), 1)
+
+    async def test_existing_service_scoped_operator_keeps_general_reconciliation(self) -> None:
+        from tests.http_app_test_support import _local_operator_bearer_config
+        from tests.support.auth import local_operator_policy
+
+        self.app = self.make_app(
+            _local_operator_bearer_config(),
+            local_operator_policy(
+                actions=("dokploy_target.setup",),
+                token_label="local-owner-read",
+            ),
+        )
+        self.store.write_dokploy_target_record(
+            self.target.model_copy(update={"domains": ("old.example.invalid",)})
+        )
+        response = await self.post()
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(len(self.writes), 1)
+        self.assertIn(
+            "old.example.invalid",
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).domains,
+        )

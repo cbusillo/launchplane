@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from typing import Any, Literal, cast
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import click
 import yaml
@@ -2472,6 +2472,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             compose_id="compose-cm-testing",
             domain_host="cm-testing.shinycomputers.com",
             runtime_port=8069,
+            certificate_type=ANY,
         )
         update_env.assert_called_once()
         self.assertEqual(fetch_converted_compose.call_count, 2)
