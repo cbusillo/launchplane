@@ -1,7 +1,10 @@
 from urllib.parse import urlsplit
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
 from control_plane.contracts.product_profile_record import (
@@ -9,20 +12,22 @@ from control_plane.contracts.product_profile_record import (
     is_exclusive_product_context,
     product_context_owner_map,
 )
-from control_plane.disposable_lanes import require_lane_target_ownership
 from control_plane.dokploy import api, compose, source
-from control_plane.dokploy.application_domains import (
-    _domain_value_matches,
-    require_exclusive_testing_application_hostname,
-)
 from control_plane.dokploy_target_setup_http import (
     CREATE_COMPOSE_SOURCE_LABEL,
     DokployTargetSetupEnvelope,
-    _lane_has_usage_or_data_commitments,
 )
-from control_plane.generic_web_testing_exclusion import (
-    _target_reservations,
-    require_quiescent_testing_provider_work,
+from control_plane.generic_web_testing_exclusion import require_quiescent_testing_provider_work
+from control_plane.dokploy_testing_domain import (
+    require_first_testing_target_unprotected,
+    require_first_testing_hostname_available,
+    require_first_testing_idle,
+    match_first_testing_origin,
+)
+from control_plane.provider_operations import (
+    ProviderOperationLease,
+    ProviderMutationOutcome,
+    ProviderObservation,
 )
 from control_plane.npmplus import NpmplusProxyHost, NpmplusProxyHostPayload
 from control_plane.route_binding_reconcile import provider_target_projection
@@ -32,6 +37,8 @@ from control_plane.testing_public_ingress import (
     TestingPublicIngressAdapter,
     _certificate_current,
     _covers,
+    _host_payload,
+    _marker,
 )
 from control_plane.workflows.generic_web_deploy_provider import (
     dokploy_generic_web_provider_target_key,
@@ -39,6 +46,47 @@ from control_plane.workflows.generic_web_deploy_provider import (
 
 
 class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
+    current_provider_key: str = ""
+
+    def provider_target_origin(self) -> ProviderTargetOrigin:
+        provider = self.store.read_provider_target_record(
+            context_name=self.request.context, instance_name="testing"
+        )
+        return ProviderTargetOrigin(
+            product=self.product,
+            context=self.request.context,
+            instance="testing",
+            provider_id=provider.provider_id,
+            target_type=provider.provider_target_type,
+            target_id=provider.target_id,
+        )
+
+    def target_key(self) -> str:
+        return self.provider_target_origin().target_key()
+
+    @contextmanager
+    def _original_provider_operation(self, provider_key: str) -> Iterator[None]:
+        previous = self.current_provider_key
+        self.current_provider_key = provider_key
+        try:
+            yield
+        finally:
+            self.current_provider_key = previous
+
+    def apply(
+        self, provider_operation_key: str, lease: ProviderOperationLease
+    ) -> ProviderMutationOutcome:
+        with self._original_provider_operation(provider_operation_key):
+            return super().apply(provider_operation_key, lease)
+
+    def observe(
+        self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
+    ) -> ProviderObservation:
+        with self._original_provider_operation(provider_operation_key):
+            return super().observe(
+                provider_operation_key, provider_effect_phase, reconciliation_key
+            )
+
     def _execution_lock_name(self) -> str:
         provider = self.store.read_provider_target_record(
             context_name=self.request.context, instance_name="testing"
@@ -97,26 +145,9 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
         ):
             raise ValueError("The initial testing target identity or hostname is unqualified.")
         domain = target.domains[0]
-        require_exclusive_testing_application_hostname(
-            hostname=domain, target=target, targets=self.store.list_dokploy_target_records()
+        safety = require_first_testing_target_unprotected(
+            self.store, product=self.product, context=self.request.context, provider=provider
         )
-        require_lane_target_ownership(
-            self.store.list_dokploy_target_id_records(),
-            context=self.request.context,
-            instance="testing",
-            target_id=identity.target_id,
-        )
-        safety = self.store.read_disposable_lane_safety(
-            self.product, self.request.context, "testing"
-        )
-        if safety is not None and (
-            safety.usage == "in_use"
-            or safety.data == "only_copy"
-            or safety.production_resources in {"shared", "separation_ready"}
-        ):
-            raise ValueError(
-                "Testing use, data custody or shared production resources protects this lane."
-            )
         try:
             binding = self.store.read_route_binding_record(
                 product=self.product, context_name=self.request.context, instance_name="testing"
@@ -132,6 +163,14 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
             or tuple(d.domain_name for d in binding.domains) != (domain,)
         ):
             raise ValueError("An existing binding already owns this testing lane.")
+        if binding is not None:
+            audit = self.store.read_ingress_route_audit_record(
+                str(binding.ingress.provider_evidence["audit_record"])
+            )
+            if binding.model_dump(exclude={"source", "updated_at"}) != self._candidate(
+                audit
+            ).model_dump(exclude={"source", "updated_at"}):
+                raise ValueError("The published testing route authority has changed.")
         for value in (lane.base_url, lane.health_url):
             if value and (
                 binding is None
@@ -154,15 +193,13 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
                 runtime_port=profile.runtime_port,
                 reason=self.request.reason,
             )
-            if _lane_has_usage_or_data_commitments(self.store, scope) or _target_reservations(
+            require_first_testing_idle(
                 self.store,
                 product=self.product,
-                context=self.request.context,
-                target_key=dokploy_generic_web_provider_target_key(provider),
-                target_id=identity.target_id,
-                require_complete=True,
-            ):
-                raise ValueError("Testing work or data commitments protect this target.")
+                request=scope,
+                provider=provider,
+                current_provider_key=self.current_provider_key,
+            )
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         live = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=identity.target_id
@@ -178,29 +215,11 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
         expected = compose.compose_web_domain_route_payload(
             compose_id=identity.target_id, domain_host=domain, runtime_port=profile.runtime_port
         )
-        if (
-            not isinstance(routes, list)
-            or len(routes) != 1
-            or not isinstance(routes[0], dict)
-            or not isinstance(routes[0].get("domainId"), str)
-            or not routes[0]["domainId"]
-            or any(
-                not _domain_value_matches(routes[0].get(key), value)
-                for key, value in expected.items()
-            )
-            or any(
-                routes[0].get(key, default) != default
-                for key, default in {
-                    "enabled": True,
-                    "middlewares": [],
-                    "forwardAuthEnabled": False,
-                    "customEntrypoint": None,
-                }.items()
-            )
-        ):
-            raise ValueError(
-                "The approved origin hostname must exist unchanged before edge publication."
-            )
+        origin_id = match_first_testing_origin(
+            routes, target_id=identity.target_id, domain=domain, runtime_port=profile.runtime_port
+        )
+        if not origin_id:
+            raise ValueError("The approved origin hostname must exist before edge publication.")
         server = api.as_json_object(
             api.dokploy_request(
                 host=host,
@@ -232,26 +251,15 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
             require_quiescent_testing_provider_work(
                 host=host, token=token, target_id=identity.target_id, never_deployed=True
             )
-        claims = {
-            urlsplit(value).hostname or ""
-            for other in self.store.list_product_profile_records()
-            for other_lane in other.lanes
-            if (other.product, other_lane.context, other_lane.instance)
-            != (self.product, self.request.context, "testing")
-            for value in (other_lane.base_url, other_lane.health_url)
-            if value
-        } | {
-            entry.domain_name
-            for other in self.store.list_route_binding_records()
-            if (other.product, other.context, other.instance)
-            != (self.product, self.request.context, "testing")
-            for entry in other.domains
-        }
-        if any(
-            claim == domain or claim.startswith("*.") and domain.endswith(claim[1:])
-            for claim in claims
-        ):
-            raise ValueError("Another lane already claims this public hostname.")
+        require_first_testing_hostname_available(
+            product=self.product,
+            target=target,
+            domain=domain,
+            targets=self.store.list_dokploy_target_records(),
+            profiles=self.store.list_product_profile_records(),
+            bindings=self.store.list_route_binding_records(),
+            allow_current_binding=binding is not None,
+        )
         material: dict[str, object] = {
             "product": self.product,
             "context": self.request.context,
@@ -262,7 +270,7 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
                     "context": self.request.context,
                     "target": provider_target_projection(provider),
                     "domain": domain,
-                    "origin_domain_id": routes[0]["domainId"],
+                    "origin_domain_id": origin_id,
                 }
             ),
             "profile": profile.model_dump(mode="json", exclude_none=True),
@@ -280,13 +288,23 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
             required_context_owner=(self.product, self.request.context),
         )
 
-    def _route_identity(self) -> tuple[str, str, EdgeEndpointRecord]:
-        material, _ = self._authority()
-        return (
-            str(material["domain_host"]),
-            str(material["first_use"]),
-            EdgeEndpointRecord.model_validate(material["endpoint"]),
-        )
+    def _authority_witness(self, material: dict[str, object]) -> str:
+        return str(material["first_use"])
+
+    def _verify_readback_authority(
+        self, material: dict[str, object], audit: IngressRouteAuditRecord, current: NpmplusProxyHost
+    ) -> None:
+        desired = _host_payload(current)
+        marker = _marker(self.request.reviewed_plan_sha256)
+        if current.advanced_config != marker:
+            raise ValueError("First testing ingress cannot adopt changed route configuration.")
+        desired["advanced_config"] = ""
+        desired["meta"] = {}
+        if (
+            self._custody_binding({**material, "desired": desired})
+            != audit.testing_authority_sha256
+        ):
+            raise ValueError("The first-use target differs from its published authority witness.")
 
     def _custody_binding(self, material: dict[str, object]) -> str:
         profile = LaunchplaneProductProfileRecord.model_validate(material["profile"])
@@ -302,7 +320,7 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
         )
         return canonical_json_sha256(
             {
-                "generation": material["first_use"],
+                "first_use": material["first_use"],
                 "profile": normalized.model_dump(mode="json", exclude={"updated_at"}),
                 "provider": provider_target_projection(
                     ProviderTargetRecord.model_validate(material["provider"])
@@ -357,7 +375,7 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
         expected: dict[str, object],
         custody_sha256: str,
     ) -> None:
-        audit = self._audit(host, provider_key, custody_sha256=custody_sha256)
+        audit = self._audit(host, provider_key, custody_sha256=custody_sha256, authority=expected)
         self.store.write_ingress_route_audit_record(audit)
         self.store.publish_first_testing_public_ingress_binding(
             expected=expected, replacement=self._candidate(audit), audit=audit

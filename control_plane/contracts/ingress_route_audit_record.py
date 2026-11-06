@@ -49,9 +49,6 @@ class IngressRouteAuditRecord(BaseModel):
     provider_certificate_ref: str = ""
     provider_route_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     testing_generation_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
-    testing_first_use_sha256: str = Field(
-        default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: not value
-    )
     testing_authority_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     testing_application_id: str = ""
     expected_host_id: int | None = Field(default=None, ge=1)

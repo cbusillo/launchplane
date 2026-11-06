@@ -29818,6 +29818,38 @@ class PostgresRecordStore(HumanSessionStore):
                 != expected["generation"]
             ):
                 raise ValueError("The reviewed testing generation changed.")
+            from control_plane.dokploy_testing_domain import (
+                require_testing_hostname_claims_available,
+            )
+
+            require_testing_hostname_claims_available(
+                product=replacement.product,
+                target=DokployTargetRecord.model_validate(expected["target"]),
+                domain=audit.requested_domains[0],
+                targets=(
+                    self._read_payload(model_type=DokployTargetRecord, payload=row.payload)
+                    for row in session.scalars(
+                        select(LaunchplaneDokployTargetRow).with_for_update()
+                    ).all()
+                ),
+                profiles=(
+                    self._read_payload(
+                        model_type=LaunchplaneProductProfileRecord, payload=row.payload
+                    )
+                    for row in session.scalars(
+                        select(LaunchplaneProductProfileRow).with_for_update()
+                    ).all()
+                ),
+                bindings=(
+                    self._read_payload(
+                        model_type=EnvironmentRouteBindingRecord, payload=row.payload
+                    )
+                    for row in session.scalars(
+                        select(LaunchplaneRouteBindingRow).with_for_update()
+                    ).all()
+                ),
+                allow_current_binding=True,
+            )
             audit_row = session.get(
                 LaunchplaneIngressRouteAuditRow, audit.record_id, with_for_update=True
             )
@@ -29857,7 +29889,6 @@ class PostgresRecordStore(HumanSessionStore):
             or audit.status != "applied"
             or audit.mode != "apply"
             or audit.testing_generation_sha256
-            or audit.testing_first_use_sha256 != expected["first_use"]
             or not audit.testing_authority_sha256
         ):
             raise ValueError("First testing edge publication must preserve its exact lane.")
@@ -29934,6 +29965,38 @@ class PostgresRecordStore(HumanSessionStore):
                 is not None
             ):
                 raise ValueError("A restored testing generation now owns this lane.")
+            from control_plane.dokploy_testing_domain import (
+                require_testing_hostname_claims_available,
+            )
+
+            require_testing_hostname_claims_available(
+                product=profile.product,
+                target=target,
+                domain=target.domains[0],
+                targets=(
+                    self._read_payload(model_type=DokployTargetRecord, payload=row.payload)
+                    for row in session.scalars(
+                        select(LaunchplaneDokployTargetRow).with_for_update()
+                    ).all()
+                ),
+                profiles=(
+                    self._read_payload(
+                        model_type=LaunchplaneProductProfileRecord, payload=row.payload
+                    )
+                    for row in session.scalars(
+                        select(LaunchplaneProductProfileRow).with_for_update()
+                    ).all()
+                ),
+                bindings=(
+                    self._read_payload(
+                        model_type=EnvironmentRouteBindingRecord, payload=row.payload
+                    )
+                    for row in session.scalars(
+                        select(LaunchplaneRouteBindingRow).with_for_update()
+                    ).all()
+                ),
+                allow_current_binding=True,
+            )
             audit_row = session.get(
                 LaunchplaneIngressRouteAuditRow, audit.record_id, with_for_update=True
             )

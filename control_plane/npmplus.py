@@ -414,7 +414,7 @@ class NpmplusClient:
 
     def list_certificates(self) -> tuple[NpmplusCertificate, ...]:
         payload = self._request(method="GET", path="/api/nginx/certificates")
-        if not isinstance(payload, list) or len(payload) > 100:
+        if not isinstance(payload, list):
             raise click.ClickException(
                 "NPMplus certificate inventory is unavailable or incomplete."
             )

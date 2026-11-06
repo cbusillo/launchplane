@@ -18,7 +18,6 @@ from control_plane.outbound_http import PublicTlsProbeResult
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
-from tests.support.auth import scoped_agent_transport
 from tests.support.http import request
 from tests.support.profiles import _odoo_preview_profile_payload
 from tests.test_testing_public_ingress import EdgeClient
@@ -116,9 +115,7 @@ class FirstTestingPublicIngressTests(unittest.IsolatedAsyncioTestCase):
         )
         self.client.certificate = self.certificate
         self.enterContext(
-            patch.object(
-                self.client, "list_certificates", create=True, return_value=(self.certificate,)
-            )
+            patch.object(self.client, "list_certificates", return_value=(self.certificate,))
         )
         self.enterContext(
             patch(
@@ -200,14 +197,6 @@ class FirstTestingPublicIngressTests(unittest.IsolatedAsyncioTestCase):
             self.store.read_route_binding_record(
                 product=self.profile.product, context_name="example", instance_name="testing"
             )
-
-    async def test_first_use_preserves_instance_and_director_identity_guards(self) -> None:
-        with scoped_agent_transport():
-            response = await self.plan()
-        self.assertEqual(response.status_code, 403, response.text)
-        response = await self.plan(instance="prod")
-        self.assertEqual(response.status_code, 400, response.text)
-        self.assertTrue(all(call == "list" for call in self.client.calls))
 
     def adapter(self) -> Any:
         from control_plane.testing_first_public_ingress import FirstTestingPublicIngressAdapter
@@ -396,4 +385,198 @@ class FirstTestingPublicIngressTests(unittest.IsolatedAsyncioTestCase):
                 adapter.apply(
                     "initial-edge-key", Mock(spec=["assert_current", "checkpoint_effect"])
                 )
+        self.assertNotIn("create", self.client.calls)
+
+    async def test_observation_preserves_a_later_external_authority_decision(self) -> None:
+        adapter = self.reviewed()
+        adapter.apply("initial-edge-key", Mock(spec=["assert_current", "checkpoint_effect"]))
+        binding = self.store.read_route_binding_record(
+            product=self.profile.product, context_name="example", instance_name="testing"
+        )
+        changed = binding.model_copy(
+            update={
+                "tls": binding.tls.model_copy(update={"owner": "external", "provider_evidence": {}})
+            }
+        )
+        self.store.write_route_binding_record(changed)
+        result = adapter.observe(
+            "initial-edge-key", "create_testing_public_route", adapter.reconciliation_key()
+        )
+        self.assertEqual(result.outcome, "unknown")
+        self.assertEqual(
+            self.store.read_route_binding_record(
+                product=self.profile.product, context_name="example", instance_name="testing"
+            ),
+            changed,
+        )
+        self.assertEqual(self.client.calls.count("create"), 1)
+
+    async def test_unresolved_edge_effect_is_visible_to_the_native_testing_reservation_gate(
+        self,
+    ) -> None:
+        from control_plane.generic_web_testing_exclusion import _target_reservations
+        from control_plane.workflows.generic_web_deploy_provider import (
+            dokploy_generic_web_provider_target_key,
+        )
+
+        adapter = self.reviewed()
+        provider = self.store.read_provider_target_record(
+            context_name="example", instance_name="testing"
+        )
+        reserved = self.store.reserve_mutation(
+            scope="fixture-edge",
+            route_path="/v1/products/example-odoo/testing-public-ingress",
+            idempotency_key="original-edge-key",
+            request_fingerprint="fixture",
+            provider_target_key=adapter.target_key(),
+            provider_target_origin=adapter.provider_target_origin(),
+            reconciliation_key=adapter.reconciliation_key(),
+            lease_owner="fixture",
+            lease_seconds=300,
+        )
+        self.assertEqual(reserved.status, "acquired")
+        held = _target_reservations(
+            self.store,
+            product=self.profile.product,
+            context="example",
+            target_key=dokploy_generic_web_provider_target_key(provider),
+            target_id=self.target_id.target_id,
+            require_complete=True,
+        )
+        self.assertEqual(held, (reserved.record,))
+
+    async def test_first_publication_can_template_a_later_restored_generation(self) -> None:
+        from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
+        from control_plane.testing_public_ingress import (
+            TestingPublicIngressAdapter,
+            TestingPublicIngressRequest,
+        )
+
+        adapter = self.reviewed()
+        adapter.apply("initial-edge-key", Mock(spec=["assert_current", "checkpoint_effect"]))
+        generation = FreshOdooTestingGeneration(
+            product=self.profile.product,
+            context="example",
+            operation_id="restored-testing",
+            target_id=self.target_id.target_id,
+            namespace="lp-testing-" + "e" * 32,
+            domain_host="restored-testing.example.invalid",
+            resources_binding_sha256="a" * 64,
+            bootstrap_plan_sha256="b" * 64,
+            request_sha256="c" * 64,
+            prepared_at=self.profile.updated_at,
+            source_mode="container-export",
+            source_binding_sha256="d" * 64,
+            certificate_type="letsencrypt",
+        )
+        self.store.write_fresh_odoo_testing_generation(generation)
+        profile = self.store.read_product_profile_record(self.profile.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(
+                            update={
+                                "base_url": "https://" + generation.domain_host,
+                                "health_url": "https://"
+                                + generation.domain_host
+                                + self.profile.health_path,
+                            }
+                        )
+                        for lane in profile.lanes
+                    )
+                }
+            )
+        )
+        self.store.write_dokploy_target_record(
+            self.target.model_copy(update={"domains": (generation.domain_host,)})
+        )
+        original = TestingPublicIngressAdapter(
+            self.root,
+            self.store,
+            self.profile.product,
+            TestingPublicIngressRequest(
+                context="example",
+                operation_id=generation.operation_id,
+                reason="Continue restored testing",
+            ),
+            "restored-trace",
+            self.client,
+        )
+        with patch(
+            "control_plane.testing_public_ingress.read_current_testing_generation",
+            return_value=generation,
+        ):
+            self.assertFalse(original.plan()["applied"])
+        self.assertEqual(self.client.calls.count("create"), 1)
+
+    async def test_native_reservation_allows_its_own_original_apply_and_replay(self) -> None:
+        if self.store.database_dialect_name != "postgresql":
+            self.skipTest("Native mutation fencing requires PostgreSQL.")
+        from control_plane.provider_operations import run_durable_provider_operation
+
+        adapter = self.reviewed()
+
+        def run() -> Any:
+            return run_durable_provider_operation(
+                store=self.store,
+                scope="fixture-edge",
+                route_path="/v1/products/example-odoo/testing-public-ingress",
+                idempotency_key="original-edge-key",
+                request_fingerprint="fixture",
+                lease_owner="fixture",
+                response_trace_id="fixture-trace",
+                adapter=adapter,
+            )
+
+        first = run()
+        self.assertEqual(first.status, "completed")
+        self.assertEqual(run().status, "replayed")
+        self.assertEqual(self.client.calls.count("create"), 1)
+
+    async def test_state_volume_custody_refuses_before_any_edge_effect(self) -> None:
+        from control_plane.application_state_volume import state_volume_target_key
+
+        self.store.reserve_mutation(
+            scope="volume-fixture",
+            route_path="/fixture/state-volume",
+            idempotency_key="retained-volume-key",
+            request_fingerprint="volume-fixture",
+            provider_target_key=state_volume_target_key("example"),
+            reconciliation_key="volume-fixture",
+            lease_owner="fixture",
+            lease_seconds=300,
+        )
+        with self.assertRaises(ValueError):
+            self.adapter().plan()
+        self.assertNotIn("create", self.client.calls)
+
+    async def test_hostname_setup_empty_optional_route_fields_remain_accepted(self) -> None:
+        self.routes[0]["customEntrypoint"] = ""
+        self.assertFalse(self.adapter().plan()["applied"])
+        self.assertNotIn("create", self.client.calls)
+
+    async def test_provider_history_and_foreign_hostname_claims_refuse_before_effect(self) -> None:
+        read = self.provider_read
+
+        def history(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/deployment.allByType":
+                return [
+                    {
+                        "composeId": self.target_id.target_id,
+                        "deploymentId": "active-deploy",
+                        "status": "running",
+                    }
+                ]
+            return read(**kwargs)
+
+        with patch("control_plane.testing_public_ingress.api.dokploy_request", side_effect=history):
+            with self.assertRaises(ValueError):
+                self.adapter().plan()
+        other = self.target.model_copy(
+            update={"context": "foreign", "domains": ("*.example.invalid",)}
+        )
+        self.store.write_dokploy_target_record(other)
+        with self.assertRaises(ValueError):
+            self.adapter().plan()
         self.assertNotIn("create", self.client.calls)

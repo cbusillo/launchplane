@@ -304,6 +304,44 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
 
 
 class TestingPublicIngressTests(TestingPublicIngressScenario):
+    def test_new_hostname_claim_after_effect_cannot_be_published_over(self) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from tests.support.profiles import _odoo_preview_profile_payload
+
+        self.review_edge()
+        generation = self.store.read_fresh_odoo_testing_generation(
+            self.profile.product, self.fixture.context
+        )
+        assert generation is not None
+        foreign_payload = _odoo_preview_profile_payload("foreign-odoo")
+        foreign_payload["lanes"] = (
+            {
+                "context": "foreign",
+                "instance": "testing",
+                "base_url": "https://" + generation.domain_host,
+            },
+        )
+        foreign_payload["preview"] = {"enabled": False, "context": "foreign"}
+        foreign = LaunchplaneProductProfileRecord.model_validate(foreign_payload)
+        publish = TestingPublicIngressAdapter._publish
+
+        def claim_hostname(adapter: TestingPublicIngressAdapter, *args: Any, **kwargs: Any) -> None:
+            self.store.write_product_profile_record(foreign)
+            publish(adapter, *args, **kwargs)
+
+        with patch.object(TestingPublicIngressAdapter, "_publish", new=claim_hostname):
+            with self.assertRaises(ProviderMutationUnknownError):
+                self.publish()
+        self.assertEqual(self.client.calls.count("create"), 1)
+        self.assertEqual(
+            self.store.read_route_binding_record(
+                product=self.profile.product,
+                context_name=self.fixture.context,
+                instance_name="testing",
+            ),
+            self.old_binding,
+        )
+
     def test_claim_list_uses_selected_route_configuration_for_readback(self) -> None:
         def claims() -> tuple[NpmplusProxyHostClaim, ...]:
             return tuple(

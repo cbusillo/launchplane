@@ -2409,35 +2409,19 @@ already stranded legacy operation.
 
 ### Publish the first testing public edge
 
-Use the same `testing-public-ingress` operation without `operation_id` for a
-service-created Odoo testing target that has never deployed or served. Complete
-its approved origin hostname first. The service derives that exact hostname
-from its tracked target and verifies the current provider route before planning
-any edge effect. It accepts no caller hostname, certificate, upstream or raw
-provider configuration.
+Use the same client below without `--operation-id` for a service-created Odoo
+testing lane that has never deployed or served. Complete its approved origin
+hostname first. The service derives that hostname, matches its recorded edge
+and selects an existing covering certificate. Missing or conflicting evidence,
+use, custody, holds and provider work refuse the operation. No certificate is
+issued and no credential, runtime, database or preview wildcard is changed.
 
-First use requires exclusive context and target ownership, resettable empty
-data, no current generation or public URL, no binding, no testing use or custody
-protection, no provider work or deployment history, and no competing reservation.
-It matches the live origin server and protocol to one active service-owned edge
-endpoint, and selects one existing unexpired certificate covering the hostname.
-Missing or ambiguous evidence refuses; this operation issues no certificate,
-changes no access list and never copies credentials. Preview wildcard setup is
-separate and is not proved by this testing operation.
-
-Run the client below without `--operation-id` to review first use. Apply uses the
-same saved review and stable key. It holds the testing event executor lock,
-reuses the existing marker, pending audit and original-key recovery, and writes
-the first route binding and testing public URL in one transaction. The expected
-binding and generation must still be absent, and every reviewed source must
-still agree. Readback verifies the loaded provider route, covering certificate,
-recorded binding and ordinary public TLS. A failed or lost post-effect response
-stays fenced for original-key observation; it never creates the route again.
-The audit records a first-use target witness separately from restored-generation
-evidence. The operation neither initializes nor deploys Odoo, and makes no
-serving, installation or health claim. After a first-use publication, a source
-rollback must retain the optional audit-witness reader; an older reader cannot
-interpret that new evidence.
+Review the dry-run, then apply and read back with the same saved evidence and
+stable key. Publication writes the first binding and testing URL together under
+the native testing fence. Lost or unverified effects stay with that original
+key; they are never created again. Readback verifies the loaded route and
+ordinary public TLS, and makes no serving, installation or health claim. The
+existing authority digest binds the first-use target; no generation is invented.
 
 ### Continue a restored generation's public edge
 

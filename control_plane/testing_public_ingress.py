@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import re
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 from urllib.parse import urlsplit
 
 import click
@@ -206,6 +206,7 @@ class TestingPublicIngressAdapter:
             "product": self.product,
             "context": self.request.context,
             "generation": generation_binding(generation),
+            "domain_host": generation.domain_host,
             "profile": profile.model_dump(mode="json", exclude_none=True),
             "target": target.model_dump(mode="json", exclude_none=True),
             "target_id": target_id.model_dump(mode="json", exclude_none=True),
@@ -269,7 +270,6 @@ class TestingPublicIngressAdapter:
             and audit.status == "applied"
             and audit.requested_domains == template.domain_names
             and audit.edge_endpoint_key == binding.ingress.endpoint_key
-            and bool(audit.testing_generation_sha256)
             and bool(audit.testing_authority_sha256)
             and audit.provider_host_id == template.id
             and audit.provider_route_sha256 == canonical_json_sha256(_host_payload(template))
@@ -409,18 +409,15 @@ class TestingPublicIngressAdapter:
             or custody.status not in {"pending", "applied"}
             or custody.requested_domains != desired.domain_names
             or custody.edge_endpoint_key != endpoint.endpoint_key
-            or (
-                custody.testing_generation_sha256
-                if self.request.operation_id
-                else custody.testing_first_use_sha256
-            )
-            != witness
+            or custody.testing_generation_sha256 != (witness if self.request.operation_id else "")
             or custody.testing_authority_sha256 != self._custody_binding(material)
             or custody.provider_route_sha256 != canonical_json_sha256(_host_payload(desired))
         ):
             raise ValueError("The pending edge operation no longer owns this route.")
         self._candidate(
-            self._audit(None, "preflight", desired=desired).model_copy(update={"status": "applied"})
+            self._audit(None, "preflight", desired=desired, authority=material).model_copy(
+                update={"status": "applied"}
+            )
         )
         for h in hosts:
             for name in h.domain_names:
@@ -468,20 +465,24 @@ class TestingPublicIngressAdapter:
             "public_tls_verified": applied,
         }
 
-    def _route_identity(self) -> tuple[str, str, EdgeEndpointRecord]:
-        generation = self.store.read_fresh_odoo_testing_generation(
-            self.product, self.request.context
-        )
-        if generation is None:
-            raise ValueError("The current testing generation is missing.")
-        binding = self.store.read_route_binding_record(
-            product=self.product, context_name=self.request.context, instance_name="testing"
-        )
+    def _authority_witness(self, material: dict[str, object]) -> str:
+        return str(material["generation"])
+
+    def _route_identity(
+        self, material: dict[str, object] | None = None
+    ) -> tuple[str, str, EdgeEndpointRecord]:
+        if material is None:
+            material, _ = self._authority()
         return (
-            generation.domain_host,
-            generation_binding(generation),
-            self.store.read_edge_endpoint_record(binding.ingress.endpoint_key),
+            str(material["domain_host"]),
+            self._authority_witness(material),
+            EdgeEndpointRecord.model_validate(material["endpoint"]),
         )
+
+    def _verify_readback_authority(
+        self, material: dict[str, object], audit: IngressRouteAuditRecord, current: NpmplusProxyHost
+    ) -> None:
+        return None
 
     def _execution_lock_name(self) -> str:
         return self.request.operation_id
@@ -493,8 +494,9 @@ class TestingPublicIngressAdapter:
         *,
         desired: NpmplusProxyHostPayload | None = None,
         custody_sha256: str = "",
+        authority: dict[str, object] | None = None,
     ) -> IngressRouteAuditRecord:
-        domain_host, witness, endpoint = self._route_identity()
+        domain_host, witness, endpoint = self._route_identity(authority)
         payload = host or desired
         assert payload is not None
         return IngressRouteAuditRecord(
@@ -510,7 +512,6 @@ class TestingPublicIngressAdapter:
             provider_certificate_ref=str(payload.certificate_id),
             provider_route_sha256=canonical_json_sha256(_host_payload(payload)),
             testing_generation_sha256=witness if self.request.operation_id else "",
-            testing_first_use_sha256=witness if not self.request.operation_id else "",
             testing_authority_sha256=custody_sha256,
             provider_host_id=host.id if host else None,
             operations=(
@@ -550,7 +551,7 @@ class TestingPublicIngressAdapter:
         expected: dict[str, object],
         custody_sha256: str,
     ) -> None:
-        audit = self._audit(host, provider_key, custody_sha256=custody_sha256)
+        audit = self._audit(host, provider_key, custody_sha256=custody_sha256, authority=expected)
         self.store.write_ingress_route_audit_record(audit)
         candidate = self._candidate(audit)
         self.store.publish_testing_public_ingress_binding(
@@ -560,8 +561,8 @@ class TestingPublicIngressAdapter:
         )
 
     def readback(self) -> dict[str, object]:
-        self._authority()
-        domain_host, witness, _ = self._route_identity()
+        material, _ = self._authority()
+        domain_host, witness, _ = self._route_identity(material)
         binding = self.store.read_route_binding_record(
             product=self.product, context_name=self.request.context, instance_name="testing"
         )
@@ -598,12 +599,7 @@ class TestingPublicIngressAdapter:
             or audit.edge_endpoint_key != endpoint.endpoint_key
             or audit.provider_certificate_ref != str(current.certificate_id)
             or audit.provider_route_sha256 != canonical_json_sha256(_host_payload(current))
-            or (
-                audit.testing_generation_sha256
-                if self.request.operation_id
-                else audit.testing_first_use_sha256
-            )
-            != witness
+            or audit.testing_generation_sha256 != (witness if self.request.operation_id else "")
         ):
             raise ValueError("The provider route differs from its original publication receipt.")
         if binding.model_dump(exclude={"source", "updated_at"}) != self._candidate(
@@ -623,6 +619,7 @@ class TestingPublicIngressAdapter:
             or not any(_covers(name, domain_host) for name in cert.domain_names)
         ):
             raise ValueError("The testing edge certificate changed.")
+        self._verify_readback_authority(material, audit, current)
         tls = probe_public_tls(domain_host, timeout_seconds=15)
         if tls.status not in {"valid", "expiring"}:
             raise TestingIngressPrerequisiteError("testing_edge_tls_unverified")
@@ -646,7 +643,7 @@ class TestingPublicIngressAdapter:
         provider = self.store.read_provider_target_record(
             context_name=target.context, instance_name="testing"
         )
-        expected = self._authority()[0]
+        expected = cast(dict[str, object], snapshot["material"])
         result_host: list[NpmplusProxyHost] = []
         if create:
             self.store.write_ingress_route_audit_record(
@@ -655,6 +652,7 @@ class TestingPublicIngressAdapter:
                     provider_key,
                     desired=desired,
                     custody_sha256=str(snapshot["custody_sha256"]),
+                    authority=expected,
                 )
             )
 
