@@ -2407,6 +2407,38 @@ generation, key and copy custody; do not edit its digest or invent a safe-releas
 attestation. A forward fix for new journals does not establish recovery of an
 already stranded legacy operation.
 
+### Publish the first testing public edge
+
+Use the same `testing-public-ingress` operation without `operation_id` for a
+service-created Odoo testing target that has never deployed or served. Complete
+its approved origin hostname first. The service derives that exact hostname
+from its tracked target and verifies the current provider route before planning
+any edge effect. It accepts no caller hostname, certificate, upstream or raw
+provider configuration.
+
+First use requires exclusive context and target ownership, resettable empty
+data, no current generation or public URL, no binding, no testing use or custody
+protection, no provider work or deployment history, and no competing reservation.
+It matches the live origin server and protocol to one active service-owned edge
+endpoint, and selects one existing unexpired certificate covering the hostname.
+Missing or ambiguous evidence refuses; this operation issues no certificate,
+changes no access list and never copies credentials. Preview wildcard setup is
+separate and is not proved by this testing operation.
+
+Run the client below without `--operation-id` to review first use. Apply uses the
+same saved review and stable key. It holds the testing event executor lock,
+reuses the existing marker, pending audit and original-key recovery, and writes
+the first route binding and testing public URL in one transaction. The expected
+binding and generation must still be absent, and every reviewed source must
+still agree. Readback verifies the loaded provider route, covering certificate,
+recorded binding and ordinary public TLS. A failed or lost post-effect response
+stays fenced for original-key observation; it never creates the route again.
+The audit records a first-use target witness separately from restored-generation
+evidence. The operation neither initializes nor deploys Odoo, and makes no
+serving, installation or health claim. After a first-use publication, a source
+rollback must retain the optional audit-witness reader; an older reader cannot
+interpret that new evidence.
+
 ### Continue a restored generation's public edge
 
 An independent Dokploy hostname does not provision its public edge. With a

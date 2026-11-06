@@ -70,6 +70,9 @@ class EdgeClient(_FakeNpmplusIngressClient):
             raise ValueError("The fixture host has private TLS or unloaded config")
         return next(host for host in self.proxy_hosts if host.id == host_id)
 
+    def list_certificates(self) -> tuple[NpmplusCertificate, ...]:
+        return (self.certificate,)
+
     def get_certificate(self, certificate_id: int) -> NpmplusCertificate:
         if certificate_id != self.certificate.id:
             raise ValueError("Unknown fixture certificate")

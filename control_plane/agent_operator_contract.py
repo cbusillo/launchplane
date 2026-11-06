@@ -291,7 +291,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         TESTING_PUBLIC_INGRESS_ROUTE,
-        "Publish the current independent Odoo testing hostname at its recorded edge using an existing covering certificate; preserve its restored copy and retained routes.",
+        "Publish a first-use or restored Odoo testing hostname at its recorded edge with an existing covering certificate; preserve runtime, credentials and retained routes.",
         ("service_api",),
         ("dry-run", "apply", "readback"),
         "apply",
