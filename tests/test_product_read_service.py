@@ -223,6 +223,22 @@ class ProductReadServiceTests(unittest.TestCase):
         self.profile = LaunchplaneProductProfileRecord.model_validate(_profile_payload())
         self.store = _ProductReadStore(self.profile)
 
+    def test_live_product_warns_when_host_updates_have_never_been_observed(self) -> None:
+        baseline = build_product_environment_list_service_payload(
+            record_store=self.store, action_allowed=lambda *_: True
+        )
+        self.store.profile = self.profile.model_copy(update={"production_use": "live"})
+        result = build_product_environment_list_service_payload(
+            record_store=self.store, action_allowed=lambda *_: True
+        )
+        product = cast(list[dict[str, object]], result["products"])[0]
+        before = cast(list[dict[str, object]], baseline["products"])[0]
+        previous = cast(list[dict[str, object]], before["environments"])
+        environments = cast(list[dict[str, object]], product["environments"])
+        for old, new in zip(previous, environments, strict=True):
+            added = set(cast(list[str], new["warnings"])) - set(cast(list[str], old["warnings"]))
+            self.assertEqual(len(added), int(new["environment"] == "prod"))
+
     def test_product_read_model_store_requires_db_summary_capabilities(self) -> None:
         class PartialStore:
             def list_product_profile_records(

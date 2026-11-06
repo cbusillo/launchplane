@@ -315,6 +315,13 @@ class HealthMonitorScheduler:
             observed_at=_timestamp(self.clock()),
             should_stop=self._stop.is_set,
         )
+        from control_plane.host_security_updates import collect_host_security_updates
+
+        if not self._stop.is_set():
+            try:
+                collect_host_security_updates(self.store, should_stop=self._stop.is_set)
+            except Exception:
+                _LOGGER.exception("Host security-update observation failed")
 
     def watch_once(self, instance: str = "prod") -> bool:
         now = self.clock()

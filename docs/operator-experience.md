@@ -1087,6 +1087,15 @@ result. Its ordered `transitions` contain only changes caused by evidence expiry
 clients select the last transition whose `after` timestamp has passed. An open
 page therefore expires cached evidence without a second health algorithm.
 
+Live products also warn when a production host has no successful security-update
+completion, or its last completion is over two days old. The delivery worker
+reads Debian's `upgrade-stamp` through the existing host transport; apt writes
+that stamp after a successful unattended run, including one with no upgrades.
+Shared hosts are read once per pass. Each lane's latest result replaces a
+completion receipt in the existing store, outside uptime history. Missing,
+expired, denied, moved-target or invalid evidence remains unverified. A fresh
+read clears the warning. Launchplane does not run updates or reboot the host.
+
 The catalog's `product-status-read` reads the same product
 inventory once and returns each caller-visible product and every recorded lane's sidebar tone and description,
 sidebar reasons and attention and warning reasons, plus the product's warnings. Missing lane status
