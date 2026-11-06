@@ -263,6 +263,20 @@ class NpmplusWildcardIngressOperation:
                 )
             if provider_effect_phase.startswith("wildcard_provider_rejected_http_"):
                 self.plan()
+                self.finish(
+                    NpmplusIngressApplyResult(
+                        status="unchanged",
+                        dry_run=False,
+                        operations=(
+                            NpmplusIngressOperation(
+                                action="no-op",
+                                domain_names=self.request.route.domain_names,
+                                requires_apply=False,
+                            ),
+                        ),
+                    ),
+                    provider_operation_key,
+                )
                 return ProviderObservation("absent", retry_safe=True)
         except (ValueError, LookupError, OSError, click.ClickException):
             return ProviderObservation("unknown")

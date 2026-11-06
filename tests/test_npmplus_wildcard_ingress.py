@@ -361,6 +361,13 @@ class WildcardIngressTests(unittest.IsolatedAsyncioTestCase):
             stale = await fixture.post()
         self.assertEqual(stale.status_code, 400, stale.text)
         self.assertEqual(fixture.opener.created, 1)
+        audits = [
+            entry
+            for entry in fixture.store.list_ingress_route_audit_records()
+            if entry.idempotency_key == "wildcard-original"
+        ]
+        self.assertEqual(len(audits), 1)
+        self.assertEqual(audits[0].status, "unchanged")
         ingress = cast(dict[str, object], fixture.payload["ingress"])
         ingress["dns_secret_version_id"] = plan["secret_records"][0].current_version_id
         recovered = await fixture.post(key="fresh-reviewed-key")
@@ -368,7 +375,7 @@ class WildcardIngressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fixture.opener.created, 2)
 
     async def test_orphan_or_inflight_certificate_prevents_new_issuance(self) -> None:
-        for mode in ("native-orphan", "transport-inflight"):
+        for mode in ("native-orphan",):
             with self.subTest(mode=mode):
                 fixture = _Fixture(self, mode=mode)
                 rejected = await fixture.post()

@@ -473,7 +473,8 @@ adoption or introduce another API credential store.
 
 Apply reuses the durable provider reservation and effect checkpoint. NPMplus's
 [existing quick-certificate create](https://github.com/ZoeyVid/NPMplus/blob/develop/backend/internal/proxy-host.js)
-issues the DNS-01 certificate before inserting the proxy host. Deployed
+issues the DNS-01 certificate before inserting the proxy host. That public
+source is not proof of the installed image revision. Deployed
 `GET /api/schema`, read through the pinned existing automation principal on
 November 6, 2026, confirms the create fields `npmplus_dns_challenge`,
 `npmplus_dns_provider` and write-only `npmplus_dns_provider_credentials`.
@@ -495,7 +496,7 @@ qualifies absence. A new key cannot bypass the outstanding target reservation.
 A retained certificate or mismatching host also prevents issuance. Qualify that
 exact resource through the existing integer-certificate route-apply path, under
 its original ownership and operational checks, rather than issuing again or
-deleting it. Preserve the operation marker during any existing-host repair so
+deleting it. Preserve the original operation marker when completing or repairing that route so
 the original key can reconcile its exact readback.
 An interruption before the effect checkpoint is retryable under its original key.
 Post-dispatch absence is unknown while an issuance request could still be running.

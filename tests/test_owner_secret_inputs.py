@@ -13,6 +13,7 @@ from control_plane.storage.product_authority_bundle import (
 from cryptography.fernet import Fernet
 
 from control_plane import secrets
+from control_plane.npmplus import PREVIEW_DNS_INTEGRATION
 from control_plane.artifact_scan import GHCR_ARTIFACT_READ_INTEGRATION
 from control_plane.owner_secret_inputs import resolve_owner_secret_submission
 from control_plane.contracts.authz_policy_record import AuthzPolicyConflictError
@@ -91,7 +92,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
         for environment in (
             "onboarding_github_app",
             "trusted_maintenance_webhook",
-            "preview_dns_cloudflare",
+            PREVIEW_DNS_INTEGRATION,
         ):
             with self.subTest(environment=environment):
                 read = await self.service_read(director, environment)
