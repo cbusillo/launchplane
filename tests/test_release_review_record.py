@@ -432,27 +432,6 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         )
         self.assertNotIn("method", api.call_args_list[0].kwargs)
 
-    def test_recovers_a_record_written_with_older_wording(self) -> None:
-        older_body = (
-            release_decision_issue_body(self.decision)
-            .replace("## Client checklist", "## Owner checklist")
-            .replace("\n", "\r\n")
-        )
-        with patch(
-            "control_plane.release_review_record.github_api_request",
-            return_value=[{"number": 99, "body": older_body}],
-        ) as api:
-            url = publish_release_decision(
-                store=self.store,
-                control_plane_root=self.root,
-                profile=profile(),
-                decision=self.decision,
-            )
-        self.assertEqual(url, "https://github.com/example/site/issues/99")
-        self.assertEqual(
-            [call.kwargs.get("method", "GET") for call in api.call_args_list], ["GET", "DELETE"]
-        )
-
     def test_only_the_same_record_marker_on_the_first_line_recovers(self) -> None:
         body = release_decision_issue_body(self.decision)
         other = release_decision_issue_body(

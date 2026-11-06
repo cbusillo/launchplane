@@ -167,6 +167,14 @@ class ClientReleaseBackoff:
     blocked: dict[str, tuple[str, float]] = field(default_factory=dict)
     reconciliations: dict[str, tuple[str, float]] = field(default_factory=dict)
 
+    def should_defer(self, key: str, identity: str) -> bool:
+        now = monotonic()
+        blocked = self.blocked.get(key)
+        if blocked is not None and blocked[0] == identity and now < blocked[1]:
+            return True
+        self.blocked[key] = (identity, now + 300)
+        return False
+
 
 CLIENT_RELEASE_RECONCILIATION_SECONDS = 60.0
 
@@ -1371,11 +1379,8 @@ def _record_standing_acceptance(
             profile.model_dump_json() + production.model_dump_json() + candidate.model_dump_json()
         ).encode()
     ).hexdigest()
-    if backoff is not None:
-        blocked = backoff.blocked.get(profile.product)
-        if blocked is not None and blocked[0] == fingerprint and monotonic() < blocked[1]:
-            return
-        backoff.blocked[profile.product] = (fingerprint, monotonic() + 300)
+    if backoff is not None and backoff.should_defer(profile.product, fingerprint):
+        return
     # Stamp before reads: a human decision made while GitHub is being read remains
     # newer than this standing decision even if its DB write finishes first.
     decided_at = datetime.now(UTC).isoformat()
@@ -1613,15 +1618,10 @@ def advance_client_releases(
         ):
             pending_profile, decision = pending
             publication_key = f"publication:{profile.product}"
-            if release_backoff is not None:
-                blocked = release_backoff.blocked.get(publication_key)
-                if (
-                    blocked is not None
-                    and blocked[0] == decision.record_id
-                    and monotonic() < blocked[1]
-                ):
-                    continue
-                release_backoff.blocked[publication_key] = (decision.record_id, monotonic() + 300)
+            if release_backoff is not None and release_backoff.should_defer(
+                publication_key, decision.record_id
+            ):
+                continue
             try:
                 _require_current_release(
                     store, control_plane_root, pending_profile, decision, require_publication=False

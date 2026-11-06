@@ -744,16 +744,18 @@ class ClientReleaseTests(unittest.TestCase):
                 release_issue_url="https://github.com/example/site/issues/99",
             ).release_issue_url
 
-        with patch(
-            "control_plane.client_release.publish_release_decision", side_effect=StopIteration
-        ) as publish:
+        with (
+            patch(
+                "control_plane.client_release.publish_release_decision", side_effect=StopIteration
+            ) as publish,
+            patch("control_plane.client_release.monotonic", return_value=0),
+        ):
             with self.assertLogs("control_plane.client_release", level="ERROR"):
                 self.assertEqual(advance(), ())
             self.assertEqual(advance(), ())
             publish.assert_called_once()
-        deadline = max(value[1] for value in backoff.blocked.values())
         with (
-            patch("control_plane.client_release.monotonic", return_value=deadline + 1),
+            patch("control_plane.client_release.monotonic", return_value=86_400),
             patch(
                 "control_plane.client_release.publish_release_decision", side_effect=publish_saved
             ) as publish,

@@ -3032,7 +3032,8 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         assert incomplete.checklist is not None
         incomplete = incomplete.model_copy(
             update={
-                "checklist": incomplete.checklist.model_copy(update={"untracked_commits": (HEAD,)})
+                "checklist": incomplete.checklist.model_copy(update={"untracked_commits": (HEAD,)}),
+                "checklist_complete": False,
             }
         )
         backoff = ClientReleaseBackoff()
