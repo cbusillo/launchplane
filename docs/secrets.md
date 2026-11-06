@@ -97,7 +97,22 @@ The purpose/integration is `preview_dns_cloudflare`, binding and secret name
 request revision, administrator check and atomic write apply. Agents handle only
 readiness, secret IDs and version IDs. They never obtain the value from another
 store or ask for it in a message. Entry does not prove the provider permissions;
-confirm entry with the Director before executing the first product setup.
+confirm entry with the Director before executing the first product setup unless
+the Director has explicitly authorized a bounded transfer instead.
+
+For an explicitly authorized initial transfer, the Director's authenticated
+agent can fill this same absent slot through `POST /v1/product-config/apply`:
+product and context `launchplane`, no instance, exactly one supplied context
+secret with integration `preview_dns_cloudflare`, name and binding `api_token`.
+Existing `product_config.plan` and `product_config.apply` authorization, matching
+dry-run, idempotency and atomic encryption apply. This fixed service input needs
+no product profile. Mixed runtime bundles, other purposes and Client agents do
+not gain this path. A filled slot refuses another write; use the existing
+signed-in form for rotation. A completed original-key retry replays its receipt.
+Transfer the value directly in memory through private stdin, with no arguments,
+tracing, output, evidence files or intermediate store; read back metadata only.
+Source access and custody remain the Director's explicit decision. This path
+does not authorize retrieving a credential or private key on its own.
 
 Only the service's product wildcard create resolves this purpose. It is separate
 from NPMplus API authentication and application runtime bindings. It is never

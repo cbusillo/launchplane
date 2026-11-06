@@ -16382,6 +16382,11 @@ def create_launchplane_fastapi_app(
         operator_identity = isinstance(
             identity, GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity
         )
+        service_dns_input = (
+            isinstance(identity, LocalOperatorIdentity)
+            and director_agent_identity(identity)
+            and product_config_request.is_preview_dns_service_input()
+        )
         action = (
             "product_config.apply"
             if product_config_request.mode == "apply"
@@ -16451,8 +16456,10 @@ def create_launchplane_fastapi_app(
                         code="authorization_denied",
                         message=f"Caller cannot perform {required_action} for calendar configuration.",
                     )
-        if isinstance(identity, LocalOperatorIdentity) and (
-            product_config_request.mode == "apply" or not director_agent_identity(identity)
+        if (
+            not service_dns_input
+            and isinstance(identity, LocalOperatorIdentity)
+            and (product_config_request.mode == "apply" or not director_agent_identity(identity))
         ):
             scope_refusal = _local_operator_product_config_scope_refusal(
                 record_store=record_store,
@@ -16560,13 +16567,17 @@ def create_launchplane_fastapi_app(
             )
 
         try:
-            config_profile = control_plane_product_config_service.resolve_product_config_profile(
-                database_store,
-                product=product_config_request.product,
-                context=product_config_request.context,
-                instance=product_config_request.instance,
-                context_wide=context_wide_config,
-                diagnostic_preview=is_diagnostic_preview_config(request_payload),
+            config_profile = (
+                None
+                if service_dns_input
+                else control_plane_product_config_service.resolve_product_config_profile(
+                    database_store,
+                    product=product_config_request.product,
+                    context=product_config_request.context,
+                    instance=product_config_request.instance,
+                    context_wide=context_wide_config,
+                    diagnostic_preview=is_diagnostic_preview_config(request_payload),
+                )
             )
         except control_plane_product_config.ProductConfigError as error:
             profile_error = control_plane_product_config_service.product_config_service_error(error)
@@ -16608,6 +16619,7 @@ def create_launchplane_fastapi_app(
         if (
             isinstance(identity, LocalOperatorIdentity)
             and (product_config_request.mode == "apply" or not director_agent_identity(identity))
+            and config_profile is not None
             and config_profile.production_use == "live"
             # The profile's live status describes production, not its owned
             # testing lane. Target ownership and instance scope are checked above.
@@ -16653,6 +16665,25 @@ def create_launchplane_fastapi_app(
                 code="matching_dry_run_required",
                 message="Product-config apply requires a prior matching dry-run.",
             )
+        if service_dns_input:
+            from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION
+
+            if (
+                database_store.find_secret_record(
+                    scope="context",
+                    integration=PREVIEW_DNS_INTEGRATION,
+                    name=PREVIEW_DNS_BINDING,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    instance="",
+                )
+                is not None
+            ):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="service_secret_already_configured",
+                    message="The DNS credential is already configured. Use the signed-in form to rotate it.",
+                )
 
         def secret_copy_source_readable(*, context: str, instance: str) -> bool:
             # Secret-value copies retain their existing explicit source grants.
@@ -16693,6 +16724,7 @@ def create_launchplane_fastapi_app(
         calendar_replacement = None
         try:
             if product_config_request.odoo_business_hours is not None:
+                assert config_profile is not None
                 try:
                     calendar_plan, calendar_replacement = await asyncio.to_thread(
                         odoo_business_hours_config.plan_business_hours_config,
@@ -16860,14 +16892,24 @@ def create_launchplane_fastapi_app(
             authority_bundle = authority_bundle.model_copy(
                 update={"expected_product_profiles": (expected_product_profile,)}
             )
-        authority_bundle = authority_bundle.model_copy(
-            update={
-                "required_product_config_target": (
-                    product_config_request.product,
-                    product_config_request.context,
-                    "" if context_wide_config else product_config_request.instance,
-                )
-            }
+        authority_bundle = (
+            authority_bundle.model_copy(
+                update={
+                    "required_product_config_target": (
+                        product_config_request.product,
+                        product_config_request.context,
+                        "" if context_wide_config else product_config_request.instance,
+                    )
+                }
+            )
+            if not service_dns_input
+            else authority_bundle.model_copy(
+                update={
+                    "absent_secret_ids": tuple(
+                        record.secret_id for record in authority_bundle.secret_records
+                    )
+                }
+            )
         )
         driver_result: dict[str, object] = {
             **planned_driver_result,
@@ -16938,7 +16980,11 @@ def create_launchplane_fastapi_app(
                 response=product_config_response,
             )
         else:
-            if isinstance(identity, LocalOperatorIdentity) and product_config_request.context:
+            if (
+                not service_dns_input
+                and isinstance(identity, LocalOperatorIdentity)
+                and product_config_request.context
+            ):
                 # Re-checked under the profile-write lock when the bundle commits.
                 authority_bundle = authority_bundle.model_copy(
                     update={
@@ -16958,7 +17004,11 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     response=product_config_response,
                 )
-                if public_hosts_plan is None:
+                if service_dns_input:
+                    database_store.write_preview_dns_secret_bundle(
+                        completed_bundle, identity=identity
+                    )
+                elif public_hosts_plan is None:
                     database_store.write_product_authority_bundle(
                         completed_bundle, identity=identity
                     )

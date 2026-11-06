@@ -398,6 +398,50 @@ class ProductConfigApplyEnvelope(BaseModel):
     odoo_business_hours: OdooBusinessHoursConfigRequest | None = None
     reviewed_plan_sha256: str = ""
 
+    def is_preview_dns_service_input(self) -> bool:
+        from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION
+
+        if (
+            self.product != "launchplane"
+            or self.context != "launchplane"
+            or self.instance
+            or len(self.secrets) != 1
+            or self.model_fields_set
+            - {
+                "schema_version",
+                "mode",
+                "product",
+                "context",
+                "instance",
+                "source_label",
+                "reason",
+                "confirmation",
+                "secrets",
+                "reviewed_plan_sha256",
+            }
+        ):
+            return False
+        secret = self.secrets[0]
+        return (
+            not secret.model_fields_set
+            - {
+                "scope",
+                "context",
+                "instance",
+                "integration",
+                "name",
+                "binding_key",
+                "value",
+                "description",
+            }
+            and secret.scope == "context"
+            and secret.context in {None, "launchplane"}
+            and not secret.instance
+            and secret.integration == PREVIEW_DNS_INTEGRATION
+            and secret.name == secret.binding_key == PREVIEW_DNS_BINDING
+            and secret.value is not None
+        )
+
     @field_validator("public_hosts", mode="before")
     @classmethod
     def _validate_public_hosts(cls, value: object) -> tuple[str, ...]:
