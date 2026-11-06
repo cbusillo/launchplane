@@ -6,7 +6,8 @@ import click
 
 from control_plane import secrets
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.public_hosts import normalize_public_hosts
+from control_plane.contracts.public_hosts import normalize_public_hosts, retained_hostname_identity
+from control_plane.ingress_route_scope import tracked_ingress_targets
 from control_plane.contracts.product_profile_record import (
     is_exclusive_product_context,
     product_context_owner_map,
@@ -103,24 +104,61 @@ class NpmplusWildcardIngressOperation:
         namespace = normalize_public_hosts((base.hostname or "",))[0]
         if base.scheme != "https" or self.request.route.domain_names != ("*." + namespace,):
             raise ValueError("Wildcard issuance must use the recorded product preview namespace.")
-        for other in self.store.list_product_profile_records():
+        profiles = self.store.list_product_profile_records()
+        claimed_hosts = {
+            retained_hostname_identity(value)
+            for other in profiles
+            for lane in other.lanes
+            for value in (
+                lane.base_url,
+                lane.health_url,
+                *(
+                    check.url
+                    for check in lane.health_monitoring.checks
+                    if check.enabled and check.kind == "public_http"
+                ),
+            )
+            if value.strip()
+        } | {
+            name
+            for other in profiles
+            for target in tracked_ingress_targets(self.store, other)
+            for name in target.hostname_claims
+        }
+        wildcard_name = "*." + namespace
+        if any(
+            _covers(name, wildcard_name) or _covers(wildcard_name, name) for name in claimed_hosts
+        ):
+            raise ValueError("A product lane already claims this wildcard namespace.")
+        for other in profiles:
             if other.product == self.product or not other.preview.enabled:
                 continue
             for entry in self.store.list_runtime_environment_records(
                 scope="context", context_name=other.preview.context
             ):
                 other_base = entry.env.get("LAUNCHPLANE_PREVIEW_BASE_URL")
-                if isinstance(other_base, str) and urlsplit(other_base).hostname == namespace:
-                    raise ValueError("Another product owns this preview namespace.")
+                if isinstance(other_base, str):
+                    other_namespace = retained_hostname_identity(other_base)
+                    if other_namespace and (
+                        namespace == other_namespace
+                        or namespace.endswith("." + other_namespace)
+                        or other_namespace.endswith("." + namespace)
+                    ):
+                        raise ValueError("Another product owns this preview namespace.")
         try:
             edge = self.store.read_edge_endpoint_record(self.request.route.edge_endpoint_key)
         except (FileNotFoundError, LookupError) as error:
             raise ValueError("The reviewed edge endpoint is unavailable.") from error
-        if edge.status != "active" or (
-            self.request.route.forward_host,
-            self.request.route.forward_port,
-            self.request.route.forward_scheme,
-        ) != (edge.upstream_host, edge.upstream_port, edge.upstream_scheme):
+        if (
+            edge.status != "active"
+            or edge.upstream_scheme != "https"
+            or (
+                self.request.route.forward_host,
+                self.request.route.forward_port,
+                self.request.route.forward_scheme,
+            )
+            != (edge.upstream_host, edge.upstream_port, edge.upstream_scheme)
+        ):
             raise ValueError("The reviewed edge endpoint changed.")
         result = apply_npmplus_ingress_route(
             client=self.client, request=self.request.model_copy(update={"mode": "dry-run"})

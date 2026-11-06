@@ -594,6 +594,16 @@ idempotency and compare-and-write checks remain required. This changes no
 credentials, grants, provider state or release authority. See
 [artifact scanning](artifact-security.md) for qualification and recovery.
 
+The transport-marked Director operator can also create a product preview
+wildcard through the existing ingress apply operation. The closed request uses
+only a new Cloudflare certificate, forced TLS and an active recorded HTTPS edge.
+The service refuses existing or overlapping provider claims, recorded product
+lane hosts and other products' preview namespaces. Arbitrary NGINX text, extra
+locations and upstream overrides require the general ingress policy. Provider
+reservation, original-key reconciliation and secret-version checks still apply;
+this conditional path changes no grant or credential. See
+[preview wildcard creation](driver-development.md#preview-wildcard-creation).
+
 Treat `authorization_denied` as an authority result, not a credential-selection
 hint. Record the denied action, scope, and trace ID, then:
 
