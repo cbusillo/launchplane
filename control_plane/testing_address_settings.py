@@ -36,6 +36,7 @@ from control_plane.testing_candidate_probe import (
     CANDIDATE_CONTAINER_PROBE,
     sanitized_testing_readback_policy,
 )
+from control_plane.testing_serving_copy import testing_receiver_generation
 
 if TYPE_CHECKING:
     from control_plane.testing_address import TestingAddressAdapter
@@ -172,13 +173,7 @@ def canonical_settings_frame(
         base64.b64decode(payload, validate=True)
     ).website_bootstrap
     spec: dict[str, object] = {
-        "generation": plan.before.generation.model_dump(mode="json")
-        if plan.before.generation
-        else {
-            "namespace": candidate.namespace,
-            "instance": "testing",
-            "resources_binding_sha256": candidate.resources_binding_sha256,
-        },
+        "generation": testing_receiver_generation(candidate, plan.before.generation),
         "compose_project": plan.provider_project,
         "database_name": environment.get("ODOO_DB_NAME", ""),
         "database_data_directory": compose.ODOO_DATABASE_DATA_DIRECTORY,

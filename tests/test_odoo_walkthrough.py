@@ -987,6 +987,31 @@ class AccountProgramTests(unittest.TestCase):
 
     parameter_api = ("get_param", "set_param")
 
+    def test_empty_publication_account_requires_absent_restore_witness_and_keeps_task_custody(
+        self,
+    ) -> None:
+        self.request.update(copy_binding="empty:" + "a" * 64, copy_witness="")
+        with self.assertRaises(RuntimeError):
+            self.execute()
+        self.users.create.assert_not_called()
+        self.parameters.pop(TESTING_COPY_COMPLETION_PARAMETER)
+        self.request.pop("copy_witness")
+        with self.assertRaises(RuntimeError):
+            self.execute()
+        self.users.create.assert_not_called()
+        self.request["copy_witness"] = ""
+        self.assertEqual(self.execute()["status"], "pass")
+        self.user.login = WALKTHROUGH_LOGIN_PREFIX + self.request["task_id"]
+        self.request["operation"] = "cleanup"
+        self.user.write.side_effect = lambda updates: setattr(
+            self.user, "active", updates["active"]
+        )
+        self.assertEqual(self.execute()["status"], "pass")
+        self.request["copy_binding"] = "another-empty-publication"
+        self.request["binding"] = "another-task-copy-binding"
+        with self.assertRaises(RuntimeError):
+            self.execute()
+
     def setUp(self) -> None:
         self.addCleanup(logging.disable, logging.root.manager.disable)
         self.enterContext(patch.dict(sys.modules, {"odoo_website_settings": None}))
