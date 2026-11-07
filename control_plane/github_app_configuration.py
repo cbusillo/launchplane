@@ -12,6 +12,15 @@ if TYPE_CHECKING:
 ADVISORY_GITHUB_APP_ID_ENV_KEY = "LAUNCHPLANE_ADVISORY_GITHUB_APP_ID"
 ONBOARDING_GITHUB_APP_CLIENT_ID_ENV_KEY = "LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID"
 ONBOARDING_GITHUB_APP_INTEGRATION = "onboarding_github_app"
+RUNNER_LIFECYCLE_GITHUB_APP_INTEGRATION = "runner_lifecycle_github_app"
+RUNNER_LIFECYCLE_GITHUB_APP_ID_KEY = "LAUNCHPLANE_RUNNER_LIFECYCLE_GITHUB_APP_ID"
+RUNNER_LIFECYCLE_GITHUB_APP_CLIENT_ID_KEY = "LAUNCHPLANE_RUNNER_LIFECYCLE_GITHUB_APP_CLIENT_ID"
+
+
+def validate_app_id(value: str) -> str:
+    if not value.isdecimal() or int(value) < 1:
+        raise ValueError("GitHub App id must be a positive numeric identifier.")
+    return value
 
 
 def validate_onboarding_app_client_id(value: str) -> str:
@@ -22,7 +31,10 @@ def validate_onboarding_app_client_id(value: str) -> str:
 
 def validate_delivery_key_integration(value: str) -> str:
     integration = value.strip()
-    if not integration or integration == ONBOARDING_GITHUB_APP_INTEGRATION:
+    if not integration or integration in {
+        ONBOARDING_GITHUB_APP_INTEGRATION,
+        RUNNER_LIFECYCLE_GITHUB_APP_INTEGRATION,
+    }:
         raise ValueError("Delivery App requires its own key integration.")
     return integration
 

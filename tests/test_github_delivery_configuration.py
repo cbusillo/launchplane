@@ -8,7 +8,10 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from control_plane import secrets
-from control_plane.github_app_configuration import ONBOARDING_GITHUB_APP_INTEGRATION
+from control_plane.github_app_configuration import (
+    ONBOARDING_GITHUB_APP_INTEGRATION,
+    RUNNER_LIFECYCLE_GITHUB_APP_INTEGRATION,
+)
 from control_plane.runtime_environments import build_runtime_environment_definition_from_records
 from control_plane.launchplane_github_delivery import (
     DELIVERY_GITHUB_APP_ID_KEY,
@@ -130,8 +133,15 @@ class DeliveryConfigurationTests(unittest.TestCase):
         )
         self.assertNotIn("fixture-key-material", str(result))
 
-    def test_onboarding_key_cannot_be_offered_or_selected_for_delivery(self) -> None:
-        integration = ONBOARDING_GITHUB_APP_INTEGRATION
+    def test_service_purpose_keys_cannot_be_offered_or_selected_for_delivery(self) -> None:
+        for integration in (
+            ONBOARDING_GITHUB_APP_INTEGRATION,
+            RUNNER_LIFECYCLE_GITHUB_APP_INTEGRATION,
+        ):
+            with self.subTest(integration=integration):
+                self.assert_purpose_key_excluded(integration)
+
+    def assert_purpose_key_excluded(self, integration: str) -> None:
         secrets.write_secret_value(
             record_store=self.store,
             scope="context",

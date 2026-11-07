@@ -91,6 +91,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
         director = _human("director", 9004, "admin")
         for environment in (
             "onboarding_github_app",
+            "runner_lifecycle_github_app",
             "trusted_maintenance_webhook",
             PREVIEW_DNS_INTEGRATION,
         ):
@@ -98,7 +99,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
                 read = await self.service_read(director, environment)
                 self.assertEqual(read.status_code, 200, read.text)
                 (field,) = read.json()["fields"]
-                self.assertEqual(field["multiline"], environment == "onboarding_github_app")
+                self.assertEqual(field["multiline"], environment.endswith("github_app"))
                 value = (
                     "synthetic-line-one\nsynthetic-line-two\n"
                     if field["multiline"]

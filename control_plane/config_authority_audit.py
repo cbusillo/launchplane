@@ -1072,9 +1072,6 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "GH_TOKEN": frozenset(("${{ steps.github-read-token.outputs.token }}",)),
         "RUNNER_REPOSITORY_SCOPE": frozenset(("${{ github.repository }}",)),
     },
-    ".github/workflows/runner-lane-registration.yml": {
-        "GH_TOKEN": frozenset(("${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}",))
-    },
 }
 INGRESS_ROUTE_WORKFLOW_PATHS = frozenset(
     (

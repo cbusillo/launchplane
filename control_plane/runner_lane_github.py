@@ -20,6 +20,12 @@ class RunnerLaneClock(Protocol):
     def now(self) -> datetime: ...
 
 
+class RunnerLaneRegistrationTokenFetcher(Protocol):
+    def fetch_registration_token(
+        self, *, repository: str
+    ) -> tuple[str, RunnerLaneRegistrationTokenRecord]: ...
+
+
 class SystemRunnerLaneClock:
     def now(self) -> datetime:
         return datetime.now(timezone.utc).replace(microsecond=0)

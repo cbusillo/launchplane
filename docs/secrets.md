@@ -87,6 +87,49 @@ the value or the displayed receipt time. Superseded requests remain encrypted
 history and are not runtime-bound; automatic removal of retained secret history is
 not part of this input flow.
 
+## Runner lifecycle App credential
+
+The Director alone pastes the independently held runner lifecycle App private
+key into `/ui/owner-secrets?product=launchplane&environment=runner_lifecycle_github_app`.
+The existing masked multiline input preserves internal line breaks, clears
+before submission and returns only a receipt. The purpose/integration is
+`runner_lifecycle_github_app`, binding and name `private_key`, context
+`launchplane`, no instance. Current DB administrator checks, encrypted versions,
+atomic writes and stale-request protection are the same as the onboarding input.
+Agents never retrieve, copy or supply this key. It is excluded from Delivery
+App selection and is never delivered to a product or runner host.
+
+The non-secret numeric App ID and client ID are declared service runtime values
+`LAUNCHPLANE_RUNNER_LIFECYCLE_GITHUB_APP_ID` and
+`LAUNCHPLANE_RUNNER_LIFECYCLE_GITHUB_APP_CLIENT_ID`, written through
+[service runtime settings](service-runtime-settings.md). Both must match the
+App returned by GitHub before an installation token can be issued.
+
+The protected Runner Lane Lifecycle workflow uses
+`POST /v1/service/runner-lanes/operation` for inventory, active-run safety reads,
+registration-token requests and retirement. It reuses its existing
+`runner_lane_registration_audit.write` authorization and remains limited to the
+direct lifecycle workflow with a branch ref and manual dispatch. Other callers
+with `runner_lane_inventory.read` can request inventory only. No new workflow
+grant is needed. Browser calls retain CSRF validation.
+
+Launchplane resolves the target's immutable repository and owner IDs from
+tracked repository inventory, verifies the App, client ID, installation owner,
+accepted permissions and suspension state, and requests exactly one repository
+with Administration write, Actions read and Metadata read. It verifies the issued
+repository, permission ceiling and expiry and revokes the installation token
+after use, including failures. Even an all-repository installation never creates
+an all-repository token. Only ephemeral runner registration configuration can
+reach the authorized workflow; the App key and installation token stay inside
+the service. Responses are not cacheable and provider diagnostics are scrubbed.
+The existing local host/filesystem, dry-run, active-run and audit checks remain.
+
+The workflow no longer reads `LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN`.
+Keep that obsolete secret intact until the Director separately checks its
+remaining consumers and deletes/revokes it. First qualification after human key
+entry is a read-only inventory request, with a value-free receipt, not a runner
+registration or retirement.
+
 ## Preview wildcard DNS credential
 
 The Director enters the preview-zone-scoped Cloudflare DNS-edit token in the

@@ -292,11 +292,13 @@ The manual workflow defaults `registration_root` to `auto`, which resolves to
 `$HOME/actions-runners` for the constrained service user. An explicit root must
 match that resolved approved root exactly.
 
-The manual workflow requires the repository secret
-`LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN` for cross-repository runner
-inventory and registration-token requests. The default `GITHUB_TOKEN` from the
-Launchplane workflow is not sufficient authority for product repository runner
-administration.
+The manual workflow calls Launchplane's service-backed
+[runner lifecycle App](secrets.md#runner-lifecycle-app-credential) for runner
+inventory, registration tokens, active-run reads and retirement. It holds
+neither the App key nor an installation token and does not read the old PAT.
+The service uses one repository-scoped token per call and revokes it afterward.
+Local rehearsal mode still accepts an explicitly supplied fixture token; service
+audit mode always uses Launchplane and has no GitHub-token fallback.
 
 This executor is the proving-ground adapter for #1231. Mutating runs require a
 `runner_package_url` workflow input (passed as `--runner-package-url`) that
