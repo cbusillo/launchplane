@@ -136,7 +136,7 @@ def require_testing_generation_usage(
         database_url=store.database_url,
     )
     evidence = store.read_disposable_lane_safety(product, context, "testing")
-    known_use = evidence is not None and evidence.usage == "in_use"
+    known_use = evidence is not None and evidence.current_usage() == "in_use"
     decision = evaluate_lane_usage(
         store,
         profile=store.read_product_profile_record(product),

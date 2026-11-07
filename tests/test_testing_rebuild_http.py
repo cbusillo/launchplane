@@ -35,6 +35,12 @@ from tests.support.http import LIFESPAN_HANG_DEADLINE_SECONDS, lifespan_client, 
 
 
 class TestingRebuildHttpFixture(unittest.TestCase):
+    def assert_conditional_plan(self, response: Response, code: str) -> None:
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "pending")
+        self.assertEqual(response.json()["blockers"][0]["code"], code)
+        self.assertTrue(response.json()["steps"])
+
     def setUp(self) -> None:
         self.fixture = worker_tests.NativeTestingWorkerTests()
         self.fixture.setUp()
@@ -757,12 +763,23 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                 self.assertEqual(self.fixture.effects, [])
 
     async def test_read_only_preflight_does_not_admit_artifact_or_candidate(self) -> None:
+        from control_plane import testing_rebuild_service as service
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+
         before = self.store.list_odoo_stable_target_replacement_operation_records()
         response = await self.call("GET", path=self.url + "/inputs")
         self.assertEqual(response.status_code, 200, response.json())
         self.assertEqual(response.json()["base_url"], "https://" + self.fixture.fixture.route.host)
         self.assertEqual(response.json()["artifact_id"], self.manifest.artifact_id)
         self.assertEqual(response.json()["candidate_verification"], "pending")
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.manifest.artifact_id)
+        with patch.object(
+            service, "read_odoo_testing_usage", return_value=OdooTestingUsage("in_use")
+        ):
+            refused = await self.call("POST", self.payload)
+        self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         with self.assertRaises(FileNotFoundError):
             self.store.read_artifact_manifest(self.manifest.artifact_id)
@@ -806,10 +823,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                         "GET", path=self.url + "/inputs?data_source_mode=" + mode
                     )
                     submitted = await self.call("POST", self.payload, key=mode)
-                    self.assertEqual(inspected.status_code, 409, inspected.text)
-                    self.assertEqual(
-                        inspected.json()["error"]["code"], TESTING_STORAGE_BUDGET_REQUIRED
-                    )
+                    self.assert_conditional_plan(inspected, TESTING_STORAGE_BUDGET_REQUIRED)
                     self.assertEqual(submitted.status_code, 409, submitted.text)
         source.assert_not_called()
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
@@ -827,12 +841,12 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         with patch.object(preflight, "capture_rebuild_intent", side_effect=failure):
             inspected = await self.call("GET", path=self.url + "/inputs")
             submitted = await self.call("POST", self.payload)
-        for response, code in ((inspected, failure.code), (submitted, "testing_rebuild_not_ready")):
-            self.assertEqual(response.status_code, 409, response.text)
-            self.assertEqual(response.json()["error"]["code"], code)
-            self.assertEqual(response.json()["error"]["message"], str(failure))
-            self.assertEqual(response.json()["error"]["reason"], failure.code)
-            self.assertTrue(response.json()["trace_id"])
+        self.assert_conditional_plan(inspected, failure.code)
+        self.assertEqual(submitted.status_code, 409, submitted.text)
+        self.assertEqual(submitted.json()["error"]["code"], "testing_rebuild_not_ready")
+        self.assertEqual(submitted.json()["error"]["message"], str(failure))
+        self.assertEqual(submitted.json()["error"]["reason"], failure.code)
+        self.assertTrue(submitted.json()["trace_id"])
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
 
@@ -886,18 +900,21 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                         self.payload if method == "POST" else None,
                         path=self.url if method == "POST" else self.url + "/inputs",
                     )
-                    self.assertEqual(response.status_code, status, response.text)
-                    self.assertTrue(response.json()["trace_id"])
-                    self.assertEqual(
-                        response.json()["error"]["code"],
+                    code = (
                         "authorization_denied"
                         if status == 403
                         else "testing_rebuild_not_ready"
                         if method == "POST"
                         else "testing_rebuild_observation_unavailable"
                         if isinstance(failure, NativeSourceUnavailable)
-                        else "testing_rebuild_inputs_unverified",
+                        else "testing_rebuild_inputs_unverified"
                     )
+                    if method == "GET" and status != 403:
+                        self.assert_conditional_plan(response, code)
+                    else:
+                        self.assertEqual(response.status_code, status, response.text)
+                        self.assertTrue(response.json()["trace_id"])
+                        self.assertEqual(response.json()["error"]["code"], code)
                     if isinstance(failure, NativeProgramFailed):
                         self.assertIn(failure.code, response.text)
                     self.assertNotIn("private-", response.text)
@@ -1068,16 +1085,30 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.latest.assert_not_called()
         self.assertEqual(self.fixture.effects, [])
 
-    async def test_known_use_blocks_both_preflight_and_submission(self) -> None:
+    async def test_known_use_returns_conditional_plan_but_blocks_submission(self) -> None:
+        from datetime import UTC, datetime, timedelta
         from control_plane import testing_rebuild_service as service
         from control_plane.odoo_testing_usage import OdooTestingUsage
 
+        since = datetime.now(UTC) - timedelta(minutes=1)
+        expiry = since + timedelta(minutes=5)
         with patch.object(
-            service, "read_odoo_testing_usage", return_value=OdooTestingUsage("in_use")
+            service,
+            "read_odoo_testing_usage",
+            return_value=OdooTestingUsage(
+                "in_use", actors=("odoo-user:42",), since=since, valid_until=expiry
+            ),
         ):
             inspected = await self.call("GET", path=self.url + "/inputs")
             submitted = await self.call("POST", self.payload)
-        self.assertEqual(inspected.status_code, 409, inspected.json())
+        self.assertEqual(inspected.status_code, 200, inspected.json())
+        plan = inspected.json()
+        self.assertEqual(plan["status"], "pending")
+        self.assertEqual(plan["blockers"][0]["code"], "testing_in_use")
+        for fact in ("odoo-user:42", since.isoformat(), expiry.isoformat()):
+            self.assertIn(fact, plan["blockers"][0]["message"])
+        self.assertTrue(plan["steps"])
+        self.assertEqual(plan["base_url"], self.fixture.intent.profile.lanes[0].base_url)
         self.assertEqual(submitted.status_code, 409, submitted.json())
         with self.assertRaises(FileNotFoundError):
             self.store.read_artifact_manifest(self.manifest.artifact_id)
@@ -1147,7 +1178,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         before = self.store.read_secret_record(binding.secret_id)
         self.store.write_secret_binding(binding.model_copy(update={"value_source": "supplied"}))
         response = await self.call("GET", path=self.url + "/inputs")
-        self.assertEqual(response.status_code, 409, response.json())
+        self.assert_conditional_plan(response, "testing_credentials_unverified")
         self.assertEqual(self.store.read_secret_record(binding.secret_id), before)
         self.assertEqual(self.fixture.effects, [])
 
@@ -1174,7 +1205,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             )
         )
         refused = await self.call("GET", path=path)
-        self.assertEqual(refused.status_code, 409, refused.json())
+        self.assert_conditional_plan(refused, "testing_restore_source_unconfigured")
         self.assertEqual(self.fixture.effects, [])
 
     def test_current_build_reader_stops_at_denial_without_selecting_another_build(self) -> None:
@@ -1496,26 +1527,32 @@ class GenericWebTestingRebuildHttpTests(
                 response = await self.call(
                     "GET", path=self.url + "/inputs?data_source_mode=" + source_mode
                 )
-                self.assertEqual(response.status_code, 409, response.text)
+                if source_mode != "empty":
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["status"], "pending")
+                    self.assertTrue(response.json()["blockers"])
+                else:
+                    self.assertEqual(response.status_code, 409, response.text)
                 provider.assert_not_called()
         self.assertEqual(self.fixture.effects, [])
 
     async def test_recorded_protection_blocks_generic_web_inspection(self) -> None:
-        from types import SimpleNamespace
+        from tests.support.disposable_lanes import record_safety
 
         for facts in (
             {"usage": "in_use", "data": "unknown", "production_resources": "unknown"},
             {"usage": "unknown", "data": "only_copy", "production_resources": "unknown"},
             {"usage": "unknown", "data": "unknown", "production_resources": "shared"},
         ):
-            with (
-                self.subTest(facts=facts),
-                patch.object(
-                    self.store, "read_disposable_lane_safety", return_value=SimpleNamespace(**facts)
-                ),
-            ):
+            with self.subTest(facts=facts):
+                record_safety(
+                    self.store, self.product, self.fixture.operation.context, "testing", **facts
+                )
                 response = await self.call("GET", path=self.url + "/inputs")
-                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["status"], "pending")
+                self.assertTrue(response.json()["blockers"])
+                self.assertEqual((await self.call("POST", self.payload)).status_code, 409)
         self.assertEqual(self.fixture.effects, [])
 
     async def test_application_lane_reports_support_from_declared_state(self) -> None:
@@ -1537,7 +1574,7 @@ class GenericWebTestingRebuildHttpTests(
             provider.model_copy(update={"target_category": "application"})
         )
         response = await self.call("GET", path=self.url + "/inputs")
-        self.assertEqual(response.status_code, 409, response.text)
+        self.assert_conditional_plan(response, "testing_rebuild_state_unverified")
         for state, supported in (
             ({"kind": "none"}, True),
             (None, False),

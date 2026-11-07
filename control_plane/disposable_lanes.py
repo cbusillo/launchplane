@@ -317,7 +317,7 @@ def require_disposable_lane(
         target=target,
         target_id=target_id,
         instance=instance,
-        usage=evidence.usage if evidence else "unknown",
+        usage=evidence.current_usage(now) if evidence else "unknown",
         require_unused=not (preview_operation or retirement),
         now=now,
         runtime_stopped=runtime_stopped,
@@ -520,7 +520,7 @@ def require_unprotected_preview(
     if (target is not None and target.policies.staff_testing_hold is not None) or (
         evidence is not None
         and (
-            evidence.usage == "in_use"
+            evidence.current_usage() == "in_use"
             or evidence.data == "only_copy"
             or evidence.production_resources in {"shared", "separation_ready"}
         )

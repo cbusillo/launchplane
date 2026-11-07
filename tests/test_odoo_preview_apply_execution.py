@@ -827,6 +827,11 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
                     "preview_url": "https://pr-42.cm-preview.example.test",
                     "domain_host": "pr-42.cm-preview.example.test",
                     "compose_name": "cm-odoo-preview-pr-42",
+                    "resource_provenance": {
+                        "binding_sha256": "b" * 64,
+                        "qualified_at": profile.updated_at,
+                        "recipient_state": "unstarted",
+                    },
                 }
             )
             observe_apply = Mock(side_effect=AssertionError("fresh apply must not observe"))
@@ -885,6 +890,10 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         assert provider_operation_record is not None
         self.assertEqual(provider_operation_record.record_id, expected_deployment_record_id)
         self.assertEqual(provider_operation_record.state, "completed")
+        self.assertEqual(
+            provider_operation_record.response_payload["result"]["resource_provenance"],
+            execute_apply.return_value["resource_provenance"],
+        )
         self.assertEqual(len(previews), 1)
         self.assertEqual(previews[0].state, "active")
 

@@ -1,6 +1,6 @@
 """Recorded safety facts for ordinary disposable-lane work, never access grants."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -32,12 +32,23 @@ class DisposableLaneSafety(BaseModel):
     data: Literal["unknown", "reproducible", "only_copy"] = "unknown"
     production_resources: Literal["unknown", "isolated", "separation_ready", "shared"] = "unknown"
     usage_evidence: str = ""
+    usage_actor: str = ""
+    usage_since: datetime | None = None
+    usage_valid_until: datetime | None = None
     data_evidence: str = ""
     isolation_evidence: str = ""
     replaces_operation_id: str = ""
     replaced_target_id: str = ""
     observed_at: datetime
     expires_at: datetime
+
+    def current_usage(self, now: datetime | None = None) -> str:
+        current = now or datetime.now(UTC)
+        if self.usage_valid_until is not None and not (
+            self.observed_at <= current < self.usage_valid_until
+        ):
+            return "unknown"
+        return self.usage
 
     @model_validator(mode="after")
     def validate_evidence(self) -> "DisposableLaneSafety":
@@ -58,6 +69,15 @@ class DisposableLaneSafety(BaseModel):
                 raise ValueError("Known disposable safety facts require their source evidence.")
         if bool(self.replaces_operation_id) != bool(self.replaced_target_id):
             raise ValueError("Replacement evidence names both the operation and retained target.")
+        if self.usage_since is not None and (
+            self.usage_since.utcoffset() is None or self.usage_since > self.observed_at
+        ):
+            raise ValueError("Usage must identify an aware recorded time before observation.")
+        if self.usage_valid_until is not None and (
+            self.usage_valid_until.utcoffset() is None
+            or not self.observed_at < self.usage_valid_until <= self.expires_at
+        ):
+            raise ValueError("Bounded usage must expire within its observation lifetime.")
         return self
 
 

@@ -722,7 +722,7 @@ class PreviewRefreshResourceFenceTests(unittest.TestCase):
                 inspection = stack.enter_context(
                     patch(
                         "control_plane.odoo_preview_resources.require_existing_preview_resources",
-                        side_effect=[None, failure] if late else failure,
+                        side_effect=["a" * 64, failure] if late else failure,
                     )
                 )
                 result = _execute_refresh(
@@ -736,6 +736,9 @@ class PreviewRefreshResourceFenceTests(unittest.TestCase):
                     qualify_existing_preview=True,
                 )
                 self.assertEqual(result.status, "fail")
+                self.assertEqual(bool(result.resource_provenance), late)
+                if late:
+                    self.assertEqual(result.resource_provenance["binding_sha256"], "a" * 64)
                 inspection.assert_called()
                 self.assertEqual(result.provider_effect_attempted, late)
                 deploy.assert_not_called()

@@ -1,6 +1,7 @@
 """Value-free occupancy reads through the service's existing provider transport."""
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 import base64
 import inspect
 import hashlib
@@ -96,11 +97,17 @@ class OdooTestingUsage:
     never_served_candidate: bool = False
     resources_qualified: bool = False
     credential_hashes: tuple[str, ...] = field(default=(), repr=False)
+    actors: tuple[str, ...] = ()
+    since: datetime | None = None
+    valid_until: datetime | None = None
 
     def payload(self) -> dict[str, object]:
         return {
             "recent_signins": self.recent_signins,
             "authenticated_sessions": self.authenticated_sessions,
+            "actors": self.actors,
+            "since": self.since.isoformat() if self.since else None,
+            "valid_until": self.valid_until.isoformat() if self.valid_until else None,
             "reason_code": (
                 self.reason_code
                 if self.reason_code in ODOO_USAGE_REASON_CODES
@@ -113,6 +120,7 @@ class OdooTestingUsage:
 # session-store get/save/GC, account names, tokens or session IDs leave it.
 ODOO_USAGE_CONTAINER_PROGRAM_TEMPLATE = r"""
 import argparse, configparser, json, os, re, stat
+from datetime import datetime, timezone
 EXPECTED_INSTANCE=__EXPECTED_INSTANCE__
 from pathlib import Path
 CONFIG_PATH=__CONFIG_PATH__
@@ -167,7 +175,7 @@ def serving_configured(process, options, database):
             and args.db_user==options['db_user']
             and args.db_filter=='^'+re.escape(database)+'$')
 
-def read_sessions(path, database):
+def read_sessions(path, database, evidence=None):
     global checkpoint
     checkpoint='session_store_unavailable'
     # Count every authenticated or partially authenticated file, regardless of
@@ -205,6 +213,10 @@ def read_sessions(path, database):
                 raise UsageUnavailable('session_file_unreadable')
             if data.get('db')==database and (data.get('uid') or data.get('pre_uid')):
                 used=True
+                user=data.get('uid') or data.get('pre_uid')
+                if evidence is not None and type(user) is int and user>0:
+                    evidence.setdefault('actors',set()).add('odoo-user:'+str(user))
+                    evidence['since']=min(evidence.get('since',info.st_mtime),info.st_mtime)
     return used
 
 def probe():
@@ -238,7 +250,8 @@ def probe():
     # custom command or another config cannot qualify this read.
     if not all(serving_configured(p,options,database) for p in odoo_processes):
         raise UsageUnavailable('serving_configuration_mismatch')
-    session_use=read_sessions(data_dir/'sessions',database)
+    evidence={}
+    session_use=read_sessions(data_dir/'sessions',database,evidence)
     checkpoint='database_connection_unavailable'
     connection=psycopg2.connect(
         host='database',port=options.get('db_port') or '5432',
@@ -256,14 +269,23 @@ def probe():
             recent=cursor.fetchone()[0]
             if type(recent) is not bool:
                 raise UsageUnavailable('login_history_unavailable')
+            if recent:
+                cursor.execute("SELECT create_uid, min(create_date) FROM res_users_log WHERE create_date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - interval '24 hours' GROUP BY create_uid ORDER BY create_uid LIMIT 256")
+                for user,since in cursor.fetchall():
+                    if type(user) is int and user>0 and isinstance(since,datetime):
+                        evidence.setdefault('actors',set()).add('odoo-user:'+str(user))
+                        stamp=since.replace(tzinfo=timezone.utc).timestamp()
+                        evidence['since']=min(evidence.get('since',stamp),stamp)
         checkpoint='database_cleanup_unavailable'
         connection.rollback()
     finally:
         connection.close()
     # Scan again after SQL: a login during collection must not be hidden behind
     # an earlier empty session inventory. No scan refreshes session timestamps.
-    session_use=read_sessions(data_dir/'sessions',database) or session_use
-    return {'type':'complete','recent_signins':recent,'authenticated_sessions':session_use}
+    session_use=read_sessions(data_dir/'sessions',database,evidence) or session_use
+    return {'type':'complete','recent_signins':recent,'authenticated_sessions':session_use,
+            'actors':sorted(evidence.get('actors',()))[:256],
+            'since':datetime.fromtimestamp(evidence['since'],timezone.utc).isoformat() if 'since' in evidence else None}
 
 if __name__=='__main__':
     try:
@@ -600,7 +622,7 @@ def read_odoo_testing_usage(
                 return OdooTestingUsage(reason_code=reason)
         if (
             len(frames) != 1
-            or set(frames[0])
+            or set(frames[0]) - {"actors", "since"}
             != {"type", "recent_signins", "authenticated_sessions"}
             | ({"resources_qualified", "credential_hashes"} if preview_spec is not None else set())
             or frames[0]["type"] != "complete"
@@ -624,6 +646,29 @@ def read_odoo_testing_usage(
             )
         ):
             return OdooTestingUsage(reason_code="probe_result_invalid")
+        observed = datetime.now(UTC)
+        actors = frames[0].get("actors", [])
+        since = frames[0].get("since")
+        if (
+            not isinstance(actors, list)
+            or len(actors) > 256
+            or any(
+                not isinstance(actor, str)
+                or not actor.startswith("odoo-user:")
+                or not actor.removeprefix("odoo-user:").isascii()
+                or not actor.removeprefix("odoo-user:").isdigit()
+                for actor in actors
+            )
+        ):
+            actors = []
+        try:
+            recorded_since = datetime.fromisoformat(since) if isinstance(since, str) else None
+        except ValueError:
+            recorded_since = None
+        if recorded_since is not None and (
+            recorded_since.utcoffset() is None or recorded_since > observed
+        ):
+            recorded_since = None
         return OdooTestingUsage(
             "in_use" if recent or sessions else "unused",
             recent,
@@ -631,6 +676,9 @@ def read_odoo_testing_usage(
             "complete",
             resources_qualified=preview_spec is not None,
             credential_hashes=tuple(hashes),
+            actors=tuple(actors),
+            since=recorded_since,
+            valid_until=observed + timedelta(minutes=5),
         )
     except NativeSourceAuthorizationDenied:
         raise

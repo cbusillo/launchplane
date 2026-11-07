@@ -5,6 +5,7 @@ import io
 import json
 import re
 import shlex
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
@@ -240,6 +241,12 @@ class SessionInventoryTests(unittest.TestCase):
         result = self.probe_result("sessions_used", recent=True, instance="preview")
         self.assertIs(result["recent_signins"], True)
         self.assertIs(result["authenticated_sessions"], True)
+        self.assertIn("odoo-user:42", result["actors"])
+        self.assertAlmostEqual(
+            datetime.fromisoformat(result["since"]).timestamp(),
+            (self.path / "sessions" / "private-fixture-session").stat().st_mtime,
+            delta=0.000001,
+        )
 
     def wrapped_image_argv(self, *, gevent: bool = False) -> list[bytes]:
         argv = supported_odoo_argv()

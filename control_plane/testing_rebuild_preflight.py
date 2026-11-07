@@ -50,6 +50,13 @@ from control_plane.testing_rebuild_service import (
 from control_plane.workflows.ship import utc_now_timestamp
 
 
+class TestingRebuildBlocker(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    message: str
+
+
 class TestingRebuildPreflight(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -67,6 +74,15 @@ class TestingRebuildPreflight(BaseModel):
     source_git_ref: str
     data_source_mode: Literal["empty", "production_restore", "upstream_restore", "migrated_restore"]
     observed_at: str
+    blockers: tuple[TestingRebuildBlocker, ...] = ()
+    steps: tuple[str, ...] = (
+        "prepare_independent_copy",
+        "verify_source_and_isolation",
+        "verify_private_health_and_identity",
+        "publish_same_address",
+        "verify_public_health_and_identity",
+        "retire_predecessor_runtime",
+    )
     # This is admission evidence. The worker still proves the actual independent
     # candidate's isolation, credentials, restore, health and cutover before use.
     candidate_verification: Literal["pending"] = "pending"
@@ -120,6 +136,9 @@ def admit_current_testing_rebuild(
         root=root, store=store, request=request, actor=actor, verified_build=verified_build
     )
     if inspection.status != "pass":
+        if inspection.blockers:
+            blocker = inspection.blockers[0]
+            raise TestingRebuildRefused(blocker.code, blocker.message)
         raise TestingRebuildRefused(TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE, inspection.message)
     if isinstance(verified, VerifiedBuildArtifact):
         try:
@@ -137,6 +156,40 @@ def inspect_testing_rebuild(
     request: OdooStableTargetReplacementRequest,
     verified_build: VerifiedBuildArtifact | VerifiedGenericWebBuild | None = None,
     actor: str = "",
+) -> TestingRebuildPreflight:
+    try:
+        return _inspect_testing_rebuild(
+            root=root, store=store, request=request, verified_build=verified_build, actor=actor
+        )
+    except TestingRebuildRefused as error:
+        driver = resolve_testing_rebuild_driver(store, request.product)
+        assert request.data_source_mode in {
+            "empty",
+            "production_restore",
+            "upstream_restore",
+            "migrated_restore",
+        }
+        return TestingRebuildPreflight(
+            status="pending",
+            message=str(error),
+            product=request.product,
+            context=driver.lane.context,
+            base_url=driver.lane.base_url,
+            artifact_id=request.artifact_id,
+            source_git_ref=request.source_git_ref,
+            data_source_mode=request.data_source_mode,
+            observed_at=utc_now_timestamp(),
+            blockers=(TestingRebuildBlocker(code=error.code, message=str(error)),),
+        )
+
+
+def _inspect_testing_rebuild(
+    *,
+    root: Path,
+    store: PostgresRecordStore,
+    request: OdooStableTargetReplacementRequest,
+    verified_build: VerifiedBuildArtifact | VerifiedGenericWebBuild | None,
+    actor: str,
 ) -> TestingRebuildPreflight:
     if request.strategy != "replace-and-cutover":
         raise ValueError("Native preflight requires the testing copy lifecycle.")

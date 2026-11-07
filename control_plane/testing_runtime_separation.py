@@ -87,7 +87,7 @@ def separation_admission(
         product=request.product,
         context=request.context,
         instance=request.instance,
-        usage=evidence.usage,
+        usage=evidence.current_usage(),
         require_unused=False,
     ):
         raise ValueError(
