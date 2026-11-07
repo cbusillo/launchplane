@@ -356,5 +356,4 @@ def _inspect_execution(
             "testing_restore_source_unconfigured",
             "The selected testing restore source is not configured or available.",
         ) from error
-    # The worker still verifies the independent copy before publishing it.
     return inspection
