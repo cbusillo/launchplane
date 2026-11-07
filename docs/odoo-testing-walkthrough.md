@@ -252,6 +252,9 @@ the original current copy, isolated resources and exact runtime. It never lifts
 the staff hold or reads login history to authorize cleanup. After a copy is
 replaced, old accounts/secrets remain under that retained copy's custody;
 this API does not redirect cleanup to an old database.
+Native cleanup does not depend on public-route observation or installing a
+rotated local password first. Current local credential safety, publication
+custody, physical receiver and connection isolation must still qualify.
 
 Every apply uses the existing durable provider reservation and Odoo lane fence.
 An exact completed retry replays its redacted receipt and never repeats browser
@@ -302,8 +305,8 @@ and resource qualification; select `source_mode=ssh` if that is the intended cop
 source (the default is `container-export`). Each failure has a plain description
 and fix kind. Dependent or unselected evidence stays unknown. See the
 [path-check contract](service-boundary.md#product-retirement) for the read boundary.
-An explicit intent reports that operation's prerequisites. The default testing
-check retains automatic-deploy history; a historical automatic-deploy failure
+The provision intent reports the walkthrough's own prerequisites. Other testing
+checks retain automatic-deploy history; a historical automatic-deploy failure
 does not qualify or refuse the current walkthrough. Once current copy custody
 qualifies, provision does not demand legacy restore preparation. No clear
 checkpoint replaces the remaining physical, isolation, sign-in or task reads.

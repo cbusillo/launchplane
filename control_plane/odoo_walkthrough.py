@@ -85,6 +85,7 @@ from control_plane.testing_serving_copy import (
     published_testing_copy,
     require_maintained_local_credentials,
     omitted_maintenance_keys,
+    testing_receiver_generation,
 )
 from control_plane.testing_replacement_bootstrap import require_testing_credential_safety
 from control_plane.native_testing_route_refresh import plan_native_testing_route_refresh
@@ -535,7 +536,8 @@ def _walkthrough_preflight(
                     or publication.plan.after.generation is not None
                 ):
                     raise WalkthroughPrerequisiteError(WalkthroughPrerequisite.GENERATION_MISSING)
-                require_maintained_local_credentials(store, publication)
+                if operation != "cleanup":
+                    require_maintained_local_credentials(store, publication)
                 require_testing_credential_safety(
                     store, context, omitted_maintenance_keys(store, context)
                 )
@@ -543,11 +545,7 @@ def _walkthrough_preflight(
                 copy_binding = application.prepared.source_witness
                 copy_witness = ""
                 usage_since = candidate.created_at.isoformat()
-                receiver_generation = {
-                    "namespace": candidate.namespace,
-                    "instance": "testing",
-                    "resources_binding_sha256": candidate.resources_binding_sha256,
-                }
+                receiver_generation = testing_receiver_generation(candidate, None)
             else:
                 raise WalkthroughPrerequisiteError(WalkthroughPrerequisite.GENERATION_MISSING)
     with checkpoint(WalkthroughPrerequisite.USE, ()) as run:
@@ -580,15 +578,16 @@ def _walkthrough_preflight(
             assert connection is not None
             assert parsed is not None
             if publication is not None:
-                route = plan_native_testing_route_refresh(
-                    store,
-                    root=root,
-                    current=store.read_route_binding_record(
-                        product=product, context_name=context, instance_name="testing"
-                    ),
-                )
-                if route.status not in {"ready", "unchanged"}:
-                    raise WalkthroughEvidenceUnavailable
+                if operation != "cleanup":
+                    route = plan_native_testing_route_refresh(
+                        store,
+                        root=root,
+                        current=store.read_route_binding_record(
+                            product=product, context_name=context, instance_name="testing"
+                        ),
+                    )
+                    if route.status not in {"ready", "unchanged"}:
+                        raise WalkthroughEvidenceUnavailable
             elif not odoo_compose_has_domain(
                 host=connection.host,
                 token=connection.token,

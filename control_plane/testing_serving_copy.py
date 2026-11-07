@@ -9,7 +9,11 @@ from control_plane.contracts.product_profile_record import (
     is_exclusive_product_context,
     product_context_owner_map,
 )
-from control_plane.odoo_testing_restore import generation_snapshot_matches
+from control_plane.odoo_testing_restore import (
+    FreshOdooTestingGeneration,
+    generation_snapshot_matches,
+)
+from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_candidate_allocation import candidate_resources
 from control_plane.testing_candidate_runtime import candidate_runtime_fences
@@ -128,6 +132,20 @@ def published_testing_copy(
     ):
         raise ValueError("Serving testing copy acquired another lane's alias.")
     return record
+
+
+def testing_receiver_generation(
+    candidate: TestingCandidateAllocation, generation: FreshOdooTestingGeneration | None
+) -> dict[str, object]:
+    return (
+        generation.model_dump(mode="json")
+        if generation is not None
+        else {
+            "namespace": candidate.namespace,
+            "instance": "testing",
+            "resources_binding_sha256": candidate.resources_binding_sha256,
+        }
+    )
 
 
 def require_published_testing_release(store: object, release: ReleaseTupleRecord) -> None:

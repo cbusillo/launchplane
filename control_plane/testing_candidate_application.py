@@ -32,6 +32,7 @@ from control_plane.testing_candidate_probe import (
     sanitized_testing_readback_policy,
 )
 from control_plane.testing_candidate_runtime import TestingCandidateRuntimeInputs
+from control_plane.testing_serving_copy import testing_receiver_generation
 
 
 class CandidateObservationUnavailable(ValueError):
@@ -63,13 +64,7 @@ def candidate_private_readiness(
     compose_project = str(payload["appName"])
     generation = plan.generation
     spec: dict[str, object] = {
-        "generation": generation.model_dump(mode="json")
-        if generation
-        else {
-            "namespace": allocation.namespace,
-            "instance": "testing",
-            "resources_binding_sha256": allocation.resources_binding_sha256,
-        },
+        "generation": testing_receiver_generation(allocation, generation),
         "compose_project": compose_project,
         "database_name": inputs.runtime_environment["ODOO_DB_NAME"],
         "database_data_directory": compose.ODOO_DATABASE_DATA_DIRECTORY,

@@ -503,7 +503,7 @@ def build_product_path_check(
     *, product: str, path: PathName, inputs: PathCheckInputs, intent: TestingIntent | None = None
 ) -> ProductPathCheck:
     steps = tuple(
-        _testing_steps(inputs, include_deploy=intent is None)
+        _testing_steps(inputs, include_deploy=intent != "provision")
         if path == "testing"
         else _PATH_STEPS[path](inputs)
     )

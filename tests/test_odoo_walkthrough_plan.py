@@ -773,6 +773,13 @@ class PublishedWalkthroughPlanTests(unittest.TestCase):
             self.physical.call_args.kwargs["spec"]["generation"]["namespace"],
             self.candidate.namespace,
         )
+        self.assertEqual(
+            self.physical.call_args.kwargs["spec"]["copy_binding_sha256"], plan.copy_witness
+        )
+        self.assertEqual(
+            self.physical.call_args.kwargs["spec"]["generation"]["resources_binding_sha256"],
+            self.candidate.resources_binding_sha256,
+        )
         self.domain.assert_not_called()
         self.assertGreater(self.host.database_reads, 0)
         self.assertIsNone(
@@ -935,7 +942,11 @@ class PublishedWalkthroughPlanTests(unittest.TestCase):
     def test_provision_qualification_does_not_consume_historical_automatic_deploy_failure(
         self,
     ) -> None:
-        from control_plane.product_path_check import PathCheckInputs, build_product_path_check
+        from control_plane.product_path_check import (
+            PathCheckInputs,
+            TestingIntent,
+            build_product_path_check,
+        )
         from control_plane.testing_path_check import read_testing_prerequisites
 
         profile = self.store.read_product_profile_record(self.candidate.product)
@@ -966,3 +977,47 @@ class PublishedWalkthroughPlanTests(unittest.TestCase):
         self.assertEqual(provision.state, "clear")
         default = build_product_path_check(product=profile.product, path="testing", inputs=inputs)
         self.assertEqual(default.state, "blocked")
+        intents: tuple[TestingIntent, ...] = ("generation", "testing-replacement")
+        histories: tuple[tuple[dict[str, object], str], ...] = (
+            ({"reconcile_state": "done", "queued_operation_id": "running-operation"}, "blocked"),
+            ({"reconcile_state": "pending"}, "unknown"),
+        )
+        for intent in intents:
+            for history, expected in histories:
+                with self.subTest(intent=intent, history=history):
+                    check = build_product_path_check(
+                        product=profile.product,
+                        path="testing",
+                        intent=intent,
+                        inputs=replace(inputs, testing_reconcile_plan=history),
+                    )
+                    self.assertEqual(check.state, expected)
+
+    def test_native_cleanup_can_revoke_its_copy_after_local_rotation_or_route_read_loss(
+        self,
+    ) -> None:
+        from control_plane.testing_local_credentials import generation_bundle
+
+        original = self.plan()
+        self.store.write_product_authority_bundle(
+            generation_bundle(
+                self.store,
+                self.store.read_product_profile_record(self.candidate.product),
+                self.candidate.context,
+                actor="fixture",
+                generation="rotated",
+                only_keys=frozenset({"ODOO_DB_PASSWORD"}),
+            )
+        )
+        with self.assertRaises(WalkthroughPrerequisiteError):
+            self.plan()
+        self.request = self.request.model_copy(update={"operation": "cleanup"})
+        self.frame["old_endpoints"] = ("http://unavailable.invalid",)
+        self.assertEqual(self.plan().binding, original.binding)
+        self.host.connection.isolation_readable = False
+        with self.assertRaises(WalkthroughPrerequisiteError):
+            self.plan()
+        self.host.connection.isolation_readable = True
+        self.physical.side_effect = NativeSourceUnavailable("unreadable physical separation")
+        with self.assertRaises(WalkthroughPrerequisiteError):
+            self.plan()
