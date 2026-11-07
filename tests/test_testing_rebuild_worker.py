@@ -298,6 +298,10 @@ class NativeTestingWorkerTests(unittest.TestCase):
             return {**self.old_provider, "environmentId": "old-environment"}
         if kwargs["path"] == "/api/server.one":
             return {"serverId": self.intent.server_id, "name": "Managed server"}
+        if kwargs["path"] == "/api/compose.update":
+            self.assertEqual(kwargs["payload"]["composeId"], self.intent.old.target_id)
+            self.old_provider["autoDeploy"] = kwargs["payload"]["autoDeploy"]
+            return {}
         self.assertEqual(kwargs["path"], "/api/compose.stop")
         self.assertEqual(kwargs["payload"]["composeId"], self.intent.old.target_id)
         self.assertIsNotNone(self.owned)
@@ -493,7 +497,12 @@ class NativeTestingWorkerTests(unittest.TestCase):
         )
 
     def admit_unavailable(
-        self, availability: str, *, redirect: bool = False, partial: bool = False
+        self,
+        availability: str,
+        *,
+        redirect: bool = False,
+        partial: bool = False,
+        first_delivery: bool = False,
     ) -> None:
         self.retained.update(
             availability=availability,
@@ -504,24 +513,31 @@ class NativeTestingWorkerTests(unittest.TestCase):
         )
         if availability == "absent":
             self.retained["container_ids"] = []
+            self.retained["volumes"] = []
+            if not first_delivery:
+                self.deployment_history.return_value = [{"status": "done"}]
             for field in ("web_id", "identity", "resource_binding", "physical_binding"):
                 self.retained.pop(field, None)
         self.raw = {"routers": {}, "services": {}, "middlewares": {}}
         route_tests.add_proxy_internal_routes(self.raw)
-        configured = yaml.safe_dump(
-            {
-                "services": {
-                    "web": {
-                        "labels": {
-                            "traefik.enable": "true",
-                            "traefik.docker.network": "dokploy-network",
-                            "traefik.http.routers.testing.rule": f"Host(`{self.fixture.route.host}`)",
-                            "traefik.http.routers.testing.entrypoints": "websecure",
-                            "traefik.http.routers.testing.tls": "true",
+        configured = (
+            ""
+            if first_delivery
+            else yaml.safe_dump(
+                {
+                    "services": {
+                        "web": {
+                            "labels": {
+                                "traefik.enable": "true",
+                                "traefik.docker.network": "dokploy-network",
+                                "traefik.http.routers.testing.rule": f"Host(`{self.fixture.route.host}`)",
+                                "traefik.http.routers.testing.entrypoints": "websecure",
+                                "traefik.http.routers.testing.tls": "true",
+                            }
                         }
                     }
                 }
-            }
+            )
         )
         if redirect:
             reference = "fixture-redirect@file"
@@ -534,6 +550,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 reference
             )
             configured = yaml.safe_dump(declaration)
+        if first_delivery:
+            self.old_provider.update(sourceType="github", env=None, autoDeploy=True)
         self.converted_compose = self.enterContext(
             patch.object(compose, "fetch_dokploy_converted_compose_file", return_value=configured)
         )
@@ -544,6 +562,96 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertIsNone(self.intent.old.private_url)
         self.assertIsNone(self.intent.old.runtime_identity)
         self.assertIsNone(self.intent.old.resource_binding)
+        self.assertEqual(self.effects, [])
+
+    def test_first_empty_delivery_does_not_require_an_old_ingress_declaration(self) -> None:
+        self.admit_unavailable("absent", first_delivery=True)
+        self.converted_compose.assert_not_called()
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertEqual(result.health_status, "pass")
+        self.assertEqual(self.effects, ["switch-new"])
+
+    def test_first_empty_delivery_still_fails_its_normal_public_health_check(self) -> None:
+        self.admit_unavailable("absent", first_delivery=True)
+        self.fail_public = True
+        result = self.execute()
+        self.assertEqual(result.error_code, "candidate_public_health_failed")
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_prior_or_unknown_provider_delivery_keeps_the_existing_ingress_guard(self) -> None:
+        self.admit_unavailable("absent", first_delivery=True)
+        self.deployment_history.return_value = [{"status": "done"}]
+        with self.assertRaises(service.TestingRebuildRefused):
+            self.capture_function(root=self.root, store=self.store, operation=self.operation)
+        self.deployment_history.side_effect = api.DokployRequestFailed(
+            method="GET",
+            path="/api/deployment.allByType",
+            status_code=503,
+            detail="History unavailable",
+        )
+        with self.assertRaises(api.DokployRequestFailed):
+            self.capture_function(root=self.root, store=self.store, operation=self.operation)
+        self.assertEqual(self.effects, [])
+
+    def test_first_delivery_keeps_production_sharing_protected(self) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        self.admit_unavailable("absent", first_delivery=True)
+        record_safety(
+            self.store,
+            self.operation.product,
+            self.operation.context,
+            "testing",
+            production_resources="shared",
+        )
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def assert_prior_record_keeps_ingress_guard(self) -> None:
+        with self.assertRaises(ValueError):
+            self.capture_function(root=self.root, store=self.store, operation=self.operation)
+
+    def test_initialized_runtime_keeps_the_existing_ingress_guard(self) -> None:
+        from control_plane.contracts.environment_inventory import EnvironmentInventory
+
+        self.admit_unavailable("absent", first_delivery=True)
+        deployment = self.fixture.plan.deployment
+        self.store.write_environment_inventory(
+            EnvironmentInventory(
+                context=self.operation.context,
+                instance="testing",
+                source_git_ref=self.operation.request.source_git_ref,
+                deploy=deployment.deploy,
+                updated_at=self.operation.updated_at,
+                deployment_record_id=deployment.record_id,
+            )
+        )
+        self.assert_prior_record_keeps_ingress_guard()
+
+    def test_prior_generation_keeps_the_existing_ingress_guard(self) -> None:
+        from tests.test_odoo_testing_restore import generation
+
+        self.admit_unavailable("absent", first_delivery=True)
+        self.store.write_fresh_odoo_testing_generation(
+            generation().model_copy(
+                update={
+                    "product": self.operation.product,
+                    "context": self.operation.context,
+                    "target_id": self.intent.old.target_id,
+                }
+            )
+        )
+        self.assert_prior_record_keeps_ingress_guard()
+
+    def test_recorded_delivery_stops_first_delivery_before_effects(self) -> None:
+        self.admit_unavailable("absent", first_delivery=True)
+        self.store.write_deployment_record(self.fixture.plan.deployment)
+        self.assert_prior_record_keeps_ingress_guard()
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "fail")
         self.assertEqual(self.effects, [])
 
     def test_stopped_predecessor_rebuilds_without_starting_or_stopping_it(self) -> None:

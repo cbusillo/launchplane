@@ -923,7 +923,7 @@ def compile_unavailable_testing_route(
     observation_sha256: str,
     static_configuration: str,
     configured_compose: str,
-    declared_ingress: dict[str, str] | None = None,
+    first_delivery: bool = False,
     recorded_template: dict[str, Any] | None = None,
     aliases: tuple[str, ...] = (),
     recorded_backend: str | None = None,
@@ -933,15 +933,25 @@ def compile_unavailable_testing_route(
         raise ValueError("The managed proxy's listener configuration is unavailable.")
     identifier = testing_route_id(product, context)
     template = deepcopy(recorded_template)
+    if first_delivery and (
+        recorded_template is not None or file_content is not None or configured_compose
+    ):
+        raise ValueError("First testing delivery cannot replace existing ingress authority.")
     if aliases and template is None:
         raise ValueError("Retained testing hostnames require recorded route authority.")
     if template is None:
         if file_content is not None:
             raise ValueError("The existing testing route has no recorded template authority.")
         labels = (
-            declared_testing_ingress(configured_compose)
-            if declared_ingress is None
-            else declared_ingress
+            {
+                "traefik.enable": "true",
+                "traefik.docker.network": "dokploy-network",
+                "traefik.http.routers.testing.rule": f"Host(`{host}`)",
+                "traefik.http.routers.testing.entrypoints": "websecure",
+                "traefik.http.routers.testing.tls": "true",
+            }
+            if first_delivery
+            else declared_testing_ingress(configured_compose)
         )
         if (
             labels.get("traefik.enable", "").lower() != "true"
@@ -1168,7 +1178,9 @@ def compile_unavailable_testing_route(
             observation_sha256=observation_sha256,
             applied=bool(matches),
             static_sha256=testing_route_static_sha256(static_configuration, template),
-            declaration_sha256=canonical_json_sha256(labels) if recorded_template is None else "",
+            declaration_sha256=canonical_json_sha256(declared_testing_ingress(configured_compose))
+            if recorded_template is None and not first_delivery
+            else "",
         ),
     )
 
