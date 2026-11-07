@@ -14,7 +14,10 @@ from control_plane.contracts.product_profile_record import (
     ProductOdooLaneDataPolicy,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.disposable_lane_collection import collect_testing_resource_facts
+from control_plane.disposable_lane_collection import (
+    collect_testing_resource_facts,
+    collect_disposable_lane_facts,
+)
 from control_plane.disposable_lane_collection import merge_collected_safety
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.odoo_testing_resources import OdooTestingResources
@@ -25,6 +28,66 @@ from tests.test_odoo_testing_restore import generation
 
 
 class UsageEvidenceExpiryTests(unittest.TestCase):
+    def test_legacy_hold_with_unusable_timestamp_remains_protective(self) -> None:
+        store = Mock(spec=PostgresRecordStore)
+        store.list_dokploy_target_id_records.return_value = ()
+        for stamp in ("", "old-format", "2026-11-07T18:00:00"):
+            target = DokployTargetRecord(
+                context="fixture", instance="testing", updated_at="2026-11-07T00:00:00Z"
+            )
+            target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+                reason="Actual staff use",
+                purpose="staff_testing",
+                recorded_by="fixture-staff",
+                recorded_at=stamp,
+            )
+            with self.subTest(stamp=stamp):
+                facts = collect_disposable_lane_facts(
+                    store,
+                    context="fixture",
+                    instance="testing",
+                    target=target,
+                    target_id=None,
+                    binding_sha256="a" * 64,
+                )
+                self.assertEqual(facts.usage, "in_use")
+                self.assertEqual(facts.usage_actor, target.policies.staff_testing_hold.recorded_by)
+                self.assertIsNone(facts.usage_since)
+                self.assertIsNone(facts.usage_valid_until)
+
+    def test_new_use_keeps_its_deadline_when_resource_proof_expires_first(self) -> None:
+        now = datetime.now(timezone.utc)
+        previous = DisposableLaneSafety(
+            product="fixture",
+            context="fixture",
+            instance="testing",
+            observed_by="collector",
+            observer_kind="director_agent",
+            binding_sha256="a" * 64,
+            data="reproducible",
+            data_evidence="fixture:rebuildable",
+            production_resources="isolated",
+            isolation_evidence="fixture:isolated",
+            observed_at=now,
+            expires_at=now + timedelta(minutes=5),
+        )
+        collected = previous.model_copy(
+            update={
+                "observed_at": now + timedelta(seconds=10),
+                "expires_at": now + timedelta(minutes=5, seconds=10),
+                "usage": "in_use",
+                "usage_evidence": "fixture:session",
+                "usage_since": now + timedelta(seconds=11),
+                "usage_valid_until": now + timedelta(minutes=5, seconds=10),
+                "data": "unknown",
+                "production_resources": "unknown",
+            }
+        )
+        merged = merge_collected_safety(previous, collected)
+        self.assertEqual(merged.expires_at, previous.expires_at)
+        self.assertEqual(merged.usage_valid_until, collected.usage_valid_until)
+        self.assertEqual(merged.current_usage(previous.expires_at), "in_use")
+
     def test_recollection_preserves_use_deadline_and_independent_protection(self) -> None:
         now = datetime.now(timezone.utc)
         previous = DisposableLaneSafety(

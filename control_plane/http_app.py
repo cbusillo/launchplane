@@ -24269,8 +24269,18 @@ def create_launchplane_fastapi_app(
                         "mode": "inspect",
                         "observation_sha256": disposable_lane_observation_sha256(recorded),
                         "observation": {
-                            key: getattr(recorded, key)
-                            for key in ("usage", "data", "production_resources")
+                            **recorded.model_dump(
+                                mode="json",
+                                include={
+                                    "usage",
+                                    "data",
+                                    "production_resources",
+                                    "usage_actor",
+                                    "usage_since",
+                                    "usage_valid_until",
+                                },
+                            ),
+                            "current_usage": recorded.current_usage(),
                         }
                         if recorded is not None
                         else None,

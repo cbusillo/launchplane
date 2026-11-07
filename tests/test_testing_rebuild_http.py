@@ -122,6 +122,31 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             )
         )
 
+    def test_invalid_source_and_build_are_refused_before_conditional_planning(self) -> None:
+        replacement = self.fixture.operation.request.model_copy(
+            update={
+                "artifact_id": self.manifest.artifact_id,
+                "source_git_ref": self.manifest.source_commit,
+            }
+        )
+        for changes, expected in (
+            ({"data_source_mode": "existing"}, ValueError),
+            ({"artifact_id": "not-the-verified-build"}, ValueError),
+        ):
+            with (
+                self.subTest(changes=changes),
+                patch.object(preflight, "capture_rebuild_intent") as capture,
+                self.assertRaises(expected),
+            ):
+                preflight.inspect_testing_rebuild(
+                    root=self.fixture.root,
+                    store=self.store,
+                    request=replacement.model_copy(update=changes),
+                    verified_build=VerifiedBuildArtifact(manifest=self.manifest),
+                )
+            capture.assert_not_called()
+        self.assertEqual(self.fixture.effects, [])
+
     def test_current_rebuild_rejects_non_testing_and_in_place_before_build_reads(self) -> None:
         for changes in ({"instance": "prod"}, {"strategy": "recreate-in-place"}):
             with (
@@ -514,7 +539,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             "testing_route_compilation_failed",
             "The observed testing ingress cannot be safely compiled for its retained copy.",
         )
-        with patch.object(preflight, "inspect_testing_rebuild", side_effect=failure):
+        with patch.object(preflight, "capture_rebuild_intent", side_effect=failure):
             response = await request(
                 app,
                 "POST",
@@ -522,13 +547,20 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                 headers={"Authorization": "Bearer fixture-operator"},
                 payload={
                     "product": self.product,
-                    "replacement": self.fixture.operation.request.model_dump(
+                    "replacement": self.fixture.operation.request.model_copy(
+                        update={
+                            "artifact_id": self.manifest.artifact_id,
+                            "source_git_ref": self.manifest.source_commit,
+                        }
+                    ).model_dump(
                         mode="json", include=set(OdooStableTargetReplacementRequest.model_fields)
                     ),
                 },
             )
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertEqual(response.json()["error"]["code"], failure.code)
+        self.assertEqual(response.status_code, 202, response.text)
+        result = response.json()["result"]
+        self.assertEqual(result["blockers"][0]["code"], failure.code)
+        self.assertEqual(result["status"], "pending")
         self.assertTrue(response.json()["trace_id"])
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])

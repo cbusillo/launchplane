@@ -69,15 +69,15 @@ class DisposableLaneSafety(BaseModel):
                 raise ValueError("Known disposable safety facts require their source evidence.")
         if bool(self.replaces_operation_id) != bool(self.replaced_target_id):
             raise ValueError("Replacement evidence names both the operation and retained target.")
-        if self.usage_since is not None and (
-            self.usage_since.utcoffset() is None or self.usage_since > self.observed_at
-        ):
-            raise ValueError("Usage must identify an aware recorded time before observation.")
+        if self.usage_since is not None and self.usage_since.utcoffset() is None:
+            raise ValueError("Usage timestamps must be timezone-aware.")
         if self.usage_valid_until is not None and (
             self.usage_valid_until.utcoffset() is None
-            or not self.observed_at < self.usage_valid_until <= self.expires_at
+            or not 0
+            < (self.usage_valid_until - self.observed_at).total_seconds()
+            <= MAX_DISPOSABLE_LANE_SAFETY_SECONDS
         ):
-            raise ValueError("Bounded usage must expire within its observation lifetime.")
+            raise ValueError("Bounded usage lasts at most fifteen minutes from observation.")
         return self
 
 

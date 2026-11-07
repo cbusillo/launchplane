@@ -186,6 +186,7 @@ def require_drill_use_unprotected(
     accepted_usage_revision: str = "",
     allow_down_repair: bool = True,
 ) -> None:
+    observed = datetime.fromtimestamp(now, timezone.utc) if now is not None else None
     try:
         # Missing tracked authority is an unreadable hold check, never no hold.
         store.read_dokploy_target_record(context_name=context, instance_name="testing")
@@ -193,7 +194,7 @@ def require_drill_use_unprotected(
         recorded = store.read_disposable_lane_safety(product, context, "testing")
         protected = (
             recorded is not None
-            and recorded.usage == "in_use"
+            and recorded.current_usage(observed) == "in_use"
             and _usage_revision(recorded) != accepted_usage_revision
             and hold is None
             and lane_usage_protected(
@@ -201,9 +202,9 @@ def require_drill_use_unprotected(
                 product=product,
                 context=context,
                 instance="testing",
-                usage=recorded.usage,
+                usage=recorded.current_usage(observed),
                 require_unused=allow_down_repair,
-                now=datetime.fromtimestamp(now, timezone.utc) if now is not None else None,
+                now=observed,
             )
         )
     except Exception as error:

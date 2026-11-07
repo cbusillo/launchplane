@@ -119,7 +119,7 @@ class OdooTestingUsage:
 # Runs inside the existing web container. No ORM, registry, HTTP authentication,
 # session-store get/save/GC, account names, tokens or session IDs leave it.
 ODOO_USAGE_CONTAINER_PROGRAM_TEMPLATE = r"""
-import argparse, configparser, json, os, re, stat
+import argparse, configparser, json, logging, os, re, stat
 from datetime import datetime, timezone
 EXPECTED_INSTANCE=__EXPECTED_INSTANCE__
 from pathlib import Path
@@ -270,12 +270,16 @@ def probe():
             if type(recent) is not bool:
                 raise UsageUnavailable('login_history_unavailable')
             if recent:
-                cursor.execute("SELECT create_uid, min(create_date) FROM res_users_log WHERE create_date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - interval '24 hours' GROUP BY create_uid ORDER BY create_uid LIMIT 256")
-                for user,since in cursor.fetchall():
-                    if type(user) is int and user>0 and isinstance(since,datetime):
-                        evidence.setdefault('actors',set()).add('odoo-user:'+str(user))
-                        stamp=since.replace(tzinfo=timezone.utc).timestamp()
-                        evidence['since']=min(evidence.get('since',stamp),stamp)
+                try:
+                    cursor.execute("SELECT create_uid, min(create_date) FROM res_users_log WHERE create_date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - interval '24 hours' GROUP BY create_uid ORDER BY create_uid LIMIT 256")
+                    for user,since in cursor.fetchall():
+                        if type(user) is int and user>0:
+                            evidence.setdefault('actors',set()).add('odoo-user:'+str(user))
+                        if isinstance(since,datetime):
+                            stamp=since.replace(tzinfo=timezone.utc).timestamp()
+                            evidence['since']=min(evidence.get('since',stamp),stamp)
+                except Exception:
+                    logging.warning('Optional testing-use actor metadata is unavailable.')
         checkpoint='database_cleanup_unavailable'
         connection.rollback()
     finally:
@@ -678,7 +682,7 @@ def read_odoo_testing_usage(
             credential_hashes=tuple(hashes),
             actors=tuple(actors),
             since=recorded_since,
-            valid_until=observed + timedelta(minutes=5),
+            valid_until=observed + timedelta(minutes=5) if recent or sessions else None,
         )
     except NativeSourceAuthorizationDenied:
         raise

@@ -39,6 +39,14 @@ class CollectedDisposableLaneFacts:
         }
 
 
+def _hold_since(recorded_at: str) -> datetime | None:
+    try:
+        since = datetime.fromisoformat(recorded_at)
+    except ValueError:
+        return None
+    return since if since.utcoffset() is not None else None
+
+
 def collect_disposable_lane_facts(
     store: DisposableLaneStore,
     *,
@@ -75,9 +83,7 @@ def collect_disposable_lane_facts(
     return CollectedDisposableLaneFacts(
         usage="in_use" if held else usage.usage,
         usage_actor=hold.recorded_by if held and hold is not None else ", ".join(usage.actors),
-        usage_since=datetime.fromisoformat(hold.recorded_at)
-        if held and hold is not None and hold.recorded_at
-        else usage.since,
+        usage_since=_hold_since(hold.recorded_at) if held and hold is not None else usage.since,
         usage_valid_until=usage.valid_until if not held else None,
         usage_evidence=(
             f"service:staff-testing-hold:{binding_sha256}"
@@ -186,9 +192,7 @@ def merge_collected_safety(
             usage_evidence=previous.usage_evidence,
             usage_actor=previous.usage_actor,
             usage_since=previous.usage_since,
-            usage_valid_until=min(previous.usage_valid_until, collected.expires_at)
-            if previous.usage_valid_until is not None
-            else None,
+            usage_valid_until=previous.usage_valid_until,
         )
     if previous.data == "only_copy":
         changes.update(data="only_copy", data_evidence=previous.data_evidence)

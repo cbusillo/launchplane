@@ -244,7 +244,7 @@ def preparation_binding(
     if hold is None or hold.recorded_by != actor:
         raise SeparationResourcesRefused("Retain this caller's existing testing interlock.")
     protection = store.read_disposable_lane_safety(product, context, "testing")
-    if protection and protection.usage == "in_use":
+    if protection and protection.current_usage() == "in_use":
         raise SeparationResourcesRefused("Known staff use protects the retained recipient.")
     key = generic_web_provider_target_key(
         provider_id=provider.provider_id,
