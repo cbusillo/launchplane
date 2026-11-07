@@ -1018,7 +1018,6 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
 
     def test_continuation_use_refusal_precedes_native_capture(self) -> None:
         from control_plane.odoo_testing_usage import OdooTestingUsage
-        from control_plane.odoo_preview_qualification import PreviewQualification
         from control_plane.preview_preservation import run_preview_preservation
 
         self.record_serving_original()
@@ -1044,10 +1043,8 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "control_plane.odoo_preview_qualification.read_odoo_preview_qualification",
-                    return_value=PreviewQualification(
-                        OdooTestingUsage(usage="in_use", resources_qualified=True), "fixture"
-                    ),
+                    "control_plane.odoo_preview_qualification.read_odoo_testing_usage",
+                    return_value=OdooTestingUsage(usage="in_use", resources_qualified=True),
                 ) as qualification,
                 patch("control_plane.dokploy.native_copy_stream._read_remote") as remote,
             ):

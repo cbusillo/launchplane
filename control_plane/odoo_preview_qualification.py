@@ -9,9 +9,17 @@ from control_plane import secrets
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetPolicies
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.secret_record import SecretScope
-from control_plane.contracts.product_profile_record import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
+from control_plane.contracts.product_profile_record import (
+    FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
+    is_exclusive_product_context,
+    product_config_targets,
+    product_context_owner_map,
+)
 from control_plane.dokploy import api, source
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
@@ -160,6 +168,51 @@ def production_credentials(
 ) -> ProductionCredentialInventory:
     profile = store.read_product_profile_record(product)
     lanes = [lane for lane in profile.lanes if lane.instance == "prod"]
+    if not lanes:
+        profiles = store.list_product_profile_records()
+        contexts = {lane.context for lane in product_config_targets(profile)} | set(
+            profile.historical_contexts
+        )
+        owners = product_context_owner_map(profiles, config_scopes=True)
+        if (
+            profile.production_use == "live"
+            or [item for item in profiles if item.product == product] != [profile]
+            or not contexts
+            or any(
+                not is_exclusive_product_context(context=context, product=product, owners=owners)
+                for context in contexts
+            )
+        ):
+            raise PreviewQualificationMissing("preview_production_inventory_unavailable")
+        targets: tuple[
+            DokployTargetRecord
+            | DokployTargetIdRecord
+            | ProviderTargetRecord
+            | EnvironmentInventory
+            | RuntimeEnvironmentRecord,
+            ...,
+        ] = (
+            *store.list_dokploy_target_records(),
+            *store.list_dokploy_target_id_records(),
+            *store.list_physical_provider_target_records(),
+            *store.list_environment_inventory(),
+            *store.list_runtime_environment_records(),
+        )
+        if any(row.context in contexts and row.instance == "prod" for row in targets):
+            raise PreviewQualificationMissing("preview_production_inventory_unavailable")
+        for context in contexts:
+            records = store.list_secret_records(context_name=context, limit=None)
+            bindings = store.list_secret_bindings(context_name=context, limit=None)
+            if any(row.instance == "prod" for row in records) or any(
+                row.instance == "prod" or row.declared_secret_class == "prod_only"
+                for row in bindings
+            ):
+                raise PreviewQualificationMissing("preview_production_inventory_unavailable")
+        return ProductionCredentialInventory(
+            canonical_json_sha256({"profile": profile.model_dump(mode="json")}),
+            frozenset(),
+            frozenset(),
+        )
     if len(lanes) != 1:
         raise PreviewQualificationMissing("preview_production_lane_unavailable")
     context = lanes[0].context

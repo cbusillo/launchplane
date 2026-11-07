@@ -12,11 +12,16 @@ from control_plane.disposable_lane_collection import collect_disposable_lane_fac
 from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.promotion_record import DeploymentEvidence
+from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.product_profile_record import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
     LaunchplaneProductProfileRecord,
 )
-from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.http_app import LaunchplaneErrorDetail
 from control_plane.odoo_testing_usage import (
@@ -34,7 +39,10 @@ from control_plane.odoo_preview_apply_http import (
     apply_odoo_preview_lifecycle_evidence,
     build_odoo_preview_runtime_identity,
 )
-from control_plane.odoo_preview_qualification import PreviewQualificationMissing
+from control_plane.odoo_preview_qualification import (
+    PreviewQualificationMissing,
+    read_odoo_preview_qualification,
+)
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.test_disposable_lane_authority import _DisposableRuntimeAuthorityFixture
 from tests.test_odoo_preview_apply_execution import _issued_plan, _refresh_payload
@@ -43,6 +51,211 @@ from tests.support.auth import scoped_agent_transport
 
 
 class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
+    profile: LaunchplaneProductProfileRecord
+    identity: RuntimeIdentity
+    production: dict[str, str]
+
+    def remove_registered_production(self) -> None:
+        self.profile = self.profile.model_copy(
+            update={"lanes": tuple(lane for lane in self.profile.lanes if lane.instance != "prod")}
+        )
+        self.store.write_product_profile_record(self.profile)
+        self.store.delete_dokploy_target_id_record(
+            expected_record=self.store.read_dokploy_target_id_record(
+                context_name="cm", instance_name="prod"
+            )
+        )
+        self.store.delete_dokploy_target_record(
+            expected_record=self.store.read_dokploy_target_record(
+                context_name="cm", instance_name="prod"
+            )
+        )
+
+    async def test_testing_only_preview_qualifies_current_facts_without_inventing_data_custody(
+        self,
+    ) -> None:
+        self.remove_registered_production()
+        response = await self.evidence()
+        self.assertEqual(response.status_code, 200, response.text)
+        current = response.json()["result"]["current"]
+        self.assertEqual(current["usage"], "unused")
+        self.assertEqual(current["production_resources"], "isolated")
+        self.assertEqual(current["credential_isolation"], "separated")
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(
+                self.profile.product, "cm", self.issued.preview_slug
+            )
+        )
+        response = await self.collect()
+        self.assertEqual(response.status_code, 202, response.text)
+        result = response.json()["result"]
+        self.assertEqual(result["usage"], "unused")
+        self.assertEqual(result["production_resources"], "isolated")
+        self.assertEqual(result["data"], "unknown")
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+        self.assertEqual(
+            self.store.read_idempotency_record_by_id(self.original.record_id), self.original
+        )
+
+    async def test_absent_lane_cannot_hide_production_records_or_unreadable_inventory(self) -> None:
+        target = self.store.read_dokploy_target_record(context_name="cm", instance_name="prod")
+        target_id = self.store.read_dokploy_target_id_record(
+            context_name="cm", instance_name="prod"
+        )
+        self.remove_registered_production()
+        secret = SecretRecord(
+            secret_id="orphan-production-secret",
+            scope="context_instance",
+            integration="runtime_environment",
+            context="cm",
+            instance="prod",
+            name="ORPHAN_PASSWORD",
+            current_version_id="orphan-version",
+            created_at=self.profile.updated_at,
+            updated_at=self.profile.updated_at,
+        )
+        binding = SecretBinding(
+            binding_id="orphan-binding",
+            secret_id=secret.secret_id,
+            integration=secret.integration,
+            binding_key=secret.name,
+            context="cm",
+            instance="prod",
+            created_at=self.profile.updated_at,
+            updated_at=self.profile.updated_at,
+        )
+        inventory = (
+            ("list_dokploy_target_records", target),
+            ("list_dokploy_target_id_records", target_id),
+            (
+                "list_physical_provider_target_records",
+                ProviderTargetRecord.from_dokploy_records(
+                    target_record=target, target_id_record=target_id
+                ),
+            ),
+            (
+                "list_environment_inventory",
+                EnvironmentInventory(
+                    context="cm",
+                    instance="prod",
+                    source_git_ref=self.identity.source_git_ref,
+                    deployment_record_id="orphan-deployment",
+                    deploy=DeploymentEvidence(
+                        target_name=target.target_name,
+                        target_type=target.target_type,
+                        deploy_mode="manual",
+                    ),
+                    updated_at=self.profile.updated_at,
+                ),
+            ),
+            (
+                "list_runtime_environment_records",
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context="cm",
+                    instance="prod",
+                    env={"SETTING": "orphan"},
+                    updated_at=self.profile.updated_at,
+                ),
+            ),
+            ("list_secret_records", secret),
+            ("list_secret_bindings", binding),
+            (
+                "list_secret_bindings",
+                binding.model_copy(
+                    update={"instance": "preview", "declared_secret_class": "prod_only"}
+                ),
+            ),
+        )
+        for reader_name, orphan in inventory:
+            for unavailable in (False, True):
+                with self.subTest(reader=reader_name, unavailable=unavailable):
+                    reader = getattr(self.store, reader_name)
+                    with patch.object(
+                        self.store,
+                        reader_name,
+                        **(
+                            {"side_effect": RuntimeError("unreadable inventory")}
+                            if unavailable
+                            else {"return_value": (*reader(), orphan)}
+                        ),
+                    ):
+                        if unavailable:
+                            with self.assertRaises(PreviewQualificationMissing):
+                                read_odoo_preview_qualification(
+                                    self.store, preview=self.preview, root=self.root
+                                )
+                        else:
+                            response = await self.collect()
+                            self.assertEqual(response.status_code, 409, response.text)
+                    self.remote.assert_not_called()
+                    self.assertIsNone(
+                        self.store.read_disposable_lane_safety(
+                            self.profile.product, "cm", self.issued.preview_slug
+                        )
+                    )
+
+    async def test_absent_production_requires_complete_exclusive_nonlive_profile_authority(
+        self,
+    ) -> None:
+        self.remove_registered_production()
+        profiles = self.store.list_product_profile_records()
+        other = next(profile for profile in profiles if profile.product != self.profile.product)
+        conflicting = other.model_copy(
+            update={
+                "preview": other.preview.model_copy(
+                    update={"context": self.profile.preview.context}
+                )
+            }
+        )
+        for profile, snapshot in (
+            (self.profile.model_copy(update={"production_use": "live"}), profiles),
+            (self.profile, ()),
+            (self.profile, (*profiles, conflicting)),
+        ):
+            with self.subTest(profile=profile.production_use, snapshot=snapshot):
+                self.store.write_product_profile_record(profile)
+                with patch.object(
+                    self.store, "list_product_profile_records", return_value=snapshot
+                ):
+                    response = await self.evidence()
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["result"]["current"]["usage"], "unknown")
+                self.assertEqual(
+                    response.json()["result"]["current"]["production_resources"], "unknown"
+                )
+                self.remote.assert_not_called()
+                self.assertIsNone(
+                    self.store.read_disposable_lane_safety(
+                        self.profile.product, "cm", self.issued.preview_slug
+                    )
+                )
+
+    async def test_absent_production_rechecks_authority_and_still_requires_runtime_facts(
+        self,
+    ) -> None:
+        production_profile = self.profile
+        self.remove_registered_production()
+        empty_profile = self.profile
+
+        def change_profile(**kwargs: Any) -> None:
+            self.store.write_product_profile_record(production_profile)
+            self.read_frame(**kwargs)
+
+        with patch.object(self.remote, "side_effect", change_profile):
+            response = await self.collect()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.store.write_product_profile_record(empty_profile)
+        self.remote.side_effect = self.read_frame
+        self.frame.update(resources_qualified=False)
+        response = await self.collect()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(
+                self.profile.product, "cm", self.issued.preview_slug
+            )
+        )
+
     async def evidence(self, *, product: str = "", **changes: object) -> Any:
         query = {
             "pr_number": self.preview.anchor_pr_number,
