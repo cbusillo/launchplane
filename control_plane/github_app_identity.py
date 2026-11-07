@@ -31,6 +31,7 @@ from control_plane.github_app_configuration import (
 ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY = "LAUNCHPLANE_ADVISORY_GITHUB_APP_PRIVATE_KEY"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _ALLOWED_INSTALLATION_PERMISSIONS = {"checks": "write", "metadata": "read"}
+RUNNER_LIFECYCLE_PERMISSIONS = {"administration": "write", "actions": "read", "metadata": "read"}
 _MERGE_TRAIN_TOKEN_PERMISSIONS = {
     "checks": "read",
     "contents": "write",
@@ -131,6 +132,7 @@ class GitHubAppPermissionError(GitHubAppIdentityError):
 class GitHubAppIdentity:
     app_id: int
     private_key: str = field(repr=False)
+    client_id: str = ""
 
 
 def resolve_advisory_github_app_identity(*, control_plane_root: Path) -> GitHubAppIdentity:
@@ -198,6 +200,32 @@ def mint_delivery_installation_token(
         allowed_token_permissions=allowed,
         identity_label="Launchplane delivery GitHub App",
         permission_boundary_label="delivery operation",
+        api_request=api_request,
+        now=now,
+    )
+
+
+def mint_runner_lifecycle_installation_token(
+    *,
+    identity: GitHubAppIdentity,
+    repository: str,
+    repository_id: str,
+    repository_owner_id: str,
+    api_request: GitHubApiRequest = github_api_request,
+    now: datetime | None = None,
+) -> GitHubAppInstallationToken:
+    permissions = RUNNER_LIFECYCLE_PERMISSIONS
+    return _mint_repository_installation_token(
+        identity=identity,
+        repository=repository,
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        requested_permissions=permissions,
+        required_installation_permissions=permissions,
+        allowed_installation_permissions=permissions,
+        allowed_token_permissions=permissions,
+        identity_label="Runner lifecycle GitHub App",
+        permission_boundary_label="runner lifecycle",
         api_request=api_request,
         now=now,
     )
@@ -386,6 +414,8 @@ def _mint_repository_installation_token(
             != identity.app_id
         ):
             raise GitHubAppIdentityError("GitHub App identity does not match configured app id.")
+        if identity.client_id and app_payload.get("client_id") != identity.client_id:
+            raise GitHubAppIdentityError("GitHub App identity does not match configured client id.")
         slug = app_payload.get("slug")
         app_slug = slug.strip() if isinstance(slug, str) else ""
     installation_payload = json_object(
@@ -402,6 +432,8 @@ def _mint_repository_installation_token(
         "GitHub App installation response requires id.",
         error_type=GitHubAppIdentityError,
     )
+    if installation_payload.get("suspended_at") is not None:
+        raise GitHubAppIdentityError("GitHub App installation is suspended.")
     if (
         required_positive_int(
             installation_payload.get("app_id"),

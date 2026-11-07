@@ -11,7 +11,10 @@ from control_plane import secrets
 from control_plane.npmplus import PREVIEW_DNS_INTEGRATION, PREVIEW_DNS_BINDING
 from control_plane.contracts.authz_policy_record import AuthzPolicyConflictError
 from control_plane.artifact_scan import GHCR_ARTIFACT_READ_INTEGRATION
-from control_plane.github_app_configuration import ONBOARDING_GITHUB_APP_INTEGRATION
+from control_plane.github_app_configuration import (
+    ONBOARDING_GITHUB_APP_INTEGRATION,
+    RUNNER_LIFECYCLE_GITHUB_APP_INTEGRATION,
+)
 from control_plane.durable_operation_authorization import read_active_authz_policy_record
 from control_plane.product_config import _plan_product_config_secret_write
 from control_plane.contracts.product_profile_record import (
@@ -58,6 +61,11 @@ _SERVICE_CREDENTIAL_FIELDS = {
         "Onboarding App credential",
         "Enter the independently held original onboarding App key. It is never shown again and does not change the App's installation or permissions.",
         (("private_key", "Existing onboarding App private key"),),
+    ),
+    RUNNER_LIFECYCLE_GITHUB_APP_INTEGRATION: (
+        "Runner lifecycle App credential",
+        "Enter the independently held runner lifecycle App key. Launchplane uses it only for repository runner operations. It is never shown again.",
+        (("private_key", "Runner lifecycle App private key"),),
     ),
     "trusted_maintenance_webhook": (
         "Trusted maintenance webhook credential",

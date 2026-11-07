@@ -20,7 +20,7 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 from control_plane.contracts.runner_lane_registration import plan_runner_lane_registration
 from control_plane.contracts.text_fields import require_text
 from control_plane.github_payload import repository_full_name
-from control_plane.runner_lane_github import GitHubRunnerLaneRegistrationTokenFetcher
+from control_plane.runner_lane_github import RunnerLaneRegistrationTokenFetcher
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
 
 
@@ -111,7 +111,7 @@ def execute_runner_lane_registration_executor(
     policy: RunnerLaneRegistrationPolicy,
     pre_inventory: RunnerLaneInventory,
     inventory_reader: InventoryReader,
-    token_fetcher: GitHubRunnerLaneRegistrationTokenFetcher,
+    token_fetcher: RunnerLaneRegistrationTokenFetcher,
     remote_runner: RemoteCommandRunner,
     audit_poster: AuditPoster,
 ) -> RunnerLaneRegistrationExecutorResult:

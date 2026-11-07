@@ -1,4 +1,5 @@
 from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
+from control_plane.http_routes.runner_lanes import register_runner_lane_service_routes
 from control_plane.http_routes.runner_host_hygiene_configuration import (
     register_runner_host_hygiene_configuration_routes,
 )
@@ -29033,6 +29034,10 @@ def create_launchplane_fastapi_app(
     register_topology_read_routes(app, dependencies=read_route_dependencies)
     register_ingress_read_routes(app, dependencies=read_route_dependencies)
     register_runner_host_hygiene_read_routes(app, dependencies=read_route_dependencies)
+    register_runner_lane_service_routes(
+        app,
+        dependencies=replace(read_route_dependencies, read_identity=read_browser_mutation_identity),
+    )
     register_runner_host_hygiene_configuration_routes(
         app,
         dependencies=replace(read_route_dependencies, read_identity=read_browser_mutation_identity),

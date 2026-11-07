@@ -11,7 +11,13 @@ from fastapi import FastAPI
 from pydantic import ValidationError
 
 from control_plane import secrets
-from control_plane.github_app_configuration import ONBOARDING_GITHUB_APP_CLIENT_ID_ENV_KEY
+from control_plane.github_app_configuration import (
+    ONBOARDING_GITHUB_APP_CLIENT_ID_ENV_KEY,
+    RUNNER_LIFECYCLE_GITHUB_APP_ID_KEY,
+    RUNNER_LIFECYCLE_GITHUB_APP_CLIENT_ID_KEY,
+    RUNNER_LIFECYCLE_GITHUB_APP_INTEGRATION,
+)
+from control_plane.runner_lane_service import runner_lifecycle_identity
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.merge_train_stall import (
     STALL_WORKFLOW_REF_KEY,
@@ -161,6 +167,42 @@ class ServiceRuntimeSettingTests(unittest.TestCase):
         for value in ("", "not a client id", "line\nbreak", "key=value"):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 ServiceRuntimeSettingRequest(key=setting.key, value=value, reason=setting.reason)
+
+    def test_runner_app_selectors_are_runtime_values_and_preserve_other_settings(self) -> None:
+        expected = dict(EXISTING_ENV)
+        for key, value in (
+            (RUNNER_LIFECYCLE_GITHUB_APP_ID_KEY, "42"),
+            (RUNNER_LIFECYCLE_GITHUB_APP_CLIENT_ID_KEY, "Iv1.syntheticRunnerApp"),
+        ):
+            request = ServiceRuntimeSettingRequest(
+                key=key, value=value, reason="Record runner App identity."
+            )
+            preview = self.call(request)
+            self.call(
+                request.model_copy(
+                    update={"mode": "apply", "expected_plan_digest": preview["plan_digest"]}
+                ),
+                key,
+            )
+            expected[key] = value
+            self.assertEqual(_service_env(self.store), expected)
+        self.assertEqual(self.store.list_secret_records(), ())
+        with self.assertRaises(ValueError):
+            runner_lifecycle_identity(self.store)
+        secrets.write_secret_value(
+            record_store=self.store,
+            scope="context",
+            integration=RUNNER_LIFECYCLE_GITHUB_APP_INTEGRATION,
+            name="private_key",
+            plaintext_value="synthetic-runner-key",
+            binding_key="private_key",
+            context_name="launchplane",
+            actor="test",
+        )
+        identity = runner_lifecycle_identity(self.store)
+        self.assertEqual(str(identity.app_id), expected[RUNNER_LIFECYCLE_GITHUB_APP_ID_KEY])
+        self.assertEqual(identity.client_id, expected[RUNNER_LIFECYCLE_GITHUB_APP_CLIENT_ID_KEY])
+        self.assertEqual(identity.private_key, "synthetic-runner-key")
 
     def test_reviewed_apply_accepts_both_stall_sender_routing_settings(self) -> None:
         expected = {

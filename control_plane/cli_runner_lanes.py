@@ -42,7 +42,9 @@ from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
 from control_plane.runner_lane_github import GitHubRunnerLaneRegistrationTokenFetcher
 from control_plane.runner_lane_github import GitHubRunnerLaneRetirer
 from control_plane.runner_lane_github import GitHubRepositoryActiveRunReader
+from control_plane.runner_lane_github import RunnerLaneRegistrationTokenFetcher
 from control_plane.runner_queue_wait_github import GitHubRunnerQueueWaitReader
+from control_plane.workflows.runner_lane_service_client import ServiceRunnerLaneClient
 from control_plane.workflows.runner_lane_registration_executor import (
     RunnerLaneRegistrationExecutorRequest,
 )
@@ -144,8 +146,22 @@ def register_runner_lane_commands(main: click.Group) -> None:
     show_default=True,
     help="GitHub API base URL.",
 )
-def runner_inventory(repository: str, github_token_env: str, github_api_base_url: str) -> None:
+@click.option("--service-url", default="", help="Use Launchplane's runner lifecycle App.")
+@click.option("--bearer-token-env", default="LAUNCHPLANE_TOKEN", show_default=True)
+def runner_inventory(
+    repository: str,
+    github_token_env: str,
+    github_api_base_url: str,
+    service_url: str,
+    bearer_token_env: str,
+) -> None:
     try:
+        if service_url:
+            inventory = _service_runner_lane_client(
+                service_url, bearer_token_env
+            ).read_runner_lane_inventory(repository=repository)
+            click.echo(json.dumps(inventory.model_dump(mode="json"), indent=2, sort_keys=True))
+            return
         token_env = github_token_env.strip()
         if not token_env:
             raise click.ClickException("runner inventory requires --github-token-env.")
@@ -646,15 +662,16 @@ def runner_lane_registration_executor(
 ) -> None:
     try:
         pre_inventory = _load_runner_lane_inventory(inventory_file)
-        token_env = github_token_env.strip()
-        token = os.environ.get(token_env, "").strip() if token_env else ""
-        if not token:
-            raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
-        transport = UrllibMergeTrainGitHubTransport(
-            token=token,
-            api_base_url=github_api_base_url,
-        )
-        inventory_reader = GitHubRunnerLaneInventoryReader(transport=transport)
+        inventory_reader: ServiceRunnerLaneClient | GitHubRunnerLaneInventoryReader
+        token_fetcher: RunnerLaneRegistrationTokenFetcher
+        if audit_mode == "service":
+            client = _service_runner_lane_client(service_url, bearer_token_env)
+            inventory_reader = client
+            token_fetcher = client
+        else:
+            transport = _runner_lane_transport(github_token_env, github_api_base_url)
+            inventory_reader = GitHubRunnerLaneInventoryReader(transport=transport)
+            token_fetcher = GitHubRunnerLaneRegistrationTokenFetcher(transport=transport)
         audit_poster: RunnerRegistrationAuditPoster = dry_run_audit_poster
         if audit_mode == "service":
             token_env = bearer_token_env.strip()
@@ -698,7 +715,7 @@ def runner_lane_registration_executor(
             inventory_reader=lambda repo: inventory_reader.read_runner_lane_inventory(
                 repository=repo
             ),
-            token_fetcher=GitHubRunnerLaneRegistrationTokenFetcher(transport=transport),
+            token_fetcher=token_fetcher,
             remote_runner=build_runner_registration_command_runner(),
             audit_poster=audit_poster,
         )
@@ -810,19 +827,19 @@ def runner_lane_retirement_executor(
 ) -> None:
     try:
         pre_inventory = _load_runner_lane_inventory(inventory_file)
-        github_token_name = github_token_env.strip()
-        github_token = os.environ.get(github_token_name, "").strip() if github_token_name else ""
-        if not github_token:
-            raise click.ClickException(
-                f"Missing GitHub token in environment variable {github_token_name}."
-            )
-        transport = UrllibMergeTrainGitHubTransport(
-            token=github_token,
-            api_base_url=github_api_base_url,
-        )
-        inventory_reader = GitHubRunnerLaneInventoryReader(transport=transport)
-        activity_reader = GitHubRepositoryActiveRunReader(transport=transport)
-        runner_retirer = GitHubRunnerLaneRetirer(transport=transport)
+        inventory_reader: ServiceRunnerLaneClient | GitHubRunnerLaneInventoryReader
+        activity_reader: ServiceRunnerLaneClient | GitHubRepositoryActiveRunReader
+        runner_retirer: ServiceRunnerLaneClient | GitHubRunnerLaneRetirer
+        if audit_mode == "service":
+            client = _service_runner_lane_client(service_url, bearer_token_env)
+            inventory_reader = client
+            activity_reader = client
+            runner_retirer = client
+        else:
+            transport = _runner_lane_transport(github_token_env, github_api_base_url)
+            inventory_reader = GitHubRunnerLaneInventoryReader(transport=transport)
+            activity_reader = GitHubRepositoryActiveRunReader(transport=transport)
+            runner_retirer = GitHubRunnerLaneRetirer(transport=transport)
         if mutate and audit_mode != "service":
             raise click.ClickException(
                 "runner lane retirement mutation requires --audit-mode service."
@@ -1865,6 +1882,22 @@ def _runner_host_hygiene_bearer_token(*, service_url: str, token_env: str) -> st
         service_url=service_url,
         token_env=token_env,
         label="runner host hygiene",
+    )
+
+
+def _runner_lane_transport(token_env: str, api_base_url: str) -> UrllibMergeTrainGitHubTransport:
+    token = os.environ.get(token_env.strip(), "").strip() if token_env.strip() else ""
+    if not token:
+        raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
+    return UrllibMergeTrainGitHubTransport(token=token, api_base_url=api_base_url)
+
+
+def _service_runner_lane_client(service_url: str, token_env: str) -> ServiceRunnerLaneClient:
+    return ServiceRunnerLaneClient(
+        service_url=service_url,
+        bearer_token_provider=lambda: _launchplane_service_bearer_token(
+            service_url=service_url, token_env=token_env, label="runner lifecycle"
+        ),
     )
 
 

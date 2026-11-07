@@ -142,6 +142,31 @@ class GitHubRunnerLaneInventoryReaderTests(unittest.TestCase):
 
 
 class RunnerLaneInventoryCliTests(unittest.TestCase):
+    def test_service_inventory_never_uses_a_github_token(self) -> None:
+        inventory = GitHubRunnerLaneInventoryReader(
+            transport=RecordingMergeTrainGitHubTransport(responses=({"runners": []},)),
+            clock=_FixedClock(),
+        ).read_runner_lane_inventory(repository="example/repo")
+        with (
+            patch("control_plane.cli_runner_lanes.ServiceRunnerLaneClient") as client,
+            patch("control_plane.cli_runner_lanes.UrllibMergeTrainGitHubTransport") as transport,
+            patch.dict("os.environ", {"LAUNCHPLANE_TOKEN": "synthetic-bearer"}, clear=True),
+        ):
+            client.return_value.read_runner_lane_inventory.return_value = inventory
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "runner-inventory",
+                    "--repository",
+                    "example/repo",
+                    "--service-url",
+                    "https://service.invalid",
+                ],
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(result.output)["repository"], inventory.repository)
+        transport.assert_not_called()
+
     def test_cli_prints_runner_inventory_json(self) -> None:
         class _FakeInventoryReader:
             def __init__(self, *, transport: object) -> None:

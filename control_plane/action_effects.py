@@ -263,6 +263,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "runner_host_hygiene_audit.read": ActionDeclaration("read"),
         "runner_host_hygiene_audit.write": ActionDeclaration("write"),
         "runner_lane_registration_audit.write": ActionDeclaration("write"),
+        "runner_lane_inventory.read": ActionDeclaration("read"),
         "runtime_key_safety.write": ActionDeclaration("write"),
         "secret.list": ActionDeclaration("read", "service"),
         "secret.read": ActionDeclaration("read", "service"),
