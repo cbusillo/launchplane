@@ -4247,8 +4247,6 @@ identity. It does not consume global-admin, bootstrap-admin, manager,
 delegation, repository-permission, or routing state as Client authority. This retired policy surface does not decide current Client review or merge readiness;
 its separate deletion remains pending.
 
-See `docs/product-owner-policy.md` for routes and persisted record contracts.
-
 ## Product Review API
 
 The small Client review path from `DIRECTION.md` and issue `#2446`. It is
@@ -4320,13 +4318,7 @@ An older record without a valid reviewed commit or identifier returns
 `409 product_review_feedback_unavailable` without changing its publication flag;
 the Client can open the latest review and record a new decision.
 
-## Retired Client Acceptance API
-
-The `/v1/owner-acceptance/*` routes and old engineering workbench are removed.
-Historical stored events remain readable through the record stores and retain
-all original identities and digests. No event writer or old Client evaluator
-participates in the current product-review or release-checklist flow. See
-[`owner-acceptance.md`](owner-acceptance.md) for the storage compatibility boundary.
+## Governance Projection
 
 `GET /v1/governance/projection` accepts only repository, pull request number,
 and base branch scope. It requires the repository policy's service authorization
@@ -4342,34 +4334,6 @@ projection is `authoritative=false`, authorizes no
 effect, classifies historical head/tree evidence explicitly, and never
 interprets a missing landing outcome as landed. See
 `docs/governance-evidence.md`.
-
-## Change Impact API
-
-Retired. Change-impact routing is retired (see `DIRECTION.md`), and the former
-`POST /v1/change-impact/evaluation` route is deleted; there is no service route
-for evaluating or applying change-impact policy. See
-`docs/change-impact-policy.md` for the retained historical record
-compatibility.
-
-## Out Of Scope For This First Slice
-
-- full human/admin auth design
-- multi-tenant billing or quota models
-- generalized plugin marketplace design
-- replacing file-backed storage immediately
-- moving every current CLI command behind HTTP at once
-
-## Recommended Next Implementation Steps
-
-Historical: these first-slice steps predate the current service; the Odoo and
-VeriReel drivers and service ingress described above exist.
-
-1. Convert the existing CLI preview evidence commands into local clients of the
-   same service-layer handler or payload contract.
-2. Add local clients for deployment and promotion evidence where Launchplane-facing
-   workflows still write through repo-local CLI adapters.
-3. Define the first explicit Odoo and VeriReel driver interfaces after the
-   service ingress exists.
 
 ## Product retirement
 

@@ -168,14 +168,6 @@ continuity across container replacements, or a complete night. The HTTP fixture 
 provider semantics; it does not prove the natural single-target workload or overnight
 budget. Qualify those original criteria from naturally occurring work only.
 
-## Preparing An Ordinary-Agent Target
-
-The dedicated ordinary-agent preparation routes and browser callers are removed.
-Historical preparation context remains readable; new generic proposals cannot
-supply it. Remaining domain/storage retirement is tracked by
-[launchplane#2437](https://github.com/cbusillo/launchplane/issues/2437).
-
-
 ## Credential Source And Policy Readback
 
 A repository policy names one supported GitHub credential source.
@@ -406,7 +398,7 @@ Each repository policy contains:
   bytes and digests and supplies no ordinary readiness capability. Only the
   governed `managed-merge-train-policy-import` lifecycle may change its effective
   active projection, including removal. It is separate from authorization
-  policy schema 3; see [retained inspection records](records.md#provider-delivery-inspection).
+  policy schema 3.
 - `failure_policy`: Whether Launchplane pauses the whole train or continues
   after marking the blocked pull request.
 - `enqueue`: Requirements for who may enqueue. Human authority remains role-based
@@ -2809,10 +2801,6 @@ qualifies when its provider-reported merge commit is contained in that base.
 Three-dot comparison can conservatively include base updates made by a child;
 this may require original-PR recovery even if those owned paths are already in
 the base. It never supplies native approval.
-
-This qualification does not cover ordinary-agent delegated delivery, which
-[DIRECTION.md](../DIRECTION.md#retired) retires and #2437 owns. This change adds
-no history grant or ancestry capability to that retired path.
 
 Run-once reports `merge_train_original_review_recovery_required` with original
 PR numbers and heads. Selection excludes the affected stack and dependent base

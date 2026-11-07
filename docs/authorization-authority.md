@@ -552,11 +552,6 @@ downgrade. Nonempty incompatible fragments still return HTTP 409
 `authz_policy_schema_conflict` with the deterministic schema incompatibility;
 refreshing and retrying the same request does not resolve it.
 
-The approved `operator.manager-preview-approval` contraction and independent
-empty-set readback are recorded on #2006. Its dedicated
-`manager-preview-approval-retirement` wrapper selection is removed after that
-operation; it is no longer a dispatch path.
-
 A PR that retires a caller links the matching grant-removal proposal in the
 same change, prepared with `privileged-policy-propose` through the
 [Launchplane helper](privileged-operations.md#agent-policy-proposals); if that
@@ -621,19 +616,6 @@ probing, wildcard grants, temporary CI authority, and copied policy payloads are
 not diagnostic substitutes.
 
 ## Target Model
-
-The delegated-session target in
-[issue #2240](https://github.com/cbusillo/launchplane/issues/2240) was closed as
-not planned; the ordinary-agent delegated-delivery design it served is retired
-(see [DIRECTION.md](../DIRECTION.md#retired)). Client acceptance remains
-product-decision evidence consumed by an independently
-authorized delivery request and never grants merge, deploy, configuration,
-secret, or policy-administration power.
-
-The currently implemented action-by-action policy evaluation, diagnostic
-routes, activation bridges, and recovery mechanisms recorded in this document
-remain the runtime contract. The administration surface described immediately below
-is itself the target model. This target text grants no capability.
 
 The DB-native administration surface must support authenticated administrators
 through Launchplane's API and UI:
@@ -903,13 +885,6 @@ routine authorization workflows must be retired. GitHub may remain an identity
 provider and transport for already-authorized workloads. No total-lockout
 bootstrap or break-glass path is active.
 
-Issue `#2243` removes the unactivated hardware-recovery API, UI, service, CLI,
-and public contracts. Alembic revision `f2239a0b1c2d` remains immutable deployed
-history, and its inert tables remain available only for safe rolling deployment
-and rollback compatibility. The outbox worker retains the historical recovery
-alert kind only to drain any already-persisted row; neither compatibility path
-can create authorization authority.
-
 ## Bootstrap And Break-Glass
 
 Bootstrap exists only to establish the first reachable DB-backed administrator
@@ -980,54 +955,6 @@ until the worker's terminal reauthorization, then revoke every canary rule and
 read the active policy back after terminal verification or any post-activation
 worker stop.
 
-The ordinary-agent delegated-delivery design is retired (see
-[DIRECTION.md](../DIRECTION.md#retired)), and
-[#2437](https://github.com/cbusillo/launchplane/issues/2437) deletes its code.
-The ordinary-agent activation text below describes that code until then; do not
-activate or extend it.
-
-The retired activation executor and enrollment recovery have been removed.
-Historical activation contracts and schema-3 parsing remain until the
-domain/storage layers are deleted under #2437. Bounded legacy ciphertext expiry
-maintenance remains necessary for current managed-secret key retirement.
-
-The source-owned activation administration descriptor is
-`ordinary-agent-delivery-activation`. Its human lifecycle uses the distinct
-`ordinary_agent_delivery_activation.plan`, `.read`, `.cancel`, `.approve`, and
-`.revoke` actions. Each action must appear literally on the one matching managed
-rule; the legacy empty-action compatibility behavior used by other descriptors
-does not authorize this family. The descriptor has no terminal-agent proposal or
-summary capability.
-
-Setup resolves a stored managed-policy proposal and current repository inventory
-on the server. A schema-v2 source policy requires the explicit
-`migrate_v2_to_v3` proposal mode. A schema-v3 source policy uses an ordinary
-schema-v3 reconcile with migration mode `reject`; renewal does not repeat a
-completed migration. The source operation may be planned, approved, executing,
-or executed, and its request, evidence, plan, managed-set, and full candidate
-policy digests are recomputed. It must identify exactly one ordinary-agent rule
-and target. Other reviewed rule families remain governed by that policy
-operation rather than forcing an artificial package split.
-
-An approved setup writes only an inert activation record with desired state
-`guarded` and effective state `qualification_only`. A separate approved
-`revoke_activation` request performs exact activation CAS and makes both states
-terminal `revoked`. Replacing an expired guarded intent atomically supersedes the
-old projection, appends its event, and installs a new activation ID; a revoked
-predecessor stays unchanged. Recovery follows the append-only event bound to the
-setup or revoke operation, so later legitimate transitions do not erase the
-original result. Scope history and current-row uniqueness use the immutable
-repository ID, branch, managed set, and managed rule; the repository name remains
-display context and a rename cannot create a second current intent. The Launchplane
-UI offers server-resolved targets and server-clock expiry choices from one hour
-through 30 days without requiring typed record IDs, digests, issue IDs, or
-free-form reasons. The planner rejects any setup expiry beyond 30 days.
-
-This descriptor makes no provider call, installs no authorization grant,
-registers no ordinary worker, and derives no guarded readiness. New setups and
-revocations are refused, and the activation writers are deleted; stored
-activation records remain readable history.
-
 A schema-v3 policy write that adds or changes any ordinary rule, including a
 v2-to-v3 migration, is refused with `ordinary_authority_retired`, at both the
 service and the storage compare-and-write. Exact ordinary-rule removal and
@@ -1035,16 +962,6 @@ other schema-v3 maintenance remain possible with maintenance evidence; raw
 schema-v3 seed and unbound replacement stay fenced. Historical
 `runtime_capability_at_setup` and `policy_v3_write_supported` values on stored
 records are history only, not authority.
-
-### Retained Agent Delivery Administration Records
-
-The retired `ordinary-agent-delivery-administration` candidate and its replay
-are no longer accepted by authorization-candidate preparation. Stored records
-remain readable, and administration-rule removal stays guarded by activation
-history. Do not stage or install the retired
-`operator.ordinary-agent-delivery-administration` managed set; remove existing
-rules through a managed-policy-set plan or managed-rule-set reconcile. Schema-3
-parsing and retained request validation remain supported.
 
 ### Preparing Administrator Product Evidence Access
 
@@ -1278,25 +1195,6 @@ and that the access stands until a separately governed removal. Preparation
 creates a plan for review and changes nothing until approval, current-policy
 checks, worker execution, CAS and read-back install it. Installing it is a
 grant, so it is a Director decision.
-
-### Inspecting Pilot Preparation Inputs
-
-The dedicated ordinary-agent preparation routes and browser callers are removed.
-Historical preparation context remains readable; new generic proposals cannot
-supply it. Terminal enrollment candidate production and its candidate ID are
-removed from the generic candidate endpoint as well. Exact historical terminal
-request recognition remains for privileged-operation semantic review. The
-ordinary-agent delivery-policy compiler remains in use by
-`privileged_operation_registry` to validate retained prepared-request shapes;
-its removal needs a replacement for that validation. Remaining source tracing
-is tracked by [launchplane#5245](https://github.com/cbusillo/launchplane/issues/5245).
-The data retirement on #2437 is complete and is not reopened.
-
-
-### Preparing The First Ordinary Client Policy
-
-The first-client preparation route is removed. Its persisted context remains
-part of historical policy records.
 
 ## Existing-identity policy version compatibility
 

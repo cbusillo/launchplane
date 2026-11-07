@@ -142,19 +142,6 @@ The same logger retains nested causes for handled HTTP errors. It omits exceptio
 text, payloads and local variables; these locations explain the waiting checkpoint
 without changing the operation's status, original key or recovery fences.
 
-## Retired Approval Policies
-
-Change-impact and Client policy endpoints are removed. Do not repair
-retired policies to unblock delivery. Merge admission reads current Git and
-technical evidence; Client approval belongs to the product review and release
-checklist. Historical policy/audit readers retain old payloads without making
-approval decisions. See [retired impact records](change-impact-policy.md).
-
-The legacy manager webhook URL remains a signed trusted-maintenance transport.
-Manager commands and the manager reconcile endpoint are removed. No manager
-event authorizes a release, and preview destruction no longer writes such an
-event. Runtime grant contraction is separate from this code deletion.
-
 ## Repository Inventory
 
 Use the deployed service for repository inventory reads and mutations. Submit
@@ -4320,8 +4307,7 @@ The current command group supports:
 The label-driven PR-event ingest and webhook replay commands are deleted
 (#2738). Previews follow the pull request's state through the event reconciler. The
 manual `write-enablement` command and the tenant render's preview enablement
-rows are also deleted (#2875); see the
-[retired record](records.md#retired-preview-enablement-record).
+rows are also deleted (#2875).
 
 `show-tenant`, `render-index-page`, and `render-site` now resolve stable-lane
 baseline tuples from Launchplane's DB-backed release-tuple records. Cockpit and
