@@ -78,16 +78,9 @@ not describe runtime authority until it is implemented, deployed, and activated.
   train policy contract, enqueue authority, and smoke-target policy.
 - [merge-train-events.md](merge-train-events.md) — signed App events, worker wake hints,
   bounded controller progression and timed recovery.
-- [merge-readiness.md](merge-readiness.md) — ephemeral machine-derived merge
-  readiness facets, fail-closed aggregation, and live-evidence adapter boundary.
-- [governance-evidence.md](governance-evidence.md) — one read-only API and
-  workbench projection that keeps current readiness, recorded admission,
-  landing outcomes, and advisory observations independent.
-- [merge-train-structural-provenance.md](merge-train-structural-provenance.md) —
-  deterministic candidate, rolling-base, and landing-plan
-  provenance consumed by merge readiness.
-- [merge-admission.md](merge-admission.md) — immutable per-attempt Level 3
-  admission, truthful landing outcomes, and append-only reconciliation.
+- [merge-admission.md](merge-admission.md) — merge readiness, structural
+  provenance, immutable per-attempt admission, truthful landing outcomes,
+  append-only reconciliation and the read-only governance projection.
 - [merge-train-historical-completion.md](merge-train-historical-completion.md) —
   applicability proof and atomic historical disposition without an admission.
 - [runner-lane-baseline.md](runner-lane-baseline.md) — self-hosted runner lane

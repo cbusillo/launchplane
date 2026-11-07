@@ -54,11 +54,10 @@ See [`owner-acceptance.md`](owner-acceptance.md).
 
 ## No Feedback Loop
 
-Launchplane-owned governance check names are excluded from Every Code preview
-readiness, merge-train check-run aggregation, and tenant-admission commit-status,
-check-run, and required-check inputs. The legacy
-`launchplane/engineering-review-shadow` status is also excluded during its
-separate cutover. Tests prove that preview, merge, and admission results are
+Launchplane-owned governance check names, including the legacy
+`launchplane/engineering-review-shadow` status, are excluded from merge
+readiness, merge-train check-run aggregation, and tenant-admission
+commit-status, check-run, and required-check inputs. Tests prove that preview, merge, and admission results are
 unchanged when GitHub projections are present, `in_progress`, completed, or
 failed.
 
