@@ -67,7 +67,7 @@ new record, account, policy change or alternate identity:
 | --- | --- |
 | `testing_task_prerequisite_not_reached` | A read-only checkpoint was skipped because an earlier prerequisite did not pass. No observation of this checkpoint was attempted; inspect the earlier failure. |
 | `testing_task_identity_unavailable` | Active product, exact testing context, runtime selection or exclusive HTTPS origin. Read the product profile and testing environment identity. |
-| `testing_task_generation_missing` | No current fresh testing generation was returned. A healthy deployment or connection-isolation pass cannot supply this copy witness. |
+| `testing_task_generation_missing` | Neither a qualified native empty publication nor a current fresh testing generation was returned. Healthy alone cannot supply copy custody. |
 | `testing_task_generation_incomplete` | The current qualified generation has no completion record. Follow its original supported operation and retain any unknown outcome. |
 | `testing_task_generation_unverified` | Generation qualification could not read or verify queue receipt, target, credential separation, resource allocation, use/route hold or exclusive ownership. This code alone does not identify which subcheck failed. |
 | `testing_task_use_protected` | Staff hold or recorded use, only-copy custody or shared resources protect the lane, or that protection could not be read. Read existing hold and safety evidence. |
@@ -123,8 +123,16 @@ fabricating a completion record or resetting custody: use the supported
 [testing replacement/bootstrap path](disposable-lanes.md) under its own
 current prerequisites and sequencing. This walkthrough performs no repair.
 
-The lane must have a completed qualified fresh Odoo testing generation with
-independent credentials, storage and networks. The service checks current
+The lane must have a qualified native empty publication or a completed fresh
+Odoo testing generation, with independent credentials, storage and networks.
+An empty publication uses its existing bootstrap witness for task custody and
+requires the native database's restore witness to be absent. It creates no
+restore policy or generation record. Sign-in protection covers the full period
+since candidate allocation. Its current generated local credential versions,
+physical receiver and native connection isolation still have to qualify.
+Native publications verify their managed lane route through the existing inert
+route planner; legacy copies retain their Compose-domain check.
+The service checks current
 product ownership, target aliases, HTTPS origin, exact runtime/image, copy
 witness, real host isolation, staff hold and protected usage/custody. No other
 stable lane may use the testing origin. Recent successful sign-ins by anyone
@@ -294,6 +302,11 @@ and resource qualification; select `source_mode=ssh` if that is the intended cop
 source (the default is `container-export`). Each failure has a plain description
 and fix kind. Dependent or unselected evidence stays unknown. See the
 [path-check contract](service-boundary.md#product-retirement) for the read boundary.
+An explicit intent reports that operation's prerequisites. The default testing
+check retains automatic-deploy history; a historical automatic-deploy failure
+does not qualify or refuse the current walkthrough. Once current copy custody
+qualifies, provision does not demand legacy restore preparation. No clear
+checkpoint replaces the remaining physical, isolation, sign-in or task reads.
 
 ## Read-only product identities
 

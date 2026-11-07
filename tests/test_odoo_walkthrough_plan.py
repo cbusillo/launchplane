@@ -27,6 +27,7 @@ from control_plane.odoo_walkthrough import (
     WALKTHROUGH_SECRET_INTEGRATION,
     WalkthroughPrerequisite,
     WalkthroughPrerequisiteError,
+    WalkthroughPlan,
 )
 from control_plane.contracts.odoo_walkthrough import (
     OdooWalkthroughRequest,
@@ -38,6 +39,7 @@ from tests.test_odoo_walkthrough import task_request
 from tests.test_odoo_walkthrough_probe import NativeHost
 from tests.test_preview_fixture import fixture_binding
 from control_plane.contracts.runtime_identity import runtime_identity_env
+from control_plane.testing_candidate_runtime import CandidateSource
 
 
 class WalkthroughPlanTests(unittest.TestCase):
@@ -651,3 +653,316 @@ class WalkthroughPlanTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             self.plan("cleanup")
+
+
+class PublishedWalkthroughPlanTests(unittest.TestCase):
+    source_mode: CandidateSource = "empty"
+
+    def setUp(self) -> None:
+        from tests.test_testing_publication import TestingPublicationTests
+        from tests.test_testing_route import TestingRouteTests
+        from control_plane.dokploy import api
+        from control_plane.dokploy.testing_route import route_document
+        from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
+        from control_plane.odoo_runtime_reads import select_stable_runtime
+
+        self.fixture = TestingPublicationTests()
+        self.fixture.source_mode = self.source_mode
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.fixture.prepare()
+        self.publication = self.fixture.publish()
+        self.store = self.fixture.store
+        self.candidate = self.fixture.candidate
+        self.root = self.fixture.fixture.root
+        profile = self.store.read_product_profile_record(self.candidate.product)
+        self.selection = select_stable_runtime(self.store, profile, "testing")
+        app = self.candidate.application
+        assert app is not None and app.prepared is not None
+        self.witness = app.prepared.source_witness
+        runtime = self.fixture.current().runtime
+        assert runtime is not None
+        self.database = str(runtime.env["ODOO_DB_NAME"])
+        self.connection = OdooRuntimeConnection(
+            selection=self.selection,
+            evidence=OdooRuntimeEvidence(
+                identity=self.selection.identity,
+                target_id=self.candidate.compose_id,
+                target_name=self.candidate.namespace,
+                container_id="d" * 64,
+                observed_at=datetime.now(timezone.utc).isoformat(),
+            ),
+            host="https://provider.example",
+            token="fixture-token",
+            server_id=self.candidate.server_id,
+            app_name=app.prepared.compose_project,
+            credentials={"ODOO_DB_NAME": self.database},
+        )
+        journal = TemporaryDirectory()
+        self.addCleanup(journal.cleanup)
+        self.host = NativeHost(
+            self.selection.identity,
+            Path(journal.name) / "journal",
+            database=self.database,
+            copy_binding=self.witness,
+        )
+        self.addCleanup(self.host.close)
+        self.host.connection.copy = None if self.source_mode == "empty" else self.witness
+        self.enterContext(
+            patch("control_plane.odoo_walkthrough.connect_runtime", return_value=self.connection)
+        )
+        self.enterContext(
+            patch(
+                "control_plane.dokploy.odoo_walkthrough._read_remote",
+                side_effect=self.host.read_remote,
+            )
+        )
+        self.physical = self.enterContext(
+            patch(
+                "control_plane.odoo_walkthrough.inspect_native_testing_receiver",
+                side_effect=lambda **kwargs: kwargs["receive"](
+                    {"type": "complete", "cleanup_qualified": True}
+                ),
+            )
+        )
+        self.domain = self.enterContext(
+            patch(
+                "control_plane.odoo_walkthrough.odoo_compose_has_domain",
+                side_effect=AssertionError("Published copies use their managed lane route"),
+            )
+        )
+        routed = TestingRouteTests()
+        routed.setUp()
+        route = self.fixture.route
+        self.frame = {
+            "old_identity": self.selection.identity.model_dump(mode="json"),
+            "old_endpoints": (route.new_backend,),
+            "raw": routed.apply(route, route.new_backend, retire_old=True),
+            "owned_file": json.dumps(route_document(route, route.new_backend)),
+        }
+        self.enterContext(
+            patch.object(DokployTestingRouteTransport, "read", side_effect=lambda: self.frame)
+        )
+        self.enterContext(
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={
+                    "composeId": self.candidate.compose_id,
+                    "name": self.candidate.namespace,
+                    "appName": self.connection.app_name,
+                    "serverId": self.candidate.server_id,
+                },
+            )
+        )
+        self.request = OdooWalkthroughRequest(
+            product=self.candidate.product,
+            context=self.candidate.context,
+            task_id="f" * 32,
+            operation="provision",
+        )
+
+    def plan(self) -> WalkthroughPlan:
+        return plan_walkthrough(self.store, self.root, self.request, "fixture-actor")
+
+    def test_native_empty_publication_reaches_physical_route_and_sql_qualification(self) -> None:
+        plan = self.plan()
+        self.assertEqual(plan.copy_binding, self.witness)
+        self.assertEqual(plan.usage_since, self.candidate.created_at.isoformat())
+        self.assertEqual(
+            self.physical.call_args.kwargs["spec"]["generation"]["namespace"],
+            self.candidate.namespace,
+        )
+        self.domain.assert_not_called()
+        self.assertGreater(self.host.database_reads, 0)
+        self.assertIsNone(
+            self.store.read_fresh_odoo_testing_generation(
+                self.candidate.product, self.candidate.context
+            )
+        )
+
+    def checks(self) -> dict[WalkthroughPrerequisite, tuple[object, str]]:
+        return {
+            checkpoint: (code, state)
+            for checkpoint, code, state in read_walkthrough_prerequisites(
+                self.store,
+                self.root,
+                self.candidate.product,
+                self.candidate.context,
+                self.request,
+            )
+        }
+
+    def test_empty_publication_preserves_observed_and_unreadable_native_refusals(self) -> None:
+        for fault, expected in (
+            ("witness", (WalkthroughPrerequisite.COPY_WITNESS_CHANGED, "blocked")),
+            ("signin", (WalkthroughPrerequisite.PROTECTED_SIGNIN, "blocked")),
+            ("unread", (WalkthroughPrerequisite.ISOLATION_OR_USAGE, "unknown")),
+        ):
+            with self.subTest(fault=fault):
+                self.host.connection.copy = "restored" if fault == "witness" else None
+                self.host.connection.used = fault == "signin"
+                self.host.connection.isolation_readable = fault != "unread"
+                self.assertEqual(
+                    self.checks()[WalkthroughPrerequisite.ISOLATION_OR_USAGE], expected
+                )
+                with self.assertRaises(WalkthroughPrerequisiteError):
+                    self.plan()
+
+    def test_empty_publication_does_not_clear_unobserved_physical_copy_or_route(self) -> None:
+        self.physical.side_effect = NativeSourceUnavailable("private host read failed")
+        checks = self.checks()
+        self.assertEqual(checks[WalkthroughPrerequisite.PHYSICAL_COPY][1], "unknown")
+        with self.assertRaises(WalkthroughPrerequisiteError):
+            self.plan()
+        self.physical.side_effect = lambda **kwargs: kwargs["receive"](
+            {"type": "complete", "cleanup_qualified": True}
+        )
+        self.frame["old_endpoints"] = ("http://foreign.invalid",)
+        self.assertEqual(self.checks()[WalkthroughPrerequisite.ORIGIN][1], "unknown")
+        with self.assertRaises(WalkthroughPrerequisiteError):
+            self.plan()
+
+    def test_publication_resource_drift_and_rotated_credentials_cannot_qualify(self) -> None:
+        runtime = self.fixture.current().runtime
+        assert runtime is not None
+        self.store.write_runtime_environment_record(
+            runtime.model_copy(update={"env": {**runtime.env, "ODOO_PROJECT_NAME": "foreign"}})
+        )
+        with self.assertRaises(WalkthroughPrerequisiteError):
+            self.plan()
+        self.store.write_runtime_environment_record(runtime)
+        secret = next(
+            item
+            for item in self.fixture.secrets
+            if item.context == self.candidate.context and item.instance == "testing"
+        )
+        self.store.write_secret_record(secret.model_copy(update={"current_version_id": "rotated"}))
+        with self.assertRaises(WalkthroughPrerequisiteError):
+            self.plan()
+
+    def test_empty_publication_keeps_staff_and_only_copy_protections(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+        from control_plane.contracts.disposable_lane import DisposableLaneSafety
+
+        target = self.fixture.current().target
+        held = target.model_copy(
+            update={
+                "policies": target.policies.model_copy(
+                    update={
+                        "staff_testing_hold": DokployTargetStaffTestingHold(
+                            reason="fixture staff use"
+                        )
+                    }
+                )
+            }
+        )
+        self.store.write_dokploy_target_record(held)
+        with self.assertRaises(WalkthroughPrerequisiteError):
+            self.plan()
+        self.store.write_dokploy_target_record(target)
+        now = datetime.now(timezone.utc)
+        for fact in (
+            {"data": "only_copy"},
+            {"production_resources": "shared"},
+            {"usage": "in_use"},
+        ):
+            with self.subTest(fact=fact):
+                self.store.write_disposable_lane_safety(
+                    DisposableLaneSafety.model_validate(
+                        {
+                            "product": self.candidate.product,
+                            "context": self.candidate.context,
+                            "instance": "testing",
+                            "observed_by": "fixture",
+                            "observer_kind": "fixture",
+                            "binding_sha256": "a" * 64,
+                            "observed_at": now,
+                            "expires_at": now + timedelta(minutes=5),
+                            "data_evidence": "fixture",
+                            "isolation_evidence": "fixture",
+                            "usage_evidence": "fixture",
+                            **fact,
+                        }
+                    )
+                )
+                with self.assertRaises(WalkthroughPrerequisiteError):
+                    self.plan()
+
+    def test_restored_publication_keeps_its_witness_and_uses_managed_route(self) -> None:
+        restored = PublishedWalkthroughPlanTests()
+        restored.source_mode = "upstream"
+        restored.setUp()
+        self.addCleanup(restored.doCleanups)
+        with patch("control_plane.odoo_walkthrough.read_drill_recent_signins", return_value=False):
+            plan = restored.plan()
+            self.assertEqual(plan.copy_binding, restored.witness)
+            self.assertIsNone(plan.copy_witness)
+            restored.host.connection.copy = None
+            with self.assertRaises(WalkthroughPrerequisiteError):
+                restored.plan()
+        restored.domain.assert_not_called()
+
+    def test_another_empty_publication_cannot_reuse_this_tasks_credential_binding(self) -> None:
+        from tests.test_testing_candidate_allocation import TestingCandidateTests
+        from control_plane.contracts.testing_candidate import testing_candidate_namespace
+
+        before = self.plan()
+        setup = TestingCandidateTests.setUp
+
+        def another_operation(fixture: TestingCandidateTests) -> None:
+            setup(fixture)
+            operation = "another-empty-operation"
+            fixture.allocation = fixture.allocation.model_copy(
+                update={
+                    "operation_id": operation,
+                    "namespace": testing_candidate_namespace(
+                        fixture.product, fixture.context, operation
+                    ),
+                }
+            )
+
+        other = PublishedWalkthroughPlanTests()
+        with patch.object(TestingCandidateTests, "setUp", new=another_operation):
+            other.setUp()
+        self.addCleanup(other.doCleanups)
+        after = other.plan()
+        self.assertEqual(self.request.task_id, other.request.task_id)
+        self.assertNotEqual(before.copy_binding, after.copy_binding)
+        self.assertNotEqual(before.binding, after.binding)
+        self.assertNotEqual(before.secret_name, after.secret_name)
+
+    def test_provision_qualification_does_not_consume_historical_automatic_deploy_failure(
+        self,
+    ) -> None:
+        from control_plane.product_path_check import PathCheckInputs, build_product_path_check
+        from control_plane.testing_path_check import read_testing_prerequisites
+
+        profile = self.store.read_product_profile_record(self.candidate.product)
+        prerequisites = read_testing_prerequisites(
+            intent="provision",
+            store=self.store,
+            profile=profile,
+            root=self.root,
+            source_mode="container-export",
+            task_id=self.request.task_id,
+            operation_id=None,
+            action_allowed=lambda *_: True,
+            caller_can_provision=True,
+            caller_can_generate=False,
+        )
+        self.assertTrue(all(step.state == "clear" for step in prerequisites))
+        inputs = PathCheckInputs(
+            profile=profile,
+            testing_prerequisites=prerequisites,
+            testing_reconcile_plan={
+                "reconcile_state": "failed",
+                "last_failed_operation_id": "old-operation",
+            },
+        )
+        provision = build_product_path_check(
+            product=profile.product, path="testing", intent="provision", inputs=inputs
+        )
+        self.assertEqual(provision.state, "clear")
+        default = build_product_path_check(product=profile.product, path="testing", inputs=inputs)
+        self.assertEqual(default.state, "blocked")
