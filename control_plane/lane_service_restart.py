@@ -218,7 +218,7 @@ def plan_service_restart(
                 and decision.checklist.candidate.source_commit == manifest.source_commit
             ):
                 acceptance_id = decision.record_id
-        if not acceptance_id:
+        if not acceptance_id and not profile.prelaunch_bootstrap_authorized:
             raise ServiceRestartRefused(
                 "production_acceptance_unrecorded",
                 "The current production artifact has no recorded acceptance.",

@@ -1082,6 +1082,10 @@ class ServiceRestartTests(unittest.TestCase):
 
     def test_production_requires_acceptance_of_the_current_artifact(self) -> None:
         expected = seed_lane(self.store, instance="prod")
+        profile = self.store.read_product_profile_record(expected.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"production_use": "live"})
+        )
         self.provider.config["Config"]["Env"] = [
             f"{k}={v}" for k, v in runtime_identity_env(expected).items()
         ]
@@ -1091,6 +1095,50 @@ class ServiceRestartTests(unittest.TestCase):
         status, response = self.invoke()
         self.assertEqual(status, 200, response)
         self.assertEqual(response["result"]["plan"]["acceptance_record_id"], decision.record_id)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_prelaunch_production_restart_needs_no_prior_release_acceptance(self) -> None:
+        expected = seed_lane(self.store, instance="prod")
+        self.provider.config["Config"]["Env"] = [
+            f"{key}={value}" for key, value in runtime_identity_env(expected).items()
+        ]
+        self.payload["instance"] = "prod"
+        profile = self.store.read_product_profile_record(expected.product)
+        for driver in ("odoo", "generic-web"):
+            with self.subTest(driver=driver):
+                self.store.write_product_profile_record(
+                    profile.model_copy(update={"driver_id": driver, "production_use": "prelaunch"})
+                )
+                self.provider.config["State"]["StartedAt"] = "2026-10-10T00:01:00Z"
+                self.payload = {
+                    key: value
+                    for key, value in self.payload.items()
+                    if key != "reviewed_plan_sha256"
+                }
+                self.payload["mode"] = "dry-run"
+                reviewed = self.review()
+                self.assertEqual(reviewed["result"]["plan"]["acceptance_record_id"], "")
+                status, response = self.invoke(key=f"prelaunch-{driver}")
+                self.assertEqual(status, 200, response)
+                self.assertEqual(response["result"]["status"], "pass")
+                self.assertTrue(self.invoke(key=f"prelaunch-{driver}")[1]["replayed"])
+        self.assertEqual(len(self.provider.writes), 2)
+
+    def test_agent_prelaunch_classification_cannot_exempt_production_restart(self) -> None:
+        expected = seed_lane(self.store, instance="prod")
+        profile = self.store.read_product_profile_record(expected.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={"production_use": "prelaunch", "production_use_authority": "director_agent"}
+            )
+        )
+        self.provider.config["Config"]["Env"] = [
+            f"{key}={value}" for key, value in runtime_identity_env(expected).items()
+        ]
+        self.payload["instance"] = "prod"
+        status, response = self.invoke()
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["reason"], "production_acceptance_unrecorded")
         self.assertEqual(self.provider.writes, [])
 
     def test_ambiguous_start_time_and_missing_http_identity_refuse_before_effect(self) -> None:
