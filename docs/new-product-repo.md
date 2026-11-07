@@ -41,8 +41,7 @@ Simple service products, such as bots or workers deployed as Dokploy
 applications, can also use `generic-web` when their lifecycle is image deploy,
 optional health verification, and Launchplane-owned provider mutation. See
 [dokploy-service-deployments.md](dokploy-service-deployments.md) for the
-service-specific contract, including persistent volumes and internal ports such
-as Discord Blue's Every Code bridge port `8787`.
+service-specific contract, including persistent volumes and internal ports.
 
 ## Launchplane Records
 

@@ -768,13 +768,6 @@ preview records do not hide stale pending feedback; their reconciliation remains
 a no-op. Previews still requiring lifecycle work retain their existing sweep
 coverage and retry rules.
 
-## Director steps
-
-Once the receiver is deployed: set the App's webhook URL to the receiver,
-generate its secret and store it through Launchplane's managed-secret path,
-and subscribe the App to "Workflow runs" and "Pull requests". No product
-repository changes.
-
 ## Odoo call-in retirement
 
 Odoo builds, previews and testing deploy from Build events. The Odoo publish
@@ -787,12 +780,6 @@ source deletion is not evidence that those records are gone.
 
 Repository identity comes from repository inventory rather than the old profile
 copy. Its separate compatibility/admin surface is not retired by this change.
-
-For SellYourOutboard and VeriReel (#2740): each repository's
-`launchplane-preview.yml` and `launchplane-preview-notice.yml`, replaced by its
-own `.github/workflows/build.yml`, then its `preview` label. Product-run preview
-verification went with `launchplane-preview.yml`; Launchplane's own health check
-of the expected build is what marks the preview ready, as for Odoo.
 
 ## Product configuration authority from source events
 

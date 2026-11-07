@@ -178,12 +178,6 @@ post-deploy status. Odoo profiles receive this extension when they execute
 generic-web deploy, which runs the Odoo post-deploy driver after the provider
 deploy succeeds.
 
-The retired `source_ref_deploy` action and
-`POST /v1/drivers/generic-web/source-ref-deploy` endpoint are no longer
-advertised by the generic-web descriptor. The #1498 replacement path is the
-image-backed `stable_deploy` action above: Launchplane deploys an immutable
-artifact instead of temporarily rewriting provider source refs.
-
 The `prod_promotion` action routes to the native FastAPI
 `POST /v1/drivers/generic-web/prod-promotion` endpoint. It promotes a
 generic-web testing image to prod using DB-backed product profile lanes, records

@@ -474,13 +474,9 @@ webhook leave the pull request alone; Client review is shown by
 `launchplane/owner-review` (see Client Review Request). When Launchplane next
 writes a ready preview comment, a leftover `manager-preview-approval` status on
 the current head is closed once as `success` with
-`Retired. Owner review is recorded in Launchplane.`, and a leftover
+`Retired. Client review is recorded in Launchplane.`, and a leftover
 `launchplane/owner-acceptance` check run created by Launchplane's advisory app
 is updated once to `neutral` with the title "Retired". Neither signal is created where it does not already exist.
-
-Manager preview approval is retired. Its evaluator, webhook commands, reconcile
-route, and store methods are deleted; existing manager events stay in the
-database unread. Current approval uses product review and the release checklist.
 
 The `tenant-admission` status is a separate Launchplane projection of the current
 repository classification and candidate identity. It no longer evaluates manager,

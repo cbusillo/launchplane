@@ -487,10 +487,6 @@ build and deploys the image to `testing` itself
 ([event-driven-deploys.md](event-driven-deploys.md)), through the generic-web
 deploy route's provider operation; it resolves lane, provider target, runtime
 environment, managed secrets, and deployment records from DB-backed authority.
-Transitional: `POST /v1/drivers/generic-web/deploy` through the
-`cbusillo/launchplane/.github/actions/launchplane-request` action is the old
-call-in path some product workflows still use until #2606 deletes it; a new
-product repository does not call it.
 
 Publish images to the profile's `image.repository` and preserve digest identity:
 
@@ -514,14 +510,6 @@ non-floating tag in the same repository, uses it only for the provider-facing
 Docker image, and records runtime identity with `artifact_id` as the digest and
 `image_reference` as the provider tag. Compose targets remain backward
 compatible with digest image references in `artifact_id`.
-
-RepairShopr Sync is the first live canary for this stable shape. The
-`cbusillo/repairshopr_api` product workflow built an immutable GHCR image,
-called deployed Launchplane, and received `deploy_status: pass` for deployment
-record `deployment-20260630T034901Z-repairshopr-sync-prod` after Launchplane PR
-#1503 deployed. That run proved image deploy for a service-shaped worker
-without source-ref deploy or direct Dokploy mutation in the product repo; its
-product-repo call into Launchplane is the retired call-in path.
 
 The inherited source-ref deploy bridge is retired. Services that still deploy a
 Dokploy compose target from Git must migrate the provider target to immutable

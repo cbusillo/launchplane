@@ -223,18 +223,6 @@ live authority across DB, files, and process env:
   submit reviewed typed targets and policy through
   `/v1/production-backup-authority/apply`. Both snapshot and independent backup
   remain mandatory; no legacy environment value supplies a fallback
-- VeriReel app maintenance, preview refresh, preview destroy, and preview
-  inventory routes resolve Dokploy host, token, preview URL shape, app identity,
-  and target identity from Launchplane-managed secrets plus DB-backed runtime
-  and target records. `LAUNCHPLANE_PREVIEW_BASE_URL` is a context-level runtime
-  value. The product-repo workflows that still call these routes (passing
-  operation intent, preview slug, and GitHub OIDC identity, never Dokploy
-  credentials or preview domain topology) are retired call-in paths awaiting
-  deletion.
-- VeriReel stable environment metadata, including testing/prod target names,
-  target ids, base URLs, and health URLs, is served by Launchplane from
-  DB-backed target/runtime records, so no product repository hard-codes stable
-  lane topology.
 - Product onboarding and runtime key-safety policy writes use Launchplane service
   routes with scoped authorization. Product/runtime records are not read from
   checked-in catalogs during deploy or repair.
