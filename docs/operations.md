@@ -3454,9 +3454,8 @@ For Odoo calendar-policy configuration, use that route's standalone
 [release review](release-review.md#odoo-business-hours). Qualify actual company
 and calendar references before setting them, including for prelaunch products;
 do not turn a product live to obtain evidence. Apply and persisted readback do
-not prove live activation, Client acceptance or a release drill. The service
-and installed caller must both support the operation; caller delivery is tracked
-in codex-skills#2538. Existing real-system mutation boundaries still apply.
+not prove live activation, Client acceptance or a release drill. Existing
+real-system mutation boundaries still apply.
 Private company labels stay in private inspection evidence, not public issues.
 
 
@@ -3914,9 +3913,7 @@ alone is not proof that an existing testing copy has been repaired.
   `--evidence-file` outside the checkout; apply requires that same file,
   `--reviewed-dry-run` and a stable `--idempotency-key`. Use separate evidence
   files/keys for set and lift and keep the same product, context and reason
-  between each plan and its apply. The catalog's hold projection does not yet
-  accept rehearsal provenance (tracked in [codex-skills#1881](https://github.com/cbusillo/codex-skills/issues/1881)).
-  The service marks the hold
+  between each plan and its apply. The service marks the hold
   with `rehearsal` provenance only when setting it on an unused, reproducible,
   isolated lane with current binding-matched service safety evidence and no
   active or uncertain execution. An ordinary staff hold, a foreign actor's hold,
@@ -5337,18 +5334,6 @@ publishes decision comments and release-record issues. Decision comment replay
 matches the Delivery App's numeric `performed_via_github_app.id`, rather than
 calling the user-only `/user` endpoint with an installation token.
 
-After shipment, Chris configures the Delivery selector through the supported
-service path and confirms the next `launchplane/owner-review` check, decision/preview comment
-and release-record issue have the intended App identity. Verify Advisory
-installation coverage and accepted operation grants wherever those paths run;
-source tests are not live installation evidence. Apply the selector promptly
-after deployment and resend feedback for queued Client-labelled PRs through the
-existing product-review feedback retry route, so their current-head checks are
-republished. Only after these receipts and
-remaining-consumer checks should Chris disable the confirmed obsolete service
-`GITHUB_TOKEN` records through the controls above and revoke the old PAT. Other-token migrations keep their
-separate issue scopes; the hold on the shared Odoo Docker token still applies.
-
 ### Held Odoo preview reservations
 
 `GET /v1/products/{product}/preview-reservations?limit=100` is a database-only,
@@ -5867,479 +5852,35 @@ health-alert policies and historical delivery evidence intact.
 
 ### Prepared retired-delivery table migration
 
-Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
-`RETIRED_TABLES` in that revision. Normal service startup targets the
-[canonical hostname activation](#canonical-hostname-activation), including the
-non-runtime profile archive, managed preview settings and idle retirement. The
-release default preserves all held delivery history. The candidate runtime
-requires that activation before it serves traffic. It retains expiry/key-retirement,
-activation/history/policy maintenance, custody evidence and native train fences.
-While this hold is active, schema initialization refuses a migration graph whose
-head has advanced beyond the reviewed compatibility join. A later schema change must
-reconcile the hold, runtime compatibility and supported migration targets in the
-same change. Keep an independently approved application path for the destructive
-step; advancing an unrelated additive migration does not authorize it. Lifting
-the hold requires the shared-data/release approval below.
-
-The release default never traverses the held branch. If a database has already
-applied the held drop or one of its joins, startup joins the missing approved
-branches through `schema_migration_target`. After explicit approval, requesting
-the held revision from an activated hostname-only schema reaches its compatibility
-join; an integration-attestations schema reaches the later attestations join.
-Use the planner's target for the observed current revision. Earlier schemas
-keep their explicit historical application routes, followed by normal startup.
-These routes leave
-one recorded Alembic revision; startup never mistakes incomparable branches for
-ordered versions. Do not substitute Alembic `head` for the release migration
-target: `head` includes the held drop and is reserved for disposable rehearsals
-or the separately approved application procedure.
-
-An image rollback across the Q533 preview drop cannot start an older image
-that still requires the enablement table or rejects the new revision. Recovery
-across that boundary requires the pre-deploy database backup or host snapshot
-and its matching image; restoring that recovery point also discards later writes.
-The preview migration does not create a backup, and its downgrade cannot recover
-the retired rows.
-
-Although the topics migration is additive, older images reject its revision.
-Rolling back across it requires a compatible image or the pre-deploy database
-backup and matching image; downgrade does not erase discussion history.
-
-Before application, obtain the Director's explicit shared-data/release approval
-on #2437. From the approved Launchplane host and exact reviewed image, verify
-that every HTTP replica and worker is on consumer-free source including #3930,
-read the current schema revision, and inventory the candidate tables' row counts
-and database dependencies. Quiesce database writers and deployment/reconciliation
-workers. No arbitrary-checkout live-target or direct SQL fallback is authorized.
-
-Preserve the full pre-migration database with `pg_dump --format=custom --no-owner`
-using the host's existing credential source; keep it in approved private backup
-storage. Restore it into a disposable database with
-`pg_restore --no-owner --exit-on-error`, verify all table schemas and rows, and
-compare rows in primary-key order with canonical JSON keys. Preserve full columns,
-not just payloads. Treat this backup as sensitive and retain it for the rollback
-window. The source rehearsal seeds every retiring table and checks restored
-rows/columns plus every surviving table's contents. A dump file without a proven
-restore is insufficient.
-
-After Q777/Q966's approval and the actual restored-backup proof, use the
-[bounded maintenance keeper](#bounded-launchplane-database-maintenance) below.
-It runs the prepared migration on the same connection and transaction as the
-backup locks. Do not run the separate-process migration command against that
-keeper: it would wait for the keeper's own schema and table locks.
-
-The existing serialized migration helper holds the schema-migration advisory lock;
-that lock alone does not stop database writers or deployments.
-The revision takes non-waiting exclusive locks on all existing retiring tables
-before dropping any, uses restrictive drops, and never cascades into an unexpected
-dependent object. A busy table or retained database dependency aborts the
-PostgreSQL transaction without advancing the revision or partially dropping
-history. Diagnose the dependency or worker before a new attempt. The migration
-also removes three now-unused trigger functions; shared append-only and effect
-identity guards remain for retained history.
-
-Verify the candidate runtime's schema checks, privileged-worker startup/expiry
-maintenance and normal train/history reads after migration. Do not infer empty
-or inactive live state from source searches or the disposable rehearsal.
-Downgrade deliberately refuses before DDL; it cannot reconstruct the deleted
-rows. Recovery requires a separately approved restore of the verified full
-pre-migration backup with its matching image and writer quiescence. Images
-before this preparation accept only the old revision and cannot simply restart
-against the contracted database. Keep the Protection App/access decision separate.
+The completed retirement is recorded in [#2437](https://github.com/cbusillo/launchplane/issues/2437).
+Use [schema migrations](records.md#schema-migrations) for current startup targets
+and compatibility checks. Historical application approval does not authorize
+another destructive migration or restore.
 
 ### Bounded Launchplane database maintenance
 
-This path holds Launchplane's own writers and deployments through a full private
-backup, actual isolated restore, exact retirement rehearsal and verification.
-It adds no normal request or transaction barrier. Source must be reviewed,
-landed through the train and present in the exact running image before use.
-Q777 and Q966 on #2437 retain full hold/full-backup recovery; online backup or
-selective table recovery does not meet that decision. Client databases,
-credentials, grants and product resources are excluded.
+The maintenance helpers remain callable. Their exact qualification, full-backup,
+isolated-restore, rehearsal and recovery instructions are retained in the
+[reviewed procedure](https://github.com/cbusillo/launchplane/blob/cdc6a13f522c33ae83d2953a0b1c217cd73ce161/docs/operations.md#bounded-launchplane-database-maintenance).
+Read that procedure before using the reviewed image's
+`control_plane/database_maintenance_host.py`; it is not a routine migration
+path or an arbitrary-checkout live-target fallback. It covers Launchplane's
+own database only, excluding Client databases, credentials, grants and product
+resources. A new destructive step or restore needs its own approval.
 
-On the documented Launchplane host, copy only the reviewed image's
-`control_plane/database_maintenance_host.py` into a private directory. The
-standalone driver needs Python 3.11+, root's existing Docker/systemd access and
-Linux pidfd signal support and a single exact Docker cgroup membership per
-original process. Qualification adds no packages or capability grants.
-The existing PostgreSQL container must expose its Unix socket directory; the
-verification helper consumes that socket in place through a read-only mount:
-
-```bash
-python3 database_maintenance_host.py plan --api-container API_CONTAINER \
-  --postgres-container POSTGRES_CONTAINER --duration-seconds 1800
-python3 database_maintenance_host.py hold --api-container API_CONTAINER \
-  --postgres-container POSTGRES_CONTAINER --duration-seconds 1800
-```
-
-`plan` reads exact project/container/image/database identities, current DB-backed
-own target, provider queue/history and self-deploy workflows. It creates only
-private evidence, a temporary keeper helper and an isolated loopback health
-probe. The planning/keeper helper uses the existing `.env` in place and the actual API image ID, with no ports, logs,
-restart policy, runtime volumes, Odoo copy or prepared-public mounts. Its root
-is read-only, temporary storage is RAM-backed, and its only host mount is private
-maintenance state. The credential-free browser may remain running. Every own
-writer must match the image. The complete Docker inventory, including dormant
-and foreign-source containers, must have exclusive credential custody: a raw or
-percent-decoded copy of the API database password in any other environment or
-configured command refuses qualification. A same-image container without explicit
-independent database credentials also refuses qualification.
-The exact PostgreSQL server is trusted bootstrap custody, bound separately to
-the API's database system identifier; it stays running for the backup. It is
-never treated as an application writer to stop or an arbitrary extra client.
-The API needs explicit PostgreSQL username/password wiring; credential indirection
-is unqualified. Values stay in process memory and are never emitted. Unknown
-identities refuse.
-The plan binds the original PostgreSQL container and database system identifier.
-Each probe resolves a host-namespace mount or merged-directory source and compares
-its socket device/inode with the actual container socket. A process restart in
-that same container can rebind after the cluster check; a different container
-or cluster refuses recovery. A proc-root path is not used as a bind source.
-No database directory or credential file is mounted into the verification helper.
-`plan` qualifies its actual read-only startup and HTTP health before any pause.
-That qualification authorizes no backup or retirement; committed-state verification
-repeats under the complete writer hold.
-
-Before stopping services, `hold` installs and reads back a persistent systemd calendar
-timer/service, records every original restart policy, and suppresses automatic
-restart on those exact IDs. Private fsync'd state and watchdog files survive
-reboot. The watchdog runs release at the recorded deadline, including after a
-missed deadline during reboot. That oneshot service is the single recovery process:
-EOF cleanup, the deadline and explicit release requests join the same systemd job.
-The keeper ends at COMMIT; only that process verifies committed state.
-Each automatic recovery entry consumes a fsync'd budget in the existing private
-state before external commands, including an unavailable ownership read. Reloading systemd or restarting the interpreter cannot reset that count. Unit rate limits are
-secondary protection, and each service attempt has a timeout. Genuine unsafe or
-blocked results and exhausted automatic budgets have distinct non-restarting
-statuses. Explicit manual release replenishes only the main automatic budget
-through the supported driver, waits for state custody, then starts or joins the
-same service and its applicable verification gates. It never restores data or
-replays an uncertain provider request. The main service is enabled for the next
-boot without starting at installation; the existing calendar timer still starts
-it at the deadline. Boot, EOF and deadline requests share the same executor and
-persisted budget. Observe actual release;
-installation alone is not a release receipt.
-
-The keeper takes the existing own-deploy dispatch lock and installs an expiring
-provider marker before shutdown. Own DB/image/repository binding, auto-deploy off,
-complete queue/history and absence of self-deploy workflows are required.
-Normal and emergency self-deploy guards enforce that marker. The host credential
-file must remain unchanged. No workflow, credential or access grant is changed.
-
-The keeper takes the existing schema, own-deploy dispatch and release-admission
-locks before checking executor observations. Existing exact executor-exit receipts
-and execution-lock observations preserve historical running/UNKNOWN fences;
-lease expiry is never absence proof. Additional running reservations and admitted
-worker work refuse shutdown. The train must be idle or in its qualified
-pre-effect selection phase. This observation is repeated after shutdown.
-
-The host persists each exact original's termination intent before sending SIGTERM
-through a kernel pidfd bound to that process and its container membership. There
-is no queued Docker stop and no SIGKILL escalation. All originals receive TERM
-before the shared shutdown deadline. Read-only own-role clients waiting directly
-on the keeper's advisory locks are canceled so their shutdown can finish; this
-never cancels a transaction with an XID or an unrelated address/blocker.
-Every original must have its qualified exit status, no OOM and automatic restart
-suppressed. The API permits the POSIX SIGTERM exit after Uvicorn graceful cleanup;
-ordinary workers must return success. Qualify those signal paths on the exact image.
-All six own writers stop, including the API and workers. No cgroup freezer,
-namespace firewall, API thaw, or second health timer is required.
-
-Shutdown timeout, changed identity or an unclean exit refuses backup admission.
-After database safety is proved, recovery restores and reads back every original
-automatic restart policy before waiting on any API or worker. New plans require
-original policies that restart a late clean exit, with no policy mapping.
-A delayed graceful exit can then restart through Docker even after the bounded
-automatic attempts are exhausted. Exit waits remain transient; a still-running
-process with TERM pending is never reported as recovered. A native signal can be repeated
-only against that original process. A newly needed forced termination or Client
-recovery action requires its exact Director question, never an automatic kill.
-The actual released readback qualifies the bounded window; a deadline alone does
-not prove release.
-
-The keeper then takes all-public-table EXCLUSIVE NOWAIT locks before its first
-repeatable-read snapshot. No application backend is disconnected to manufacture
-admission: zero other client backends and zero prepared transactions are required.
-Stopped originals, suppressed restart, credential custody, table locks and the
-repeated client census prove exclusion of further Launchplane commits. Zero
-selected drains do not. Foreign/materialized relations, other application
-schemas, large objects and table-set changes still refuse qualification.
-
-The private `held` receipt binds hold ID, keeper identity, exported snapshot,
-transaction, cluster and aggregate schema/full-row/sequence checksums. Trigger
-metadata includes enabled state and function bodies. No SQL definition, payload,
-column default, ciphertext or individual credential-column hash is emitted.
-Schema fingerprints normalize PostgreSQL's equivalent placement of unbounded
-varchar-to-text casts only within literal arrays that are the complete operand
-of ANY or ALL. Values, comparison operations, other casts and other metadata remain distinct;
-an unsupported difference still refuses the rehearsal. Deparsing uses fixed
-string and search-path settings in a savepoint, restores the caller's settings
-and releases the savepoint before exporting the keeper snapshot. A SQL error
-rolls back that savepoint without discarding the caller's earlier work or locks.
-After changing fingerprint behavior, deploy the source first and take a new hold
-and full backup. An older diagnostic receipt cannot authorize a later window.
-Stream the complete custom dump through the existing private transport:
-
-```bash
-python3 database_maintenance_host.py dump --state STATE_JSON
-```
-
-Stdout is binary; create its approved mode-0600 encrypted private artifact
-exclusively, never overwriting a verified file. The dump carries a private
-hold-scoped application name; the keeper admits only its Unix-socket/current-role/no-XID
-backend and binds its first PID/start identity. Generic pg_dump names refuse.
-Only one dump attempt is supported per hold; after a failed read, release with
-readback and create a new hold rather than blindly retrying or replacing evidence. Stderr and host state record the stream SHA-256; independently hash the
-private file and require agreement. Prove actual artifact custody with one
-read-only private file descriptor feeding both stream hashing and pg_restore;
-check file identity/size/mtime and the full checksum before and after, require
-agreement with the native dump stream, and retain that same artifact. The
-rehearsal checksum argument is accepted only with this independently recorded
-operational proof; it is not proof by itself. Qualify capacity, encryption, custodian,
-minimum retention and Director-reviewed disposal before capture. Leave the
-existing bootstrap/keyring in place; copy or export no credential/key file.
-
-Restore with PostgreSQL `pg_restore --no-owner --exit-on-error` into an empty
-qualified isolated cluster. It has no outbound network, published ports, logs,
-persistent mounts, application processes or production keys. Data and temporary
-storage are RAM-backed without VM swap, or independently qualified encrypted
-storage. Both PostgreSQL and migrator containers require `--ulimit core=0:0`
-with process-limit readback, so a crash cannot write a core onto an unencrypted
-VM disk. Capture restore/migrator stderr privately or in RAM and emit only fixed
-status summaries on failure. Use only the exact reviewed migrator image and private held receipt,
-never production configuration. The rehearsal requires a different system
-identifier, loopback DSN and no platform credentials. Run the migrator with
-`--cap-drop ALL --security-opt no-new-privileges:true`; it requires every
-capability set empty and NoNewPrivs enabled. Namespace-local socket flags,
-IPv4 addresses, IPv4/IPv6 routes and IPv6 addresses must prove that only
-loopback is active/configured/routed. Kernel-created DOWN unconfigured tunnel
-templates are permitted without a name allowlist; missing or unknown views
-refuse. The database container remains network-none, without NET_ADMIN or
-SYS_ADMIN, and its PostgreSQL OS user must have no effective capabilities. Join
-only that exact namespace with `--network container:<isolated-postgres-container>`.
-Read back matching namespace identities and both processes' zero core limits as
-helper evidence; the network guard does not inspect its PostgreSQL peer or
-replace those process-limit observations:
-
-```bash
-python -m control_plane.database_maintenance_cli rehearse \
-  --before-file HELD_RECEIPT --backup-sha256 VERIFIED_DUMP_SHA256 \
-  --hold-id HOLD_ID --expires-at DEADLINE
-python3 database_maintenance_host.py submit --state STATE_JSON --receipt-file REHEARSAL_RECEIPT
-```
-
-Rehearsal compares the actual restore with every source aggregate, applies only
-the prepared revision, and proves the exact retired table/function set,
-retained data, compatibility and full schema invariants. Non-serving readonly
-startup, retained-history, train and expiry callbacks must also pass on the
-restored clone without changing credentials; no application service runs there.
-The receipt binds the same hold/snapshot/transaction and actual dump hash. The private FIFO submits it;
-terminal input is monitored only for EOF. The live transaction repeats the
-checks, including full invariants on its held Connection before COMMIT.
-
-Before committing DDL, the keeper readbacks a non-expiring, exact own recovery
-marker and fsyncs `commit-pending.json` while serialized against host release.
-EOF, deadline or mismatch before commit rolls back. A pending/uncertain committed
-outcome cannot reopen writers merely because the original deadline elapsed.
-Normal, explicit, deadline and post-boot release all use the same read-only
-before/after verifier: first terminate and confirm the exact keeper backend
-is gone, then independently compare committed state with either verified full
-state, check revision/cluster and full invariants. Any unsafe or UNKNOWN result
-keeps originals stopped with restart disabled and the recovery marker
-held. The failure event states which evidence failed:
-
-- `database_unsafe`: the committed data or schema disagrees with the verified
-  states. Preserve the backup and bring the Director an exact full-restore
-  question; later writes could otherwise be lost.
-- `deployment_recovery_required`: an original marker effect remains unknown.
-  Re-observe that same operation through manual release. This is no evidence of
-  database damage and never calls for restoring a healthy database.
-- `verification_blocked`: identity or runtime/health verification cannot pass.
-  Bring the Director the concrete missing action if it exceeds Q777.
-- `release_incomplete`: a transient read or transport failed; retry is supported.
-- `automatic_recovery_exhausted`: automatic attempts stopped. Supported manual
-  release replenishes their allowance without changing any safety proof.
-
-None authorizes an automatic restore or drop retry. Events report whether resume
-started and whether all original writers were resumed; a failed read does not
-claim physical quiescence.
-
-Before reopening writers, the matching image runs its actual non-serving
-privileged-worker startup/schema probe, retained-history and train readers,
-and existing expiry callback against the committed live database. A generated
-in-memory URL adds enforced transaction read-only options to both actual store
-engines; no credential is printed or copied. Expiry must return success and
-zero changes. If a credential would expire, readonly enforcement refuses its
-write and verification fails. An earlier empty count is not expiry proof.
-
-The exact image then runs the normal service application factory and real
-lifespan, including DB-backed authorization/OAuth construction, native route
-validation and the unchanged startup confirmation callback. Only its five
-background schedulers are omitted. Both store pools remain enforced read-only;
-a would-write startup, expiry or policy seed is fatal. The default startup schema
-action must already be compatible. A fresh loopback HTTP GET of `/v1/health` must
-return the service's success payload. Server shutdown and pool disposal finish
-before verification succeeds.
-
-This temporary API runs against the actual own database, never against the
-restored copy. Its root is read-only, scratch is RAM-backed, capabilities are
-dropped, and its network namespace has only loopback. It reaches PostgreSQL via
-the qualified read-only Unix-socket mount, which may use the server's existing
-local-trust authentication. Only reviewed image code consumes that access; no
-role, authentication rule or grant is created. Existing bootstrap and keyring inputs
-are consumed in place, with no credential export, new grant, published port or
-provider connection. Runtime/schema/history/expiry/train probes remain mandatory.
-After the helper exits, zero remaining DB clients are required before a durable
-health receipt binds hold, cluster, revision and image.
-
-Automatic recovery consumes the existing durable budget. Transient reads and
-health failures can be retried through the same explicit `release` or `verify`
-path; unsafe or UNKNOWN state keeps writers stopped and deployments held. Budget
-exhaustion never authorizes a restore or resets a safety proof. No probe failure
-is called database damage merely because health is unavailable.
-
-Release starts the exact original API first and requires its container health
-before explicitly starting other workers in parallel. The original policies
-have already been restored after the bound database/health proof. Healthy readback
-requires a live, non-restarting PID with unchanged process start across two seconds
-for every original, including an automatically restarted one. This is bounded
-startup evidence; normal live monitoring owns later failures. A partial resume records progress; subsequent cleanup retries
-reuse the safe proof because legitimate resumed writes may have changed rows.
-They never stop healthy services again or demand the old full hashes again. A crash after
-starting a stopped original, before progress is recorded, may leave its same
-container ID/image/project running with a newer PID. Only the already bound safe
-proof and persisted resume-start intent allow that exact-original retry. Original
-policy readback precedes resumption. On a no-commit release, durable resume intent
-and absence of `commit-pending.json` allow the same exact-original retry; the
-host's releasing flag and state lock prevent a later commit. Unverified changed
-identities still refuse.
-
-After release, observe the normal [catch-up sweep](event-driven-deploys.md#catch-up-sweep)
-and train polling against current source-control state. These existing workers
-recover missed webhook state; do not invent acceptance or blindly replay a
-Client/provider mutation. Their ordinary admission, provenance and release gates
-remain in force. Record any observed catch-up failure on its owning work item.
-
-Only the host removes the deployment marker, after all original recovery
-readbacks pass and the keeper can no longer act. Install, recovery fencing and
-removal share one private fsync'd transition journal bound to hold, target and
-expected/desired marker. The existing provider mutation observer records dispatch
-immediately before the POST, response confirmation after return and exact result
-observation after readback. It records no env body, token or credential. A failed
-GET or validation before dispatch may retry; a dispatched request is never sent
-again. One-off intent and container identity are persisted; a timed-out one-off
-is removed and its DB session must be gone before another observation.
-
-An uncertain original request permits a bounded read-only observation of its
-exact desired effect. Only that value, including absence for an original removal,
-settles it. An old marker, an expired old deadline or absence before an uncertain
-install does not prove the request cannot execute late. Unavailable or mismatched
-effect observation emits a distinct terminal recovery requirement, so the watchdog
-does not restart forever. The same manual release can re-read that original
-operation later. A newly needed repair action requires an exact Director question;
-there is no blind whole-env rewrite or cleanup override. Provider failure can
-prevent release beyond the planned bound, so successful actual marker absence
-and service release readback, rather than timer installation, qualify the window.
+An existing window continues through its original private state (default
+`/var/lib/launchplane-maintenance`) and exact target:
 
 ```bash
 python3 database_maintenance_host.py release --state STATE_JSON
 ```
 
-The final receipt includes actual verified revision and original service
-readback. Successful cleanup disables/removes the watchdog and verifies its
-inactive state. A crash after marking release complete still uses the same
-supported command to settle only the exact owned units and fsync cleanup progress;
-it repeats no database, provider or resume operation. It stops those
-units outside state custody before final metadata cleanup. Success requires the
-cleanup readback as well as the sticky release proof.
-Private state defaults to `/var/lib/launchplane-maintenance`;
-a reboot or failed attempt continues through that same supported release,
-never a different target or recovery restore. Monitoring is paused during the
-window, which counts against verification cadence and is not healthy evidence.
-
-
-### Hostname schema compatibility prelude
-
-Issue #4229 publishes schema knowledge before #4005 activates canonical hostname
-fences. The compatibility image retains the approved discussion-topics startup
-target `b81ca763d924` and existing hostname comparisons. Its migration entrypoint
-keeps the earlier explicit targets, including the independently approved delivery
-drop and existing topics/retirement join `da72490fce13`. The held-drop approval
-procedure above remains independent.
-
-The prepared hostname revision `f0a4c8e2b6d9` still follows the preview revision
-`e8d2f6a0b4c7`; its prepared held-path join is `f1b5d9a3c7e0`. Empty join
-`f2c6e0a4b8d1` reconciles the topics and hostname branches without the held drop.
-Empty join `f3d7a1b5c9e2` reconciles that join with both existing held-path joins,
-providing one graph head. None of these four prepared revisions is an accepted
-target of this image's migration entrypoint, even for an empty database.
-Graph knowledge does not authorize applying hostname fences or the held drop.
-
-Startup from the predecessor or preview revision adds only approved topics.
-An already-applied delivery drop or original retirement join follows the existing
-route to `da72490fce13`; the explicit delivery/preview crossing also retains that
-route. These paths never apply hostname fences. An already-applied hostname-only
-schema adds topics through `f2c6e0a4b8d1`, retaining all held history. An
-already-applied hostname/retirement join adds topics through `f3d7a1b5c9e2`,
-including when explicitly requesting the historical topics/retirement join.
-Topics and compatible-ahead joins remain unchanged. Every route leaves one
-recorded revision and preserves discussion history and stored target payloads.
-
-A hostname-only schema, including its topics join, cannot request the delivery
-drop or either historical held-path join through this entrypoint: joining those
-branches would newly apply the held drop. An already-applied hostname/retirement
-join or final compatibility join accepts earlier ancestor targets without a
-downgrade. Image rollback to this compatibility image keeps compatible-ahead
-schemas and payloads unchanged; a hostname schema that predates topics first
-receives the already-approved additive topics migration.
-
-The held-drop procedure above remains available from the earlier approved
-schemas. Before hostname activation reaches main, its release must also qualify
-an explicit held-drop application path for the hostname-only schemas it can
-leave behind, including image rollback. After activation, use that separately
-qualified release and its reviewed mapping for an independently approved drop;
-this compatibility entrypoint continues to refuse that transition. Do not bypass
-the refusal with direct Alembic or manual SQL.
-
-Before the first explicit public-host authority-key call, runtime provider
-operations acquire a shared transaction advisory schema-transition lock outside
-the validation savepoint. They retain it across provider I/O and reacquire it
-after every checkpoint commit. The prepared hostname migration takes the
-matching exclusive transaction lock in both upgrade and downgrade, then a
-NOWAIT SHARE lock on `launchplane_dokploy_targets` before replacing key
-derivation. This excludes ordinary and prepared target writes that invoke the
-key function through table triggers, including an uncommitted new context.
-Independent provider operations continue concurrently under shared locks.
-
-A busy advisory transition lock raises the migration's busy RuntimeError;
-target-table contention raises a database lock error with SQLSTATE `55P03`.
-VACUUM/ANALYZE can also cause the table-lock refusal. The transaction commits
-no partial DDL or revision change. Retry the supported migration after the
-conflicting activity settles; do not cancel maintenance or use a live SQL
-fallback. Runtime reacquisition contention stops further effects while keeping
-the preceding checkpoint committed; retry from a fresh plan.
-
-Source delivery alone does not establish rollback compatibility for #4005.
-An authorized deployment session must record the immutable compatibility image,
-verify that every earlier HTTP replica and worker has been replaced, and retain
-that qualified image as activation's previous-image rollback target. A drain
-marker alone does not prove older hostname writers have gone. All four new
-migration files remain byte-identical between the final qualified compatibility
-and activation changes, preserving the compatibility graph as an exact prefix.
-A release that changes startup's migration target can activate the transition
-during automatic deployment. Complete the deployed-image qualification before
-that release reaches main. Image rollback then returns to this qualified
-compatibility image without downgrading the hostname schema.
+Unsafe or UNKNOWN verification keeps writers stopped and deployments held;
+never replace the target, restore automatically or blindly retry a drop or
+provider request. Only actual verified service/marker release and watchdog
+cleanup readback prove recovery; a deadline or installed timer does not.
 
 ### Canonical hostname activation
-
-Startup activates the already-prepared hostname revision through
-`b2c4e6a8f0d3`, which also includes the profile archive, preview settings and
-idle retirement. A database that already applied the held delivery drop joins
-at `f87c72d690ab`; an explicit approved held-drop request from a hostname-only
-schema also reaches that join. Startup never applies that drop on its own.
-The runtime refuses earlier schemas until the supported migration completes.
-The four compatibility-prelude migration files remain unchanged.
 
 Ownership comparisons and PostgreSQL hostname fences share ASCII case folding,
 surrounding whitespace removal, trailing-dot removal and retained URL-host
@@ -6368,125 +5909,21 @@ product writers continue. A foreign claim acquired between recipient publication
 and its inverse refuses the inverse without overwriting that claim. Resolve the
 foreign ownership through its supported control-plane path, then retry the scoped inverse.
 
-Before checked Ready, qualify the immutable currently deployed image against
-both activated joins as the previous-image rollback target. It must include the
-non-runtime archive and every later applied migration; the old #4229 image is
-not compatible. Verify the supported self-deploy will capture that qualified
-image and that older HTTP replicas and workers have been replaced. Rollback
-starts that image on the compatible-ahead schema without downgrading it. The
-independent held-drop approval still applies to real data.
-
-### Non-runtime profile archive
-
-Release revision `a4c8e0f2b6d3` follows the topics revision. It copies every
-product profile whose payload names a classification other than
-`managed_runtime` into `launchplane_product_profile_archive`, with
-`migration:nonruntime-product-retirement` as its source and a fixed reason,
-then deletes those profile rows. Runtime profiles, repository inventory and
-every other record stay as they are. A database with no such rows only gains
-the empty archive table.
-
-Empty joins keep every recognized branch reachable without applying a held
-step. A database that already applied the delivery drop or its joins joins at
-`a5d9f1b3c7e4`; a hostname-only schema joins at `a6e0a2c4d8f5`; the
-hostname/retirement and compatibility joins reach the graph head
-`a7f1b3d5e9a6`. Explicitly requesting the delivery drop from the archive
-revision joins at `a5d9f1b3c7e4`; a hostname-only schema still refuses it.
-Hostname activation must target a join that includes this revision.
-
-Downgrade refuses. Images from before this revision reject it, so an image
-rollback across it needs this image or a later one; the hostname compatibility
-image above is no longer a rollback target once the archive has run.
-
-
-### Preview idle reservation retirement
-
-Release revision `b0a2c4e6f8d1` follows the managed preview-settings migration. It
-removes only the retired preview-idle scope's stop/start reservations and
-original-intent records. A matching database constraint refuses an overlapping
-old scheduler's late reservation writes before effects. Other operations, target
-fences and preview data are unchanged. The gateway's persisted receipt and
-current lane observation recover sleep and wake under the existing executor lock; see
-[preview idle behavior](clean-testing-snapshots.md).
-
-Through [stored-record preflight](stored-record-preflight.md#activation-order-and-recovery),
-startup migration selects `b1b3d5f7a9e2` for an already-applied delivery-drop
-branch, `b2c4e6a8f0d3` for an already-applied hostname-only branch, and
-`f87c72d690ab` for their already-applied compatibility joins. These empty joins
-retain each branch's existing approval boundary. They never activate the
-prepared delivery drop or hostname transition on an unapproved database.
-An explicit approved delivery-drop request from `b0a2c4e6f8d1` joins at
-`b1b3d5f7a9e2`; hostname-only histories continue to refuse that request.
-Downgrade cannot reconstruct deleted idle intents. An image rollback to code
-that still requires them cannot recover a sleeping preview from its gateway
-receipt alone; use this image or a later one.
-
 ### Managed preview settings migration
 
-For the producer-first rollout and activation order, see
-[stored-record preflight activation](stored-record-preflight.md#activation-order-and-recovery).
-The managed-preview migration moves profile preview overrides into each
-product's existing runtime-environment records at instance `preview`, and removes
-the old profile values atomically. Existing testing and production records stay
-unchanged. See [shared preview settings](preview-settings.md) for
-configuration and conflict handling.
-
-An explicit `b8f2c4d6e0a7` migration target retains its historical joins:
-`b9a3d5e7f1b8` for retirement, `c0b4e6f8a2c9` for hostnames, and
-`c1c5f7a9b3d0` for their compatibility join. Its route from the archive never
-applies either unrelated branch. An approved delivery-drop request from this
-revision joins at `b9a3d5e7f1b8`; hostname-only histories still refuse it.
-The startup target includes idle retirement as described above.
-
-Downgrade retains the migrated values. An older image that does not recognize
-these revisions or still renders profile overrides is not a rollback target for
-this change; retain a compatible image or the pre-migration backup and matching
-image. Schema initialization's head fence continues rejecting unreviewed
-successors after the idle-retirement transition above.
-
-This data migration uses the shared preview validator. A restored database from
-before this revision must pass the validator in the selected image; later
-validation changes may therefore refuse older values transactionally at startup.
-Preflight that backup's preview settings against the selected image before
-release rather than weakening validation to admit them.
+Use [shared preview settings](preview-settings.md) for configuration and conflict
+handling. A restored database from before this migration must pass the preview
+validator in the selected image; later validation changes can refuse older
+values transactionally at startup. Preflight that backup's preview settings
+against the selected image before release rather than weakening validation.
 
 ### Additive integration-attestation storage
 
-The attestation release targets `c8d2e4f6a9b1`, following the current
-hostname/idle-retirement release target. It adds only
-`launchplane_integration_attestations` and its PR lookup index. The default path
-still never applies the held delivery drop. An already-applied delivery branch
-joins at `d1a5b7c9d2e4`; that join is empty. Runtime recognizes the preceding
-release and compatibility revisions and these additions; the HTTP service still
-checks its required tables. Explicit approved delivery-drop requests from the
-additive revision use the same join, preserving the existing separate approval.
-Legacy adoption recognizes the future table as belonging to Launchplane and
-refuses to stamp an unversioned database containing it as an older schema.
-
-Before activating this target, deploy the compatibility slice containing these
-same two migration files and recognized revision paths while startup still uses
-the preceding target. That slice creates no attestation table and does not
-require it. Retain its qualified deployed image as activation's previous-image
-rollback target. Source delivery alone does not qualify it. Older images cannot
-recognize the additive revision and are below the new rollback floor. Image
-rollback retains the additive table and its immutable evidence.
-Compatibility also reads populated restoration and attestation evidence on
-carried Client decisions. Both additive fields are omitted when empty, so its
-ordinary carries remain readable by the preceding image. Activation uses the
-same read contract unchanged. Do not roll activation back past this compatible
-image after any populated carry has been saved.
+A rollback image must read populated restoration and attestation evidence on
+carried Client decisions. A preceding image that can read only carries without
+those fields is not a rollback target after a populated carry has been saved.
 
 ### Monitoring-authority history
-
-The additive revision `e2b6c8d0a4f7` retains profile, route-binding and
-private-endpoint decisions in `launchplane_monitoring_authority_history`.
-Ordinary startup targets this additive revision. An installation already on the
-held delivery branch advances through its empty join `f3c7d9e1b5a8`; other
-installations stay on the non-destructive branch. Never activate with Alembic
-`head`: the separately held delivery drop remains unapproved. The preceding
-compatibility image, delivered in PR5589 and retained by PR5593, recognizes both
-revisions and remains the rollback floor. Startup verifies capture storage,
-projection functions and enabled source and append-only triggers.
 
 The prepared PostgreSQL migration takes the existing authority-bundle lock, then
 locks all three source tables in one transaction. It records one coverage epoch
