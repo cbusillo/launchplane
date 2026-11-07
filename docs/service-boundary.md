@@ -1359,24 +1359,9 @@ admission store, live evidence adapter, controller lease, and append-only
 landing outcome behavior as controller mode. If those dependencies are
 unavailable, the route fails closed before GitHub mutation.
 
-Launchplane's merge-train worker (`service merge-train-workers run`) is the
-scheduler for this route: every five minutes by default it runs one pass over
-the scheduler-enabled policy targets, one target at a time, calling the same
-admission and worker functions in-process. See [merge-train policy](merge-train-policy.md).
-
-`.github/workflows/merge-train-runner.yml` is a manual external caller for
-this route. It mints a GitHub Actions OIDC token for the Launchplane service,
-reads admission, and calls one worker entrypoint only when the decision is
-`admitted`. Repository, base branch, runner mode and mutation come from explicit
-workflow inputs. Automatic sweeps and event progression belong to the service
-worker; the workflow has no schedule or target fan-out. The default manual
-runner mode calls the Level 1 `run-once` route; setting `runner_mode: controller`
-switches an admitted pass to one full-controller `run-once` call instead.
-Controller-mode dry-runs do not deliver PR feedback comments; feedback delivery
-is reserved for mutate runs and explicit manual phase workflows.
-Workflow dispatches may select at most one non-`none` phase input across
-batch-candidate, batch-landing, and stack-collapse modes; the runner validates
-that exclusivity before any phase step mutates state.
+The service merge-train worker and the manual `merge-train-runner.yml`
+workflow call these routes; see
+[scheduled and manual passes](merge-train-policy.md#scheduled-and-manual-passes).
 
 `GET /v1/repo-product-mapping` is a native FastAPI route that returns the
 repository ownership/awareness read model used by agent context.
@@ -1424,20 +1409,6 @@ service-host env overrides. It authorizes against the policy's `service_authz`,
 reads a fresh GitHub snapshot, and writes a `launchplane_merge_train_runs` record
 for accepted dry-run and mutate calls. Mutation mode still applies at most one
 worker transition from that snapshot.
-
-The full batch train will use additional service contracts and records rather
-than overloading `run-once`. Its target behavior is to build one combined
-candidate from the base branch plus multiple queued PRs, run required checks on
-that candidate commit, and then land the original PRs in queue order through
-GitHub's normal PR merge path after pre-merge invariants are rechecked.
-The first batch service contract is
-`POST /v1/work-graph/merge-train/batch-candidate/run-once`; it owns only the
-plan/build/observe candidate phases and writes
-`launchplane_merge_train_batch_candidates` records.
-The second batch service contract is
-`POST /v1/work-graph/merge-train/batch-landing/run-once`; it owns landing-plan
-creation and guarded PR-native landing, and writes
-`launchplane_merge_train_batch_landing_plans` records.
 
 `POST /v1/merge-train/policies/import` is the native FastAPI service-owned write
 path for merge train policy records. It requires database storage and
@@ -4341,7 +4312,7 @@ ref, and resolves the repository policy's declared GitHub token source. The
 projection is `authoritative=false`, authorizes no
 effect, classifies historical head/tree evidence explicitly, and never
 interprets a missing landing outcome as landed. See
-`docs/governance-evidence.md`.
+[governance projection](merge-admission.md#governance-projection).
 
 ## Change Impact API
 
