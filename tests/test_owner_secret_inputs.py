@@ -99,7 +99,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
                 read = await self.service_read(director, environment)
                 self.assertEqual(read.status_code, 200, read.text)
                 (field,) = read.json()["fields"]
-                self.assertEqual(field["multiline"], environment.endswith("github_app"))
+                self.assertEqual(field["multiline"], field["binding_key"] == "private_key")
                 value = (
                     "synthetic-line-one\nsynthetic-line-two\n"
                     if field["multiline"]

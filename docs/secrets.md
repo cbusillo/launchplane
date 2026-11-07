@@ -118,11 +118,19 @@ tracked repository inventory, verifies the App, client ID, installation owner,
 accepted permissions and suspension state, and requests exactly one repository
 with Administration write, Actions read and Metadata read. It verifies the issued
 repository, permission ceiling and expiry and revokes the installation token
-after use, including failures. Even an all-repository installation never creates
+after use, including failures. A failed revocation preserves the provider
+operation's actual outcome, emits a value-free warning and returns
+`credential_revoked: false`; expiry remains the final credential limit. Even an all-repository installation never creates
 an all-repository token. Only ephemeral runner registration configuration can
 reach the authorized workflow; the App key and installation token stay inside
 the service. Responses are not cacheable and provider diagnostics are scrubbed.
 The existing local host/filesystem, dry-run, active-run and audit checks remain.
+
+An untracked target first uses the existing repository inventory dry-run/apply
+path described in [operations](operations.md#repository-inventory).
+Credential failures report only their stage (`repository_inventory`, `identity`
+or `token_mint`), HTTP status, error code and trace ID. Provider text and secret
+values are never included in those diagnostics.
 
 The workflow no longer reads `LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN`.
 Keep that obsolete secret intact until the Director separately checks its

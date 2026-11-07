@@ -31,6 +31,7 @@ from control_plane.github_app_configuration import (
 ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY = "LAUNCHPLANE_ADVISORY_GITHUB_APP_PRIVATE_KEY"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _ALLOWED_INSTALLATION_PERMISSIONS = {"checks": "write", "metadata": "read"}
+RUNNER_LIFECYCLE_PERMISSIONS = {"administration": "write", "actions": "read", "metadata": "read"}
 _MERGE_TRAIN_TOKEN_PERMISSIONS = {
     "checks": "read",
     "contents": "write",
@@ -213,7 +214,7 @@ def mint_runner_lifecycle_installation_token(
     api_request: GitHubApiRequest = github_api_request,
     now: datetime | None = None,
 ) -> GitHubAppInstallationToken:
-    permissions = {"administration": "write", "actions": "read", "metadata": "read"}
+    permissions = RUNNER_LIFECYCLE_PERMISSIONS
     return _mint_repository_installation_token(
         identity=identity,
         repository=repository,

@@ -15,7 +15,9 @@ from control_plane.github_app_configuration import (
     ONBOARDING_GITHUB_APP_CLIENT_ID_ENV_KEY,
     RUNNER_LIFECYCLE_GITHUB_APP_ID_KEY,
     RUNNER_LIFECYCLE_GITHUB_APP_CLIENT_ID_KEY,
+    RUNNER_LIFECYCLE_GITHUB_APP_INTEGRATION,
 )
+from control_plane.runner_lane_service import runner_lifecycle_identity
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.merge_train_stall import (
     STALL_WORKFLOW_REF_KEY,
@@ -185,6 +187,22 @@ class ServiceRuntimeSettingTests(unittest.TestCase):
             expected[key] = value
             self.assertEqual(_service_env(self.store), expected)
         self.assertEqual(self.store.list_secret_records(), ())
+        with self.assertRaises(ValueError):
+            runner_lifecycle_identity(self.store)
+        secrets.write_secret_value(
+            record_store=self.store,
+            scope="context",
+            integration=RUNNER_LIFECYCLE_GITHUB_APP_INTEGRATION,
+            name="private_key",
+            plaintext_value="synthetic-runner-key",
+            binding_key="private_key",
+            context_name="launchplane",
+            actor="test",
+        )
+        identity = runner_lifecycle_identity(self.store)
+        self.assertEqual(str(identity.app_id), expected[RUNNER_LIFECYCLE_GITHUB_APP_ID_KEY])
+        self.assertEqual(identity.client_id, expected[RUNNER_LIFECYCLE_GITHUB_APP_CLIENT_ID_KEY])
+        self.assertEqual(identity.private_key, "synthetic-runner-key")
 
     def test_reviewed_apply_accepts_both_stall_sender_routing_settings(self) -> None:
         expected = {

@@ -11,6 +11,7 @@ from control_plane.runner_lane_service import (
     RunnerLaneServiceRequest,
     RunnerLaneServiceResponse,
     RunnerLaneStore,
+    RunnerLifecycleCredentialsUnavailable,
     execute_runner_lane_service_request,
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneIdentity
@@ -57,7 +58,19 @@ def register_runner_lane_service_routes(
             )
         response.headers["Cache-Control"] = "no-store"
         try:
-            return execute_runner_lane_service_request(cast(RunnerLaneStore, record_store), request)
+            result = execute_runner_lane_service_request(
+                cast(RunnerLaneStore, record_store), request
+            )
+            result.trace_id = trace_id
+            return result
+        except RunnerLifecycleCredentialsUnavailable as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="runner_lifecycle_unavailable",
+                message=str(error),
+                reason=error.stage,
+            ) from error
         except (
             LookupError,
             OSError,

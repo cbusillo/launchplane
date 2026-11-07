@@ -1,6 +1,9 @@
 import json
 from collections.abc import Callable
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
+from http.client import HTTPException
+import logging
+import re
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from typing import Any, cast
@@ -13,6 +16,27 @@ from control_plane.runner_lane_service import (
     RunnerLaneServiceRequest,
     RunnerLaneServiceResponse,
 )
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _service_error(error: HTTPError) -> MergeTrainGitHubError:
+    diagnostics: list[str] = []
+    try:
+        payload = json.loads(error.read(65536))
+        detail = payload.get("error", {}) if isinstance(payload, dict) else {}
+        if isinstance(detail, dict) and isinstance(payload, dict):
+            stage = detail.get("reason")
+            for value in (detail.get("code"), payload.get("trace_id"), stage):
+                if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value):
+                    diagnostics.append(value)
+    except (OSError, ValueError, HTTPException):
+        diagnostics = []
+    suffix = f" ({'; '.join(diagnostics)})" if diagnostics else ""
+    return MergeTrainGitHubError(
+        f"Runner lifecycle service operation failed{suffix}.",
+        status_code=error.code,
+    )
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -48,10 +72,16 @@ class ServiceRunnerLaneClient:
         try:
             with build_opener(_NoRedirect()).open(http_request, timeout=120) as response:
                 result = RunnerLaneServiceResponse.model_validate(json.load(response))
-        except (OSError, HTTPError, URLError, ValueError) as error:
+        except HTTPError as error:
+            raise _service_error(error) from error
+        except (OSError, ValueError, HTTPException) as error:
             raise MergeTrainGitHubError("Runner lifecycle service operation failed.") from error
         if result.repository != request.repository or result.operation != request.operation:
             raise MergeTrainGitHubError("Runner lifecycle response belongs to another operation.")
+        if not result.credential_revoked:
+            _LOGGER.warning(
+                "Runner lifecycle operation completed; installation credential revocation is unconfirmed."
+            )
         return result.payload
 
     def read_runner_lane_inventory(self, *, repository: str) -> RunnerLaneInventory:
@@ -67,7 +97,11 @@ class ServiceRunnerLaneClient:
         )
         token = payload.get("token")
         record = RunnerLaneRegistrationTokenRecord.model_validate(payload.get("record"))
-        if not isinstance(token, str) or not token or record.repository != repository:
+        if (
+            not isinstance(token, str)
+            or not token
+            or record.repository.casefold() != repository.strip().casefold()
+        ):
             raise MergeTrainGitHubError("Runner registration configuration is unavailable.")
         return token, record
 
