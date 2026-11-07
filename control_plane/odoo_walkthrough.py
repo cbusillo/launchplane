@@ -81,6 +81,14 @@ from control_plane.provider_operations import (
 )
 from control_plane.secrets import _decrypt_secret_value, write_secret_value
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_serving_copy import (
+    published_testing_copy,
+    require_maintained_local_credentials,
+    omitted_maintenance_keys,
+    testing_receiver_generation,
+)
+from control_plane.testing_replacement_bootstrap import require_testing_credential_safety
+from control_plane.native_testing_route_refresh import plan_native_testing_route_refresh
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.odoo_preview_runtime import odoo_compose_has_domain
@@ -219,6 +227,7 @@ class WalkthroughPlan:
     usage_since: str
     secret_name: str
     connection: OdooRuntimeConnection = field(repr=False)
+    copy_witness: str | None = None
 
 
 def plan_walkthrough(
@@ -456,6 +465,12 @@ def _walkthrough_preflight(
 
     selection = None
     generation = None
+    publication = None
+    receiver_generation: dict[str, object] = {}
+    copy_binding = ""
+    copy_witness = None
+    usage_since = ""
+    target_id = ""
     connection = None
     parsed = None
     database = ""
@@ -501,23 +516,49 @@ def _walkthrough_preflight(
                 task_account_cleanup=operation == "cleanup",
                 resource_qualification=checks is not None and operation != "cleanup",
             )
-            if generation is None:
+            if isinstance(store, PostgresRecordStore):
+                publication = published_testing_copy(store, product=product, context=context)
+            if generation is not None:
+                if not generation.completed_at:
+                    raise WalkthroughPrerequisiteError(
+                        WalkthroughPrerequisite.GENERATION_INCOMPLETE
+                    )
+                target_id = generation.target_id
+                copy_binding = generation_binding(generation)
+                usage_since = generation.prepared_at
+                receiver_generation = generation.model_dump(mode="json")
+            elif publication is not None:
+                candidate = publication.plan.candidate
+                application = candidate.application
+                assert application is not None and application.prepared is not None
+                if (
+                    application.plan.source != "empty"
+                    or publication.plan.after.generation is not None
+                ):
+                    raise WalkthroughPrerequisiteError(WalkthroughPrerequisite.GENERATION_MISSING)
+                target_id = candidate.compose_id
+                copy_binding = application.prepared.source_witness
+                copy_witness = ""
+                usage_since = candidate.created_at.isoformat()
+                receiver_generation = testing_receiver_generation(candidate, None)
+            else:
                 raise WalkthroughPrerequisiteError(WalkthroughPrerequisite.GENERATION_MISSING)
-            if not generation.completed_at:
-                raise WalkthroughPrerequisiteError(WalkthroughPrerequisite.GENERATION_INCOMPLETE)
+            if publication is not None:
+                if operation != "cleanup":
+                    require_maintained_local_credentials(store, publication)
+                require_testing_credential_safety(
+                    store, context, omitted_maintenance_keys(store, context)
+                )
     with checkpoint(WalkthroughPrerequisite.USE, ()) as run:
         if run:
             if operation != "cleanup":
                 require_drill_use_unprotected(store, product, context, allow_down_repair=False)
-    # Preserve the existing real host storage/network/image/copy inspection.
-    # Its aggregate usage boolean includes our own historical task accounts;
-    # the native witnessed-account read below distinguishes those from staff.
-    with checkpoint(
-        WalkthroughPrerequisite.PHYSICAL_COPY, (WalkthroughPrerequisite.GENERATION,)
-    ) as run:
-        if run:
-            assert generation is not None
-            if operation != "cleanup":
+    if operation != "cleanup" and not (publication is not None and generation is None):
+        with checkpoint(
+            WalkthroughPrerequisite.PHYSICAL_COPY, (WalkthroughPrerequisite.GENERATION,)
+        ) as run:
+            if run:
+                assert generation is not None
                 read_drill_recent_signins(store, generation, time.time())
     with checkpoint(
         WalkthroughPrerequisite.RUNTIME,
@@ -525,20 +566,30 @@ def _walkthrough_preflight(
     ) as run:
         if run:
             assert selection is not None
-            assert generation is not None
             connection = connect_runtime(
                 store=store,
                 selection=selection,
                 control_plane_root=root,
                 database_url=store.database_url,
             )
-            if connection.evidence.target_id != generation.target_id:
+            if connection.evidence.target_id != target_id:
                 raise ValueError("Testing recipient changed.")
     with checkpoint(WalkthroughPrerequisite.ORIGIN, (WalkthroughPrerequisite.RUNTIME,)) as run:
         if run:
             assert connection is not None
             assert parsed is not None
-            if not odoo_compose_has_domain(
+            if publication is not None:
+                if operation != "cleanup":
+                    route = plan_native_testing_route_refresh(
+                        store,
+                        root=root,
+                        current=store.read_route_binding_record(
+                            product=product, context_name=context, instance_name="testing"
+                        ),
+                    )
+                    if route.status not in {"ready", "unchanged"}:
+                        raise WalkthroughEvidenceUnavailable
+            elif not odoo_compose_has_domain(
                 host=connection.host,
                 token=connection.token,
                 compose_id=connection.evidence.target_id,
@@ -551,8 +602,7 @@ def _walkthrough_preflight(
             database = testing_drill_environment(store, context).get("ODOO_DB_NAME", "")
             if not database or database != connection.credentials.get("ODOO_DB_NAME"):
                 raise ValueError("Testing database is unavailable or changed.")
-    copy_binding = generation_binding(generation) if generation is not None else ""
-    if operation == "cleanup":
+    if operation == "cleanup" or publication is not None and generation is None:
         with checkpoint(
             WalkthroughPrerequisite.PHYSICAL_COPY,
             (
@@ -562,7 +612,6 @@ def _walkthrough_preflight(
             ),
         ) as run:
             if run:
-                assert generation is not None
                 assert connection is not None and selection is not None
                 frames: list[dict[str, object]] = []
                 inspect_native_testing_receiver(
@@ -570,13 +619,15 @@ def _walkthrough_preflight(
                     token=connection.token,
                     server_id=connection.server_id,
                     spec={
-                        "generation": generation.model_dump(mode="json"),
+                        "generation": receiver_generation,
                         "compose_project": connection.app_name,
                         "image_reference": selection.identity.image_reference,
                         "database_name": database,
                         "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
                         "workflow_environment": {},
-                        "copy_binding_sha256": copy_binding,
+                        "copy_binding_sha256": copy_binding
+                        if copy_witness is None
+                        else copy_witness,
                         "usage_only": True,
                         "task_account_cleanup": True,
                     },
@@ -588,7 +639,7 @@ def _walkthrough_preflight(
         [product, context, request.task_id if request is not None else "", copy_binding]
     )
     readback_intent: dict[str, object] = {}
-    if connection is not None and selection is not None and generation is not None:
+    if connection is not None and selection is not None and copy_binding:
         readback_intent = {
             "project": connection.app_name,
             "identity": selection.identity.model_dump(mode="json"),
@@ -596,7 +647,8 @@ def _walkthrough_preflight(
             "image": selection.identity.image_reference,
             "database": database,
             "copy_binding": copy_binding,
-            "usage_since": generation.prepared_at,
+            **({"copy_witness": copy_witness} if copy_witness is not None else {}),
+            "usage_since": usage_since,
         }
     with checkpoint(
         WalkthroughPrerequisite.ISOLATION_OR_USAGE,
@@ -609,7 +661,6 @@ def _walkthrough_preflight(
         if run:
             assert connection is not None
             assert selection is not None
-            assert generation is not None
             if operation == "cleanup":
                 read = read_testing_connection_isolation(
                     host=connection.host,
@@ -659,7 +710,7 @@ def _walkthrough_preflight(
     if checks is not None:
         return None
     assert request is not None and selection is not None
-    assert generation is not None and connection is not None
+    assert copy_binding and connection is not None
     digest = canonical_json_sha256(
         [
             actor,
@@ -671,7 +722,7 @@ def _walkthrough_preflight(
         ]
     )
     return WalkthroughPlan(
-        digest, binding, database, copy_binding, generation.prepared_at, secret_name, connection
+        digest, binding, database, copy_binding, usage_since, secret_name, connection, copy_witness
     )
 
 
@@ -739,6 +790,11 @@ class WalkthroughAdapter:
             "image": self.plan.connection.selection.identity.image_reference,
             "database": self.plan.database,
             "copy_binding": self.plan.copy_binding,
+            **(
+                {"copy_witness": self.plan.copy_witness}
+                if self.plan.copy_witness is not None
+                else {}
+            ),
             "binding": self.plan.binding,
             "task_id": self.request.task_id,
             "usage_since": self.plan.usage_since,

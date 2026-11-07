@@ -43,7 +43,7 @@ _WALKTHROUGH_DESCRIPTIONS = {
     WalkthroughPrerequisite.NOT_REACHED: "This read was not reached because an earlier prerequisite did not pass.",
     WalkthroughPrerequisite.IDENTITY: "Verify the testing runtime identity and its separate HTTPS origin.",
     WalkthroughPrerequisite.GENERATION: "Verify the current generation still owns its independent target and resources.",
-    WalkthroughPrerequisite.GENERATION_MISSING: "Create a fresh sanitized testing generation before provisioning a task account.",
+    WalkthroughPrerequisite.GENERATION_MISSING: "Qualify a native testing publication or completed sanitized generation before provisioning a task account.",
     WalkthroughPrerequisite.GENERATION_INCOMPLETE: "Wait for the testing generation to complete its sanitized copy.",
     WalkthroughPrerequisite.USE: "Resolve the testing hold, protected use or sole-copy custody before provisioning.",
     WalkthroughPrerequisite.PHYSICAL_COPY: "Verify the physical testing copy, storage, network and image.",
