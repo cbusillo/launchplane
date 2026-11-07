@@ -333,7 +333,7 @@ def _testing_artifact_id(value: object) -> str:
     return ""
 
 
-def _testing_steps(inputs: PathCheckInputs) -> list[PathCheckStep]:
+def _testing_steps(inputs: PathCheckInputs, *, include_deploy: bool = True) -> list[PathCheckStep]:
     steps = [_profile_step(inputs.profile, "testing")]
     hold = inputs.testing_hold_active
     if isinstance(hold, Unread):
@@ -350,7 +350,8 @@ def _testing_steps(inputs: PathCheckInputs) -> list[PathCheckStep]:
         )
     else:
         steps.append(_step("testing_hold", "clear", "no_hold", "The testing lane is not held."))
-    steps.append(_testing_attempt_step(inputs.testing_reconcile_plan))
+    if include_deploy:
+        steps.append(_testing_attempt_step(inputs.testing_reconcile_plan))
     steps.extend(inputs.testing_prerequisites)
     return steps
 
@@ -493,7 +494,6 @@ def _rollback_steps(inputs: PathCheckInputs) -> list[PathCheckStep]:
 
 
 _PATH_STEPS: dict[PathName, Callable[[PathCheckInputs], list[PathCheckStep]]] = {
-    "testing": _testing_steps,
     "promote": _promote_steps,
     "rollback": _rollback_steps,
 }
@@ -502,7 +502,11 @@ _PATH_STEPS: dict[PathName, Callable[[PathCheckInputs], list[PathCheckStep]]] = 
 def build_product_path_check(
     *, product: str, path: PathName, inputs: PathCheckInputs, intent: TestingIntent | None = None
 ) -> ProductPathCheck:
-    steps = tuple(_PATH_STEPS[path](inputs))
+    steps = tuple(
+        _testing_steps(inputs, include_deploy=intent != "provision")
+        if path == "testing"
+        else _PATH_STEPS[path](inputs)
+    )
     blocked = sum(step.state == "blocked" for step in steps)
     unknown = sum(step.state == "unknown" for step in steps)
     state: StepState = "blocked" if blocked else "unknown" if unknown else "clear"

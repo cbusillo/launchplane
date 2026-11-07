@@ -195,7 +195,7 @@ try:
             if spec['identity']['environment_kind']!='preview':
                 cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',('__LP_COPY_WITNESS__',))
                 row=cursor.fetchone()
-                if not row or row[0]!=spec['copy_binding']: raise Refused('copy_changed')
+                if (row[0] if row else '')!=spec.get('copy_witness',spec['copy_binding']): raise Refused('copy_changed')
             if spec['mode'] in ('usage','lane_usage','isolation','account_presence') and connection_isolation(cursor, apply=False):
                 raise Refused('isolation_refused')
             if spec['mode']=='quiescence':
@@ -402,7 +402,7 @@ if request['instance'] in ('prod','production') or (preview and not (readonly an
 env.cr.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',(__TASK_LOCK_PREFIX__+request['binding'],))
 if time.time()>request['dispatch_deadline']: raise RuntimeError('Dispatch deadline expired')
 parameters=env['ir.config_parameter'].sudo()
-if not preview and read_string_parameter(parameters,'__LP_COPY_WITNESS__')!=request['copy_binding']:
+if not preview and read_string_parameter(parameters,'__LP_COPY_WITNESS__')!=request.get('copy_witness',request['copy_binding']):
     raise RuntimeError('Testing copy witness changed')
 if connection_isolation(env.cr, apply=False):
     raise RuntimeError('Testing connection isolation did not pass')

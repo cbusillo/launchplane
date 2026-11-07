@@ -92,7 +92,7 @@ class ProbeConnection:
         if self.sql_result:
             self.sql.execute(statement, parameters)
 
-    def fetchone(self) -> tuple[object, ...]:
+    def fetchone(self) -> tuple[object, ...] | None:
         if self.sql_result:
             row = tuple(self.sql.fetchone())
             return (bool(row[0]),) if "res_users" in self.statement else row
@@ -102,7 +102,7 @@ class ProbeConnection:
             return (self.used,)
         if "ir_config_parameter" in self.statement:
             if self.parameters[0] == TESTING_COPY_COMPLETION_PARAMETER:
-                return (self.copy,)
+                return (self.copy,) if self.copy is not None else None
             return (
                 json.dumps(
                     {
@@ -318,6 +318,26 @@ class NativeProbeTests(unittest.TestCase):
         self.database_reads = 0
         self.assertFalse(self.run_probe())
         self.assertEqual(self.database_reads, 0)
+
+    def test_empty_publication_witness_is_explicit_and_preserves_all_native_reads(self) -> None:
+        for mode in ("lane_usage", "usage", "isolation", "quiescence"):
+            with self.subTest(mode=mode):
+                self.spec.update(mode=mode, copy_binding="empty:" + "a" * 64, copy_witness="")
+                self.connection.copy = None
+                self.assertEqual(self.read(), TestingRead.CLEAR)
+                self.connection.copy = "restored-copy"
+                self.assertEqual(self.read(), TestingRead.COPY_CHANGED)
+                self.connection.copy = None
+                self.spec.pop("copy_witness")
+                self.assertEqual(self.read(), TestingRead.COPY_CHANGED)
+                self.spec["copy_binding"] = "restored-copy"
+                self.assertEqual(self.read(), TestingRead.COPY_CHANGED)
+        self.spec.update(mode="lane_usage", copy_binding="empty:" + "a" * 64, copy_witness="")
+        self.connection.used = True
+        self.assertEqual(self.read(), TestingRead.PROTECTED_SIGNIN)
+        self.connection.used = False
+        self.connection.isolation_readable = False
+        self.assertEqual(self.read(), TestingRead.UNAVAILABLE)
 
     def test_each_usage_checkpoint_requires_its_task_and_no_other_recent_signins(self) -> None:
         self.spec["mode"] = "usage"
