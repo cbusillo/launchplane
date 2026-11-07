@@ -652,7 +652,7 @@ def testing_rebuild_hold_allows(
             return False
     return (
         bool(actor)
-        and operation.request.data_source_mode == "empty"
+        and operation.request.data_source_mode in {"empty", "migrated_restore"}
         and hold.purpose == "isolation_staging"
         and (
             hold == intent.before.target.policies.staff_testing_hold

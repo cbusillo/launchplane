@@ -302,8 +302,10 @@ copies keep their actual storage/configuration witness without requiring an old
 runtime identity or starting a process. Fully absent containers leave any old
 storage custody unknown and preserved. Holds, positive use, needed-copy evidence,
 production isolation and unresolved provider effects keep their existing gates.
-An empty native rebuild can retain its caller's `isolation_staging` hold when
-it exactly matches the hold captured in the original serving snapshot. Staff
+An empty or offline migrated native rebuild can retain its caller's
+`isolation_staging` hold when it exactly matches the hold captured in the
+original serving snapshot. The migrated pair retains its normal source,
+upload and independent-copy checks. Staff
 testing, foreign and changed holds still block forward effects and retirement.
 Publication and inverse publication preserve the current lane hold, so automatic
 testing stays excluded until the separately reviewed lift. Activate matching API

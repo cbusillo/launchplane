@@ -2396,7 +2396,53 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.current().target.policies.staff_testing_hold, hold)
         self.assertFalse(self.retained["stopped"])
 
-    def test_staging_hold_requires_its_original_caller_and_empty_source_before_effects(
+    def test_migrated_rebuild_retains_its_staging_hold_and_checks_use_and_custody(self) -> None:
+        from tests.test_migrated_testing_source import MigratedTestingRequestTests
+        from tests.support.disposable_lanes import record_safety
+
+        hold = self.admit_staging_hold()
+        source = MigratedTestingRequestTests().request().migrated_source
+        assert source is not None
+        request = OdooStableTargetReplacementApplyRequest.model_validate(
+            {
+                **self.operation.request.model_dump(),
+                "data_source_mode": "migrated_restore",
+                "allow_empty_data": False,
+                "migrated_source": source.model_copy(
+                    update={
+                        "product": self.operation.product,
+                        "context": self.operation.context,
+                        "target_image": self.fixture.fixture.artifact.image.digest,
+                    }
+                ),
+            }
+        )
+        self.operation = self.operation.model_copy(update={"request": request})
+        with patch.object(
+            service, "read_odoo_testing_usage", return_value=OdooTestingUsage("unused")
+        ) as usage:
+            service.check_testing_rebuild_protection(
+                self.root, self.store, self.operation, self.intent
+            )
+        usage.assert_called_once()
+        for facts, code in (
+            ({"usage": "in_use"}, "testing_in_use"),
+            ({"data": "only_copy"}, "testing_needed_copy"),
+            ({"production_resources": "shared"}, "testing_production_resources_shared"),
+        ):
+            with self.subTest(facts=facts):
+                record_safety(
+                    self.store, self.operation.product, self.operation.context, "testing", **facts
+                )
+                with self.assertRaises(service.TestingRebuildRefused) as refused:
+                    service.check_testing_rebuild_protection(
+                        self.root, self.store, self.operation, self.intent
+                    )
+                self.assertEqual(refused.exception.code, code)
+        self.assertEqual(self.current().target.policies.staff_testing_hold, hold)
+        self.assertEqual(self.effects, [])
+
+    def test_staging_hold_rejects_foreign_callers_and_upstream_restore_before_effects(
         self,
     ) -> None:
         hold = self.admit_staging_hold()
