@@ -113,8 +113,8 @@ direct lifecycle workflow with a branch ref and manual dispatch. Other callers
 with `runner_lane_inventory.read` can request inventory only. No new workflow
 grant is needed. Browser calls retain CSRF validation.
 
-Launchplane resolves the target's immutable repository and owner IDs from
-tracked repository inventory, verifies the App, client ID, installation owner,
+Launchplane resolves the target's immutable repository and account IDs from
+tracked repository inventory, verifies the App, client ID, installation account,
 accepted permissions and suspension state, and requests exactly one repository
 with Administration write, Actions read and Metadata read. It verifies the issued
 repository, permission ceiling and expiry and revokes the installation token
