@@ -781,7 +781,6 @@ source deletion is not evidence that those records are gone.
 Repository identity comes from repository inventory rather than the old profile
 copy. Its separate compatibility/admin surface is not retired by this change.
 
-
 ## Product configuration authority from source events
 
 Source implementation: #3021. Its recorded Q252 decision requires a passing

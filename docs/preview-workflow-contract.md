@@ -478,7 +478,6 @@ the current head is closed once as `success` with
 `launchplane/owner-acceptance` check run created by Launchplane's advisory app
 is updated once to `neutral` with the title "Retired". Neither signal is created where it does not already exist.
 
-
 The `tenant-admission` status is a separate Launchplane projection of the current
 repository classification and candidate identity. It no longer evaluates manager,
 waiver, or maintenance admission records. The controller separately requires

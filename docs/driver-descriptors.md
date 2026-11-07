@@ -178,7 +178,6 @@ post-deploy status. Odoo profiles receive this extension when they execute
 generic-web deploy, which runs the Odoo post-deploy driver after the provider
 deploy succeeds.
 
-
 The `prod_promotion` action routes to the native FastAPI
 `POST /v1/drivers/generic-web/prod-promotion` endpoint. It promotes a
 generic-web testing image to prod using DB-backed product profile lanes, records

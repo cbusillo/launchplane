@@ -63,8 +63,7 @@ chosen rollback build against recorded preservation history before deployment;
 this source recovery does not qualify an earlier image as a rollback target.
 
 Missing or incompatible recorded stack history stays fenced with
-`completed_landing_stack_reconciliation_required`. Missing current disposition
-configuration, unavailable child evidence and missing
+`completed_landing_stack_reconciliation_required`. Unavailable child evidence and missing
 containment return explicit `completed_landing_stack_*` reasons with the relevant
 record IDs. Conflicting or unavailable root evidence also preserves
 reconciliation. Diagnose through controller/status and resume through the
@@ -242,9 +241,8 @@ The local command is report-only. It emits dry-run JSON for `would-create`,
 `skipped-exists`, `skipped-incomplete`, `skipped-conflict`, and
 `unsupported-provider` rows without writing anything. Review incomplete pairs and
 conflicts before applying; conflicts are never overwritten automatically.
-Shared/live apply uses `POST /v1/provider-targets/operations`; see the
-[service contract](service-boundary.md#product-profile-endpoints) and the supported
-`Provider Target Operations` workflow described above.
+Shared/live apply uses `POST /v1/provider-targets/operations` through the
+supported `Provider Target Operations` workflow described above.
 
 Service-backed backfill writes only complete, non-conflicting Dokploy-derived
 rows and is idempotent. Re-run `storage provider-target-audit` after apply and

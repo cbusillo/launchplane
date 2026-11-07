@@ -511,7 +511,6 @@ Docker image, and records runtime identity with `artifact_id` as the digest and
 `image_reference` as the provider tag. Compose targets remain backward
 compatible with digest image references in `artifact_id`.
 
-
 The inherited source-ref deploy bridge is retired. Services that still deploy a
 Dokploy compose target from Git must migrate the provider target to immutable
 image deploy before using the generic-web service contract; do not use the bridge.

@@ -4144,8 +4144,6 @@ Current commands such as:
 are local rehearsal and repair clients for these Launchplane payloads. They are
 not the shared integration boundary for external product workflows.
 
-See `docs/product-owner-policy.md` for routes and persisted record contracts.
-
 ## Product Review API
 
 The small Client review path from `DIRECTION.md` and issue `#2446`. It is
