@@ -123,7 +123,7 @@ class TaskContractTests(unittest.TestCase):
             {"groups": ("stock.group_stock_user",)},
             {"task_id": canonical_json_sha256("another-product")[:32]},
             {
-                "steps": ({"action": "fill", "selector": "input", "value": "TEST x"},),
+                "steps": ({"action": "fill", "selector": "input", "value": "TK"},),
                 "operation": "run",
             },
         ):
@@ -193,7 +193,7 @@ class TaskContractTests(unittest.TestCase):
         ):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 WalkthroughStep(action="open", value=value)
-        for value in ("staff password", "1234"):
+        for value in ("", "   "):
             with self.assertRaises(ValidationError):
                 WalkthroughStep(action="fill", selector="input", value=value)
         self.assertEqual(WalkthroughStep(action="open", value="/web#action=example").action, "open")
@@ -695,9 +695,20 @@ class TaskRouteTests(unittest.TestCase):
         self.assertEqual(self.store.list_secret_records(), ())
 
     def test_dry_run_and_stale_plan_create_nothing(self) -> None:
-        status, result = self.invoke(task_request())
-        self.assertEqual((status, result["result"]["status"]), (200, "ready"))
+        for name in ("T", "TK"):
+            request = task_request(
+                operation="run",
+                steps=(
+                    {"action": "fill", "selector": "input[name=name]", "value": name},
+                    {"action": "fill", "selector": "input[name=city]", "value": "TEST fixture"},
+                    {"action": "click", "selector": ".o_form_button_save"},
+                ),
+            )
+            status, result = self.invoke(request)
+            self.assertEqual((status, result["result"]["status"]), (200, "ready"))
+            self.assertEqual(self.planner.call_args.args[2].steps, request.steps)
         self.assertEqual(self.store.list_secret_records(), ())
+        self.browser.assert_not_called()
         stale = task_request(mode="apply", reviewed_plan_sha256="d" * 64)
         self.assertEqual(self.invoke(stale, "stale")[0], 409)
         self.account.assert_not_called()

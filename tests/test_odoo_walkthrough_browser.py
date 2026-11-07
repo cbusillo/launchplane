@@ -92,7 +92,7 @@ class OpaqueBrowserTests(unittest.TestCase):
     def test_sensitive_controls_and_changed_identity_are_refused_before_interaction(self) -> None:
         self.page.locator.return_value.evaluate.return_value = False
         with self.assertRaises(ValueError):
-            self.run_browser(WalkthroughStep(action="fill", selector="input", value="TEST value"))
+            self.run_browser(WalkthroughStep(action="fill", selector="input", value="TK"))
         self.page.locator.return_value.fill.assert_not_called()
         self.checkpoint.side_effect = RuntimeError("Testing lane changed")
         with self.assertRaises(RuntimeError):
@@ -130,11 +130,13 @@ class OpaqueBrowserTests(unittest.TestCase):
         self.context.route_web_socket.call_args.args[1](socket)
         socket.close.assert_called_once()
 
-    def test_browser_receives_only_testing_origin_and_test_data(self) -> None:
+    def test_browser_passes_short_fictional_input_to_fill_and_save(self) -> None:
         self.run_browser(
-            WalkthroughStep(action="fill", selector="input[name=name]", value="TEST return")
+            WalkthroughStep(action="fill", selector="input[name=name]", value="TK"),
+            WalkthroughStep(action="click", selector=".o_form_button_save"),
         )
-        self.page.locator.return_value.fill.assert_called_once_with("TEST return")
+        self.page.locator.return_value.fill.assert_called_once_with("TK")
+        self.page.locator.return_value.click.assert_called_once_with(no_wait_after=True)
         self.assertFalse(self.browser.new_context.call_args.kwargs["accept_downloads"])
 
     def test_late_rendered_controls_can_be_read_and_clicked(self) -> None:
@@ -263,7 +265,7 @@ class OpaqueBrowserTests(unittest.TestCase):
             run_walkthrough_browser(
                 **arguments,
                 read_only=True,
-                steps=(WalkthroughStep(action="fill", selector="input", value="TEST x"),),
+                steps=(WalkthroughStep(action="fill", selector="input", value="TK"),),
             )
         self.context.request.post.assert_not_called()
         self.context.request.get.return_value.json.return_value = {

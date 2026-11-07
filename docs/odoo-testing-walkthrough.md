@@ -212,7 +212,7 @@ Use the product's actual checklist selectors; these are illustrative. The
 browser uses Playwright's bounded strict locator resolution for controls that
 render after the web client. Missing, ambiguous or sensitive controls refuse.
 The driver accepts no evaluated script, arbitrary URL, query string, dot-segment or
-encoded-path escape, staff credentials or non-TEST input. It blocks external network requests, login and
+encoded-path escape, staff credentials or blank fill input. It blocks external browser requests, login and
 password-reset pages, service workers, websockets, downloads and sensitive
 controls. Screenshots are available only on the signed-in web client, with
 inputs and occurrences of the task password masked. At most five screenshots
@@ -234,6 +234,17 @@ No reusable browser context is handed to the harness. Receipt step counts
 prove completed interactions, not business correctness: the product checklist
 still owns its pass/fail observations and screenshot interpretation.
 
+Fill values must be fictional and nonsecret. Mark the fixture TEST in a suitable
+field and retain its exact record IDs under the task's data custody; individual
+values may be short names, dates or other native field values. The owned task
+account and its native marker still identify the writer. For a standalone
+Contacts name using `field_partner_autocomplete`, one or two characters stay
+below its lookup threshold. Leave VAT/DUNS and enrichment controls untouched
+for this no-lookup fixture, and verify the installed effective widget before
+running it. External browser filtering cannot stop server-side IAP traffic from
+a same-origin RPC. A saved-form indicator still needs exact ID and field
+readback; dry-run acceptance proves neither a save nor absence of lookup.
+
 ## Cleanup, interruption and maintenance
 
 After browser work, dry-run and apply `operation=cleanup` for the same task.
@@ -242,7 +253,7 @@ archives only that account, replaces its password, removes its API keys, and
 then disables its managed-secret record and binding. This invalidates its Odoo
 sessions. The account marker and encrypted secret history remain audit evidence;
 they cannot be used to provision the same task again. Use a new task ID.
-Business records created by a walkthrough remain TEST-marked and are removed
+Business records created by a walkthrough retain their task-owned TEST fixture marker and are removed
 under that product's supported testing-data procedure; cleanup does not erase
 the walkthrough's business evidence or staff data.
 Cleanup may revoke its own account while a staff hold or recent staff sign-in

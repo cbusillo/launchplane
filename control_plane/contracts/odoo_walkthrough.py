@@ -61,8 +61,8 @@ class WalkthroughStep(BaseModel):
             raise ValueError("A browser interaction requires a selector.")
         if self.action in {"sign_out", "sign_in"} and self.selector:
             raise ValueError("Sign-in controls do not accept selectors.")
-        if self.action == "fill" and not self.value.startswith("TEST"):
-            raise ValueError("Walkthrough input must be marked TEST.")
+        if self.action == "fill" and not self.value.strip():
+            raise ValueError("Walkthrough fill requires a value.")
         if self.action not in {"fill", "open"} and self.value:
             raise ValueError("This step does not accept input.")
         return self
