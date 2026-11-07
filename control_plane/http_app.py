@@ -13734,7 +13734,8 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not isinstance(
+        director_client_metadata = director_agent_identity(identity)
+        if not director_client_metadata and not isinstance(
             identity,
             GitHubHumanIdentity
             | LocalOperatorIdentity
@@ -13764,12 +13765,14 @@ def create_launchplane_fastapi_app(
                 message="Product owner request failed validation.",
             ) from error
         normalized_product = product.strip()
-        if not resolved_authz_policy_runtime.allows(
+        policy_profile_write = resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_profile.write",
             product=normalized_product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ) and not (
+        )
+        director_client_metadata = director_client_metadata and not policy_profile_write
+        if not (policy_profile_write or director_client_metadata) and not (
             owner_request.mode != "apply"
             and resolved_authz_policy_runtime.allows(
                 identity=identity,
@@ -13800,6 +13803,24 @@ def create_launchplane_fastapi_app(
                 message="Product owner changes require Launchplane database storage.",
             )
         database_store = record_store
+        profile: LaunchplaneProductProfileRecord | None = None
+        if director_client_metadata and owner_request.mode == "apply":
+            try:
+                profile = database_store.read_product_profile_record(normalized_product)
+            except FileNotFoundError as error:
+                raise _launchplane_http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="not_found",
+                    message="Product profile was not found.",
+                ) from error
+            if profile.lifecycle_state != "active" or profile.production_use != "prelaunch":
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Director agents can record a Client only for a known non-live product.",
+                )
         payload_fingerprint = ""
         if owner_request.mode == "apply":
             payload_fingerprint = idempotency_request_fingerprint(
@@ -13852,7 +13873,8 @@ def create_launchplane_fastapi_app(
                     f"Unsupported product owner mutation preflight status: {preflight.status}"
                 )
         try:
-            profile = database_store.read_product_profile_record(normalized_product)
+            if profile is None:
+                profile = database_store.read_product_profile_record(normalized_product)
         except FileNotFoundError as error:
             raise _launchplane_http_error(
                 status_code=404,

@@ -217,6 +217,14 @@ separate context and instance rules support both scopes. Requests authorize
 the returned product and collections filter each returned record. Revocation
 continues to apply to these scoped rules and to all explicit write permissions.
 
+The product-profile Client setting route lets an authenticated Director agent
+record Client metadata for an active product explicitly classified `prelaunch`.
+Live and unknown classifications still require existing `product_profile.write`
+authority. The bounded operation changes no access policy, release decision,
+classification or promotion permission. The same-key replay rechecks the current
+classification, and the existing atomic profile comparison refuses concurrent
+profile changes. Other agents retain their scoped authorization checks.
+
 Product-config likewise lets the authenticated Director agent plan undeclared
 non-secret settings on a Live product, including testing, production and context
 scope. The plan saves only review evidence. An owned testing lane is non-live
@@ -1150,12 +1158,14 @@ The set deliberately leaves out:
 - `product_profile.write`. It also lets the holder override release review;
   the [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
   owns release authority. The Director sets the
-  Client, image repository, `production_use`, and whether the Client's acceptance
+  image repository, `production_use`, and whether the Client's acceptance
   starts the release (`release_on_acceptance`) in the Client panel under
   `product_profile.write`. Each control dry-runs and reads back the profile; the
   panel keeps the reviewed request frozen for Apply. Image Apply checks the
   starting repository; production-use and release Apply verify the full reviewed
   plan digest.
+  Client metadata also has the bounded Director-agent non-live path described
+  above; it does not confer general `product_profile.write` authority.
   Preview runtime settings use the existing product-config plan/apply authority
   on the product's preview context and exact instance `preview`. Product-profile
   POST rejects nonempty `preview.override_env`; its old one-key conditional
