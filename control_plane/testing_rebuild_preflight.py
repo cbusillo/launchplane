@@ -7,7 +7,12 @@ from uuid import uuid4
 import click
 from pydantic import BaseModel, ConfigDict, Field
 
-from control_plane.build_provenance import VerifiedBuildArtifact, VerifiedGenericWebBuild
+from control_plane.build_provenance import (
+    BuildProvenanceError,
+    VerifiedBuildArtifact,
+    VerifiedGenericWebBuild,
+    record_verified_build_artifact,
+)
 from control_plane.clean_testing_snapshot import snapshot_storage_budget
 from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -23,6 +28,7 @@ from control_plane.odoo_target_replacement_apply_http import (
 from control_plane.testing_rebuild_driver import (
     resolve_testing_rebuild_driver,
     TESTING_REBUILD_EXECUTION_UNAVAILABLE,
+    TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE,
     testing_rebuild_build_identity,
 )
 from control_plane.odoo_testing_native_source import native_testing_source_authority
@@ -71,6 +77,56 @@ class TestingRebuildPreflight(BaseModel):
     )
 
 
+def inspect_current_testing_rebuild(
+    *,
+    root: Path,
+    store: PostgresRecordStore,
+    request: OdooStableTargetReplacementRequest,
+    actor: str,
+    verified_build: VerifiedBuildArtifact | VerifiedGenericWebBuild | None = None,
+) -> tuple[TestingRebuildPreflight, VerifiedBuildArtifact | VerifiedGenericWebBuild]:
+    from control_plane.product_reconcile import (
+        ProductReconcileError,
+        latest_verified_testing_release,
+    )
+
+    driver = resolve_testing_rebuild_driver(store, request.product)
+    if verified_build is None:
+        try:
+            verified_build = latest_verified_testing_release(store, driver.profile, driver.lane)
+        except (BuildProvenanceError, ProductReconcileError) as error:
+            raise TestingRebuildRefused(
+                "testing_rebuild_inputs_unverified", "The current testing build is unavailable."
+            ) from error
+    inspection = inspect_testing_rebuild(
+        root=root, store=store, request=request, actor=actor, verified_build=verified_build
+    )
+    return inspection, verified_build
+
+
+def admit_current_testing_rebuild(
+    *,
+    root: Path,
+    store: PostgresRecordStore,
+    request: OdooStableTargetReplacementRequest,
+    actor: str,
+    verified_build: VerifiedBuildArtifact | VerifiedGenericWebBuild | None = None,
+) -> None:
+    resolve_testing_rebuild_driver(store, request.product).require_execution()
+    inspection, verified = inspect_current_testing_rebuild(
+        root=root, store=store, request=request, actor=actor, verified_build=verified_build
+    )
+    if inspection.status != "pass":
+        raise TestingRebuildRefused(TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE, inspection.message)
+    if isinstance(verified, VerifiedBuildArtifact):
+        try:
+            record_verified_build_artifact(record_store=store, verified=verified)
+        except BuildProvenanceError as error:
+            raise TestingRebuildRefused(
+                "testing_rebuild_inputs_unverified", "The verified testing artifact changed."
+            ) from error
+
+
 def inspect_testing_rebuild(
     *,
     root: Path,
@@ -91,14 +147,11 @@ def inspect_testing_rebuild(
             raise TestingRebuildRefused(
                 "testing_rebuild_inputs_unverified", "The selected build is not an Odoo artifact."
             )
-        verified_build = (
-            _validate_target_replacement_apply_artifact_authority(
-                operation_store=store,
-                replacement_request=apply,
-                context=lane.context,
-                verified_manifest=verified_build.manifest if verified_build is not None else None,
-            )
-            or verified_build
+        _validate_target_replacement_apply_artifact_authority(
+            operation_store=store,
+            replacement_request=apply,
+            context=lane.context,
+            verified_manifest=verified_build.manifest if verified_build is not None else None,
         )
     else:
         if not isinstance(verified_build, VerifiedGenericWebBuild):

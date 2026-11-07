@@ -1978,12 +1978,10 @@ not change submission, settlement or resume authority. The machine
 target-replacement plan route supports the same native read without a provider
 write.
 
-If a held lane has not recorded the selected release artifact yet, the machine
-native preflight verifies the ordinary current release build in memory and
-requires its exact artifact/source pair. It records nothing. Native submission
-records that verified release through the existing immutable artifact registration
-before queuing the rebuild. Production and in-place replacement still require
-their already recorded artifacts.
+The machine native routes verify the current release through the same preflight
+and immutable artifact registration as the signed-in control. Planning records
+nothing; submission registers after admission checks. An exact original request
+is observed before rediscovering a build.
 
 `POST /v1/products/{product}/testing-rebuild` takes the inspected build/source
 pair, a concrete reason and the original request key. Existing administrator

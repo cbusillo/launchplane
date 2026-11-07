@@ -10707,11 +10707,11 @@ def create_launchplane_fastapi_app(
 
         try:
             if plan_request.replacement.strategy == "replace-and-cutover":
-                from control_plane.testing_rebuild_preflight import inspect_testing_rebuild
+                from control_plane.testing_rebuild_preflight import inspect_current_testing_rebuild
 
                 if not isinstance(record_store, PostgresRecordStore):
                     raise ValueError("Native testing preflight requires database storage.")
-                native_preflight = inspect_testing_rebuild(
+                native_preflight, _ = inspect_current_testing_rebuild(
                     root=resolved_control_plane_root,
                     store=record_store,
                     request=plan_request.replacement,
@@ -10886,6 +10886,19 @@ def create_launchplane_fastapi_app(
                 code="authorization_provenance_unavailable",
                 message="Durable operation authorization provenance is unavailable.",
             ) from error
+
+        def native_testing_preflight() -> None:
+            from control_plane.testing_rebuild_preflight import admit_current_testing_rebuild
+
+            if not isinstance(record_store, PostgresRecordStore):
+                raise ValueError("Native testing preflight requires database storage.")
+            admit_current_testing_rebuild(
+                root=resolved_control_plane_root,
+                store=record_store,
+                request=apply_request.replacement,
+                actor=launchplane_identity_actor(identity),
+            )
+
         try:
             records, driver_result = enqueue_odoo_target_replacement_apply_operation(
                 record_store=record_store,
@@ -10896,7 +10909,15 @@ def create_launchplane_fastapi_app(
                 request_fingerprint=build_request_fingerprint(raw_payload),
                 created_at=created_at,
                 authorization=operation_authorization,
+                native_preflight=native_testing_preflight if director_rebuild else None,
             )
+        except NativeSourceAuthorizationDenied as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The provider refused the native testing preflight read.",
+            ) from error
         except OdooTargetReplacementApplyCurrentArtifactChangedError as error:
             raise _launchplane_http_error(
                 status_code=409,

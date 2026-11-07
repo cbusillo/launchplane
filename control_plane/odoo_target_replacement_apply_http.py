@@ -1,16 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol, cast
 
 import click
 from pydantic import Field, model_validator
 
-from control_plane.build_provenance import (
-    BuildProvenanceError,
-    VerifiedArtifactStore,
-    VerifiedBuildArtifact,
-    record_verified_build_artifact,
-)
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
 )
@@ -47,6 +42,8 @@ from control_plane.release_review import (
 )
 from control_plane.testing_rebuild_resume import caller_binding
 from control_plane.testing_rebuild_request_settlement import TestingRebuildRequestConflict
+from control_plane.testing_rebuild_driver import TestingRebuildRefused
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
 
 ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = "/v1/drivers/odoo/target-replacement-apply"
@@ -160,6 +157,7 @@ def enqueue_odoo_target_replacement_apply_operation(
     request_fingerprint: str,
     created_at: str,
     authorization: DurableOperationAuthorization,
+    native_preflight: Callable[[], None] | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     try:
         operation_store = odoo_target_replacement_apply_operation_store(record_store)
@@ -186,7 +184,6 @@ def enqueue_odoo_target_replacement_apply_operation(
     ):
         from control_plane.clean_testing_snapshot import snapshot_storage_budget
         from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
-        from control_plane.testing_rebuild_service import TestingRebuildRefused
 
         profile = operation_store.read_product_profile_record(request.product)
         try:
@@ -201,7 +198,9 @@ def enqueue_odoo_target_replacement_apply_operation(
             instance=request.replacement.instance,
             artifact_id=request.replacement.artifact_id,
         )
-        verified = _validate_target_replacement_apply_artifact_authority(
+        if native_preflight is not None:
+            native_preflight()
+        _validate_target_replacement_apply_artifact_authority(
             operation_store=operation_store,
             replacement_request=request.replacement,
             context=context,
@@ -215,16 +214,14 @@ def enqueue_odoo_target_replacement_apply_operation(
             created_at=created_at,
             authorization=authorization,
         )
-        if verified is not None:
-            record_verified_build_artifact(
-                record_store=cast(VerifiedArtifactStore, record_store), verified=verified
-            )
     except (
         OdooTargetReplacementApplyCurrentArtifactChangedError,
         ProductionChangeRequiresPromotion,
+        NativeSourceAuthorizationDenied,
+        TestingRebuildRefused,
     ):
         raise
-    except (ValueError, click.ClickException, BuildProvenanceError) as error:
+    except (ValueError, click.ClickException) as error:
         raise OdooTargetReplacementApplyAdmissionRefusedError from error
     try:
         operation, created_operation = (
@@ -284,7 +281,7 @@ def _validate_target_replacement_apply_artifact_authority(
     replacement_request: OdooStableTargetReplacementApplyRequest,
     context: str,
     verified_manifest: ArtifactIdentityManifest | None = None,
-) -> VerifiedBuildArtifact | None:
+) -> None:
     try:
         inventory = operation_store.read_environment_inventory(
             context_name=context,
@@ -335,20 +332,16 @@ def _validate_target_replacement_apply_artifact_authority(
             != artifact_id
         ):
             raise ValueError("The generic-web testing rebuild requires its exact verified build.")
-        return None
-    unrecorded = None
+        return
     if verified_manifest is not None:
         manifest = verified_manifest
+        if manifest.artifact_id != artifact_id:
+            raise ValueError("The verified artifact differs from the selected build.")
     else:
         try:
             manifest = operation_store.read_artifact_manifest(artifact_id)
-        except FileNotFoundError:
-            unrecorded = _unrecorded_testing_rebuild_artifact(
-                operation_store, replacement_request, context
-            )
-            manifest = unrecorded.manifest
-    if manifest.artifact_id != artifact_id:
-        raise ValueError("The verified artifact differs from the selected build.")
+        except FileNotFoundError as error:
+            raise ValueError("Odoo target replacement artifact manifest was not found.") from error
     if not artifact_manifest_matches_image_repository(
         manifest,
         expected_repository=profile.image.repository,
@@ -366,40 +359,6 @@ def _validate_target_replacement_apply_artifact_authority(
             "Odoo target replacement requires artifact odoo_install_modules to declare "
             "required module(s): " + ", ".join(missing_required_modules)
         )
-    return unrecorded
-
-
-def _unrecorded_testing_rebuild_artifact(
-    store: OdooTargetReplacementApplyOperationStore,
-    request: OdooStableTargetReplacementApplyRequest,
-    context: str,
-) -> VerifiedBuildArtifact:
-    from control_plane.product_reconcile import (
-        ProductReconcileError,
-        latest_verified_testing_release,
-    )
-    from control_plane.storage.postgres import PostgresRecordStore
-
-    if (
-        request.instance != "testing"
-        or request.strategy != "replace-and-cutover"
-        or not isinstance(store, PostgresRecordStore)
-    ):
-        raise ValueError("Odoo target replacement artifact manifest was not found.")
-    lane = resolve_odoo_target_replacement_apply_lane(
-        record_store=store, product=request.product, instance=request.instance
-    )
-    if lane.context != context:
-        raise ValueError("The selected testing context changed.")
-    try:
-        verified = latest_verified_testing_release(
-            store, store.read_product_profile_record(request.product), lane
-        )
-    except (BuildProvenanceError, ProductReconcileError) as error:
-        raise ValueError("The testing rebuild release build could not be verified.") from error
-    if not isinstance(verified, VerifiedBuildArtifact):
-        raise ValueError("The testing rebuild requires a verified Odoo artifact.")
-    return verified
 
 
 def find_odoo_target_replacement_apply_operation_by_idempotency_key(
