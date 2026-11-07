@@ -830,21 +830,12 @@ class PublishedWalkthroughPlanTests(unittest.TestCase):
         with self.assertRaises(WalkthroughPrerequisiteError):
             self.plan()
 
-    def test_publication_resource_drift_and_rotated_credentials_cannot_qualify(self) -> None:
+    def test_publication_resource_drift_cannot_qualify(self) -> None:
         runtime = self.fixture.current().runtime
         assert runtime is not None
         self.store.write_runtime_environment_record(
             runtime.model_copy(update={"env": {**runtime.env, "ODOO_PROJECT_NAME": "foreign"}})
         )
-        with self.assertRaises(WalkthroughPrerequisiteError):
-            self.plan()
-        self.store.write_runtime_environment_record(runtime)
-        secret = next(
-            item
-            for item in self.fixture.secrets
-            if item.context == self.candidate.context and item.instance == "testing"
-        )
-        self.store.write_secret_record(secret.model_copy(update={"current_version_id": "rotated"}))
         with self.assertRaises(WalkthroughPrerequisiteError):
             self.plan()
 
@@ -998,26 +989,42 @@ class PublishedWalkthroughPlanTests(unittest.TestCase):
     ) -> None:
         from control_plane.testing_local_credentials import generation_bundle
 
-        original = self.plan()
-        self.store.write_product_authority_bundle(
-            generation_bundle(
-                self.store,
-                self.store.read_product_profile_record(self.candidate.product),
-                self.candidate.context,
-                actor="fixture",
-                generation="rotated",
-                only_keys=frozenset({"ODOO_DB_PASSWORD"}),
-            )
-        )
-        with self.assertRaises(WalkthroughPrerequisiteError):
-            self.plan()
-        self.request = self.request.model_copy(update={"operation": "cleanup"})
-        self.frame["old_endpoints"] = ("http://unavailable.invalid",)
-        self.assertEqual(self.plan().binding, original.binding)
-        self.host.connection.isolation_readable = False
-        with self.assertRaises(WalkthroughPrerequisiteError):
-            self.plan()
-        self.host.connection.isolation_readable = True
-        self.physical.side_effect = NativeSourceUnavailable("unreadable physical separation")
-        with self.assertRaises(WalkthroughPrerequisiteError):
-            self.plan()
+        for source in ("empty", "upstream"):
+            with self.subTest(source=source):
+                fixture = self
+                if source == "upstream":
+                    fixture = PublishedWalkthroughPlanTests()
+                    fixture.source_mode = "upstream"
+                    fixture.setUp()
+                    self.addCleanup(fixture.doCleanups)
+                with patch(
+                    "control_plane.odoo_walkthrough.read_drill_recent_signins", return_value=False
+                ):
+                    original = fixture.plan()
+                    fixture.store.write_product_authority_bundle(
+                        generation_bundle(
+                            fixture.store,
+                            fixture.store.read_product_profile_record(fixture.candidate.product),
+                            fixture.candidate.context,
+                            actor="fixture",
+                            generation="rotated",
+                            only_keys=frozenset({"ODOO_DB_PASSWORD"}),
+                        )
+                    )
+                    self.assertEqual(
+                        fixture.checks()[WalkthroughPrerequisite.GENERATION][1], "blocked"
+                    )
+                    with self.assertRaises(WalkthroughPrerequisiteError):
+                        fixture.plan()
+                    fixture.request = fixture.request.model_copy(update={"operation": "cleanup"})
+                    fixture.frame["old_endpoints"] = ("http://unavailable.invalid",)
+                    self.assertEqual(fixture.plan().binding, original.binding)
+                    fixture.host.connection.isolation_readable = False
+                    with self.assertRaises(WalkthroughPrerequisiteError):
+                        fixture.plan()
+                    fixture.host.connection.isolation_readable = True
+                    fixture.physical.side_effect = NativeSourceUnavailable(
+                        "unreadable physical separation"
+                    )
+                    with self.assertRaises(WalkthroughPrerequisiteError):
+                        fixture.plan()

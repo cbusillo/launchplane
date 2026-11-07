@@ -128,7 +128,7 @@ Odoo testing generation, with independent credentials, storage and networks.
 An empty publication uses its existing bootstrap witness for task custody and
 requires the native database's restore witness to be absent. It creates no
 restore policy or generation record. Sign-in protection covers the full period
-since candidate allocation. Its current generated local credential versions,
+since candidate allocation. Native publications' current generated local credential versions,
 physical receiver and native connection isolation still have to qualify.
 Native publications verify their managed lane route through the existing inert
 route planner; legacy copies retain their Compose-domain check.

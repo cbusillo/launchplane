@@ -536,11 +536,6 @@ def _walkthrough_preflight(
                     or publication.plan.after.generation is not None
                 ):
                     raise WalkthroughPrerequisiteError(WalkthroughPrerequisite.GENERATION_MISSING)
-                if operation != "cleanup":
-                    require_maintained_local_credentials(store, publication)
-                require_testing_credential_safety(
-                    store, context, omitted_maintenance_keys(store, context)
-                )
                 target_id = candidate.compose_id
                 copy_binding = application.prepared.source_witness
                 copy_witness = ""
@@ -548,6 +543,12 @@ def _walkthrough_preflight(
                 receiver_generation = testing_receiver_generation(candidate, None)
             else:
                 raise WalkthroughPrerequisiteError(WalkthroughPrerequisite.GENERATION_MISSING)
+            if publication is not None:
+                if operation != "cleanup":
+                    require_maintained_local_credentials(store, publication)
+                require_testing_credential_safety(
+                    store, context, omitted_maintenance_keys(store, context)
+                )
     with checkpoint(WalkthroughPrerequisite.USE, ()) as run:
         if run:
             if operation != "cleanup":
