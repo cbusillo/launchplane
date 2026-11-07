@@ -60,6 +60,8 @@ workflow and its reusable worker are removed; use the native original-actor/key
 readback, continuation and reviewed retention path for native allocations.
 Target/record qualification does not prove working previews or real-repository
 artifact provenance; verify those through the ordinary event-driven path.
+First Odoo testing edge publication accepts profile URLs already naming its intended
+HTTPS hostname; it creates the missing binding and verifies public TLS afterward.
 
 Reapplying an advanced manifest updates its declared settings while preserving
 existing service-owned state, including the Client, live classification,
