@@ -22,6 +22,15 @@ generation, verifies its runtime identity against the immutable issued plan,
 and reads the completed deployment's concrete Compose ID. A current profile
 prefix or a different generation cannot select the recipient.
 
+A product without a registered production lane uses an empty production
+comparison only after complete service inventories confirm its profile,
+exclusive current and historical contexts, and absence of production targets,
+credentials, runtime settings and deployment inventory there. A live product,
+contradictory records, ambiguous ownership or an unavailable inventory cannot
+qualify this absence. The same reader rechecks that authority after probing.
+This does not classify unknown production use as prelaunch or establish data
+custody. Current runtime, usage, resource and integration probes still run.
+
 Collection reuses the testing usage reader for recent successful sign-ins and
 authenticated session files, and the shared copy-runtime probe for actual
 mounts, backing storage, network membership and ports. It checks the running
