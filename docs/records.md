@@ -170,8 +170,9 @@ LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run python -m control_plane
 ```
 
 Do not run `alembic upgrade head` directly against the shared service database
-during a staged rollout. The [prepared-retirement procedure](operations.md#prepared-retired-delivery-table-migration)
-owns the release target, compatible revisions and separate application authority.
+during a staged rollout. The release image's
+`control_plane.storage.schema_migration` declares the startup target and
+supported revisions; an explicit destructive target needs separate approval.
 Rollback requires an image that understands the installed schema. The runtime
 status route reports the observed database
 revision, the image's runtime compatibility set, and its migration target so
