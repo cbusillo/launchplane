@@ -12,8 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from control_plane.build_provenance import (
     BuildProvenanceError,
-    VerifiedBuildArtifact,
-    record_verified_build_artifact,
 )
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -44,7 +42,6 @@ from control_plane.odoo_target_replacement_apply_http import (
     find_odoo_target_replacement_apply_operation_by_idempotency_key,
 )
 from control_plane.testing_rebuild_driver import (
-    TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE,
     resolve_testing_rebuild_driver,
     testing_rebuild_build_identity,
 )
@@ -56,7 +53,11 @@ from control_plane.service_auth import (
     launchplane_identity_actor,
 )
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.testing_rebuild_preflight import TestingRebuildPreflight, inspect_testing_rebuild
+from control_plane.testing_rebuild_preflight import (
+    TestingRebuildPreflight,
+    inspect_testing_rebuild,
+    admit_current_testing_rebuild,
+)
 from control_plane.testing_rebuild_service import TestingRebuildRefused
 from control_plane.testing_rebuild_resume import TestingRebuildResumeRefused, caller_binding
 from control_plane.testing_rebuild_request_settlement import (
@@ -385,28 +386,13 @@ def register_testing_rebuild_routes(
             verified = latest_verified_testing_release(
                 store, store.read_product_profile_record(product), lane
             )
-            if driver.profile.driver_id == "odoo" and not isinstance(
-                verified, VerifiedBuildArtifact
-            ):
-                raise ValueError("The selected Odoo build changed its manifest kind.")
-            if testing_rebuild_build_identity(verified) != (
-                payload.artifact_id,
-                payload.source_git_ref,
-            ):
-                raise ValueError("The inspected build changed.")
-            inspection = inspect_testing_rebuild(
+            admit_current_testing_rebuild(
                 root=dependencies.root,
                 store=store,
                 request=request,
                 verified_build=verified,
                 actor=launchplane_identity_actor(identity),
             )
-            if inspection.status != "pass":
-                raise TestingRebuildRefused(
-                    TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE, inspection.message
-                )
-            if isinstance(verified, VerifiedBuildArtifact):
-                record_verified_build_artifact(record_store=store, verified=verified)
         except (
             NativeSourceAuthorizationDenied,
             ValueError,

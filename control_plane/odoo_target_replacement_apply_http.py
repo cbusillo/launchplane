@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol, cast
 
 import click
@@ -41,6 +42,8 @@ from control_plane.release_review import (
 )
 from control_plane.testing_rebuild_resume import caller_binding
 from control_plane.testing_rebuild_request_settlement import TestingRebuildRequestConflict
+from control_plane.testing_rebuild_driver import TestingRebuildRefused
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
 
 ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = "/v1/drivers/odoo/target-replacement-apply"
@@ -154,6 +157,7 @@ def enqueue_odoo_target_replacement_apply_operation(
     request_fingerprint: str,
     created_at: str,
     authorization: DurableOperationAuthorization,
+    native_preflight: Callable[[], None] | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     try:
         operation_store = odoo_target_replacement_apply_operation_store(record_store)
@@ -180,7 +184,6 @@ def enqueue_odoo_target_replacement_apply_operation(
     ):
         from control_plane.clean_testing_snapshot import snapshot_storage_budget
         from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
-        from control_plane.testing_rebuild_service import TestingRebuildRefused
 
         profile = operation_store.read_product_profile_record(request.product)
         try:
@@ -195,6 +198,8 @@ def enqueue_odoo_target_replacement_apply_operation(
             instance=request.replacement.instance,
             artifact_id=request.replacement.artifact_id,
         )
+        if native_preflight is not None:
+            native_preflight()
         _validate_target_replacement_apply_artifact_authority(
             operation_store=operation_store,
             replacement_request=request.replacement,
@@ -212,6 +217,8 @@ def enqueue_odoo_target_replacement_apply_operation(
     except (
         OdooTargetReplacementApplyCurrentArtifactChangedError,
         ProductionChangeRequiresPromotion,
+        NativeSourceAuthorizationDenied,
+        TestingRebuildRefused,
     ):
         raise
     except (ValueError, click.ClickException) as error:
