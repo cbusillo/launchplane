@@ -70,9 +70,6 @@ not describe runtime authority until it is implemented, deployed, and activated.
   review rubric.
 - [`operator-experience.md`](operator-experience.md) — product, environment,
   Client-review, settings, promotion, cleanup, and UI delivery contract.
-- [post-v2-audit.md](post-v2-audit.md) — post-v2 product, security,
-  persistence, contract, test, and modularity audit baseline and execution
-  graph.
 - [discussion-topics.md](discussion-topics.md) — product-scoped neutral topics,
   supported add/close API, and separate page/reminder delivery slices.
 - [request-attention.md](request-attention.md) — original-source waiting requests,
@@ -112,8 +109,6 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [odoo-website-settings.md](odoo-website-settings.md) — typed settings preparation, exact release application, rollback and nonproduction exclusion.
 - [release-review.md](release-review.md) — Client checklist decisions for production
   promotion, revision changes, and recorded admin overrides.
-- [mediaforce-releases.md](mediaforce-releases.md) — source-side macOS release
-  adapter, host fencing/evidence contract, and separate activation prerequisites.
 - [privileged-operations.md](privileged-operations.md) — typed human-governed
   planning, managed-rule authorization, redaction, and future execution boundary.
 - [change-impact-policy.md](change-impact-policy.md) — retired classifier history and the
@@ -166,7 +161,4 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [style/testing.md](style/testing.md) — testing conventions.
 - [policies/coding-standards.md](policies/coding-standards.md) — naming and
   code-quality guardrails.
-- [codex-lab-workers.md](codex-lab-workers.md) — historical worker compatibility
-  and retained engineering-review transport.
-
 - [host-program-package.md](host-program-package.md) — versioned host programs, installation and readback.
