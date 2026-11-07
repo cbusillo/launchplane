@@ -116,6 +116,23 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             )
         )
 
+    def test_current_rebuild_rejects_non_testing_and_in_place_before_build_reads(self) -> None:
+        for changes in ({"instance": "prod"}, {"strategy": "recreate-in-place"}):
+            with (
+                self.subTest(changes=changes),
+                patch(
+                    "control_plane.product_reconcile.latest_verified_testing_release",
+                    side_effect=AssertionError("Invalid rebuilds must not read a build"),
+                ),
+                self.assertRaises(ValueError),
+            ):
+                preflight.inspect_current_testing_rebuild(
+                    root=self.fixture.root,
+                    store=self.store,
+                    request=self.fixture.operation.request.model_copy(update=changes),
+                    actor="fixture-agent",
+                )
+
     def settlement_payload(self) -> dict[str, object]:
         return {
             **self.payload,

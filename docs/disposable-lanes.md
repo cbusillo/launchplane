@@ -1981,7 +1981,9 @@ write.
 The machine native routes verify the current release through the same preflight
 and immutable artifact registration as the signed-in control. Planning records
 nothing; submission registers after admission checks. An exact original request
-is observed before rediscovering a build.
+is observed before rediscovering a build. A new request is refused with
+`testing_rebuild_active` while a rebuild remains unfinished; use the original
+request lookup and operation status to observe that operation.
 
 `POST /v1/products/{product}/testing-rebuild` takes the inspected build/source
 pair, a concrete reason and the original request key. Existing administrator

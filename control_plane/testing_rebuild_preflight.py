@@ -85,6 +85,9 @@ def inspect_current_testing_rebuild(
     actor: str,
     verified_build: VerifiedBuildArtifact | VerifiedGenericWebBuild | None = None,
 ) -> tuple[TestingRebuildPreflight, VerifiedBuildArtifact | VerifiedGenericWebBuild]:
+    if request.instance != "testing" or request.strategy != "replace-and-cutover":
+        raise ValueError("Current-build inspection requires a native testing rebuild.")
+
     from control_plane.product_reconcile import (
         ProductReconcileError,
         latest_verified_testing_release,
