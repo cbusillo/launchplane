@@ -151,6 +151,12 @@ production-database, empty-fixture or coverage fallback.
 
 ## Activation order and recovery
 
+To run read-only qualification without deploying, dispatch the deploy workflow on
+the default branch with `stored_record_preflight_only=true` and an immutable
+`image_reference`. Both deployment jobs are excluded and the run uses its own
+concurrency group so a later self-deploy cannot displace it; a refused read
+reports missing standing authority and creates no grant.
+
 The mandatory Deploy Launchplane gate runs after immutable image resolution and before
 rendering or requesting self-deploy. It deletes snapshot material after every
 attempt and retains only counts, revision and pass/fail evidence. The existing
