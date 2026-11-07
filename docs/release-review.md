@@ -663,10 +663,9 @@ The Director changes classification in the Client panel through
 `POST /v1/product-profiles/{product}/production-use` under `product_profile.write`: dry run,
 Apply bound to the reviewed plan digest, audit record, and profile read-back.
 
-The gate replaces manager-preview approval in the product promotion read model
-and raw generic-web promotion routes. Odoo evaluates it before backup in the
-combined run and again before direct promotion. The existing VeriReel service
-promotion wrapper also checks it. Readiness and direct dry-runs remain available
+The gate applies to generic-web promotion routes. Odoo evaluates it before
+backup in the combined run and again before direct promotion.
+Readiness and direct dry-runs remain available
 while a Client decision is pending. Recording a decision never merges or
 dispatches a workflow. The [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
 owns who may start a release; the normal acceptance-started implementation is
@@ -1356,9 +1355,7 @@ live activation. The CM baseline must be verified from deployed service records.
 
 Release decisions are persisted in `launchplane_release_review_decisions`, with
 file storage reserved for tests and rehearsal. Deployments must migrate the
-database before serving the new routes. The retired change-impact, `product-owner-policy`, and manager-preview evaluators
-and administration routes are deleted. Their historical records remain readable
-and cannot satisfy this release gate.
+database before serving the new routes.
 
 ### Product issue release waits
 

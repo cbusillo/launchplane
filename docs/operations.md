@@ -70,15 +70,8 @@ record IDs. Conflicting or unavailable root evidence also preserves
 reconciliation. Diagnose through controller/status and resume through the
 controller's normal run-once route; do not edit database records or merge by hand.
 
-A current-policy stack with no `stack_child_disposition_label` returns
-`landing_stack_disposition_not_configured` before landing, or
-`completed_landing_stack_disposition_not_configured` during unfinished child
-disposition. Fenced dry runs report the same prerequisite instead of a generic
-resume. The result identifies the landing/collapse records and the managed
-`privileged-policy-propose` recovery action. Prepare an exact target-policy
-replacement, obtain the Director's approval in the service, verify installation,
-then retry the normal controller. No label is inferred or installed automatically.
-Completed child dispositions need no label and do not repeat their effects.
+Stack child disposition uses the current policy and its built-in default; see
+[stack policy settings](merge-train-policy.md#fields).
 
 Installing a replacement changes the policy digest. An unlanded collapsed plan
 can retire only after the ordinary exact no-effect proof and admission-outcome
@@ -238,7 +231,7 @@ Dokploy-derived projection. Backfill and authority cutover should not proceed
 until the audit has no unresolved blockers for the affected lanes.
 
 Use the backfill command to preview missing physical rows after reviewing the
-audit output and after dual-write is deployed:
+audit output:
 
 ```bash
 uv run launchplane storage provider-target-backfill \
@@ -249,23 +242,9 @@ The local command is report-only. It emits dry-run JSON for `would-create`,
 `skipped-exists`, `skipped-incomplete`, `skipped-conflict`, and
 `unsupported-provider` rows without writing anything. Review incomplete pairs and
 conflicts before applying; conflicts are never overwritten automatically.
-Shared/live apply runs through the deployed service route and is normally
-launched by the manual `Provider Target Operations` workflow:
-
-```bash
-skills_home="${CODE_HOME:-${CODEX_HOME:-$HOME/.code}}/skills"
-uv run "$skills_home/github/scripts/github_workflow_babysit.py" dispatch \
-  --repo OWNER/REPO \
-  --workflow provider-target-operations.yml \
-  --ref main \
-  --field mode=backfill-apply \
-  --field target_set=configured-json \
-  --field 'routes_json=[{"context":"<context>","instance":"<instance>"}]' \
-  --field provider_id=<provider-id> \
-  --field 'confirmation=APPLY PROVIDER TARGET BACKFILL' \
-  --field 'reason=issue-backed provider-target backfill' \
-  --timeout-seconds 1800
-```
+Shared/live apply uses `POST /v1/provider-targets/operations`; see the
+[service contract](service-boundary.md#product-profile-endpoints) and the supported
+`Provider Target Operations` workflow described above.
 
 Service-backed backfill writes only complete, non-conflicting Dokploy-derived
 rows and is idempotent. Re-run `storage provider-target-audit` after apply and
@@ -1267,16 +1246,6 @@ or use a workflow to resolve an `authorization_denied` result. Shared or
 production authorization is not changed through direct DB commands or a local
 CLI from an arbitrary checkout.
 
-For the already-deployed unconfirmed activation, do not approve the inert
-`privileged-operation-78a8a92942bfb2b442530a15ad7946e2` plan and do not use a
-workflow, direct database command, or raw managed-policy payload to repair it.
-Use the deployed service's hidden browser-human recovery flow in order: reset
-only the exact active activation set with no consumed confirmation backing;
-fresh dry-run, acknowledgement, confirmation, and activation; then bootstrap
-retirement. The recovery diagnostic is read-only and returns only confirmation
-backing plus per-action managed-rule match cardinalities, never rule selectors
-or bodies.
-
 Recovery, privileged-policy activation, and generic-web preview generators use
 the active policy schema for their exact managed-set request. Against schema v3
 they can produce repeatable dry-run candidates while the shared reconciliation
@@ -2034,13 +2003,9 @@ Hostname mismatch, chain failure, expiry, self-signed, and unsupported protocol
 each retain their own failure codes so the existing incident authority can open,
 update, and resolve without a parallel TLS incident system.
 
-The initial conservative thresholds are intentionally simple: a certificate is
-`expiring` when it has 14 or fewer whole days remaining, and active TLS probe
-evidence becomes stale after 2 hours. The service monitor runs twice
-per hour, so the 2-hour freshness window tolerates one or two missed scheduled
-passes without treating old evidence as current for an entire workday, while the
-14-day expiry window gives admins enough time to review ownership and
-rotation before a certificate crosses into an outage condition.
+A certificate is `expiring` when it has 14 or fewer whole days remaining,
+and active TLS probe evidence becomes stale after 2 hours. The service
+monitor runs every minute for production and every five minutes for testing.
 
 The product topology read model may use the newest fresh strict public health
 probe to corroborate observed placement between deployments. This applies only
@@ -2403,10 +2368,6 @@ uv run launchplane service sync-bootstrap-policy \
   --apply
 ```
 
-Preview workflows should normally authorize by workflow path with a wildcard
-ref suffix such as `.../preview-control-plane.yml@*`, because pull-request runs
-execute from branch-specific workflow refs rather than a fixed `main` ref.
-
 The Launchplane container entrypoint now fails closed unless one of
 `LAUNCHPLANE_POLICY_TOML`, `LAUNCHPLANE_POLICY_B64`, or
 `LAUNCHPLANE_POLICY_FILE` is supplied. It also refuses to start from the
@@ -2418,8 +2379,7 @@ read in place and is not rewritten.
 
 ## Launchplane Service Deploy Posture
 
-The first real Launchplane service deployment should be GitHub-driven and
-Dokploy-hosted.
+Launchplane service deployment is GitHub-driven and Dokploy-hosted.
 
 Browser login uses GitHub OAuth with these Launchplane self-bootstrap inputs:
 
@@ -2458,20 +2418,15 @@ repair: older code ignores the added payload fields and resumes its original
 - Keep test and deploy automation separate.
 - `CI` is the gate for Launchplane code changes and must pass before a deploy
   workflow replaces the live Launchplane app.
-- The first real Launchplane bring-up should target a single Dokploy-hosted Launchplane
-  instance rather than introducing a separate Launchplane testing instance during
-  bootstrap.
-- Launchplane deploy automation should publish an immutable image artifact, update
-  Dokploy by digest, and record the previously running digest before
+- Launchplane deploy automation publishes an immutable image artifact, updates
+  Dokploy by digest, and records the previously running digest before
   replacement.
 - The current repo workflow for that posture is
   `.github/workflows/deploy-launchplane.yml`.
-- Its GHCR image and buildcache uploads authenticate with the workflow's own
-  `GITHUB_TOKEN` and existing `packages: write` permission. The package must give
-  this repository Write access under Manage Actions access. The publisher no
-  longer reads `GHCR_USERNAME` or `GHCR_TOKEN`; Chris removes obsolete stored
-  copies and revokes the PAT after checking other consumers. Provider-side
-  registry pulls use their existing separate credential.
+- GHCR image and buildcache uploads use the workflow's `GITHUB_TOKEN` and
+  `packages: write` permission. The package must give this repository Write
+  access under Manage Actions access. Provider-side registry pulls use their
+  existing separate credential.
 - Launchplane image builds use Docker Hub public mirror-qualified base images
   and the CI container scan pulls Trivy from GHCR so self-hosted runners do not
   fail closed on Docker Hub anonymous pull limits before Launchplane code is
@@ -2511,10 +2466,9 @@ Required GitHub configuration for that workflow:
 - repository variables:
   - `LAUNCHPLANE_RUNNER_LABEL`, the self-hosted runner label used by both deploy jobs
   - `LAUNCHPLANE_PUBLIC_URL`
-  - optional `LAUNCHPLANE_SERVICE_AUDIENCE`; when unset, trusted workflows
-    derive the GitHub OIDC audience from `LAUNCHPLANE_PUBLIC_URL`'s host.
-    `Deploy Launchplane` itself ignores it and derives its service URL and
-    audience from the first `LAUNCHPLANE_DEPLOY_HEALTH_URLS` entry
+  - optional `LAUNCHPLANE_SERVICE_AUDIENCE` for trusted workflows;
+    `Deploy Launchplane` derives its service URL and audience from the first
+    `LAUNCHPLANE_DEPLOY_HEALTH_URLS` entry instead
   - `LAUNCHPLANE_DOKPLOY_TARGET_TYPE`
   - `LAUNCHPLANE_DOKPLOY_TARGET_ID`
   - `LAUNCHPLANE_DEPLOY_HEALTH_URLS`
@@ -2591,7 +2545,7 @@ existing conservative service-rollback attempt.
 After the forward marker is observed, a nearly expired window permits a bounded
 fifteen-second image confirmation and at least one health probe. Healthy results
 permit the same bounded allowance for each final identity check. Persistent
-unhealthiness does not restart the observation window. The Q197 window applies
+unhealthiness does not restart the observation window. The same window applies
 during startup migrations as well as ordinary startup; Compose's healthcheck
 schedule does not extend it.
 
@@ -3458,7 +3412,6 @@ not prove live activation, Client acceptance or a release drill. Existing
 real-system mutation boundaries still apply.
 Private company labels stay in private inspection evidence, not public issues.
 
-
 Example product config bundle shape:
 
 ```json
@@ -4216,21 +4169,13 @@ through these routes.
   deployment, then cancel it with `POST .../operations/{operation_id}/cancel` and
   a `reconciliation_attestation` to free the lane.
 
-The synchronous `POST /v1/drivers/odoo/prod-promotion-run` and
-`POST /v1/drivers/odoo/prod-rollback` routes, and the backup gate routes, keep
-accepting the CM website's workflow callers only until those workflows and their
-grant are deleted. Other Odoo sites' workflows keep using them. Each
-synchronous Odoo prod route that changes the target (`prod-promotion`,
+The synchronous Odoo prod routes remain available to other sites' workflow
+callers. Each synchronous Odoo prod route that changes the target (`prod-promotion`,
 `prod-promotion-run`, `prod-rollback`, and `post-deploy` on a prod lane) holds the
 lane for its whole run through the same reservation the queued operations use: it
 refuses with `lane_busy` while any durable Odoo operation holds the lane, and
 while it runs, a queued release, restore, or replacement on that lane is refused
 with `lane_busy` too. The panel calls neither synchronous route.
-
-The CM website's `odoo-prod-promotion.yml`, `odoo-prod-rollback.yml`, and
-`odoo-post-deploy.yml` stay in place until one real promote and one rollback
-drill have gone through this panel (#2606); they are deleted, with their
-workflow grant, after that.
 
 ## Odoo Rollback And Re-Promote Waterfall
 
@@ -4335,14 +4280,8 @@ Any exported release-tuple catalog is seed/reference material now, not live
 runtime authority. Pull requests flow through Launchplane preview records
 instead of a tracked long-lived `dev` tuple lane.
 
-Odoo PR previews use the Odoo isolated compose planner/apply routes over the
-same shared preview lifecycle records. Product workflows call
-`POST /v1/drivers/odoo/preview-apply-inputs` with product, PR, source, and
-manifest facts, then call `POST /v1/drivers/odoo/preview-apply` with the ready
-dry-run plan for both refresh and destroy. Launchplane resolves the Odoo product
-profile preview context, runtime bindings, template compose, public preview URL,
-and provider operations inside the service boundary. Odoo-specific
-`preview-refresh` and `preview-destroy` compatibility routes are retired.
+Odoo PR previews use the isolated compose planner/apply routes and shared
+preview lifecycle records through [event-driven deploys](event-driven-deploys.md).
 
 Odoo previews run as an isolated per-PR Dokploy compose (the
 `isolated_dokploy_compose` strategy) created from the product's template
@@ -4818,11 +4757,8 @@ During OPW prelaunch, the prod proof follows the temporary Dokploy host
 public hostname only after the live target actually exposes that domain.
 
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
-are local preview-evidence ingest adapters that mirror the service ingress
-payload shape. Generic-web, Odoo, and VeriReel preview runtime now flow through
-Launchplane drivers: product repos send PR/image intent, Launchplane derives the
-live preview URL from `LAUNCHPLANE_PREVIEW_BASE_URL`, and evidence stores that
-returned URL with generation status and cleanup outcome.
+are local preview-evidence ingest adapters. Shared preview execution follows
+[event-driven deploys](event-driven-deploys.md).
 
 Launchplane also collects preview inventory independently of lifecycle planning.
 The service's existing lease/slot runner collects once per ten-minute UTC slot
@@ -4895,8 +4831,7 @@ Preview-disabled products are excluded from the sweep. PR feedback goes through
 comment when runtime GitHub credentials are available, then records delivery
 status. Refresh-capable workflows can publish neutral pending feedback before
 preview publish/provision/verify outcomes are known, then replace it with ready
-or failed feedback after the actual result. Product repos remain thin adapters
-for labels, artifact build facts, and product-specific health/config hints.
+or failed feedback after the actual result.
 
 Preview PR feedback delivery failures are admin-visible when a preview PR
 feedback notification policy is configured. Missing context-scoped runtime
@@ -4960,91 +4895,6 @@ Closed cleanup holds keep their cleanup behavior. Retirement never clears a
 new blocker.
 Open PRs retain their normal event reconciliation, including subsequent builds.
 
-### VeriReel Preview Evidence Handoff
-
-> **Status:** this handoff is a product repository calling Launchplane, which
-> is retired. VeriReel's preview workflows are being replaced by its own build
-> and event-driven deploys (#2740); do not extend this path.
-
-VeriReel already computes the route, PR slug, image tags, and workflow run URL
-inside `.github/workflows/preview-control-plane.yml` and
-`.github/workflows/preview-cleanup.yml`. The scheduled orphan backstop in
-`.github/workflows/preview-janitor.yml` should use the same Launchplane destroy
-and evidence contract rather than keeping a second repo-local teardown path.
-Launchplane's reusable preview lifecycle contract is OIDC-authenticated HTTP into
-Launchplane. The local CLI examples below pin the payload shape for local
-rehearsal and repair; shared product workflows should use the service ingress.
-
-For a successful or failed preview refresh, emit two JSON payloads and hand
-them to Launchplane's preview-generation evidence ingress. The current local
-rehearsal adapter is `launchplane-previews write-from-generation`:
-
-```json
-{
-  "context": "verireel-testing",
-  "anchor_repo": "verireel",
-  "anchor_pr_number": 123,
-  "anchor_pr_url": "https://github.com/example-org/verireel/pull/123",
-  "canonical_url": "https://pr-123.preview.example.com",
-  "state": "active",
-  "updated_at": "2026-04-16T08:10:00Z",
-  "eligible_at": "2026-04-16T08:10:00Z"
-}
-```
-
-```json
-{
-  "context": "verireel-testing",
-  "anchor_repo": "verireel",
-  "anchor_pr_number": 123,
-  "anchor_pr_url": "https://github.com/example-org/verireel/pull/123",
-  "anchor_head_sha": "6b3c9d7e8f901234567890abcdef1234567890ab",
-  "state": "ready",
-  "requested_reason": "external_preview_refresh",
-  "requested_at": "2026-04-16T08:02:00Z",
-  "ready_at": "2026-04-16T08:10:00Z",
-  "finished_at": "2026-04-16T08:10:00Z",
-  "resolved_manifest_fingerprint": "verireel-preview-manifest-pr-123-6b3c9d7",
-  "artifact_id": "ghcr.io/example-org/verireel-app:pr-123-6b3c9d7",
-  "deploy_status": "pass",
-  "verify_status": "pass",
-  "overall_health_status": "pass"
-}
-```
-
-That evidence maps directly from the VeriReel workflow outputs:
-
-- `preview_url` -> `preview.canonical_url`
-- `pr_number` -> `anchor_pr_number`
-- `pr_sha` -> `anchor_head_sha`
-- `run_url` should be retained in the calling workflow logs or wrapper script
-  alongside the payload write for traceability
-- immutable preview image tag or digest -> `artifact_id`
-
-For cleanup, emit the destroy payload and hand it to
-Launchplane's preview-destroyed evidence ingress once the preview teardown has
-actually completed. The current local rehearsal adapter is
-`launchplane-previews write-destroyed`:
-
-```json
-{
-  "context": "verireel-testing",
-  "anchor_repo": "verireel",
-  "anchor_pr_number": 123,
-  "destroyed_at": "2026-04-16T09:04:00Z",
-  "destroy_reason": "external_preview_cleanup_completed"
-}
-```
-
-That cleanup payload should be written only after the preview URL, Dokploy app,
-and backing database teardown has succeeded. If cleanup fails, Launchplane should
-keep the preview record live and instead receive a failed generation or workflow
-signal later, rather than a premature destroyed transition.
-
-The scheduled janitor backstop uses the same payload shape with
-`destroy_reason: external_preview_janitor_cleanup_completed` so its retries stay
-separate from the pull-request cleanup workflow's idempotency key.
-
 Use `release-tuples export-catalog --state-dir <state>` to render those minted
 state records as catalog TOML when an admin is ready to review and
 materialize a new tracked baseline.
@@ -5086,54 +4936,15 @@ needs no wrapper or access-policy change.
 
 ## Detached Application Retirement
 
-Phase one provides **Reusable Detached Application Retirement** as a
-`workflow_call`-only worker. Phase two adds the thin
-**Detached Application Retirement** `workflow_dispatch` wrapper, pinned to the
-exact merged worker SHA in its `retire` job `uses:` value. The wrapper only
-defines the manual inputs,
-forwards them unchanged, and grants `contents: read` plus `id-token: write`; it
-does not define a runner, environment, steps, or concurrency. Both phases are
-merged; configuring the live authz grant is still a stop boundary (see below).
-The worker uses the protected
-`launchplane-authz-admin` environment, OIDC, target-digest concurrency, exact
-input validation, and redacted evidence.
+Use the [service contract](service-boundary.md#detached-application-retirement)
+for plan/apply inputs, authority-absence proof, protected fingerprints,
+idempotency and reconciliation requirements.
 
-A grant would bind the caller `workflow_ref` from
-[the dispatch wrapper](../.github/workflows/detached-application-retirement.yml)
-on the default branch and the exact immutable `job_workflow_ref` from its
-`retire` job `uses:` value. Copy the worker reference from the wrapper rather
-than a separate documentation pin. The caller format is
-`<owner>/<repository>/<wrapper path>@refs/heads/<default branch>`.
-
-The future admin sequence is plan then apply. Inputs are exact Dokploy
-project/environment/application names, the candidate target SHA-256, a sorted
-non-empty JSON array of every other accessible application target SHA-256 whose
-provider payload has the same exact project name, including duplicate physical
-project IDs, a stable idempotency key, reason, and issue. Discovery is bounded
-to ten search pages of at most 100 applications each and fails closed rather
-than truncating. Apply additionally requires the
-persisted plan record/digest and the exact target-bound confirmation. Never pass
-or recover a raw target ID through workflow inputs, artifacts, summaries, issue
-comments, or local CLI fallbacks.
-
-Planning stops on ambiguous or malformed `/api/project.all` evidence, a
-non-idle candidate, any domain, any recognized deployment history, digest/set
-drift, or any Launchplane authority reference. A deployment-source block means
-either the candidate provider target ID is present or the deployment record
-lacks consistent application-typed target evidence and still names the
-candidate. Provider-target records use the same target-ID binding. Do not
+Planning refuses a non-idle candidate, any domain or recognized deployment
+history, digest/set drift, and any Launchplane authority reference. Do not
 rewrite append-only deployment history or adopted target authority to bypass
-either gate.
-Apply repeats all proofs under a durable provider-operation lease before
-checkpointing the sole `application.delete`. Reconciliation and already-absent
-retries reuse the same apply idempotency key. Completion requires candidate
-absence, unchanged protected fingerprints, and zero authority writes.
-
-Existing detached-application retirement authority is DB-backed in
-`operator.detached-application-retirement`. Neither phase installs a grant.
-Registering an exact caller and worker changes access, so obtain the Director's
-approval through the DB-native Access policy proposal path. Never substitute a
-mutable ref, a checked-in target value, or a local CLI live-target fallback.
+these checks. Never recover raw target IDs through workflow inputs, artifacts,
+issue comments or local CLI fallbacks.
 
 ## Privileged-Operation Canary
 
@@ -5651,7 +5462,6 @@ contain no passwords, hashes, host/account values or raw grant rows. This read
 changes no configuration, binding, account, grants, runtime, source data or
 business data, and invokes no importer, deployment or synchronization.
 
-
 #### Installed importer prerequisites
 
 `GET /v1/products/{product}/environments/testing/odoo-source-prerequisites`
@@ -5848,7 +5658,6 @@ processing completed: only `action: sent_release_digest` proves a successful sen
 messages that were deliberately not sent. Disable the dedicated policy (`status: disabled`)
 through the same service surface to stop future and queued sends; it leaves
 health-alert policies and historical delivery evidence intact.
-
 
 ### Prepared retired-delivery table migration
 

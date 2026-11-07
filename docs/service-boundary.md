@@ -828,12 +828,6 @@ ID/revision/digest, supersedes and inserts only when changed, completes replay
 evidence, and commits the transaction as one unit. No-op applies complete replay
 evidence without creating policy history.
 
-Manager approval of rendered previews is retired. Its contracts, evaluator, and
-store methods are deleted. Migration `b7e9f1a3c5d8` drops
-`launchplane_manager_preview_approval_events` and all its rows, without export
-or counts, under the Director's #2006 decision. Downgrade restores only an empty
-table. Current approval uses product review and the release checklist.
-
 Schema-v1 migration and unmanaged-rule adoption are never implicit. The caller
 must request `schema_migration = migrate_v1_to_v2` and/or
 `unmanaged_adoption = adopt_matching` during both review and apply. Once a
@@ -1008,12 +1002,6 @@ Validate the Launchplane UI shell with browser navigation or `GET /ui`. Do not u
 `HEAD /ui` as the only availability check, because static app-shell fallback
 behavior can differ between request methods.
 
-`POST /v1/every-code/github-webhook` is removed. Signed label deliveries,
-PR feedback, and close events sent there return `404` and cannot create work.
-The service bootstrap no longer connects the retired Every Code handler.
-Existing records and other retired worker endpoints remain for the separately
-tracked retirement in #1313; no stored records or credentials are deleted here.
-
 `POST /v1/manager-preview-approval/github-webhook` and
 `POST /v1/github/app-webhook` retain their independent signature verification.
 Before buffering or HMAC processing, the ASGI boundary requires exactly one
@@ -1052,7 +1040,7 @@ for the chosen target: a completed `.github/workflows/build.yml`
 `unlabeled`/`closed` delivery, selects that PR's preview target. Each target
 has at most one request row; new requests fold into it. A repeated delivery id
 changes nothing. Other events, unknown or ambiguous repositories, and `ping`
-return `202` and record nothing. The body only chooses the target; the future
+return `202` and record nothing. The body only chooses the target; the
 reconcile worker re-reads every fact from GitHub.
 
 The `/v1/manager-preview-approval/github-webhook` URL and its
@@ -1626,23 +1614,6 @@ Product repositories build their own artifacts and do not call Launchplane;
 see [event-driven deploys](event-driven-deploys.md). Retired VeriReel workflow
 grant examples and native release routes are removed. Shared driver contracts
 and declared extensions are documented in [driver development](driver-development.md).
-
-Odoo stable-lane example:
-
-```text
-repository: example-org/product-repo
-workflow_ref: example-org/product-repo/.github/workflows/deploy-product.yml@refs/heads/main
-event_name: workflow_dispatch
-allowed product: example-odoo-product
-allowed contexts: example-odoo
-allowed actions:
-  - odoo_post_deploy.execute
-  - odoo_prod_backup_gate.execute
-  - odoo_prod_promotion.execute
-  - odoo_prod_rollback.execute
-```
-
-The policy engine does not need a full RBAC system yet.
 
 Human policy rules live in the same DB-backed authz policy under `github_humans`.
 The first supported roles are `read_only` and `admin`. Browser sessions can
@@ -2969,15 +2940,8 @@ remain provider execution configuration for Dokploy-backed lanes and must agree
 with the provider-target identity before deploy proceeds. The route keeps
 optional `Idempotency-Key` replay/conflict handling and stores deploy-pass plus
 post-deploy-fail evidence to prevent repeating the completed provider mutation.
-This image-backed route was the product-repo integration surface for simple
-generic-web services; product repositories calling it is retired (see
-`DIRECTION.md`), and the route stays only until source-control-event deploys
-replace those callers. `cbusillo/repairshopr_api` proved the path in live
-Launchplane after #1503 deployed: Launchplane Deploy run `28415366430` attempt 4
-called `/v1/drivers/generic-web/deploy` with immutable GHCR image identity and
-received `deploy_status: pass` for deployment record
-`deployment-20260630T034901Z-repairshopr-sync-prod` on Dokploy target
-`cm-repairshopr-sync`.
+Product repositories publish immutable artifacts; Launchplane deploys them
+through [source-control events](event-driven-deploys.md).
 The former generic-web source-ref deploy route is retired. Products that once
 depended on Launchplane temporarily rewriting provider source refs must move to
 the image-backed generic-web deploy route instead: the product repo publishes an
@@ -3608,25 +3572,12 @@ and rollback refuse it. See [profile maintenance](driver-development.md#profile-
 The retired VeriReel maintenance route has no handler. Fixture setup is internal
 to the testing verification extension, not a workflow call-in capability.
 
-The first Odoo driver cuts are intentionally narrow as well: Launchplane owns the
-artifact publish handoff, remote post-deploy data-workflow trigger, and prod
-rollback for stable Odoo compose targets. Artifact publish resolves DB-backed
-runtime records and managed secrets in Launchplane, invokes `odoo-devkit` as the
-build engine with a one-shot runtime payload, validates the returned artifact
-manifest, and writes it to Launchplane records. Post-deploy reads DB-backed Odoo
-instance override records, renders the typed override payload, invokes the
-Dokploy data-workflow runner, and writes `last_apply` evidence back to
-Launchplane. Prod rollback reads DB-backed release tuples, artifact manifests,
-and current promotion/inventory records, then delegates the provider mutation to
-stable target replacement. That shared executor deploys the selected
-artifact-backed image, injects runtime identity, runs post-deploy maintenance,
-verifies health/canonical/logo evidence, reads required runtime identity back
-from the lane-owned health endpoint, and writes deployment/release-tuple
-evidence only when that identity matches. Failed required identity evidence does
-not advance current inventory. The rollback wrapper only adds rollback
-provenance to inventory and the current prod promotion record. Local Odoo
-runtime commands remain in `odoo-devkit`; these drivers are for remote
-control-plane execution only.
+Odoo remote post-deploy and rollback use the
+[driver contract](driver-descriptors.md#initial-drivers). Product repositories build
+their artifacts as described in [artifact provenance](artifact-provenance.md).
+Post-deploy reads DB-backed Odoo instance overrides, renders the typed payload,
+invokes the Dokploy data-workflow runner, and writes `last_apply` evidence.
+Local Odoo runtime commands remain in `odoo-devkit`.
 
 Privileged product rollback actions should use a narrow delegated-worker runtime
 contract when they require network reach or host authority that does not belong
@@ -3961,31 +3912,7 @@ installation, repository, and permission identity, mints a one-repository
 Checks-write token, rechecks current server-owned evidence, and uses the exact
 decision digest as `external_id`. Replays avoid duplicate writes and same-head
 binding changes update only the App-owned run. The check completes `neutral`,
-remain shadow/non-authoritative, and are excluded from merge-train and tenant-
-admission technical inputs.
-
-Status: the two paragraphs below describe the CM product repository's preview
-workflow and its grants. Product-repository workflow grants are retired (see
-`DIRECTION.md`); these grants remain only until that workflow is deleted and
-must not be extended.
-
-The CM tenant preview workflow uses tenant-product scope for both artifact
-publish input/evidence and preview lifecycle requests. Artifact publish still
-uses Odoo driver routes, but source-ref build metadata resolves through the
-`odoo-tenant-cm` product profile so Launchplane can return the tenant image
-repository, tag, and lane-owned runtime payload. Deploy-maintained GitHub Actions
-grants for `cbusillo/odoo-tenant-cm/.github/workflows/odoo-preview.yml` should
-therefore include `odoo-tenant-cm` and context `cm` for publish input, publish
-evidence, refresh, and destroy actions.
-
-The CM preview workflow also needs `preview_pr_feedback.write` for product
-`odoo-tenant-cm` and context `cm` before it can retire tenant-side preview
-comment rendering. Normal refresh and destroy outcomes can reuse lifecycle
-grants, but unsupported/fork and Dependabot notices sit outside those mutation
-paths and require the explicit feedback grant. Fork and Dependabot notices run
-from the base branch through `pull_request_target`, so the deploy-maintained
-grant set includes both `pull_request` and `pull_request_target` feedback
-writers for the same workflow file.
+and is excluded from merge-train and tenant-admission technical inputs.
 
 ## First Stable Payloads
 
@@ -4216,36 +4143,6 @@ Current commands such as:
 
 are local rehearsal and repair clients for these Launchplane payloads. They are
 not the shared integration boundary for external product workflows.
-
-## Driver Relationship
-
-The first Launchplane API should separate two concerns:
-
-- evidence ingress into Launchplane core records
-- runtime execution through Launchplane-owned drivers
-
-That keeps the initial service slice small while still allowing a later shift
-from repo-owned operational scripts into Launchplane-owned driver execution.
-
-The first explicit drivers should be:
-
-- Odoo driver
-- VeriReel driver
-
-Repo-specific variation should stay thin and declarative where possible.
-
-## Client Authority API
-
-The Client authority API is an additive policy-administration and read-model
-surface. Policy, requirement, and preferred-routing revisions are written
-through separate endpoints and separate authz actions. Their write actions are
-classified as `policy_admin`; an invocation grant authorizes the API call but
-never satisfies a Client requirement.
-
-Authority evaluation derives human identity only from immutable provider subject
-identity. It does not consume global-admin, bootstrap-admin, manager,
-delegation, repository-permission, or routing state as Client authority. This retired policy surface does not decide current Client review or merge readiness;
-its separate deletion remains pending.
 
 See `docs/product-owner-policy.md` for routes and persisted record contracts.
 
@@ -4581,9 +4478,6 @@ superseded prior record before recording terminal success.
 Responses and stored records follow the redaction contract in
 `docs/privileged-operations.md`.
 
-**Preserved history:** the Phase 1 planning-only API description predates the
-supervised Phase 2 worker and is not current operating guidance.
-
 ## Original service delivery Apply receipt
 
 `POST /v1/service/delivery/apply-receipt` is an inert DB read carrying the original
@@ -4671,9 +4565,7 @@ a closed proposal; after closure, only a fresh update from a new base or changed
 content creates another proposal. Neither recovery path updates a
 ref or edits a PR. Provider errors with no confirmed result return a redacted
 503; retry the original request to reconcile it. A disconnected request
-finishes its worker and revocation attempt. The three updater workflow cutovers
-and real-run qualification follow this route's landing and deployment; they
-are not activated by adding the route.
+finishes its worker and revocation attempt.
 
 ## Reviewed stored-setting and workflow-rule retirement
 

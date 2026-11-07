@@ -106,13 +106,6 @@ merge train already uses for the product repository, requesting only
 grants these, and the train's own token keeps its own permission set. No
 product repository gets any new access, and no new grant is needed.
 
-## What it replaces
-
-The artifact publish route and publish-inputs route, the reusable publish
-workflow, and the workflow-identity grants that let product repos call them.
-They are still in the code until #2606 (open) deletes them; nothing new may
-use them.
-
 ## Retained artifact source attribution
 
 `GET /v1/artifacts/protected` includes optional `manifest_provenance` on entries
