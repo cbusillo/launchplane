@@ -1359,24 +1359,9 @@ admission store, live evidence adapter, controller lease, and append-only
 landing outcome behavior as controller mode. If those dependencies are
 unavailable, the route fails closed before GitHub mutation.
 
-Launchplane's merge-train worker (`service merge-train-workers run`) is the
-scheduler for this route: every five minutes by default it runs one pass over
-the scheduler-enabled policy targets, one target at a time, calling the same
-admission and worker functions in-process. See [merge-train policy](merge-train-policy.md).
-
-`.github/workflows/merge-train-runner.yml` is a manual external caller for
-this route. It mints a GitHub Actions OIDC token for the Launchplane service,
-reads admission, and calls one worker entrypoint only when the decision is
-`admitted`. Repository, base branch, runner mode and mutation come from explicit
-workflow inputs. Automatic sweeps and event progression belong to the service
-worker; the workflow has no schedule or target fan-out. The default manual
-runner mode calls the Level 1 `run-once` route; setting `runner_mode: controller`
-switches an admitted pass to one full-controller `run-once` call instead.
-Controller-mode dry-runs do not deliver PR feedback comments; feedback delivery
-is reserved for mutate runs and explicit manual phase workflows.
-Workflow dispatches may select at most one non-`none` phase input across
-batch-candidate, batch-landing, and stack-collapse modes; the runner validates
-that exclusivity before any phase step mutates state.
+The service merge-train worker and the manual `merge-train-runner.yml`
+workflow call these routes; see
+[scheduled and manual passes](merge-train-policy.md#scheduled-and-manual-passes).
 
 `GET /v1/repo-product-mapping` is a native FastAPI route that returns the
 repository ownership/awareness read model used by agent context.
@@ -1424,20 +1409,6 @@ service-host env overrides. It authorizes against the policy's `service_authz`,
 reads a fresh GitHub snapshot, and writes a `launchplane_merge_train_runs` record
 for accepted dry-run and mutate calls. Mutation mode still applies at most one
 worker transition from that snapshot.
-
-The full batch train will use additional service contracts and records rather
-than overloading `run-once`. Its target behavior is to build one combined
-candidate from the base branch plus multiple queued PRs, run required checks on
-that candidate commit, and then land the original PRs in queue order through
-GitHub's normal PR merge path after pre-merge invariants are rechecked.
-The first batch service contract is
-`POST /v1/work-graph/merge-train/batch-candidate/run-once`; it owns only the
-plan/build/observe candidate phases and writes
-`launchplane_merge_train_batch_candidates` records.
-The second batch service contract is
-`POST /v1/work-graph/merge-train/batch-landing/run-once`; it owns landing-plan
-creation and guarded PR-native landing, and writes
-`launchplane_merge_train_batch_landing_plans` records.
 
 `POST /v1/merge-train/policies/import` is the native FastAPI service-owned write
 path for merge train policy records. It requires database storage and
@@ -1516,24 +1487,6 @@ authorization checks and audit records consume them:
   dedicated `local_operator` bearer token.
 - `local_admin`: rare privileged admin automation authenticated by the dedicated
   local-admin bearer token.
-
-A future Keycloak slice may add OIDC human and service-client subject types.
-Those subjects would be trusted only after issuer, audience, signature, expiry,
-and client expectations validate. Keycloak would provide identity and session or
-token facts only; product, context, lane, provider, authz, and runtime authority
-would still come from Launchplane records, OpenFGA tuples if adopted, managed
-secrets, provider state, or explicit scoped admin input.
-
-For future OpenFGA checks, Launchplane should pass normalized facts rather than
-raw tokens. Caller facts include `subject_type`, stable `subject_id`, `issuer`,
-`audience` or client id, token expiry/freshness, optional audit display claims,
-and normalized group or role ids when present. Request/resource facts include
-the Launchplane action, product, context, optional instance, and resource id.
-GitHub workflow subjects additionally keep workflow identity claims such as
-repository, workflow ref, reusable workflow ref, ref, event name, environment,
-subject, and SHA. Keycloak service-client subjects should use the validated
-client id plus issuer as the stable caller identity, not a checked-in grant or
-ambient process identity.
 
 Launchplane should verify:
 
@@ -1746,40 +1699,6 @@ Every plaintext resolution or reveal attempt writes redacted audit evidence.
 Service responses, logs, workflow artifacts, UI payloads, and agent context must
 not include plaintext, ciphertext, token prefixes, provider env dumps, or secret
 request bodies.
-
-### OpenFGA Candidate Mapping
-
-The current DB-backed policy records remain the active authorization path.
-OpenFGA may replace or augment those checks only after #1327's relation model,
-tuple ownership, consistency, and audit rules are implemented and proven.
-
-Future OpenFGA checks consume the normalized subject facts described above plus
-Launchplane resource facts. They should map existing service actions to generic
-relations without storing real tuple assignments in this repo:
-
-- provider inspect: `dokploy_target.inspect` (or `local_operator` `driver.read`
-  for a tracked context/instance) and provider-target audit/read
-  actions check inspect permission on a provider-neutral target resource.
-- private health apply/read: `private_health_endpoint.apply` and
-  `private_health_endpoint.read` check apply or read permission on a private
-  health endpoint resource under the requested product context.
-- deploy: driver deploy actions check deploy permission on the target context
-  or deployment resource.
-- promotion: prod promotion actions check promote permission on the promotion
-  resource and its destination context.
-- agent delegated action: `agent/write-intents/evaluate` checks delegation or
-  preflight permission on an agent-intent resource before any later route can
-  execute the requested action.
-- policy/admin action: `authz_policy_grant.write` and related policy routes
-  check policy administration permission on a Launchplane policy resource.
-
-Managed rule-set reconciliation remains the only supported policy-write
-boundary during migration. It may derive tuple proposals from active DB policy
-records, compare OpenFGA decisions with existing DB decisions, and later write
-provider tuples after parity is proven. Missing, ambiguous, stale, or
-unreachable tuple state denies access; it must not fall back to checked-in
-tuples, local files, workflow defaults, ambient GitHub CLI identity, or broader
-DB grants after cutover.
 
 For first access, `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS` may name comma-separated
 verified GitHub email addresses that receive the `admin` role even before a
@@ -3492,11 +3411,6 @@ Pinned reusable Launchplane workflows for product repositories are retired
 (see `DIRECTION.md`); do not add new product-repository callers of this smoke
 or of other reusable Launchplane workflows.
 
-The product-neutral preview lifecycle route should become the common boundary
-for preview desired/current-state comparison. Product-specific driver routes can
-continue to perform provider runtime work, but repos should not each reimplement
-orphan detection once they can submit desired preview anchors to Launchplane.
-
 ### Driver discovery endpoints
 
 These are read-only endpoints for the provider-neutral driver descriptor and
@@ -3627,13 +3541,6 @@ not advance current inventory. The rollback wrapper only adds rollback
 provenance to inventory and the current prod promotion record. Local Odoo
 runtime commands remain in `odoo-devkit`; these drivers are for remote
 control-plane execution only.
-
-Privileged product rollback actions should use a narrow delegated-worker runtime
-contract when they require network reach or host authority that does not belong
-inside the main Launchplane API container.
-
-Do not generalize the full driver surface before a few product-specific routes
-have proven the shape.
 
 ## Request And Response Rules
 
@@ -4247,8 +4154,6 @@ identity. It does not consume global-admin, bootstrap-admin, manager,
 delegation, repository-permission, or routing state as Client authority. This retired policy surface does not decide current Client review or merge readiness;
 its separate deletion remains pending.
 
-See `docs/product-owner-policy.md` for routes and persisted record contracts.
-
 ## Product Review API
 
 The small Client review path from `DIRECTION.md` and issue `#2446`. It is
@@ -4320,13 +4225,7 @@ An older record without a valid reviewed commit or identifier returns
 `409 product_review_feedback_unavailable` without changing its publication flag;
 the Client can open the latest review and record a new decision.
 
-## Retired Client Acceptance API
-
-The `/v1/owner-acceptance/*` routes and old engineering workbench are removed.
-Historical stored events remain readable through the record stores and retain
-all original identities and digests. No event writer or old Client evaluator
-participates in the current product-review or release-checklist flow. See
-[`owner-acceptance.md`](owner-acceptance.md) for the storage compatibility boundary.
+## Governance Projection
 
 `GET /v1/governance/projection` accepts only repository, pull request number,
 and base branch scope. It requires the repository policy's service authorization
@@ -4341,35 +4240,7 @@ ref, and resolves the repository policy's declared GitHub token source. The
 projection is `authoritative=false`, authorizes no
 effect, classifies historical head/tree evidence explicitly, and never
 interprets a missing landing outcome as landed. See
-`docs/governance-evidence.md`.
-
-## Change Impact API
-
-Retired. Change-impact routing is retired (see `DIRECTION.md`), and the former
-`POST /v1/change-impact/evaluation` route is deleted; there is no service route
-for evaluating or applying change-impact policy. See
-`docs/change-impact-policy.md` for the retained historical record
-compatibility.
-
-## Out Of Scope For This First Slice
-
-- full human/admin auth design
-- multi-tenant billing or quota models
-- generalized plugin marketplace design
-- replacing file-backed storage immediately
-- moving every current CLI command behind HTTP at once
-
-## Recommended Next Implementation Steps
-
-Historical: these first-slice steps predate the current service; the Odoo and
-VeriReel drivers and service ingress described above exist.
-
-1. Convert the existing CLI preview evidence commands into local clients of the
-   same service-layer handler or payload contract.
-2. Add local clients for deployment and promotion evidence where Launchplane-facing
-   workflows still write through repo-local CLI adapters.
-3. Define the first explicit Odoo and VeriReel driver interfaces after the
-   service ingress exists.
+[governance projection](merge-admission.md#governance-projection).
 
 ## Product retirement
 

@@ -55,5 +55,8 @@ Credential hashes, ciphertext, key identifiers, worker host names, and resolved
 executable paths remain internal persistence fields and are excluded from
 ordinary review-run reads and OpenAPI response schemas.
 
-The retained CLI and historical workspace compatibility are described in
-[historical worker compatibility](codex-lab-workers.md).
+The historical API adapter retains authenticated work-request reads and the
+transport used by advisory engineering review.
+`launchplane every-code review-run-once` remains its supported CLI entrypoint.
+Review execution still requires the service-authorized absolute executable
+path and SHA-256; no executable authority or credential is changed here.

@@ -27,17 +27,6 @@ empty context selector so it can read the stored context of each environment.
 That standing access still requires
 separate concrete administrator confirmation and governed installation.
 
-Ordinary-agent delivery preparation and activation planning are removed.
-Historical activation records remain readable, but cannot be planned, approved,
-canceled, or revoked through the service. Schema-3 policy parsing and maintenance
-remain available for existing records. Exact removal of an ordinary rule through
-the existing managed-policy reconciliation path remains the policy stop: new
-worker authorization fails when its bound rule is absent. This source retirement
-assumes the completed Q91 access and pilot qualification; it adds no grant or
-policy mutation. Remaining deletion is tracked by
-[launchplane#2437](https://github.com/cbusillo/launchplane/issues/2437).
-
-
 ## Agent Policy Proposals
 
 Agent proposal admission and supported descriptors are defined by the
@@ -552,9 +541,7 @@ existing completion/adoption path, including after lease expiry. This typed
 rejection is the only new expired-reservation adoption path. Generic executor
 failures do not gain that permission, and completion/adoption mismatches retain
 their reconciliation fence and report that reconciliation is still required.
-The retired inspection records remain described in
-[Records](records.md#provider-delivery-inspection); no provider inspection
-orchestration remains.
+No provider inspection orchestration remains.
 
 ## Legacy Re-encryption Route
 
@@ -572,13 +559,6 @@ OIDC workload transport. Browser sessions, terminal agents, `local-operator` ide
 local administrators, and other bearer identities fail closed. Signed-in
 humans review and approve `managed-authz-policy-set` records; they cannot call a
 public policy execute route.
-
-## Completion Holds
-
-None. #2204 and #2177, the issues this section held open, are closed.
-
-**Preserved history:** Phase 1 planning-only descriptions remain historical
-context only; the supervised Phase 2 worker flow above is current guidance.
 
 ## Backup policy adapter
 

@@ -399,22 +399,6 @@ They are not fallback paths for review, merge readiness, or release approval.
 The current product-review publisher may still neutralize an old
 `launchplane/owner-acceptance` check on an existing pull request.
 
-Historical `OwnerAcceptanceEventRecord` contracts, filesystem readers, PostgreSQL
-readers, tables, and migrations remain for stored-data compatibility. This change
-neither deletes persisted events nor rewrites their bindings, event ids, replay
-digests, or subject sequences. Importing a filesystem archive containing these
-retired events fails before any writes; it does not silently discard history or
-re-enable event authoring.
-
-The managed authorization set `operator.owner-acceptance` can be reconciled only
-to an empty desired policy, allowing existing grants to be removed. It cannot be
-used to create replacement grants. No deployed authorization records are changed
-by this code deletion.
-
-The `product-owner-policy`, change-impact, manager/delegate, and ordinary-agent
-machinery still have separate remaining deletion work under [DIRECTION.md](../DIRECTION.md).
-Their historical presence grants no authority to the current review flows.
-
 ## Withdrawing a pending request
 
 When the Director records a decision to reroute a change as engineering, use
