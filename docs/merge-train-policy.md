@@ -168,14 +168,6 @@ continuity across container replacements, or a complete night. The HTTP fixture 
 provider semantics; it does not prove the natural single-target workload or overnight
 budget. Qualify those original criteria from naturally occurring work only.
 
-## Preparing An Ordinary-Agent Target
-
-The dedicated ordinary-agent preparation routes and browser callers are removed.
-Historical preparation context remains readable; new generic proposals cannot
-supply it. Remaining domain/storage retirement is tracked by
-[launchplane#2437](https://github.com/cbusillo/launchplane/issues/2437).
-
-
 ## Credential Source And Policy Readback
 
 A repository policy names one supported GitHub credential source.
@@ -252,9 +244,9 @@ Tenant merge eligibility (`evaluate_tenant_merge_eligibility`) and repository cl
 - Unified tenant admission is recomputed from DB records. The GitHub `tenant-admission` commit status is a public projection, not merge authority.
 - The tenant admission controller is a separate exact-PR landing path. It re-fetches current GitHub identity/head/mergeability facts, recomputes admission, and uses the [shared required-check evaluation](#candidate-validation) for the target branch and exact head. It enforces base freshness when the effective classic or ruleset policy requires strict checks, then rechecks admission, technical evidence and identity immediately before an expected-SHA merge. Its readiness evaluation and fresh pre-merge evaluation use the train's existing [Client gate](owner-acceptance.md#current-client-review): valid notes, current-head review where required, and saved vetoes for the current Client. A saved veto blocks even with engineering-only notes or a stale successful projection. Missing named checks remain pending; unreadable or malformed policy or evidence cannot qualify a merge. It does not enqueue work or reuse scheduler ordering, labels, batch candidates, stack collapse, or failure policy.
 - The tenant controller and merge train share the repository/base controller-state row only as a mutual-exclusion and crash-reconciliation fence. Acquisition writes a controller-specific initial action atomically and adoption is action-aware, so one controller cannot rewrite another controller's unfinished recovery state even before its first checkpoint. The row cannot make a tenant admission decision and a green GitHub status is never merge authority.
-- Advisory `launchplane/engineering-review` and
-  `launchplane/owner-acceptance` check runs are visibility projections and are
-  excluded from merge-train and tenant-admission technical-check inputs. Their
+- Launchplane's own [projected checks](advisory-governance-checks.md#no-feedback-loop),
+  including the advisory `launchplane/engineering-review` check, are excluded
+  from merge-train and tenant-admission technical-check inputs. Their
   presence, state, or provider replay cannot change a Launchplane verdict.
 - Engineering repositories remain on their existing flow; invoking the tenant controller for an engineering classification returns not-applicable without merging.
 
@@ -406,7 +398,7 @@ Each repository policy contains:
   bytes and digests and supplies no ordinary readiness capability. Only the
   governed `managed-merge-train-policy-import` lifecycle may change its effective
   active projection, including removal. It is separate from authorization
-  policy schema 3; see [retained inspection records](records.md#provider-delivery-inspection).
+  policy schema 3.
 - `failure_policy`: Whether Launchplane pauses the whole train or continues
   after marking the blocked pull request.
 - `enqueue`: Requirements for who may enqueue. Human authority remains role-based
@@ -420,9 +412,8 @@ Each repository policy contains:
 - `github_token`: Launchplane explicit GitHub credential source used for live GitHub
   API calls.
 - `scheduler`: Optional DB-backed scheduler intent. When enabled, Launchplane's
-  merge-train worker runs this target on its own timer (and the GitHub Actions
-  schedule reads it from the deployed Launchplane API until that schedule is
-  removed); checked-in workflows and GitHub variables are not target authority.
+  merge-train worker runs this target on its own timer; checked-in workflows and
+  GitHub variables are not target authority.
 
 The default enqueue policy is intentionally narrow: an authorized label or
 current-head ready handoff must be present and the PR author must be a repo
@@ -596,13 +587,6 @@ invitation awaits a decision; merges update testing. An accepted release in
 progress still holds its source repositories through the existing release-run
 state, and Client-visible changes keep their review gates. No invitation-window
 hold or local pause file is added.
-
-After this source lands and deploys, the Supervisor can retire the interim
-codex-skills#1623 watcher using its existing lifecycle procedure. Until then it
-remains the supported label bridge. Operational batch-size changes use the
-existing reviewed-baseline operational policy route above; this source change
-does not change live policy. Recovery is an ordinary source revert through the
-train; explicit-label admission remains supported for the prior service.
 
 `enqueue.dependency_update_bots` is the policy table for automatic dependency
 admission. Each row selects an immutable `github_user_id`, a `metadata_format`
@@ -1214,7 +1198,7 @@ always requires current-base freshness, independently of GitHub's optional
 strict setting: its technical evidence records `strict: true` as the train's
 requirement and retains the observed commit-containment result. Admission can
 also accept a proved recorded-rolling tree, as described in
-[structural provenance](merge-train-structural-provenance.md). Missing or stale
+[structural provenance](merge-admission.md#structural-provenance). Missing or stale
 structural proof still blocks. This does not claim to observe GitHub's strict
 setting and does not grant, change, or bypass provider protection; GitHub's
 guarded merge endpoint continues to enforce its own policy.
@@ -2329,7 +2313,7 @@ candidate record id and writes a `launchplane_merge_train_batch_landing_plans`
 record, or `mode: land` with a landing-plan record id. The linked section owns which PR is merged,
 the landing-mode exceptions, and the evidence required to finish or reconcile
 each mode. [Batch And Recovery](merge-admission.md#batch-and-recovery) owns
-admission and outcome reconciliation; [structural provenance](merge-train-structural-provenance.md)
+admission and outcome reconciliation; [structural provenance](merge-admission.md#structural-provenance)
 owns rolling-base evidence. Stale landing evidence is
 reported as a merge-train stale-state conflict, while real GitHub transport/API
 failures include upstream status details for debugging.
@@ -2359,23 +2343,6 @@ Cleanup runs after the caller completes its block, replacement or other durable
 work. A provider failure preserves that result and resumes only cleanup on the
 next lease. Missing refs are already clean. This is per-batch cleanup,
 not an inventory sweep of historical branches.
-
-### Guarded Level 3 landing
-
-Controller landing and direct batch landing use the same per-entry guarded
-boundary documented in [merge-admission.md](merge-admission.md). Immediately
-before each provider merge, Launchplane re-resolves current engineering-review,
-technical-check, policy, candidate, queue, rolling-base, head/tree, lease, and
-expected-effect evidence. Retired Client and change-impact gates are not read. It persists one
-immutable admission before mutation and a separate truthful landing outcome
-afterward.
-
-An existing admission is never a retry token. Missing outcomes and latest
-`reconcile_required` outcomes block another provider effect until GitHub is
-observed and append-only reconciliation establishes either exact landing or
-conclusive no effect. A provider rejection requires a fresh L2 evaluation and a
-new admission. Candidate-ref cleanup remains downstream of landing evidence and
-cannot downgrade it.
 
 ### Externally merged collapsed roots
 
@@ -2546,10 +2513,16 @@ authority. It records the observation without inventing admission history and
 releases only the exact legacy fence. It does not enable ordinary-agent
 execution or alter the scheduler policy.
 
+### Scheduled and manual passes
+
 Launchplane runs the scheduled pass itself. The `launchplane-merge-train-workers`
-service (`launchplane service merge-train-workers run`) starts a pass every five
-minutes (`--interval-seconds`, or `LAUNCHPLANE_MERGE_TRAIN_SCHEDULER_INTERVAL_SECONDS`
-in the start script). Each pass reads the active policy record and, for every
+Compose service runs `scripts/start-launchplane-merge-train-workers.sh`, which
+refuses to start without `LAUNCHPLANE_DATABASE_URL`, uses `LAUNCHPLANE_STATE_DIR`
+and runs `launchplane service merge-train-workers run`. That loop starts a pass
+every five minutes (`--interval-seconds`, or
+`LAUNCHPLANE_MERGE_TRAIN_SCHEDULER_INTERVAL_SECONDS` in the start script).
+`launchplane service merge-train-workers run-once` runs one pass and prints its
+per-target JSON results. Each pass reads the active policy record and, for every
 target with `scheduler.enabled = true`, reads admission and, when admitted, runs
 that target's `runner_mode` once with its `mutate` value, the same calls the
 routes below make. Scheduled passes are started by Launchplane, not by a caller,
@@ -2563,7 +2536,11 @@ clock moved into Launchplane.
 The GitHub Actions workflow `.github/workflows/merge-train-runner.yml` is
 manual-only. It runs one explicit target using workflow inputs for repository,
 base branch, runner mode, mutation, and phase-specific commands. Each dispatch
-reads admission before its worker call. Automatic cadence and timed recovery
+reads admission before its worker call. The default runner mode calls the
+Level 1 `run-once` route; `runner_mode: controller` makes one full-controller
+`run-once` call instead. A dispatch may select at most one non-`none`
+batch-candidate, batch-landing or stack-collapse phase, validated before any
+phase step mutates state. Automatic cadence and timed recovery
 belong to the service worker; the workflow has no schedule or policy-target
 fan-out.
 Controller-mode mutate runs and manually dispatched batch-candidate,
@@ -2630,13 +2607,6 @@ For rollback, use the operational policy endpoint to set `scheduler.mutate =
 false`. To disarm the scheduled lane entirely, set `scheduler.enabled = false`; scheduled runs without an enabled DB target complete as no-ops before
 the admission call. Changing `scheduler.runner_mode` to `level1` selects the
 Level 1 worker for the next scheduled pass.
-
-Every rollout or rollback should leave evidence in the planning issue: the
-target repository/base branch, the scheduler policy settings, the relevant worker trace
-IDs, the latest controller/admission state, whether PR feedback was delivered,
-and the post-merge Launchplane CI, Security, CodeQL, and deploy status that
-carried
-the rollout behavior.
 
 The merge step is allowed only from a fresh dry-run result whose next action is
 `merge`. The merge request must use the selected pull request's observed
@@ -2810,10 +2780,6 @@ Three-dot comparison can conservatively include base updates made by a child;
 this may require original-PR recovery even if those owned paths are already in
 the base. It never supplies native approval.
 
-This qualification does not cover ordinary-agent delegated delivery, which
-[DIRECTION.md](../DIRECTION.md#retired) retires and #2437 owns. This change adds
-no history grant or ancestry capability to that retired path.
-
 Run-once reports `merge_train_original_review_recovery_required` with original
 PR numbers and heads. Selection excludes the affected stack and dependent base
 refs while unrelated eligible PRs continue. A saved landing with all entries
@@ -2831,7 +2797,7 @@ an active landing requires positive ancestry evidence before retiring artifacts.
 failures and shared provider cooldowns retain their normal failure handling.
 When policy and original-review holds coexist, `details.policy_changed` retains
 the separate obsolete-policy inventory.
-GitHub still decides current-head approvals and protected merge admission.
+GitHub's protected branch still decides code-owner approval on owned paths.
 Incomplete provider evidence cannot justify carrying approval to another PR;
 comparison file lists at GitHub's [300-file limit](https://docs.github.com/en/enterprise-cloud%40latest/rest/commits/commits#compare-two-commits)
 are treated conservatively.
@@ -2851,15 +2817,16 @@ through the original PRs:
    concurrent writer is not overwritten. A merge revert leaves child ancestry
    present and cannot release this hold. No controller endpoint performs this
    branch rewrite.
-3. Let the original parent PR pass its current-head checks, review and native
-   merge admission. Retarget the original child PR to the protected base and
-   let it pass its own current-head checks, review and native merge admission.
+3. Let the original parent PR pass its current-head checks, any required
+   code-owner approval and native merge admission. Retarget the original child
+   PR to the protected base and let it pass the same on its own head.
    The original child is not closed or credited as landed through the parent.
    Repeat for each original child in a deeper stack.
 
 If GitHub already marked a carried child PR merged indirectly, preserve that
 original review history; it cannot be reopened or treated as current approval.
-A replacement PR for remaining changes requires its own review and admission.
+A replacement PR for remaining changes needs its own checks, any required
+code-owner approval and admission.
 This recovery does not reland changes already in the protected base, rewrite
 that base, waive approval, grant access, or retire stored evidence.
 

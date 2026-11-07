@@ -1,6 +1,7 @@
 import threading
 import unittest
 from collections.abc import Callable
+from contextlib import nullcontext
 from email.message import Message
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,7 +15,7 @@ from httpx2 import Response
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.github_app_identity import GitHubAppIdentity
-from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import (
@@ -23,10 +24,11 @@ from tests.http_app_test_support import (
     _github_human_identity,
     _github_human_product_config_policy,
     _github_oauth_config,
+    _local_operator_bearer_config,
     _product_profile_write_policy,
     _RejectingVerifier,
 )
-from tests.support.auth import StubVerifier, identity
+from tests.support.auth import StubVerifier, identity, scoped_agent_transport
 from tests.support.profiles import product_profile_payload
 from tests.support.stores import sqlite_database_url
 
@@ -101,16 +103,128 @@ async def _post_owner(
 
 
 def _workflow_app(
-    store: PostgresRecordStore, *, policy: LaunchplaneAuthzPolicy | None = None
+    store: PostgresRecordStore,
+    *,
+    policy: LaunchplaneAuthzPolicy | None = None,
+    bearer_config: BearerIdentityConfig | None = None,
 ) -> FastAPI:
     return create_launchplane_fastapi_app(
         verifier=StubVerifier(identity()),
         authz_policy=policy or _product_profile_write_policy(product=_PRODUCT),
+        bearer_identity_config=bearer_config,
         record_store_factory=lambda: store,
     )
 
 
 class ProductOwnerSettingHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_director_records_prelaunch_client_without_general_profile_write(self) -> None:
+        for config in (
+            _local_operator_bearer_config(),
+            BearerIdentityConfig(
+                terminal_agent_token="local-operator-token",
+                terminal_agent_subject="fixture-director",
+                terminal_agent_token_label="fixture-terminal",
+            ),
+        ):
+            with self.subTest(config=config), TemporaryDirectory() as directory:
+                original = _profile().model_copy(update={"production_use": "prelaunch"})
+                store = _store(Path(directory), original)
+                self.addCleanup(store.close)
+                app = _workflow_app(store, policy=LaunchplaneAuthzPolicy(), bearer_config=config)
+                payload: dict[str, object] = {
+                    "github_login": "site-owner",
+                    "reason": "Record the confirmed Client of this non-live product.",
+                }
+                headers = {"Authorization": "Bearer local-operator-token"}
+                planned = await _post_owner(app, payload, headers=headers)
+                self.assertEqual(planned.status_code, 202, planned.text)
+                self.assertEqual(store.read_product_profile_record(_PRODUCT), original)
+                payload["mode"] = "apply"
+                applied = await _post_owner(
+                    app, payload, headers=headers, idempotency_key="director-client"
+                )
+                self.assertEqual(applied.status_code, 202, applied.text)
+                stored = store.read_product_profile_record(_PRODUCT)
+                self.assertEqual(
+                    stored.owner.github_id, planned.json()["result"]["resolved_github_id"]
+                )
+                self.assertEqual(
+                    stored.model_dump(exclude={"owner", "source", "updated_at"}),
+                    original.model_dump(exclude={"owner", "source", "updated_at"}),
+                )
+                replay = await _post_owner(
+                    app, payload, headers=headers, idempotency_key="director-client"
+                )
+                self.assertTrue(replay.json()["replayed"], replay.text)
+                store.write_product_profile_record(
+                    stored.model_copy(update={"production_use": "live"})
+                )
+                refused = await _post_owner(
+                    app, payload, headers=headers, idempotency_key="director-client"
+                )
+                self.assertEqual(refused.status_code, 403, refused.text)
+
+    async def test_client_metadata_standing_permission_requires_known_nonlive_and_trusted_identity(
+        self,
+    ) -> None:
+        for production_use, scoped, token in (
+            ("live", False, "local-operator-token"),
+            ("unknown", False, "local-operator-token"),
+            ("prelaunch", True, "local-operator-token"),
+            ("prelaunch", False, "unrecognized-token"),
+            ("prelaunch", False, ""),
+            ("prelaunch", False, "valid-token"),
+        ):
+            with (
+                self.subTest(production_use=production_use, scoped=scoped, token=token),
+                TemporaryDirectory() as directory,
+            ):
+                original = _profile().model_copy(update={"production_use": production_use})
+                store = _store(Path(directory), original)
+                self.addCleanup(store.close)
+                app = _workflow_app(
+                    store,
+                    policy=LaunchplaneAuthzPolicy(),
+                    bearer_config=_local_operator_bearer_config(),
+                )
+                with scoped_agent_transport() if scoped else nullcontext():
+                    response = await _post_owner(
+                        app,
+                        {"mode": "apply", "github_login": "site-owner", "reason": "Record Client."},
+                        headers={"Authorization": f"Bearer {token}"},
+                        idempotency_key="denied-client",
+                    )
+                expected = 403 if token in {"local-operator-token", "valid-token"} else 401
+                self.assertEqual(response.status_code, expected, response.text)
+                self.assertEqual(store.read_product_profile_record(_PRODUCT), original)
+
+    async def test_director_client_metadata_cannot_overwrite_concurrent_live_classification(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            original = _profile().model_copy(update={"production_use": "prelaunch"})
+            store = _store(Path(directory), original)
+            self.addCleanup(store.close)
+            live = original.model_copy(update={"production_use": "live"})
+
+            def lookup_during_live_classification(*, path: str, token: str) -> object:
+                store.write_product_profile_record(live)
+                return _github_user()(path=path, token=token)
+
+            response = await _post_owner(
+                _workflow_app(
+                    store,
+                    policy=LaunchplaneAuthzPolicy(),
+                    bearer_config=_local_operator_bearer_config(),
+                ),
+                {"mode": "apply", "github_login": "site-owner", "reason": "Record Client."},
+                headers={"Authorization": "Bearer local-operator-token"},
+                idempotency_key="concurrent-live",
+                github_api=lookup_during_live_classification,
+            )
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(store.read_product_profile_record(_PRODUCT), live)
+
     async def test_credential_failure_stage_reaches_client_setting_without_profile_write(
         self,
     ) -> None:

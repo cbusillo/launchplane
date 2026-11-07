@@ -151,39 +151,11 @@ production-database, empty-fixture or coverage fallback.
 
 ## Activation order and recovery
 
-The managed-preview migration requires the structured exporter to be serving
-before activation. Its producer-first release retains the profile-archive
-startup target. After a fresh export passes the unchanged guarded migration,
-normal deployment advances to the idle-retirement target and removes the
-temporary legacy reader and write refusals. Preview settings then come from
-managed records; onboarding and configuration use their ordinary write paths.
-Migration validation, ownership, conflicts and atomicity remain enforced.
-Production-shaped PostgreSQL fixtures start before the migration, export both
-formats, restore them and check the migrated records and service startup.
-
-The exporter and candidate module must land and deploy first through the
-existing path. The Supervisor then dispatches this same deploy workflow on the
-default branch with `stored_record_preflight_only=true` and an immutable
-`image_reference`, using the installed protected-workflow helper. This read-only
-job authenticates the existing image read, fetches the supported scrubbed export
-and runs the rehearsal on the actual deploy runner. Both deployment jobs are
-excluded in this mode. Read-only qualification has its own workflow concurrency
-group, so a later self-deploy run cannot displace its pending run. Replacements
-retain their existing serialized group. Verify its per-family counts, bounds and successful
-runner result before routing the mandatory deploy gate PR. Qualification and
-manual deploys validate the same bootstrap image repository and immutable digest. A refused read is
-reported as missing standing authority; this mode creates no new grant. Landing both in one batch would require a route the old service lacks.
-This ordered capability rollout supplies a supported way to keep deploying.
-
-The version-2 producer and dual-format consumer land together before their
-read-only qualification requests version 2. The mandatory gate requests the same
-format, and it is activated only after that qualification passes on the
-installed candidate image, never on source evidence alone. Older candidate
-images can still request version 1, which can refuse its existing size limit;
-emergency recovery remains separately governed. If preview holds refuse normal
-installation, the Supervisor obtains approval for the existing manual
-break-glass path and installs the immutable image built from this producer's
-landed main commit.
+To run read-only qualification without deploying, dispatch the deploy workflow on
+the default branch with `stored_record_preflight_only=true` and an immutable
+`image_reference`. Both deployment jobs are excluded and the run uses its own
+concurrency group so a later self-deploy cannot displace it; a refused read
+reports missing standing authority and creates no grant.
 
 The mandatory Deploy Launchplane gate runs after immutable image resolution and before
 rendering or requesting self-deploy. It deletes snapshot material after every

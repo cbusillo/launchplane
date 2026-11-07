@@ -9,21 +9,10 @@ recipient/fence and supplies the supported hold/rebuild continuation.
 
 ## Merge Admission Recovery
 
-Treat a merge admission without a terminal outcome as effect-unknown. Do not
-rerun the merge mutation manually and do not infer success from checks,
-candidate status, landing-plan progress, or a sent GitHub request. Re-run the
-Launchplane controller so it observes the exact PR head, target base, merge
-commit/tree, and branch containment through the guarded recovery path.
-
-If the exact PR is already merged, Launchplane appends a `landed` observation.
-If the exact PR remains open and the expected base did not advance, Launchplane
-first appends `process_interrupted` when the attempt lacked an outcome, then
-appends conclusive no-effect evidence with exact open PR, head/tree, and
-base/tree observations; this evidence does not claim that GitHub rejected the
-request. Only then may Launchplane recompute L2 for a fresh admission.
-Contradictory or incomplete evidence remains `reconcile_required` and needs
-admin investigation. Candidate-ref cleanup failures are separate from
-landing truth and may be retried without changing the outcome record.
+An admission without a terminal outcome is effect-unknown: follow
+[Outcome Boundary](merge-admission.md#outcome-boundary) and
+[Batch And Recovery](merge-admission.md#batch-and-recovery), which also explain
+the controller phases.
 
 If a policy digest changes under the same policy key while a fully merged legacy
 landing is still awaiting controller reconciliation, the controller verifies each recorded PR head and merge commit
@@ -84,15 +73,6 @@ work can proceed. Do not change a record's digest or clear an unknown effect to
 make the old candidate eligible. A completed root instead uses the verified
 historical recovery above and is never merged again.
 
-Use the controller phase when diagnosing a failed landing. An active
-`admit_pull_request` phase means the failure occurred while reconciling or
-evaluating Launchplane admission, before a GitHub merge request. An active
-`merge_pull_request` phase means Launchplane persisted admission and crossed the
-provider-effect checkpoint immediately before the GitHub merge request. Preserve
-the response JSON and trace ID from protected workflow failures; an HTTP 409 by
-itself does not distinguish controller fencing, admission refusal, admission
-reconciliation, or a GitHub state conflict.
-
 A controller response with `controller_action=block` and
 `blocking_reason.code=merge_readiness_not_ready` is a normal fail-closed
 pre-effect result. Read `merge_readiness.reason_codes` and the individual facets,
@@ -133,19 +113,6 @@ displace the observation's own raise site.
 The same logger retains nested causes for handled HTTP errors. It omits exception
 text, payloads and local variables; these locations explain the waiting checkpoint
 without changing the operation's status, original key or recovery fences.
-
-## Retired Approval Policies
-
-Change-impact and Client policy endpoints are removed. Do not repair
-retired policies to unblock delivery. Merge admission reads current Git and
-technical evidence; Client approval belongs to the product review and release
-checklist. Historical policy/audit readers retain old payloads without making
-approval decisions. See [retired impact records](change-impact-policy.md).
-
-The legacy manager webhook URL remains a signed trusted-maintenance transport.
-Manager commands and the manager reconcile endpoint are removed. No manager
-event authorizes a release, and preview destruction no longer writes such an
-event. Runtime grant contraction is separate from this code deletion.
 
 ## Repository Inventory
 
@@ -2562,17 +2529,6 @@ The break-glass link opens manual dispatch; a pending protected approval exists
 only after an admin dispatches that recovery. No recovery is dispatched by the
 reporter, and manual break-glass credentials remain behind their approval gate.
 
-The manual Merge Train Policy Import workflow uses GitHub OIDC with
-`merge_train.policy_import` authority for product/context `launchplane`. It does
-not inherit Launchplane self-deploy authority; use that workflow for DB-backed
-merge-train policy imports instead of direct DB writes from a local checkout.
-New reviewed merge-train policy imports go through
-`managed-merge-train-policy-import` privileged operations. Do not add a workflow
-secret/grant, `local_operator` grant, raw route proxy, or direct database fallback
-to perform a policy import; activate only the exact
-`merge_train_policy_operation.*` managed rules through the existing DB-native
-managed-authz privileged-operation lifecycle.
-
 The Dokploy-hosted Launchplane target should consume `DOCKER_IMAGE_REFERENCE` from
 its env so deploy automation can switch the service by immutable digest and
 roll back to the prior digest when verification fails.
@@ -4260,8 +4216,7 @@ The current command group supports:
 The label-driven PR-event ingest and webhook replay commands are deleted
 (#2738). Previews follow the pull request's state through the event reconciler. The
 manual `write-enablement` command and the tenant render's preview enablement
-rows are also deleted (#2875); see the
-[retired record](records.md#retired-preview-enablement-record).
+rows are also deleted (#2875).
 
 `show-tenant`, `render-index-page`, and `render-site` now resolve stable-lane
 baseline tuples from Launchplane's DB-backed release-tuple records. Cockpit and

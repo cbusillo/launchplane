@@ -68,36 +68,6 @@ in Launchplane core, product-specific runtime behavior in Launchplane drivers,
 forge/provider variation behind replaceable adapters, and repo-specific
 variation in thin request/config surfaces.
 
-## Target Launchplane Shape
-
-- Launchplane should become a long-running control-plane service, expected to live
-  behind an admin-owned stable address.
-- Launchplane should expose authenticated service ingress for runtime evidence,
-  admin actions, and eventually driver-triggered orchestration.
-- Product repositories never call Launchplane. Launchplane reacts to forge
-  events, verifies which repository and commit built an artifact, and deploys
-  it (see [`event-driven-deploys.md`](event-driven-deploys.md)). Product
-  workflow-identity grants are retired.
-- Forge-issued workload identity (GitHub Actions OIDC today) authenticates
-  Launchplane's own admin and self-deploy workflows from verified claims such
-  as repository, workflow, ref, environment, and event context, rather than
-  from copied long-lived static tokens.
-- Launchplane core should own durable records, admin read models, auditability,
-  and shared orchestration contracts.
-- Launchplane should own forge-neutral Client, review, dependency, admission, and
-  landing evidence while projecting checks, comments, and merge operations
-  through replaceable forge adapters.
-- Product-specific runtime logic should live behind Launchplane-owned drivers,
-  starting with Odoo and VeriReel, instead of being duplicated as near-identical
-  scripts across many client repos.
-- Repo-specific variation should enter Launchplane as product records or small
-  driver inputs, not as Launchplane-held build settings or a second copy of the
-  same operational workflow in every product repo.
-- When a product-specific operation needs materially different network reach or
-  host-local authority, Launchplane should prefer a narrow delegated worker
-  contract over teaching the main API host to absorb every privileged runtime
-  concern directly.
-
 ## Launchplane Shape Today
 
 - Stable remote environment lanes are `testing` and `prod` only.
@@ -297,15 +267,3 @@ configuration or record authority.
   bootstrap tolerance, not the production migration strategy.
 - Keep schema changes backward-compatible enough that deploy rollback can safely
   return to the previous Launchplane image when possible.
-
-## Driver Ownership Status
-
-Driver ownership follows the [repo boundary](#repo-boundary) and the
-[core-and-driver layers](#launchplane-core-and-drivers). Extend drivers
-incrementally behind the existing service and read-model contracts rather than
-creating a second migration track.
-
-Production-capable mutation paths must use typed Launchplane service routes with
-DB-backed authority or explicit admin input. The [implementation
-posture](#implementation-posture) owns compatibility migration and deletion
-requirements.

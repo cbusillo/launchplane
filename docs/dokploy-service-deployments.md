@@ -723,27 +723,3 @@ apply path can consume the ready plan and call the normal generic-web deploy
 route, but admins must not roll back by clicking Dokploy to a mutable tag or
 changing product-repo workflow state. The durable rollback source remains the
 Launchplane deployment record and its immutable image digest.
-
-## Discord Blue Target
-
-Discord Blue should target this minimum contract before leaving the hardened
-host-managed deployment:
-
-- product key: `discord-blue`
-- driver: `generic-web`
-- image repository: `ghcr.io/cbusillo/discord-blue`
-- stable lanes: at least `testing`; add `prod` before production cutover
-- Dokploy target type: `application`
-- runtime port: `8787` when the bridge or health service is enabled
-- health path: a stable path such as `/health` or `/v1/health`
-- persistent volume: one Dokploy-mounted state/config path documented in the
-  product repo and represented by the admin-owned target configuration
-- secrets: Discord tokens and other credentials managed through Launchplane
-  secret bindings, never passed in workflow payloads
-- deploy input: immutable image reference, preferably
-  `ghcr.io/cbusillo/discord-blue@sha256:<digest>`
-
-The migration is unblocked when Launchplane can read the product profile and
-target records, deploy a testing image through the generic-web route, and record
-either a passed health check on port `8787` or an explicitly documented skipped
-health check with replacement evidence for the first cutover.
