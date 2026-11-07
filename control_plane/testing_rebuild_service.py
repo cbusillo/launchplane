@@ -470,10 +470,28 @@ def capture_rebuild_intent(
             target_name=before.target.target_name,
             server_id=server,
         )
+        first_delivery = (
+            retained.get("availability") == "absent"
+            and before.inventory is None
+            and before.generation is None
+            and previous is None
+            and provider.get("composeFile") in (None, "")
+            and urlsplit(lane.base_url).scheme == "https"
+            and not store.list_deployment_records(
+                context_name=operation.context, instance_name="testing", limit=1
+            )
+            and not api.list_deployments_for_target(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=before.target_id.target_id,
+                require_complete=True,
+            )
+        )
         try:
             configured = (
                 ""
-                if template is not None
+                if template is not None or first_delivery
                 else unavailable_ingress_declaration(
                     host=host,
                     token=token,
@@ -492,6 +510,7 @@ def capture_rebuild_intent(
                 observation_sha256=retained["observation_sha256"],
                 static_configuration=frame["static_configuration"],
                 configured_compose=configured,
+                first_delivery=first_delivery,
                 recorded_template=template,
                 aliases=aliases,
                 recorded_backend=previous_route.new_backend if previous_route else None,
@@ -1325,6 +1344,23 @@ class NativeTestingRebuildExecution:
             target_id=self.intent.old.target_id,
             require_complete=True,
         )
+        route = self.intent.unavailable_route
+        if (
+            not self.cutover_started()
+            and self.intent.recorded_template is None
+            and route is not None
+            and route.unavailable_preimage is not None
+            and not route.unavailable_preimage.declaration_sha256
+            and (
+                deployments
+                or self.store.list_deployment_records(
+                    context_name=self.operation.context, instance_name="testing", limit=1
+                )
+            )
+        ):
+            raise NativeTestingRebuildAdmissionChanged(
+                "The first testing delivery acquired serving history."
+            )
         if any(
             api.deployment_status(item)
             not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES

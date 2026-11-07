@@ -325,6 +325,9 @@ web-availability classifier.
 An unavailable predecessor has no invented private endpoint, runtime identity or
 healthy public observation. The candidate route comes from the original recorded
 template or the provider's explicit raw web-router declaration for this host.
+An absent original with no serving inventory, generation or delivery history
+needs no old ingress record for its first delivery. Normal post-deploy health
+verifies ingress; used lanes and production sharing keep their existing guards.
 When no raw rule may match that host, the provider's converted declaration
 supplies its domain routes. Ambiguous or malformed matching raw rules refuse
 instead of falling back. Generated aliases do not replace explicit raw authority.
