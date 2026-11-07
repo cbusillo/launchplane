@@ -91,11 +91,14 @@ def inspect_testing_rebuild(
             raise TestingRebuildRefused(
                 "testing_rebuild_inputs_unverified", "The selected build is not an Odoo artifact."
             )
-        _validate_target_replacement_apply_artifact_authority(
-            operation_store=store,
-            replacement_request=apply,
-            context=lane.context,
-            verified_manifest=verified_build.manifest if verified_build is not None else None,
+        verified_build = (
+            _validate_target_replacement_apply_artifact_authority(
+                operation_store=store,
+                replacement_request=apply,
+                context=lane.context,
+                verified_manifest=verified_build.manifest if verified_build is not None else None,
+            )
+            or verified_build
         )
     else:
         if not isinstance(verified_build, VerifiedGenericWebBuild):

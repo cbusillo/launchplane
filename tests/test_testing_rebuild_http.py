@@ -218,6 +218,8 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(self.fixture.effects, [])
 
     async def test_director_operator_can_queue_native_testing_without_an_apply_rule(self) -> None:
+        from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+        from tests.test_migrated_testing_source import MigratedTestingRequestTests
         from control_plane.service_auth import (
             BearerIdentityConfig,
             configured_local_operator_identity,
@@ -245,8 +247,36 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             control_plane_root_path=self.fixture.root,
             bearer_identity_config=config,
         )
+        source = MigratedTestingRequestTests().request().migrated_source
+        assert source is not None
+        profile = self.store.read_product_profile_record(self.product)
+        testing = next(lane for lane in profile.lanes if lane.instance == "testing")
+        testing.odoo_testing_drill_storage = OdooTestingDrillStorageBudget(
+            database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
+        )
+        self.store.write_product_profile_record(profile)
+        self.fixture.intent = self.fixture.intent.model_copy(update={"profile": profile})
         replacement = self.fixture.operation.request.model_copy(
-            update={"reason": "Rebuild the disposable testing copy"}
+            update={
+                "reason": "Rebuild the disposable testing copy",
+                "artifact_id": self.manifest.artifact_id,
+                "source_git_ref": self.manifest.source_commit,
+                "data_source_mode": "migrated_restore",
+                "allow_empty_data": False,
+                "migrated_source": source.model_copy(
+                    update={
+                        "product": self.product,
+                        "context": self.fixture.operation.context,
+                        "target_image": self.manifest.image.digest,
+                    }
+                ),
+            }
+        )
+        self.enterContext(
+            patch(
+                "control_plane.product_reconcile.latest_verified_testing_release",
+                return_value=VerifiedBuildArtifact(manifest=self.manifest),
+            )
         )
         identity = configured_local_operator_identity(config)
         assert identity is not None
@@ -271,6 +301,26 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                 },
             )
         self.assertEqual(inspected.status_code, 202, inspected.text)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.manifest.artifact_id)
+        for changed in (
+            {"artifact_id": "unverified-build"},
+            {"source_git_ref": "f" * 40},
+        ):
+            with self.subTest(changed=changed):
+                mismatched = replacement.model_copy(update=changed).model_dump(
+                    mode="json", include=set(OdooStableTargetReplacementRequest.model_fields)
+                )
+                refused = await request(
+                    app,
+                    "POST",
+                    ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+                    headers={"Authorization": "Bearer fixture-operator"},
+                    payload={"product": self.product, "replacement": mismatched},
+                )
+                self.assertEqual(refused.status_code, 400, refused.text)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.manifest.artifact_id)
         ordinary = await request(
             app,
             "POST",
@@ -279,7 +329,12 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             payload={
                 "product": self.product,
                 "replacement": replacement.model_copy(
-                    update={"strategy": "recreate-in-place"}
+                    update={
+                        "strategy": "recreate-in-place",
+                        "data_source_mode": "empty",
+                        "allow_empty_data": True,
+                        "migrated_source": None,
+                    }
                 ).model_dump(mode="json"),
             },
         )
@@ -295,6 +350,9 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             payload={"product": self.product, "replacement": replacement.model_dump(mode="json")},
         )
         self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(
+            self.store.read_artifact_manifest(self.manifest.artifact_id), self.manifest
+        )
         operations = self.store.list_odoo_stable_target_replacement_operation_records()
         saved = next(
             item for item in operations if item.idempotency_key == "native-director-rebuild"
@@ -335,7 +393,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                     payload={
                         "product": self.product,
                         "replacement": replacement.model_copy(
-                            update={"data_source_mode": mode}
+                            update={"data_source_mode": mode, "migrated_source": None}
                         ).model_dump(mode="json"),
                     },
                 )
