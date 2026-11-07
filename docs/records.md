@@ -45,61 +45,7 @@ rehearsal parity only.
 
 ### Ordinary-Agent Lifecycle
 
-Status: retired. Ordinary-agent delegated delivery is retired in
-[DIRECTION.md](../DIRECTION.md); its code and tables remain only until they are
-deleted (cbusillo/launchplane#2437). Do not extend them. This section describes
-what is still in the code.
-
-Two DB-backed tables with live readers hold the ordinary-agent lifecycle
-boundary:
-
-- `launchplane_ordinary_agent_principals` stores linear principal revisions and
-  enforces one current revision per principal.
-- `launchplane_ordinary_agent_authentication_credentials` stores the
-  agent-to-Launchplane authentication digest and lifetime, with one current
-  credential per principal and one row per credential version. It never stores
-  bearer material or a provider App key/token.
-
-Sixteen retired ordinary-agent tables, including credential custody, lifecycle
-audits, session operations, landing, semantic, effect-reconciliation, read and
-job-claim records, have no remaining reader. Their ORM models are deleted, and
-the privileged-operation worker no longer requires them at startup. Prepared
-migration `e7c1d5e9a3b6` drops those sixteen tables, provider-delivery inspections,
-and the five older unmodeled authorization/recovery/requirement-authority tables.
-Shipping this prepared migration does not authorize dropping these shared
-tables or their rows. The [operations procedure](operations.md#prepared-retired-delivery-table-migration)
-owns the current release target and runtime compatibility set. Schema invariants
-require only tables with retained consumers.
-
-Enrollment, authentication/credential claim, session admission, finite-job
-execution, provider inspection, and joined ordinary-controller writes have been
-removed from storage. No enrollment or delegated execution is enabled. Historical
-tables and schema-3 policy parsing remain until their separate retirement.
-
-Retained delivery ciphertext still participates in managed-secret key retirement,
-so the privileged-operation worker keeps its bounded expiry maintenance. That
-maintenance preserves unclaimed-credential revocation and session/effect
-cancellation. Historical activation reads, policy maintenance and its activation
-lock remain supported. Native merge-train records retain their finite-job
-bindings and refuse to overwrite a bound controller/progress record or bypass
-an unresolved ordinary effect. These fences are not removed with the retired
-execution methods. Unused issuers, eligibility/lifecycle calculators, worker
-compatibility descriptors, inspection setup and their unreferenced contracts
-are removed. Only contracts and helpers consumed by retained maintenance,
-native train fences and historical policy/activation reads remain. Applying the
-prepared migration to shared data requires separate approval under #2437; see
-the [retirement procedure](operations.md#prepared-retired-delivery-table-migration).
-
-### Provider Delivery Inspection
-
-Status: retired with ordinary-agent delegated delivery; deletion is tracked in
-cbusillo/launchplane#2437. Do not extend it.
-
-The inspection reservation, token-custody transition, completion, and recovery
-methods and its ORM model are removed. `launchplane_provider_delivery_inspections`
-remains until `e7c1d5e9a3b6` is applied with separate shared-data approval.
-No inspection profile, credential, expectation, or activation is created by
-this migration.
+Retired ordinary-agent delivery follows [DIRECTION.md](../DIRECTION.md#retired); retained ciphertext maintenance uses [privileged operations](privileged-operations.md).
 
 ## Merge-train repository identities
 
@@ -375,37 +321,6 @@ Provider-backed routes must durably reserve first, bind their stable provider
 operation or reconciliation key before invoking the provider, and complete only
 after durable local evidence is ready. A crash or timeout after key binding is
 an unknown outcome, not permission to retry the provider mutation.
-
-## Retired Product Client Policy Records
-
-Historical product/system Client grants, requirements, and routing remain in
-`launchplane_product_owner_policies`, `launchplane_product_owner_requirements`,
-and `launchplane_product_owner_routing`. Their immutable payloads, digests,
-migrations, and archived authority-cutover rows remain readable. The retired
-evaluators and service routes are removed; these records cannot decide a merge
-or release. Current Client identity comes from the product profile.
-
-## Retired Client Acceptance Event Records
-
-`OwnerAcceptanceEventRecord` remains a historical, read-only compatibility
-contract. Its exact-binding evaluator and event writers have been removed; these
-records are never current Client review or merge authority. Current decisions use
-product-review records and release-checklist records instead.
-
-Filesystem history remains under `launchplane_owner_acceptance_events/`.
-PostgreSQL retains `launchplane_owner_acceptance_events` and
-`launchplane_owner_acceptance_subject_sequences`, including their migrations and
-indexes. No row, event id, binding digest, replay digest, or sequence is rewritten
-or deleted. Filesystem-to-PostgreSQL import rejects archives containing retired
-Client events before writing anything. See [`owner-acceptance.md`](owner-acceptance.md).
-
-## Retired Change Impact Policy Records
-
-Historical repository-scoped impact policies and audits retain their exact
-payloads and digests in `launchplane_change_impact_policies` and its audit store.
-Record contracts and storage compatibility remain; the classifier and policy
-service endpoints are deleted. Active merge admission reads Git identities
-independently and current engineering decisions use two authority-bound reviews.
 
 ## Transactional Outbox
 
@@ -2819,15 +2734,8 @@ run` is the foreground loop intended for an external process supervisor, and
 - Pure tenant merge eligibility matches this DB classification authority. A matching tenant UI candidate is eligible for the controller's separate required-check and exact source-control gates; retired human admission paths do not qualify a merge.
 - This record and pure evaluation remain separate from scheduler merge train admission (`merge_train_admission`).
 
-## Retired Repository Human Admission Records
+## Trusted-Maintenance Policy Records
 
-- Repository human role policies (the manager and delegate roles) and the
-  technical human waiver are retired. Their routes, contracts, evaluation, and
-  store methods are deleted. Migration `b7e9f1a3c5d8` drops
-  `launchplane_repository_human_role_policies` and
-  `launchplane_tenant_technical_human_waiver_events`, including all rows, under
-  the Director's #2006 decision to keep nothing. It exports no rows or counts.
-  Downgrade recreates empty historical schemas, not the deleted data.
 - Trusted-maintenance policy records are a separate contract, not a human role
   policy and not a generic authz-policy reuse. Each policy revision is keyed by
   immutable numeric `repository_id` plus `repository_owner_id`, `repository`,
@@ -3051,40 +2959,13 @@ delete provider values or deploy an application.
   Launchplane API payloads, not as the final integration boundary external
   products are expected to couple to forever.
 
-## Retired Manager Preview Approval Event Record
-
-Manager preview approval is retired. Its contracts, evaluator, command parser,
-reconcile endpoint, projection writer, and store methods are deleted, and
-filesystem-to-database import no longer copies manager events. Existing
-`launchplane_manager_preview_approval_events` rows are deleted with the table
-by migration `b7e9f1a3c5d8`, under the Director's #2006 decision to keep nothing.
-There is no export or row-count record; downgrade recreates only an empty table.
-Hosted service startup applies the release's migration target, so deployment of
-this revision deletes the retired rows. Current approval uses product review
-and the release checklist.
+## Trusted-Maintenance Webhook
 
 The configured `/v1/manager-preview-approval/github-webhook` URL and its existing
 bootstrap secret remain solely as a transport compatibility boundary for signed
 trusted-maintenance evidence. The receiver verifies the signature and ignores
 `issue_comment` commands; it cannot record approval or merge. No webhook,
 credential, runtime grant, or stored record is changed by this code retirement.
-
-## Retired Preview Enablement Record
-
-- Retired in #2875. Every open pull request gets a preview (#2735), so opt-in
-  enablement has nothing left to decide. No command writes the record and
-  tenant renders no longer show enablement rows or request recipes.
-- Director decision Q533 authorizes deletion of Launchplane's own retired
-  enablement rows. Migration `e8d2f6a0b4c7` drops the table on normal service
-  startup, independently of the held delivery-history drop in #2437.
-- Detached application retirement no longer treats enablement as authority,
-  and filesystem import skips it. Existing `launchplane_preview_enablement/`
-  JSON files stay in place; no reader or importer consumes them.
-- Schema adoption trusts an existing Alembic revision. Only unversioned
-  databases are matched against complete supported historical schema shapes;
-  the retired table's presence never advances a stamped database's revision.
-  Downgrade cannot recover deleted rows; recovery uses the pre-migration
-  database backup and matching image.
 
 ## Launchplane Preview Inventory Scan Record
 
@@ -3465,10 +3346,3 @@ history ID. PostgreSQL enforces one active
 the privileged worker uses atomic expected-active-policy compare-and-write,
 operation-scoped idempotency, and exact active/superseded read-back before an
 operation reaches `executed`.
-
-The retired trusted-host confirmation and second-administrator enrollment
-APIs are removed. Their table declarations, schema checks, migration history,
-and migration tests remain until a separately approved data deletion.
-
-**Preserved history:** references to Phase 1 planning records describe the
-pre-worker lifecycle and do not constrain the current Phase 2 statuses.

@@ -105,8 +105,6 @@ not describe runtime authority until it is implemented, deployed, and activated.
   run records, dispatch binding, credential boundary, and worker lifecycle.
 - [engineering-review-decisions.md](engineering-review-decisions.md) — exact-head
   classification plus independent-run evaluation and shadow GitHub projection.
-- [`product-owner-policy.md`](product-owner-policy.md) — retired Client policy
-  history and the current product-profile Client boundary.
 - [`owner-acceptance.md`](owner-acceptance.md) — current Client review and the
   compatibility boundary for retired acceptance history.
 - [odoo-website-settings.md](odoo-website-settings.md) — typed settings preparation, exact release application, rollback and nonproduction exclusion.
@@ -116,8 +114,6 @@ not describe runtime authority until it is implemented, deployed, and activated.
   adapter, host fencing/evidence contract, and separate activation prerequisites.
 - [privileged-operations.md](privileged-operations.md) — typed human-governed
   planning, managed-rule authorization, redaction, and future execution boundary.
-- [change-impact-policy.md](change-impact-policy.md) — retired classifier history and the
-  independent repository-evidence boundary.
 - [operations.md](operations.md) — admin workflows and runtime boundary rules.
 - [health-alert-drills.md](health-alert-drills.md) — isolated routing reads and
   explicitly marked, rate-limited Discord test alerts for existing lane checks.

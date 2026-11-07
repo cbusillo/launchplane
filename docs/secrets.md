@@ -508,13 +508,6 @@ authentication before creating a separate private token file.
   repository, and permission identity, revokes the token after use, and never
   persists or logs the token.
   Do not reuse onboarding, runner-host-hygiene, PAT, or ordinary service tokens.
-- The GitHub-secret authorization reconcile wrapper and reusable worker are
-  deleted. Their former `LAUNCHPLANE_AUTHZ_*_MANAGED_SET_JSON` inputs are no
-  longer consumed. The Director deletes those repository secrets by hand after
-  the deletion lands; [#2521](https://github.com/cbusillo/launchplane/issues/2521)
-  records the names. Stored managed rules remain DB-backed and are changed only
-  through the reviewed Access policy path. Current Client review uses the
-  product profile's Client identity and has no Client-grant secret prerequisite.
 
 ## DB-Backed Secret Resolution
 
@@ -581,23 +574,12 @@ Every encrypted managed-secret version should record the non-secret
 that version. The active key id is used for new writes. Allowed historical key
 ids may decrypt old versions only during an explicit rotation or recovery window.
 
-The target rotation model is:
-
-1. Introduce a new bootstrap decryption root or platform-secret reference and an
-   active `encryption_key_id` in `LAUNCHPLANE_SECRET_KEYS_JSON`.
-2. Keep the previous decryption root available only as an allowed historical key
-   in the JSON keys map for versions that still carry its key id.
-3. Run the deployed Launchplane service re-encryption endpoint in dry-run mode.
-   The response reports unreadable versions, the active-key usage summary, keys
-   blocked from retirement, and a digest bound to the current secret versions.
-4. Apply through the same service endpoint with the dry-run digest, an admin
-   reason, and an idempotency key. Launchplane atomically writes every new
-   ciphertext version, current-version pointer, audit event, and apply
-   idempotency completion record.
-5. Run dry-run again and verify the previous key id is reported as ready for
-   retirement.
-6. Retire the previous root by removing it from the service bootstrap key ring.
-   Later reads fail closed if any active secret still depends on that id.
+Use the `managed-secret-reencryption` privileged operation through the
+[human plan, approval, and worker flow](privileged-operations.md#approval-and-execution-boundary).
+See [re-encryption planning evidence](#re-encryption-planning-evidence) for its
+redacted result and the [legacy route boundary](privileged-operations.md#legacy-re-encryption-route).
+Keep historical roots available until fresh planning evidence proves they are
+ready for retirement.
 
 `LAUNCHPLANE_SECRET_KEYS_JSON` has this bootstrap-only shape:
 
@@ -1035,18 +1017,6 @@ state, actor/source metadata, and lifecycle timestamps.
 Managed-secret IDs, secret-version IDs, ciphertext, plaintext, and raw error
 strings are neither persisted nor returned in the agent projection. The agent
 projection also excludes key IDs and request/actor details.
-
-`POST /v1/secrets/reencrypt` is legacy-only: its `mode: "dry-run"` response
-refuses with `privileged_operation_planning_required`, and its `mode: "apply"`
-response refuses with `privileged_operation_approval_required`. The legacy
-`secret.reencrypt.dry-run` and `secret.reencrypt.apply` actions are not a
-current authority path. Use the typed browser-human plan and approval flow, then
-the supervised privileged-operation worker; approval may execute immediately,
-and revocation is possible only before worker claim. See
-`docs/privileged-operations.md` for canary activation and worker proof rules.
-
-**Preserved history:** Phase 1 described planning evidence before a deployed
-worker existed; it is not current root-rotation operating guidance.
 
 ## Copying a product's own managed runtime secret
 
