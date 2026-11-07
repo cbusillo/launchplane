@@ -1083,14 +1083,16 @@ class ServiceRestartTests(unittest.TestCase):
     def test_production_requires_acceptance_of_the_current_artifact(self) -> None:
         expected = seed_lane(self.store, instance="prod")
         profile = self.store.read_product_profile_record(expected.product)
-        self.store.write_product_profile_record(
-            profile.model_copy(update={"production_use": "live"})
-        )
         self.provider.config["Config"]["Env"] = [
             f"{k}={v}" for k, v in runtime_identity_env(expected).items()
         ]
         self.payload["instance"] = "prod"
-        self.assertEqual(self.invoke()[0], 409)
+        for production_use in ("unknown", "live"):
+            with self.subTest(production_use=production_use):
+                self.store.write_product_profile_record(
+                    profile.model_copy(update={"production_use": production_use})
+                )
+                self.assertEqual(self.invoke()[0], 409)
         decision = self.record_acceptance(expected)
         status, response = self.invoke()
         self.assertEqual(status, 200, response)
@@ -1121,7 +1123,16 @@ class ServiceRestartTests(unittest.TestCase):
                 status, response = self.invoke(key=f"prelaunch-{driver}")
                 self.assertEqual(status, 200, response)
                 self.assertEqual(response["result"]["status"], "pass")
-                self.assertTrue(self.invoke(key=f"prelaunch-{driver}")[1]["replayed"])
+        self.assertEqual(len(self.provider.writes), 2)
+        decision = self.record_acceptance(expected)
+        self.store.write_release_review_decision_record(
+            decision.model_copy(update={"release_start": "promote"})
+        )
+        self.payload["mode"] = "dry-run"
+        self.payload.pop("reviewed_plan_sha256")
+        status, response = self.invoke()
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["reason"], "client_release_holds_lane")
         self.assertEqual(len(self.provider.writes), 2)
 
     def test_agent_prelaunch_classification_cannot_exempt_production_restart(self) -> None:
