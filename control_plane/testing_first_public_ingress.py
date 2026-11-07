@@ -153,11 +153,7 @@ class FirstTestingPublicIngressAdapter(TestingPublicIngressAdapter):
             ).model_dump(exclude={"source", "updated_at"}):
                 raise ValueError("The published testing route authority has changed.")
         for value in (lane.base_url, lane.health_url):
-            if value and (
-                binding is None
-                or urlsplit(value).scheme != "https"
-                or urlsplit(value).hostname != domain
-            ):
+            if value and (urlsplit(value).scheme != "https" or urlsplit(value).hostname != domain):
                 raise ValueError("First testing ingress cannot replace an existing public URL.")
         if binding is None:
             if (
