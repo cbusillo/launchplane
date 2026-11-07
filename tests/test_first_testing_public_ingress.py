@@ -243,6 +243,39 @@ class FirstTestingPublicIngressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_deployment_records(), ())
         self.assertTrue(adapter.readback()["public_tls_verified"])
 
+    async def test_first_publication_accepts_the_configured_hostname_without_a_binding(
+        self,
+    ) -> None:
+        self.store.write_product_profile_record(
+            self.profile.model_copy(
+                update={
+                    "lanes": (
+                        self.profile.lanes[0].model_copy(
+                            update={
+                                "base_url": "https://" + self.domain,
+                                "health_url": "https://" + self.domain + self.profile.health_path,
+                            }
+                        ),
+                    )
+                }
+            )
+        )
+        adapter = self.reviewed()
+        outcome = adapter.apply(
+            "initial-edge-key", Mock(spec=["assert_current", "checkpoint_effect"])
+        )
+        self.assertTrue(outcome.response_payload["result"]["public_tls_verified"])
+        self.assertTrue(adapter.readback()["public_tls_verified"])
+        self.assertEqual(self.client.calls.count("create"), 1)
+        self.assertEqual(
+            self.store.read_route_binding_record(
+                product=self.profile.product, context_name="example", instance_name="testing"
+            )
+            .domains[0]
+            .domain_name,
+            self.domain,
+        )
+
     async def test_holds_and_protected_data_refuse_before_effect(
         self,
     ) -> None:
@@ -326,6 +359,20 @@ class FirstTestingPublicIngressTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_origin_edge_and_certificate_drift_refuse_before_effect(self) -> None:
         adapter = self.reviewed()
+        for field, value in (
+            ("base_url", "https://other.example.invalid"),
+            ("health_url", "https://other.example.invalid/health"),
+            ("base_url", "http://" + self.domain),
+        ):
+            with self.subTest(field=field, value=value):
+                self.store.write_product_profile_record(
+                    self.profile.model_copy(
+                        update={"lanes": (self.profile.lanes[0].model_copy(update={field: value}),)}
+                    )
+                )
+                with self.assertRaises(ValueError):
+                    adapter.plan()
+        self.store.write_product_profile_record(self.profile)
         origin = self.routes[0].copy()
         self.routes[0]["port"] = self.profile.runtime_port + 1
         with self.assertRaises(ValueError):

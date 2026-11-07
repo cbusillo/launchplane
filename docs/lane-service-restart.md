@@ -44,8 +44,9 @@ code, no attempted post-deploy work and no uncertain provider outcome. Attempts
 started or finished since the current deployment began are checked regardless
 of their position in history. Newer unfinished attempts, successes, unclassified
 failures and uncertain effects refuse recovery and name the blocking deployment record. The same selection is checked during
-apply and original-request reconciliation. Production also requires recorded acceptance of that exact artifact
-and source commit. The same requirements apply to generic-web Compose lanes.
+apply and original-request reconciliation. Production requires recorded acceptance of that exact artifact
+and source commit unless the product already has explicit prelaunch bootstrap authority.
+Active Client releases still exclude restarts. The same requirements apply to generic-web Compose lanes.
 Historical rows may omit a start or finish time: their latest available timestamp
 places them relative to the current deployment's required start time. Missing
 both timestamps or a malformed recorded timestamp refuses recovery.
