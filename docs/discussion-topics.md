@@ -142,8 +142,3 @@ before activation, in addition to discord-blue#226's release, Justin's
 invitation, and Chris's schedule configuration. This slice proves scheduling,
 delivery through an injected adapter, and failure alerts with isolated tests;
 it does not claim an end-to-end CM send or live activation.
-
-The additive schema migration follows the approved preview-retirement branch.
-It does not apply the held delivery-table drop. See the
-[migration continuation](operations.md#prepared-retired-delivery-table-migration)
-for the release target and already-applied paths.
