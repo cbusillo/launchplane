@@ -278,8 +278,8 @@ privilege boundary, and verifies that GitHub inventory reports exactly one
 online lane with the expected labels before writing a `completed` audit. If any
 step fails, the executor writes a `failed` audit. The raw registration token must
 never be written to the audit record, command output, or JSON result.
-GitHub's runner `config.sh` still requires the token as a command-line option,
-so the ops lane must treat same-user process inspection on the host as privileged
+The persistent registration executor passes the token as a command-line option,
+so its ops lane must treat same-user process inspection on the host as privileged
 and keep unrelated workloads off the constrained service user during mutation.
 
 The retirement CLI entrypoint is:
