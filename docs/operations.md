@@ -2764,9 +2764,12 @@ for adoption, production, compose or repair operations. To remove legacy
 `operator.generic-web-preview` caller rules, run `Generic Web Preview Authorization`
 with `operation=retire` (`POST /v1/authz-policies/managed-rule-sets/generic-web-preview/plan`
 and the protected managed reconcile apply; see [service-boundary.md](service-boundary.md)).
-Keep the existing planner, retirement/readback routes, and shared GitHub App
-inputs until those legacy rules are retired; onboarding workflow removal does
-not retire credentials, grants or policy records.
+Its `onboard`, `expand`, `contract`, and `include_ingress_operator` inputs remain
+in code only for legacy caller rules; any legacy `expand` or
+`include_ingress_operator=true` rotation requires a matching `contract` with
+`include_ingress_operator=false`. Keep the existing planner, retirement/readback
+routes, and shared GitHub App inputs until those legacy rules are retired;
+onboarding workflow removal does not retire credentials, grants or policy records.
 
 - Promotions and deploys reference explicit artifact identifiers.
 - Missing control-plane config is a hard error, not a silent fallback.
