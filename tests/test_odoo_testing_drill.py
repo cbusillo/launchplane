@@ -529,7 +529,8 @@ class TestingDrillTests(TestingDrillScenario):
         self.assert_down_lane_drill_admitted("in_use")
 
     def test_walkthrough_keeps_known_use_protected_on_a_down_lane(self) -> None:
-        from types import SimpleNamespace
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+        from control_plane.odoo_runtime_reads import OdooRuntimeSelection
         from control_plane.odoo_walkthrough import (
             WalkthroughPrerequisite,
             WalkthroughPrerequisiteError,
@@ -545,8 +546,16 @@ class TestingDrillTests(TestingDrillScenario):
             datetime.fromtimestamp(self.now, timezone.utc),
         )
         record_safety(self.store, self.profile.product, self.context, "testing", usage="in_use")
-        selection = SimpleNamespace(
-            identity=SimpleNamespace(context=self.context), base_url="https://testing.example.com"
+        selection = OdooRuntimeSelection(
+            RuntimeIdentity(
+                product=self.profile.product,
+                context=self.context,
+                instance="testing",
+                deployment_record_id="fixture-deployment",
+                artifact_id="fixture-artifact",
+                source_git_ref="a" * 40,
+            ),
+            "https://testing.example.com",
         )
         with (
             patch("control_plane.odoo_walkthrough.select_stable_runtime", return_value=selection),

@@ -2,6 +2,8 @@
 
 from enum import StrEnum
 
+from control_plane.dokploy.odoo_shell import ODOO_RUNNER_PROGRAM, ODOO_SHELL_WRAPPER
+
 from control_plane._odoo_website_settings_program import ODOO_STRING_PARAMETERS_PROGRAM
 from control_plane.dokploy.native_copy_stream import _read_remote
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
@@ -243,7 +245,9 @@ finally:
 )
 
 
-ACCOUNT_JOURNAL_READ_PROGRAM = r"""
+ACCOUNT_JOURNAL_READ_PROGRAM = (
+    ODOO_RUNNER_PROGRAM
+    + r"""
 import base64,json,re,sys,os,stat,time,subprocess
 from pathlib import Path
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
@@ -276,16 +280,8 @@ try:
         preview=identity['environment_kind']=='preview'
         if identity['instance'] in ('prod','production') or (preview and not (spec.get('read_only') and identity.get('preview_id') and identity.get('preview_generation_id'))) or (not preview and identity['instance']!='testing'):
             raise RuntimeError('Unsupported task target')
-        ids=docker('ps','--filter','label=com.docker.compose.project='+spec['project'],
-            '--filter','label=com.docker.compose.service=script-runner','--format','{{.ID}}').decode().split()
-        if len(ids)!=1: raise Refused('runner_unselected')
-        runner=json.loads(docker('inspect',ids[0]))[0]
-        environment=dict(value.split('=',1) for value in runner['Config']['Env'] if '=' in value)
-        observed=json.loads(environment.get(spec['identity_key'],'{}')); expected=spec['identity']
-        observed.pop('deployed_at',None); expected.pop('deployed_at',None)
-        if observed!=expected or runner['Config']['Image']!=spec['image'] or environment.get('PLATFORM_INSTANCE')!=('preview' if preview else 'testing') or environment.get('ODOO_DB_HOST')!='database' or environment.get('ODOO_DB_NAME')!=spec['database']:
-            raise Refused('runner_changed')
-        response=json.loads(docker('exec','-i',ids[0],'python3','-c',spec['probe'],data=json.dumps(spec).encode()))
+        runner=qualified_script_runner(spec,docker,Refused)
+        response=json.loads(docker('exec','-i',runner,'python3','-c',spec['probe'],data=json.dumps(spec).encode()))
         if not isinstance(response,dict) or set(response)!={'reason'} or response['reason'] not in __PROBE_READS__:
             raise RuntimeError('Invalid probe receipt')
         reason=response['reason']
@@ -298,14 +294,17 @@ except Exception:
     reason='unavailable'
 print(sys.argv[2]+json.dumps({'type':'complete','clear':reason=='clear','reason':reason}),flush=True)
 """.replace("__JOURNAL_DIRECTORY__", repr(WALKTHROUGH_JOURNAL_DIRECTORY)).replace(
-    "__PROBE_READS__", repr(tuple(read.value for read in _PROBE_READS))
+        "__PROBE_READS__", repr(tuple(read.value for read in _PROBE_READS))
+    )
 )
 
 
 # There are no user-selected executable names, paths, SQL, shell or Python.
 # The caller's password travels only in the echo-disabled input and docker
 # exec stdin. Neither Docker argv, a schedule, nor a provider log carries it.
-ACCOUNT_HOST_PROGRAM = r'''
+ACCOUNT_HOST_PROGRAM = (
+    ODOO_RUNNER_PROGRAM
+    + r"""
 import base64, json, subprocess, sys, os, re, stat, time
 from pathlib import Path
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
@@ -335,50 +334,12 @@ try:
         json.dump({'finished':False},stream);stream.flush();os.fsync(stream.fileno())
     journal_owned=True
     if time.time()>spec['dispatch_deadline']: raise RuntimeError('Dispatch deadline expired')
-    project=spec['project']
-    ids=docker('ps','--filter','label=com.docker.compose.project='+project,
-        '--filter','label=com.docker.compose.service=script-runner','--format','{{.ID}}').decode().split()
-    if len(ids)!=1: raise RuntimeError('Ambiguous testing runner')
-    runner=json.loads(docker('inspect',ids[0]))[0]
-    env=dict(value.split('=',1) for value in runner['Config']['Env'] if '=' in value)
-    observed=json.loads(env.get(spec['identity_key'],'{}'))
-    expected=spec['identity']
-    observed.pop('deployed_at',None); expected.pop('deployed_at',None)
-    if observed!=expected or runner['Config']['Image']!=spec['image']:
-        raise RuntimeError('Testing runner identity changed')
-    if env.get('PLATFORM_INSTANCE')!=('preview' if preview else 'testing') or env.get('ODOO_DB_HOST')!='database' or env.get('ODOO_DB_NAME')!=spec['database']:
-        raise RuntimeError('Testing runner database changed')
+    runner_id=qualified_script_runner(spec,docker)
     source=spec.pop('account_program')
-    wrapper="""
-import argparse, contextlib, io, json, logging, os, subprocess, sys, tempfile, textwrap
-logging.disable(logging.CRITICAL)
-request=json.loads(sys.stdin.read())
-program=request.pop('program')
-sys.path.insert(0,'/volumes/scripts')
-import run_odoo_startup as startup
-os.environ['ODOO_DB_NAME']=request['database']
-os.environ['ODOO_LOG_LEVEL']='critical'
-with tempfile.TemporaryDirectory(prefix='launchplane-walkthrough-') as directory:
-    output=os.path.join(directory,'result.json')
-    request['result_file']=output
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        settings=startup._load_settings(argparse.Namespace(config_path=os.path.join(directory,'odoo.conf')))
-        startup._write_runtime_config(settings)
-    failure="env.cr.rollback()\\nimport json,os\\nwith os.fdopen(os.open(request['result_file'],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:\\n    json.dump({'account_id':0,'status':'unknown' if commit_started else 'fail'},stream)"
-    script='request='+repr(request)+'\\ncommit_started=False\\ntry:\\n'+textwrap.indent(program,'    ')+'\\nexcept Exception:\\n'+textwrap.indent(failure,'    ')
-    try:
-        child=subprocess.run(startup._build_odoo_shell_command(settings),
-            input=script.encode(),
-            env=startup._odoo_environment(settings),capture_output=True,timeout=80)
-        if child.returncode: raise RuntimeError('Testing account consumer failed')
-        with open(output) as stream: result=json.load(stream)
-    except Exception:
-        result={'account_id':0,'status':'unknown'}
-    print(json.dumps(result))
-"""
+    wrapper=__ODOO_SHELL_WRAPPER__
     dispatched=True
-    result=json.loads(docker('exec','-i',ids[0],'python3','-c',wrapper,
-        data=json.dumps({**spec,'program':source}).encode()))
+    result=json.loads(docker('exec','-i',runner_id,'python3','-c',wrapper,
+        data=json.dumps({**spec,'program':source,'failure_program':__ACCOUNT_FAILURE_PROGRAM__,'fallback_result':{'account_id':0,'status':'unknown'}}).encode()))
     if set(result)!={'account_id','status'}: raise RuntimeError('Invalid account receipt')
     finish(result['status']=='unknown')
     print(sys.argv[2]+json.dumps({'type':'complete',**result}),flush=True)
@@ -386,7 +347,15 @@ except Exception:
     if journal_owned and not dispatched:
         finish(False)
     print(sys.argv[2]+json.dumps({'type':'complete','status':'unknown'}),flush=True)
-'''.replace("__JOURNAL_DIRECTORY__", repr(WALKTHROUGH_JOURNAL_DIRECTORY))
+""".replace("__JOURNAL_DIRECTORY__", repr(WALKTHROUGH_JOURNAL_DIRECTORY))
+    .replace("__ODOO_SHELL_WRAPPER__", repr(ODOO_SHELL_WRAPPER))
+    .replace(
+        "__ACCOUNT_FAILURE_PROGRAM__",
+        repr(
+            "env.cr.rollback()\nimport json,os\nwith os.fdopen(os.open(request['result_file'],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:\n    json.dump({'account_id':0,'status':'unknown' if commit_started else 'fail'},stream)"
+        ),
+    )
+)
 
 
 ACCOUNT_ODOO_PROGRAM = (

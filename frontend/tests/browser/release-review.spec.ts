@@ -739,6 +739,8 @@ test("Base image and build tool ranges keep their Client notes", async ({ page }
   }, NOTHING_TO_TEST);
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "client", organizations: [], teams: [] } } }));
   await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  const signupRead = page.waitForResponse(response =>
+    response.request().method() === "GET" && new URL(response.url()).pathname === "/v1/product-review/sign-in");
   await page.goto("/ui/owner-review?product=example-site");
   const images = page.getByRole("region", { name: "Shared release inputs from example/base-image", exact: true });
   await expect(images).toHaveCount(2);
@@ -747,5 +749,9 @@ test("Base image and build tool ranges keep their Client notes", async ({ page }
   }
   await expect(page.getByRole("region", { name: "Shared release inputs from example/build-tool", exact: true })).toContainText("Build packaging maintenance.");
   await expect(page.getByRole("button", { name: "Accept release", exact: true })).toBeEnabled();
+  const signupResponse = await signupRead;
+  expect(signupResponse.status()).toBe(200);
+  expect((await signupResponse.json()).users).toEqual([]);
+  await expect(page.getByRole("button", { name: /^Sign in as / })).toHaveCount(0);
   expect(errors).toEqual([]);
 });

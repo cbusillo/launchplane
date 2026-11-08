@@ -7,12 +7,7 @@ import { chromium, expect, test as base, type BrowserContext, type Page } from "
 // in which a busy host can run past pauseAt's target.
 export const test = base.extend({
   context: async ({ context }, use) => {
-    await freezeClock(context);
-    // Existing journeys supply their own lane reads. Keep the independent
-    // service read inert unless a page explicitly supplies attention evidence.
-    await context.route(`**${PROVIDER_HOLD_ATTENTION_ROUTE}**`, route => route.fulfill({
-      status: 503, json: { error: { code: "fixture_unavailable", message: "Service attention is not supplied by this journey." } },
-    }));
+    await prepareContext(context);
     await use(context);
   },
 });
@@ -21,17 +16,24 @@ export { expect };
 export type { ConsoleMessage, Page, Route, TestInfo } from "@playwright/test";
 
 // Persistent-profile tests create their own contexts and use the same setup.
-async function freezeClock(context: BrowserContext) {
+async function prepareContext(context: BrowserContext) {
   const now = new Date();
   await context.clock.install({ time: new Date(0) });
   await context.clock.pauseAt(new Date(86_400_000));
   await context.clock.setSystemTime(now);
+  await context.route(`**${PROVIDER_HOLD_ATTENTION_ROUTE}**`, route => route.fulfill({
+    status: 503, json: { error: { code: "fixture_unavailable", message: "Service attention is not supplied by this journey." } },
+  }));
+  await context.route("**/v1/product-review/sign-in?*", route => {
+    if (route.request().method() !== "GET") return route.fallback();
+    return route.fulfill({ json: { users: [], runtime_binding: "" } });
+  });
 }
 
 export async function launchControlledProfile(...args: Parameters<typeof chromium.launchPersistentContext>) {
   const context = await chromium.launchPersistentContext(...args);
   try {
-    await freezeClock(context);
+    await prepareContext(context);
     return context;
   } catch (error) {
     await context.close();

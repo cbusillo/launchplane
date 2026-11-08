@@ -1,0 +1,16 @@
+# Part of Odoo. See LICENSE file for full copyright and licensing details.
+from __future__ import annotations
+
+import typing
+from collections.abc import Callable
+
+class classproperty[T]:
+    def __init__(self, fget: Callable[[typing.Any], T]) -> None:
+        self.fget = classmethod(fget)
+
+    def __get__(self, instance, owner: type | None = None, /) -> T:
+        return self.fget.__get__(None, owner)()
+
+    @property
+    def __doc__(self):
+        return self.fget.__doc__
