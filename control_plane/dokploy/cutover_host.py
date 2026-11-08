@@ -645,6 +645,7 @@ class BoundOdooCutoverHost:
         if plan != self.plan:
             raise ValueError("host execution crossed its original plan")
         self.guard()
+        self.route.fence_earlier_commands()
         self.state.admit_execution(recovery=self.record() is not None)
         self.admitted = True
         retained = self.state.authority("retained-assets")

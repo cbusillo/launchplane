@@ -425,14 +425,13 @@ container bind-mounts exactly that directory read-write, that its static file
 provider watches the mounted destination, and that host and container see the
 same directory device and inode. Publication takes a host lock in the authority
 directory, rechecks that mount, and replaces the file only when its current
-bytes and the lane's host generation both still match what the worker read.
-Every route publication advances that generation after its write, including
-one that finds the route already applied, and so do pause activation and
-retention, which share the same lane lock and generation. Reads take the same
-lock. A host command also refuses unless it holds the lock within half the
-persisted cutover reconciliation delay of starting, so a command whose reply
-was lost either applies before any recovery can claim the operation or never
-applies. Applied readback reads Traefik's API from inside that container. The
+bytes and the lane's host generation both still match what the worker read,
+then advances that generation. Pause activation and retention share the same
+lane lock and generation, and reads take the same lock. Every cutover, rollback
+and recovery run advances the generation when it enters its exclusive section,
+before any other host effect, so a command an earlier run dispatched and lost
+can never apply after a later run observes or settles the lane.
+Applied readback reads Traefik's API from inside that container. The
 initial file must already name the serving slot, and applied Traefik authority
 must agree with its single exact route. Missing mounts or file permissions are
 activation prerequisites. Changing live ingress access remains a Director stop

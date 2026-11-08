@@ -1,13 +1,14 @@
 import base64
-import fcntl
 import json
-import os
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from typing import Any, cast
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
+from control_plane.dokploy.cutover_host import BoundOdooCutoverHost
 from control_plane.dokploy.cutover_host_files import ProductHostFileRoute, ProductHostPreparedSites
 from control_plane.dokploy.prepared_host import (
     PreparedSiteDirectory,
@@ -94,7 +95,7 @@ class ProductHostRouteTests(unittest.TestCase):
             )
         self.assertEqual(self.route.observed_target(), OLD)
 
-    def test_delayed_switch_cannot_apply_after_a_no_op_recovery_publication(self) -> None:
+    def test_delayed_commands_cannot_apply_after_a_later_run_enters_the_lane(self) -> None:
         delayed = ProductHostFileRoute(
             self.target,
             reader=self.host.read,
@@ -103,27 +104,11 @@ class ProductHostRouteTests(unittest.TestCase):
             guard=Mock(),
         )
         admitted = delayed._read_owned()
-        self.assertEqual(self.route.publish(OLD, expected=(NEW,)), OLD)
+        self.route.fence_earlier_commands()
         with self.assertRaisesRegex(ValueError, "stale traffic switch"):
             delayed._replace_owned(
                 json.dumps(route_payload(self.target, NEW), sort_keys=True), admitted
             )
-        self.assertEqual(self.route.observed_target(), OLD)
-
-    def test_command_delayed_past_its_admission_window_never_applies(self) -> None:
-        admitted = self.route._read_owned()
-        lock = os.open(self.route.lock, os.O_RDWR | os.O_CREAT, 0o600)
-        self.addCleanup(os.close, lock)
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        with (
-            patch("control_plane.dokploy.cutover_host_files.HOST_COMMAND_ADMISSION_SECONDS", 0.5),
-            self.assertRaises(subprocess.CalledProcessError),
-        ):
-            self.route._replace_owned(
-                json.dumps(route_payload(self.target, NEW), sort_keys=True), admitted
-            )
-        fcntl.flock(lock, fcntl.LOCK_UN)
-        self.assertEqual(self.host.route_file.read_text(), admitted)
         self.assertEqual(self.route.observed_target(), OLD)
 
     def test_watch_proof_refuses_a_directory_the_proxy_does_not_watch(self) -> None:
@@ -234,6 +219,40 @@ class ProductHostPreparedSitesTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FileNotFoundError):
             sites.active_pause()
 
+    async def test_delayed_activation_cannot_apply_after_a_later_run_enters_the_lane(self) -> None:
+        sites = self.sites()
+        sites.publish(self.site, "original-operation")
+        admitted_generation = int(sites._read_frame("active.json")["generation"])
+        sites._run(
+            sites.execute,
+            "stage",
+            name=bundle_name("delayed-operation"),
+            content=prepared_bundle_text(self.site, "delayed-operation"),
+        )
+        ProductHostFileRoute(
+            TraefikRouteTarget(
+                route_id="lane",
+                host="fixture.invalid",
+                entrypoints=("web",),
+                route_file=self.host.route_file,
+                api_url="http://127.0.0.1:8080",
+                tls=False,
+            ),
+            reader=self.host.read,
+            execute=self.host.execute,
+            lock_directory=str(self.host.authority),
+            guard=Mock(),
+        ).fence_earlier_commands()
+        with self.assertRaises(subprocess.CalledProcessError):
+            sites._run(
+                sites.execute,
+                "activate",
+                name=bundle_name("delayed-operation"),
+                content=json.dumps("delayed-operation"),
+                expected_generation=admitted_generation,
+            )
+        self.assertEqual(sites.active_pause(), "original-operation")
+
     async def test_volume_outside_the_product_daemon_root_is_refused(self) -> None:
         self.host.state["volumes"][self.host.volume]["Mountpoint"] = str(self.host.authority)
         self.host.save()
@@ -263,3 +282,20 @@ class ProductHostPreparedSitesTests(unittest.IsolatedAsyncioTestCase):
             sites.load("held")
         with self.assertRaises(FileNotFoundError):
             sites.active_pause()
+
+
+class OperationEntryFenceTests(unittest.TestCase):
+    def test_every_run_fences_earlier_host_commands_before_its_own_effects(self) -> None:
+        calls = Mock()
+        calls.admit.side_effect = RuntimeError("stop after admission")
+        plan = object()
+        bound: Any = SimpleNamespace(
+            plan=plan,
+            guard=calls.guard,
+            route=SimpleNamespace(fence_earlier_commands=calls.fence),
+            state=SimpleNamespace(admit_execution=calls.admit),
+            record=lambda: None,
+        )
+        with self.assertRaisesRegex(RuntimeError, "stop after admission"):
+            BoundOdooCutoverHost.enter_execution(bound, cast(Any, plan))
+        self.assertEqual([name for name, *_ in calls.mock_calls], ["guard", "fence", "admit"])

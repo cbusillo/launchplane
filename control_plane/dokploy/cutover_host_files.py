@@ -5,7 +5,6 @@ from typing import Any
 
 import yaml
 
-from control_plane.contracts.odoo_prod_promotion_operation import ODOO_CUTOVER_RECONCILIATION_DELAY
 from control_plane.contracts.prepared_public_site import PreparedPublicSite
 from control_plane.dokploy.prepared_host import (
     ACTIVE_PAUSE_FILE,
@@ -27,7 +26,6 @@ MANAGED_PROXY_CONTAINER = "dokploy-traefik"
 HOST_FILE_HELPERS = r"""
 import fcntl,hashlib,json,os,subprocess,sys,tempfile,time
 from pathlib import Path
-STARTED=time.monotonic()
 spec=json.load(sys.stdin)
 def docker(*arguments):
     return subprocess.run(['docker',*arguments],capture_output=True,text=True,timeout=60,check=True).stdout
@@ -35,15 +33,14 @@ def hold_lock(path):
     path=Path(path)
     if not path.parent.is_dir() or path.parent.is_symlink(): raise ValueError('host lock directory is unavailable')
     descriptor=os.open(path,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+    deadline=time.monotonic()+30
     while True:
         try:
             fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            break
+            return descriptor
         except BlockingIOError:
-            if time.monotonic()-STARTED>=spec['admission_seconds']: raise ValueError('host command admission expired')
+            if time.monotonic()>=deadline: raise
             time.sleep(0.1)
-    if time.monotonic()-STARTED>=spec['admission_seconds']: raise ValueError('host command admission expired')
-    return descriptor
 def sync_directory(directory):
     descriptor=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
     try: os.fsync(descriptor)
@@ -102,14 +99,16 @@ elif spec['mode']=='read':
     generation=read_generation(spec['generation'])
     content=read_owned(route)
     print(json.dumps({'present':content is not None,'content':content or '','generation':generation}))
-elif spec['mode'] in {'publish','fence'}:
+elif spec['mode']=='enter':
+    hold_lock(spec['lock'])
+    generation=read_generation(spec['generation'])
+    advance_generation(generation)
+    print(json.dumps({'generation':generation+1}))
+elif spec['mode']=='publish':
     hold_lock(spec['lock'])
     watched_destination()
     if sha256(read_owned(route))!=spec['expected_sha256'] or not admitted(spec['expected_generation']):
         print(json.dumps({'outcome':'predecessor_changed'}))
-    elif spec['mode']=='fence':
-        advance_generation(spec['expected_generation'])
-        print(json.dumps({'outcome':'fenced'}))
     else:
         replace_owned(route,spec['content'],'.cutover-')
         advance_generation(spec['expected_generation'])
@@ -182,9 +181,6 @@ else:
 )
 
 
-HOST_COMMAND_ADMISSION_SECONDS = ODOO_CUTOVER_RECONCILIATION_DELAY.total_seconds() / 2
-
-
 def lane_fence(lock_directory: str, route_id: str) -> tuple[str, str]:
     authority = f"{lock_directory.rstrip('/')}/{route_id}.cutover"
     return authority + ".lock", authority + ".generation"
@@ -217,7 +213,6 @@ class ProductHostFileRoute(TraefikFileRoute):
         self.reader, self.execute, self.guard = reader, execute, guard
         self.lock, self.generation = lane_fence(lock_directory, target.route_id)
         self.admitted: tuple[str, int] | None = None
-        self.replaced = False
 
     def _request(self, mode: str, **values: object) -> dict[str, Any]:
         return {
@@ -226,32 +221,17 @@ class ProductHostFileRoute(TraefikFileRoute):
             "proxy": MANAGED_PROXY_CONTAINER,
             "lock": self.lock,
             "generation": self.generation,
-            "admission_seconds": HOST_COMMAND_ADMISSION_SECONDS,
             **values,
         }
 
     def publish(self, backend: str, *, expected: tuple[str, ...]) -> str:
         self.guard()
-        self.replaced = False
-        applied = super().publish(backend, expected=expected)
-        if not self.replaced:
-            self._fence_outstanding_commands()
-        return applied
+        return super().publish(backend, expected=expected)
 
-    def _fence_outstanding_commands(self) -> None:
-        if self.admitted is None:
-            raise ValueError("route authority was not read before its fence")
-        frame = run_host_program(
-            self.execute,
-            ROUTE_HOST_PROGRAM,
-            self._request(
-                "fence",
-                expected_sha256=content_sha256(self.admitted[0]),
-                expected_generation=self.admitted[1],
-            ),
-        )
-        if frame != {"outcome": "fenced"}:
-            raise ValueError("route authority changed; refusing a stale traffic switch")
+    def fence_earlier_commands(self) -> None:
+        frame = run_host_program(self.execute, ROUTE_HOST_PROGRAM, self._request("enter"))
+        if type(frame.get("generation")) is not int:
+            raise ValueError("lane fence has no host generation readback")
 
     def verify_watch(self) -> None:
         frame = run_host_program(
@@ -294,7 +274,6 @@ class ProductHostFileRoute(TraefikFileRoute):
         )
         if frame != {"outcome": "published", "sha256": content_sha256(payload)}:
             raise ValueError("route authority changed; refusing a stale traffic switch")
-        self.replaced = True
 
     def _api(self, suffix: str) -> Any:
         url = self.target.api_url.rstrip("/") + suffix
@@ -341,7 +320,6 @@ class ProductHostPreparedSites:
             "site": self.site,
             "lock": self.lock,
             "generation": self.generation,
-            "admission_seconds": HOST_COMMAND_ADMISSION_SECONDS,
             **values,
         }
         return run_host_program(command, PREPARED_HOST_PROGRAM, request)
