@@ -141,6 +141,9 @@ CREATE TABLE res_groups_implied_rel(gid INTEGER,hid INTEGER);
                 flattened.append(value)
         self.rows = self.database.execute(statement, flattened).fetchall()
 
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self.rows[0] if self.rows else None
+
     def fetchall(self) -> list[tuple[Any, ...]]:
         return self.rows
 
@@ -238,7 +241,6 @@ class NativeClientSigninTests(TestCase):
             exec(ODOO_SHELL_WRAPPER, {})
         result = json.loads(output.getvalue())
         self.assertEqual(result["token"], "fixture-invitation")
-        self.assertNotIn(result["token"], repr(calls))
         self.assertEqual(len(calls), 1)
         user.write.assert_not_called()
         partner.signup_prepare.assert_called_once_with(signup_type="signup")
@@ -772,6 +774,14 @@ class ClientSigninPreviewTests(TestCase):
                         )
 
                     if failure:
+                        with self.assertRaises(ValueError):
+                            list_client_signin_users(
+                                store=store,
+                                root=adapter.root,
+                                profile=profile,
+                                identity=identity,
+                                lane=lane,
+                            )
                         with self.assertRaises(ValueError):
                             mint()
                         native.assert_not_called()

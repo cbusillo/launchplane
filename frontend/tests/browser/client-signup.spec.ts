@@ -11,6 +11,7 @@ test("only the Client sees eligible signup buttons and minting happens only on c
   let eligible = true;
   let privateReads = 0;
   let mints = 0;
+  let mintFails = false;
   const binding = "a".repeat(64);
   const user = { xmlid: "fixture.user_client", name: "Example Client", login: "client@example.invalid" };
   const csrf = "fixture";
@@ -23,6 +24,7 @@ test("only the Client sees eligible signup buttons and minting happens only on c
   });
   await page.route("**/v1/product-review/sign-in", route => {
     mints += 1;
+    if (mintFails) return route.fulfill({ status: 409, json: { code: "client_signup_unavailable" } });
     expect(route.request().postDataJSON().xmlid).toBe(user.xmlid);
     expect(route.request().postDataJSON().reviewed_runtime_binding).toBe(binding);
     expect(route.request().headers()["x-csrf-token"]).toBe(csrf);
@@ -56,6 +58,13 @@ test("only the Client sees eligible signup buttons and minting happens only on c
   await expect(page.getByRole("checkbox", { name: "I looked at this preview and it is right." })).toBeEnabled();
   await nativePage.close();
   expect(mints).toBe(1);
+  mintFails = true;
+  await button.click();
+  const alert = page.getByRole("alert");
+  await expect(alert).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(button).toBeVisible();
+  await expect(alert).toBeVisible();
   const readsBeforeHistory = privateReads;
   await page.goto(path + "&decision_id=historical-decision");
   await expect(page.getByRole("link", { name: "View latest review" })).toBeVisible();

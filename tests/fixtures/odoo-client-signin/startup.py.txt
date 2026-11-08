@@ -181,3 +181,19 @@ def _write_runtime_config(settings: StartupSettings) -> None:
     with os.fdopen(descriptor, "w", encoding="utf-8") as config_file:
         os.fchmod(config_file.fileno(), 0o600)
         config_parser.write(config_file)
+
+
+RUNTIME_SCRIPTS_PATH = '/volumes/scripts'
+
+def _odoo_environment(settings: StartupSettings) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["ODOO_ADDONS_PATH"] = settings.addons_path
+    # Odoo's native environment option preserves whitespace that its conf reader trims.
+    # Override even an inherited PGPASSWORD so every launch uses these settings.
+    environment["PGPASSWORD"] = settings.database_password
+    python_path_parts = [
+        part for part in environment.get("PYTHONPATH", "").split(os.pathsep) if part and part != RUNTIME_SCRIPTS_PATH
+    ]
+    python_path_parts.insert(0, RUNTIME_SCRIPTS_PATH)
+    environment["PYTHONPATH"] = os.pathsep.join(python_path_parts)
+    return environment

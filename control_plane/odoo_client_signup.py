@@ -56,8 +56,6 @@ def _connection(
     profile: LaunchplaneProductProfileRecord,
     identity: LaunchplaneIdentity,
     lane: ClientSigninLane,
-    *,
-    mutation: bool = False,
 ) -> OdooRuntimeConnection:
     if not viewer_is_product_owner(profile=profile, identity=identity):
         raise PermissionError("Client sign-in is unavailable.")
@@ -92,7 +90,7 @@ def _connection(
                 generation_id=lane.generation_id,
                 fixture="read-only-test-identity",
             ),
-        ).connect(mutation=mutation)
+        ).connect(mutation=True)
     elif lane.instance == "testing":
         selection = select_stable_runtime(store, profile, "testing")
         if selection.identity.artifact_id != lane.generation_id:
@@ -221,7 +219,7 @@ def mint_client_signin(
     reviewed_runtime_binding: str,
     xmlid: str,
 ) -> dict[str, str]:
-    connection = _connection(store, root, profile, identity, lane, mutation=True)
+    connection = _connection(store, root, profile, identity, lane)
     if not reviewed_runtime_binding or _binding(connection) != reviewed_runtime_binding:
         raise ValueError("The reviewed sign-in lane changed.")
     _require_current(store, connection, profile, identity)

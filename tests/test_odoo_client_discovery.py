@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control_plane.dokploy.odoo_client_signin import (
     CLIENT_SIGNIN_LIST_PROGRAM,
@@ -25,6 +25,16 @@ class NativeAddonDiscoveryTests(TestCase):
         self.root = Path(self.enterContext(TemporaryDirectory())).resolve()
         self.enterContext(patch("logging.disable"))
         self.enterContext(patch.dict(os.environ, {}, clear=True))
+        expanduser = os.path.expanduser
+
+        def fixture_home(path: str) -> str:
+            if path == "~":
+                return str(self.root)
+            if path.startswith("~/"):
+                return str(self.root / path[2:])
+            return expanduser(path)
+
+        self.enterContext(patch("os.path.expanduser", side_effect=fixture_home))
         os.environ.update(
             ODOO_DB_NAME="fixture",
             ODOO_DB_HOST="database",
@@ -74,6 +84,7 @@ class NativeAddonDiscoveryTests(TestCase):
             "run_odoo_startup", validate_admin_password=admin.validate_admin_password
         )
         exec((FIXTURES / "startup.py.txt").read_text(), vars(startup))
+        self.startup = startup
         load_settings = startup._load_settings
         self.enterContext(
             patch.object(
@@ -138,6 +149,48 @@ class NativeAddonDiscoveryTests(TestCase):
         result = self.read()
         self.assertEqual([user["xmlid"] for user in result["users"]], ["fixture.user_3"])
         self.assertEqual(self.config["data_dir"], str(self.root / "data"))
+
+    def test_startup_addon_prefix_survives_native_environment_precedence(self) -> None:
+        self.startup.LAUNCHPLANE_ADDONS_PATH = str(self.root / "managed")
+        self.addon(self.root / "managed", "fixture", ["fixture.user_3"])
+        self.addon(self.root / "explicit", "other", [])
+        self.assertEqual([user["xmlid"] for user in self.read()["users"]], ["fixture.user_3"])
+
+    def test_executor_preflight_uses_the_same_effective_startup_environment(self) -> None:
+        from control_plane.dokploy.cutover_writer_capabilities import (
+            EXECUTOR_PREFLIGHT_PROGRAM,
+            SUPPORTED_SERVER_WIDE_MODULES,
+        )
+
+        startup = self.startup
+        startup.LAUNCHPLANE_ADDONS_PATH = str(self.root / "managed")
+        for name in {"fixture", *SUPPORTED_SERVER_WIDE_MODULES}:
+            self.addon(self.root / "managed", name, [])
+        self.addon(self.root / "explicit", "other", [])
+        connection = NativeClientListConnection()
+        self.addCleanup(connection.close)
+        connection.database.executescript(
+            "CREATE TABLE ir_config_parameter(key TEXT,value TEXT); INSERT INTO ir_config_parameter VALUES ('database.uuid','fixture-uuid');"
+        )
+        os.environ["ODOO_MAX_CRON_THREADS"] = "0"
+        request = {
+            "environment": dict(os.environ),
+            "database": "fixture",
+            "database_uuid": "fixture-uuid",
+            "planned_modules": [],
+            "supported_server_wide": sorted(SUPPORTED_SERVER_WIDE_MODULES),
+            "image": "fixture",
+        }
+        setattr(sys.modules["odoo.netsvc"], "init_logger", Mock())
+        output = io.StringIO()
+        with (
+            patch("runpy.run_path", return_value=vars(startup)),
+            patch.dict(sys.modules, {"psycopg2": SimpleNamespace(connect=lambda **_: connection)}),
+            patch("sys.stdin", io.StringIO(json.dumps(request))),
+            redirect_stdout(output),
+        ):
+            exec(EXECUTOR_PREFLIGHT_PROGRAM, {})
+        self.assertIn("fixture", json.loads(output.getvalue())["modules"])
 
     def test_native_explicit_path_retains_optional_metadata_and_rejects_malformed_values(
         self,

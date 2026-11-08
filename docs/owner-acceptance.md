@@ -12,7 +12,7 @@ preview or testing review page. The optional installed seed addon manifest key
 `res.users` XMLIDs owned by that addon. Missing or empty metadata offers no user
 and never gates a deployment. Malformed or unresolved declarations refuse
 sign-in qualification. Both reads and clicks discover addons through the native
-startup-generated effective config. Missing or ambiguous installed addon sources
+startup-generated effective config and its native child environment. Missing or ambiguous installed addon sources
 refuse qualification. Published testing lanes are observed through their managed
 route and publication custody, sharing the walkthrough check; compose domains
 are not required for these lanes.

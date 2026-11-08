@@ -152,6 +152,7 @@ with tempfile.TemporaryDirectory(prefix='launchplane-client-signin-') as directo
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         settings=startup._load_settings(argparse.Namespace(config_path=os.path.join(directory,'odoo.conf')))
         startup._write_runtime_config(settings)
+        os.environ.update(startup._odoo_environment(settings))
         config.parse_config(['-c',settings.config_path],setup_logging=False)
 import psycopg2
 """

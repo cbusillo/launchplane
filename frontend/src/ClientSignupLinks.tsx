@@ -17,13 +17,13 @@ export function ClientSignupLinks({ repository, pullRequest, generationId, insta
   const [error, setError] = useState("");
   const lookup: ClientSigninLookup = { repository, pull_request: pullRequest, generation_id: generationId, instance };
   useEffect(() => {
+    setError("");
     const controller = new AbortController();
     let sequence = 0;
     const refresh = () => {
       const request = ++sequence;
       setUsers([]);
       setRuntimeBinding("");
-      setError("");
       void readClientSigninUsers({ repository, pull_request: pullRequest, generation_id: generationId, instance }, controller.signal)
         .then(response => {
           if (!controller.signal.aborted && request === sequence) {

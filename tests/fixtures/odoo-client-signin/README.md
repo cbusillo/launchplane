@@ -11,7 +11,7 @@ Copyright Odoo S.A.; LGPL-3, reproduced in LICENSE.
 
 `startup.py.txt` contains unchanged startup settings/bootstrap definitions and
 constants selected from `docker/scripts/run_odoo_startup.py` in odoo-devkit
-commit `dfcc52d6aec24cac02bf9574386a190472106fe3`, with their imports.
+commit `dfcc52d6aec24cac02bf9574386a190472106fe3`, with their imports and native child environment builder.
 `odoo_addon_paths.py.txt` and `odoo_admin_password.py.txt` are unchanged sibling
 sources from that revision. Source and LGPL-3 license:
 https://github.com/cbusillo/odoo-devkit/tree/dfcc52d6aec24cac02bf9574386a190472106fe3/docker/scripts
