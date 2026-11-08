@@ -24384,8 +24384,6 @@ def create_launchplane_fastapi_app(
                     odoo_usage = OdooTestingUsage(reason_code="unsupported_lane")
                 elif target is None or target_id is None:
                     odoo_usage = OdooTestingUsage(reason_code="target_unavailable")
-                elif target.policies.staff_testing_hold is not None:
-                    odoo_usage = OdooTestingUsage(reason_code="staff_testing_hold")
                 elif any(
                     item.target_id == target_id.target_id
                     and (item.context, item.instance) != (target.context, target.instance)
@@ -24400,6 +24398,8 @@ def create_launchplane_fastapi_app(
                             target_id=target_id,
                             control_plane_root=resolved_control_plane_root,
                             database_url=store.database_url,
+                            record_store=store,
+                            product=profile.product,
                         )
                     except NativeSourceAuthorizationDenied:
                         raise _launchplane_http_error(

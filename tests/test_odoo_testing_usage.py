@@ -5,7 +5,9 @@ import io
 import json
 import re
 import shlex
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+import os
+import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
@@ -62,14 +64,18 @@ class SessionInventoryTests(unittest.TestCase):
         self.path = Path(self.directory)
         self.addons_path = "/opt/launchplane/addons,/odoo/addons"
         self.driver = ModuleType("psycopg2")
+        self.created_at = datetime.now(UTC) - timedelta(hours=2)
         self.namespace: dict[str, Any] = {"__name__": "fixture"}
         self.enterContext(patch.dict("sys.modules", {"psycopg2": self.driver}))
-        exec(ODOO_TESTING_USAGE_CONTAINER_PROGRAM, self.namespace)
+        exec(
+            odoo_usage_container_program("testing", generation_created_at=self.created_at),
+            self.namespace,
+        )
 
     def sessions(self) -> bool:
         return bool(self.namespace["read_sessions"](self.path, "testing_db"))
 
-    def test_empty_or_anonymous_store_is_idle_but_old_authenticated_sessions_protect(self) -> None:
+    def test_empty_anonymous_and_restored_sessions_are_idle(self) -> None:
         self.assertFalse(self.sessions())
         (self.path / "anonymous").write_text(json.dumps({"db": "testing_db", "uid": None}))
         self.assertFalse(self.sessions())
@@ -79,7 +85,7 @@ class SessionInventoryTests(unittest.TestCase):
         import os
 
         os.utime(shard / "session", (1, 1))
-        self.assertTrue(self.sessions())
+        self.assertFalse(self.sessions())
 
     def test_partial_authentication_counts_and_other_databases_are_excluded(self) -> None:
         session = self.path / "session"
@@ -177,6 +183,8 @@ class SessionInventoryTests(unittest.TestCase):
         actor_metadata_unavailable: bool = False,
         instance: str = "testing",
         argv: list[bytes] | None = None,
+        generation_created_at: datetime | None = None,
+        login_rows: tuple[tuple[int, datetime], ...] | None = None,
     ) -> dict[str, Any]:
         """Execute the emitted container probe, including its bounded exception handler."""
         config = MagicMock()
@@ -198,9 +206,34 @@ class SessionInventoryTests(unittest.TestCase):
             options["server_wide_modules"] = "base,web,session_store_module"
         connection = MagicMock()
         connection.cursor.return_value.__enter__.return_value.fetchone.return_value = (recent,)
+        if login_rows is not None:
+            database = sqlite3.connect(":memory:")
+            self.addCleanup(database.close)
+            database.execute("CREATE TABLE res_users_log (create_uid INTEGER, create_date TEXT)")
+            database.executemany(
+                "INSERT INTO res_users_log VALUES (?, ?)",
+                [
+                    (user, stamp.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S.%f"))
+                    for user, stamp in login_rows
+                ],
+            )
+            cursor = connection.cursor.return_value.__enter__.return_value
+
+            def execute_history(query: str, parameters: tuple[object, ...] = ()) -> None:
+                if query == "SET TRANSACTION READ ONLY":
+                    return
+                translated = query.replace(
+                    "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - interval '24 hours'",
+                    "datetime('now', '-24 hours')",
+                ).replace("%s", "?")
+                result = database.execute(translated, parameters)
+                cursor.fetchone.side_effect = lambda: (bool(result.fetchone()[0]),)
+                cursor.fetchall.side_effect = result.fetchall
+
+            cursor.execute.side_effect = execute_history
         if actor_metadata_unavailable:
 
-            def execute(query: str) -> None:
+            def execute(query: str, _parameters: tuple[object, ...] = ()) -> None:
                 if query.startswith("SELECT create_uid"):
                     raise TimeoutError("private-fixture optional metadata")
 
@@ -239,11 +272,48 @@ class SessionInventoryTests(unittest.TestCase):
             patch.object(Path, "glob", return_value=processes),
             redirect_stdout(output),
         ):
-            exec(odoo_usage_container_program(instance), {"__name__": "__main__"})
+            program = odoo_usage_container_program(instance, generation_created_at=self.created_at)
+            if generation_created_at is None:
+                exec(program, {"__name__": "__main__"})
+            else:
+                namespace: dict[str, Any] = {"__name__": "fixture"}
+                exec(program, namespace)
+                namespace["GENERATION_CREATED_AT"] = generation_created_at.timestamp()
+                print(json.dumps(namespace["probe"]()))
         self.assertNotIn("private-fixture", output.getvalue())
         value = json.loads(output.getvalue())
         assert isinstance(value, dict)
         return value
+
+    def test_restored_login_and_session_history_do_not_claim_current_generation_use(self) -> None:
+        now = datetime.now(UTC)
+        created = now - timedelta(minutes=30)
+        old = now - timedelta(hours=1)
+        sessions = self.path / "sessions"
+        sessions.mkdir()
+        session = sessions / "restored"
+        session.write_text(json.dumps({"db": "testing_db", "uid": 42}))
+        os.utime(session, (old.timestamp(), old.timestamp()))
+        original = session.read_bytes(), session.stat().st_mtime
+        for current_login, current_session in ((False, False), (True, False), (False, True)):
+            with self.subTest(login=current_login, session=current_session):
+                stamp = now if current_session else old
+                os.utime(session, (stamp.timestamp(), stamp.timestamp()))
+                rows = ((42, old),) + (((7, now),) if current_login else ())
+                result = self.probe_result(generation_created_at=created, login_rows=rows)
+                self.assertNotIn("unavailable", result)
+                self.assertEqual(result["recent_signins"], current_login)
+                self.assertEqual(result["authenticated_sessions"], current_session)
+                self.assertEqual(
+                    result["actors"],
+                    ["odoo-user:7"]
+                    if current_login
+                    else ["odoo-user:42"]
+                    if current_session
+                    else [],
+                )
+                self.assertEqual(session.read_bytes(), original[0])
+                self.assertEqual(session.stat().st_mtime, stamp.timestamp())
 
     def test_preview_container_reads_sessions_and_signins_with_preview_identity(self) -> None:
         result = self.probe_result("sessions_used", recent=True, instance="preview")
@@ -429,6 +499,18 @@ class UsageReaderTests(unittest.TestCase):
             patch(module + "api.list_deployments_for_target", return_value=[])
         )
         self.remote = self.enterContext(patch(module + "_read_remote"))
+        self.store = Mock()
+        self.store.find_testing_candidate_by_target.return_value = None
+        self.generation = SimpleNamespace(
+            product="fixture",
+            context="fixture",
+            instance="testing",
+            target_id=self.target_id.target_id,
+            namespace="fixture-project",
+            prepared_at=self.target.updated_at,
+            completed_at=(datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+        )
+        self.store.read_fresh_odoo_testing_generation.return_value = self.generation
 
     def read(self, **kwargs: Any) -> Any:
         return read_odoo_testing_usage(
@@ -436,6 +518,8 @@ class UsageReaderTests(unittest.TestCase):
             target_id=self.target_id,
             control_plane_root=Path("/fixture"),
             database_url="sqlite+pysqlite://",
+            record_store=self.store,
+            product="fixture",
             **kwargs,
         )
 
@@ -470,6 +554,93 @@ class UsageReaderTests(unittest.TestCase):
                 result = self.read()
                 self.assertEqual(result.usage, "in_use" if recent or sessions else "unused")
                 self.assertNotIn("private-provider-token", repr(result))
+
+    def test_generation_boundary_comes_from_current_custody_and_is_rechecked(self) -> None:
+        self.remote.side_effect = lambda **kw: kw["receive"](
+            {"type": "complete", "recent_signins": False, "authenticated_sessions": False}
+        )
+        self.provider.return_value["appName"] = self.generation.namespace + "-abc123"
+        for field, value in (
+            ("target_id", "retired"),
+            ("context", "retired"),
+            ("namespace", "retired"),
+            ("completed_at", "invalid"),
+            ("completed_at", "2026-01-01T00:00:00"),
+            ("completed_at", (datetime.now(UTC) + timedelta(hours=1)).isoformat()),
+        ):
+            previous = getattr(self.generation, field)
+            with self.subTest(field=field, value=value):
+                setattr(self.generation, field, value)
+                result = self.read()
+                self.assertEqual(
+                    (result.usage, result.reason_code),
+                    ("unknown", "generation_boundary_unavailable"),
+                )
+                setattr(self.generation, field, previous)
+        self.assertEqual(self.read().usage, "unused")
+        captured_legacy: dict[str, Any] = {"__name__": "fixture"}
+        self.remote.side_effect = lambda **kw: (
+            exec(kw["payload"]["container_program"], captured_legacy),
+            kw["receive"](
+                {"type": "complete", "recent_signins": False, "authenticated_sessions": False}
+            ),
+        )
+        self.assertEqual(self.read().usage, "unused")
+        self.assertEqual(
+            captured_legacy["GENERATION_CREATED_AT"],
+            datetime.fromisoformat(self.generation.completed_at).timestamp(),
+        )
+        self.store.read_fresh_odoo_testing_generation.return_value = None
+        self.assertEqual(self.read().usage, "unknown")
+        candidate = SimpleNamespace(
+            product="fixture",
+            context="fixture",
+            compose_id=self.target_id.target_id,
+            namespace="fixture-project",
+            created_at=datetime.now(UTC) - timedelta(hours=1),
+            application=SimpleNamespace(
+                prepared=SimpleNamespace(observed_at=datetime.now(UTC) - timedelta(minutes=30))
+            ),
+        )
+        self.store.find_testing_candidate_by_target.return_value = candidate
+        captured: dict[str, Any] = {"__name__": "fixture"}
+
+        def probe(**kwargs: Any) -> None:
+            exec(kwargs["payload"]["container_program"], captured)
+            kwargs["receive"](
+                {"type": "complete", "recent_signins": False, "authenticated_sessions": False}
+            )
+
+        self.remote.side_effect = probe
+        self.assertEqual(self.read().usage, "unused")
+        self.assertEqual(
+            captured["GENERATION_CREATED_AT"],
+            candidate.application.prepared.observed_at.timestamp(),
+        )
+
+        def changed(**kwargs: Any) -> None:
+            probe(**kwargs)
+            candidate.application.prepared.observed_at += timedelta(seconds=1)
+
+        self.remote.side_effect = changed
+        result = self.read()
+        self.assertEqual((result.usage, result.reason_code), ("unknown", "generation_changed"))
+
+    def test_missing_generation_preserves_probe_failure_without_inventing_unused(self) -> None:
+        self.store.read_fresh_odoo_testing_generation.return_value = None
+        for reason in (
+            "database_connection_unavailable",
+            "session_file_unreadable",
+            "generation_boundary_unavailable",
+        ):
+            with self.subTest(reason=reason):
+                self.remote.side_effect = lambda **kw: kw["receive"](
+                    {"type": "complete", "unavailable": True, "reason_code": reason}
+                )
+                result = self.read()
+                self.assertEqual((result.usage, result.reason_code), ("unknown", reason))
+                self.assertIsNone(result.recent_signins)
+                self.assertIsNone(result.authenticated_sessions)
 
     def test_incomplete_invalid_or_failed_frames_are_unknown(self) -> None:
         for frame in (

@@ -625,11 +625,18 @@ For an Odoo testing lane, `collect` now reads recent successful logins from
 `res_users_log` in a transaction enforced read-only by PostgreSQL and checks the
 running web container's configured filesystem session store. The preceding
 24 hours count for interactive and `authenticate()` logins on every account,
-including administrator and portal accounts. Restored login rows can
-conservatively count as use. Any authenticated
-or partially authenticated session for that database counts regardless of age;
-device-log rows and old login timestamps cannot prove that a browser session has
-ended. Session contents, identifiers, account names and credentials never leave
+including administrator and portal accounts, bounded below by the current
+generation's creation boundary. Native copies use their candidate's immutable
+private-readiness `observed_at`, before public cutover; earlier restored copies
+use the existing generation's `completed_at`. Allocation and preparation start
+before copying history and cannot supply that boundary.
+The product, context, target and provider compose project must
+match that custody, which is rechecked after the probe. A missing or mismatched
+boundary reports UNKNOWN, without adding a positive-unused admission requirement.
+Authenticated or partially authenticated session files count when their modification
+time is at or after that boundary. Restored earlier login/session history stays
+intact and does not establish current use. Current sessions remain protective
+regardless of the 24-hour login window. Session contents, identifiers, account names and credentials never leave
 the container. The result exposes only two booleans and a bounded `reason_code`. The filesystem check follows
 [Odoo's session storage contract](https://github.com/odoo/odoo/blob/19.0/odoo/http.py),
 without calling methods that create, refresh, migrate or delete session files.
@@ -645,6 +652,10 @@ trace and is never retried with another identity. Complete negative login
 and session reads can produce `unused`. The separate
 [never-served rule](#never-served-testing-generations) can also qualify non-use
 from complete durable generation records; staff holds protect both paths.
+Collection probes held testing lanes too. An `isolation_staging` hold does not
+hide current use; a `staff_testing` hold remains independently protective even
+when the probe reports unused or UNKNOWN. Inspect reads the collected facts,
+and rebuild admission runs the same generation-bounded reader afresh.
 Other drivers and previews retain their existing collection behavior.
 Resource collection inspects eligible resettable Odoo testing copies on both
 healthy and down lanes when no staff-testing hold is active. A successful
