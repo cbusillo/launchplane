@@ -2768,6 +2768,22 @@ filestore SHA256/lengths, and complete expanded filestore file/byte counts.
 This is the declared offline output, never a claimed observation of
 production. The compiler binds it to the selected artifact and generation.
 
+This native path can select the exact canonical PR Build before Client acceptance
+or main. The service verifies its current open PR head and normal build provenance,
+then binds the offline pair to that image. Admission retains the preview-purpose
+manifest on the original operation; it never registers it as a release artifact.
+The worker carries it into ordinary independent-copy preparation and rechecks
+provenance before first application preparation. Retained preparation and recovery
+keep the original manifest, request, caller and candidate. A moved head or changed
+build cannot substitute another candidate. Use, needed-copy, separation, original
+data, Client and backup protections remain independent. Ordinary preview source
+major matching and production release eligibility are unchanged.
+
+Automatic release reconciliation still holds behind a serving PR candidate until
+source history proves forward movement. An explicit rebuild can select the newest
+verified release independently; selection retains the recorded release baseline
+for complete run/history checks and refuses an older requested release.
+
 Once the normal worker has recorded its private candidate application, the
 original authenticated testing caller uploads one part at a time to
 `wss://SERVICE/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source/{part}`

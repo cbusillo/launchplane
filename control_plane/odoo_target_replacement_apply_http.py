@@ -157,7 +157,7 @@ def enqueue_odoo_target_replacement_apply_operation(
     request_fingerprint: str,
     created_at: str,
     authorization: DurableOperationAuthorization,
-    native_preflight: Callable[[], None] | None = None,
+    native_preflight: Callable[[], ArtifactIdentityManifest | None] | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     try:
         operation_store = odoo_target_replacement_apply_operation_store(record_store)
@@ -198,12 +198,12 @@ def enqueue_odoo_target_replacement_apply_operation(
             instance=request.replacement.instance,
             artifact_id=request.replacement.artifact_id,
         )
-        if native_preflight is not None:
-            native_preflight()
+        candidate_manifest = native_preflight() if native_preflight is not None else None
         _validate_target_replacement_apply_artifact_authority(
             operation_store=operation_store,
             replacement_request=request.replacement,
             context=context,
+            verified_manifest=candidate_manifest,
         )
         operation = build_odoo_target_replacement_apply_operation_record(
             replacement_request=request.replacement,
@@ -213,6 +213,7 @@ def enqueue_odoo_target_replacement_apply_operation(
             request_fingerprint=request_fingerprint,
             created_at=created_at,
             authorization=authorization,
+            testing_candidate_manifest=candidate_manifest,
         )
     except (
         OdooTargetReplacementApplyCurrentArtifactChangedError,
@@ -384,6 +385,7 @@ def build_odoo_target_replacement_apply_operation_record(
     request_fingerprint: str,
     created_at: str,
     authorization: DurableOperationAuthorization,
+    testing_candidate_manifest: ArtifactIdentityManifest | None = None,
 ) -> OdooStableTargetReplacementOperationRecord:
     if replacement_request.strategy == "replace-and-cutover":
         caller_binding(authorization.caller)
@@ -405,6 +407,7 @@ def build_odoo_target_replacement_apply_operation_record(
         request_fingerprint=request_fingerprint,
         request=replacement_request,
         authorization=authorization,
+        testing_candidate_manifest=testing_candidate_manifest,
         status="pending",
         phase="created",
         created_at=created_at,

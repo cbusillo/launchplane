@@ -13,6 +13,7 @@ from control_plane.build_provenance import (
     VerifiedGenericWebBuild,
     record_verified_build_artifact,
 )
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.clean_testing_snapshot import snapshot_storage_budget
 from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -108,12 +109,23 @@ def inspect_current_testing_rebuild(
     from control_plane.product_reconcile import (
         ProductReconcileError,
         latest_verified_testing_release,
+        verified_testing_rebuild_artifact,
     )
 
     driver = resolve_testing_rebuild_driver(store, request.product)
     if verified_build is None:
         try:
-            verified_build = latest_verified_testing_release(store, driver.profile, driver.lane)
+            verified_build = (
+                verified_testing_rebuild_artifact(
+                    store,
+                    driver.profile,
+                    driver.lane,
+                    artifact_id=request.artifact_id,
+                    source_git_ref=request.source_git_ref,
+                )
+                if request.migrated_source is not None
+                else latest_verified_testing_release(store, driver.profile, driver.lane)
+            )
         except (BuildProvenanceError, ProductReconcileError) as error:
             raise TestingRebuildRefused(
                 "testing_rebuild_inputs_unverified", "The current testing build is unavailable."
@@ -131,7 +143,7 @@ def admit_current_testing_rebuild(
     request: OdooStableTargetReplacementRequest,
     actor: str,
     verified_build: VerifiedBuildArtifact | VerifiedGenericWebBuild | None = None,
-) -> None:
+) -> ArtifactIdentityManifest | None:
     resolve_testing_rebuild_driver(store, request.product).require_execution()
     inspection, verified = inspect_current_testing_rebuild(
         root=root, store=store, request=request, actor=actor, verified_build=verified_build
@@ -142,12 +154,18 @@ def admit_current_testing_rebuild(
             raise TestingRebuildRefused(blocker.code, blocker.message)
         raise TestingRebuildRefused(TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE, inspection.message)
     if isinstance(verified, VerifiedBuildArtifact):
+        if (
+            verified.manifest.source_build is not None
+            and verified.manifest.source_build.purpose == "preview"
+        ):
+            return verified.manifest
         try:
             record_verified_build_artifact(record_store=store, verified=verified)
         except BuildProvenanceError as error:
             raise TestingRebuildRefused(
                 "testing_rebuild_inputs_unverified", "The verified testing artifact changed."
             ) from error
+    return None
 
 
 def inspect_testing_rebuild(
@@ -223,6 +241,13 @@ def inspect_testing_rebuild(
         idempotency_key="read-only",
         request_fingerprint="read-only",
         request=apply,
+        testing_candidate_manifest=(
+            verified_build.manifest
+            if isinstance(verified_build, VerifiedBuildArtifact)
+            and verified_build.manifest.source_build is not None
+            and verified_build.manifest.source_build.purpose == "preview"
+            else None
+        ),
         created_at=now,
         updated_at=now,
     )

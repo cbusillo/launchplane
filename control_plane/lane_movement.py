@@ -261,6 +261,7 @@ def require_forward_build(
     current: LaneBuild,
     desired: LaneBuild,
     transport: BuildProvenanceTransport | None = None,
+    require_descendant: bool = False,
 ) -> LaneBuild:
     store = cast(LaneMovementStore, record_store)
     try:
@@ -297,6 +298,8 @@ def require_forward_build(
                 current = replace(current, commit=manifest.source_commit)
     if not current.artifact_id and not current.commit:
         return desired
+    if require_descendant and current.commit.lower() == desired.commit.lower():
+        raise LaneMovementRefused("source_order_unverified")
     if current.commit.lower() == desired.commit.lower() and (
         (current.artifact_id and current.artifact_id == desired.artifact_id)
         or (current.image and current.image == desired.image)
@@ -327,6 +330,8 @@ def require_forward_build(
     if not all(re.fullmatch(r"[0-9a-fA-F]{40}", sha) for sha in (current.commit, desired.commit)):
         raise LaneMovementRefused("source_order_unverified")
     if current.commit.lower() == desired.commit.lower():
+        if require_descendant:
+            raise LaneMovementRefused("source_order_unverified")
         # A same-commit rebuild can change shared inputs. Never guess its age from
         # an artifact name, digest, or the time it was first recorded locally.
         if profile.driver_id != "odoo" and desired.image:
@@ -352,6 +357,8 @@ def require_forward_build(
         if comparison.get("status") == "behind":
             raise LaneMovementRefused("ancestor_build")
         if comparison.get("status") == "diverged":
+            if require_descendant:
+                raise LaneMovementRefused("source_order_unverified")
             # Following an open PR also admits rebases. Its freshly verified
             # artifact must be newer than the serving generation's build.
             if profile.driver_id != "odoo" and desired.image:

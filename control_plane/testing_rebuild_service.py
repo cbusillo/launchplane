@@ -1491,6 +1491,11 @@ class NativeTestingRebuildExecution:
             self.operation.request.source_git_ref,
         ):
             raise ValueError("Candidate differs from the original admitted artifact/source pair.")
+        if (
+            self.operation.testing_candidate_manifest is not None
+            and app_plan.artifact != self.operation.testing_candidate_manifest
+        ):
+            raise ValueError("Candidate differs from the original admitted build provenance.")
         new = TestingCopy(
             copy_id=allocation.namespace,
             target_id=allocation.compose_id,
@@ -1515,6 +1520,38 @@ class NativeTestingRebuildExecution:
             new=new,
         )
 
+    def require_candidate_build(self) -> None:
+        candidate = self.operation.testing_candidate_manifest
+        if candidate is not None:
+            from control_plane.build_provenance import BuildProvenanceError
+            from control_plane.product_reconcile import (
+                ProductReconcileError,
+                verified_testing_rebuild_artifact,
+            )
+
+            try:
+                current = verified_testing_rebuild_artifact(
+                    self.store,
+                    self.intent.profile,
+                    self.lane,
+                    artifact_id=self.operation.request.artifact_id,
+                    source_git_ref=self.operation.request.source_git_ref,
+                )
+            except ProductReconcileError as error:
+                raise NativeSourceUnavailable("The candidate build read is unavailable.") from error
+            except BuildProvenanceError as error:
+                if error.code == "github_read_failed":
+                    raise NativeSourceUnavailable(
+                        "The candidate build read is unavailable."
+                    ) from error
+                raise NativeTestingRebuildAdmissionChanged(
+                    "The admitted candidate build is no longer eligible."
+                ) from error
+            if current.manifest != candidate:
+                raise NativeTestingRebuildAdmissionChanged(
+                    "The admitted candidate provenance changed."
+                )
+
     def current_candidate_inputs(
         self, allocation: TestingCandidateAllocation
     ) -> TestingCandidateRuntimeInputs:
@@ -1527,6 +1564,7 @@ class NativeTestingRebuildExecution:
                 source=rebuild_source(self.operation),
                 migrated_source=self.operation.request.migrated_source,
                 admitted_profile=self.intent.profile,
+                admitted_artifact=self.operation.testing_candidate_manifest,
             )
         except CandidateRuntimeInputsChanged as error:
             raise NativeTestingRebuildAdmissionChanged(
@@ -1662,6 +1700,8 @@ class NativeTestingRebuildExecution:
                             "The original route writer is not proven excluded."
                         ) from None
         if existing_publication is None:
+            if allocation is None or allocation.application is None:
+                self.require_candidate_build()
             self.guard()
             if allocation is None:
                 allocation = TestingCandidateAllocation(

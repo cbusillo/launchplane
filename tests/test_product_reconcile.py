@@ -252,6 +252,8 @@ class FakeGitHub:
                     if f"head_sha={run['head_sha']}" in path and f"event={run['event']}" in path
                 ]
             }
+        if path in {f"/repos/{REPOSITORY}/actions/runs/{run_id}" for run_id in self.runs}:
+            return self.runs[int(path.rsplit("/", 1)[1])]
         if path.startswith(f"/repos/{REPOSITORY}/commits?"):
             if "page=1" not in path:
                 return []
@@ -926,6 +928,309 @@ class ProductReconcileStoreTests(ProductReconcileTestCase):
 
 
 class ProductReconcileTestingTests(ProductReconcileTestCase):
+    def test_requested_migrated_release_cannot_select_an_ancestor_build(self) -> None:
+        from control_plane.product_reconcile import verified_testing_rebuild_artifact
+
+        self._running_release(20, DEPLOYABLE)
+        self.github.add_run(10, OLDER)
+        profile = self.store.read_product_profile_record("site")
+        lane = next(item for item in profile.lanes if item.instance == "testing")
+        current = verified_testing_rebuild_artifact(
+            self.store, profile, lane, artifact_id="artifact-cm-run-20-1", source_git_ref=DEPLOYABLE
+        )
+        self.assertEqual(current.manifest.source_commit, DEPLOYABLE)
+        with self.assertRaises(BuildProvenanceError):
+            verified_testing_rebuild_artifact(
+                self.store, profile, lane, artifact_id="artifact-cm-run-10-1", source_git_ref=OLDER
+            )
+
+    def serving_candidate(
+        self, status: Literal["pass", "reconciliation_required", "fail"] = "pass"
+    ) -> str:
+        from tests.test_migrated_testing_source import MigratedTestingRequestTests
+
+        self._running_release(20, DEPLOYABLE)
+        candidate_id = "artifact-cm-run-30-1"
+        self.github.add_run(30, PR_HEAD, event="pull_request")
+        candidate = verify_build_artifact(
+            transport=self.github,
+            repository=REPOSITORY,
+            repository_id=REPOSITORY_ID,
+            commit=PR_HEAD,
+            purpose="preview",
+            context="cm",
+            image_repository=IMAGE_REPOSITORY,
+            pull_request_number=5,
+        ).manifest
+        migrated = MigratedTestingRequestTests().request().migrated_source
+        assert migrated is not None
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            OdooStableTargetReplacementOperationRecord(
+                operation_id="candidate-operation",
+                product="site",
+                context="cm",
+                instance="testing",
+                idempotency_key="candidate-original",
+                request_fingerprint="candidate-request",
+                request=OdooStableTargetReplacementApplyRequest(
+                    product="site",
+                    instance="testing",
+                    strategy="replace-and-cutover",
+                    data_source_mode="migrated_restore",
+                    artifact_id=candidate_id,
+                    source_git_ref=PR_HEAD,
+                    migrated_source=migrated.model_copy(
+                        update={
+                            "product": "site",
+                            "context": "cm",
+                            "target_image": candidate.image.digest,
+                        }
+                    ),
+                ),
+                testing_candidate_manifest=candidate,
+                status=status,
+                phase="post_deploy"
+                if status == "reconciliation_required"
+                else "completed"
+                if status == "pass"
+                else "failed",
+                created_at="2026-09-30T12:00:00Z",
+                updated_at="2026-09-30T12:00:00Z",
+                finished_at="" if status == "reconciliation_required" else "2026-09-30T12:00:00Z",
+                error_message="Fixture retirement held" if status != "pass" else "",
+                error_code="fixture_retirement_held" if status != "pass" else "",
+            )
+        )
+        from control_plane.contracts.testing_candidate import (
+            TestingCandidateAllocation,
+            testing_candidate_namespace,
+        )
+        from control_plane.contracts.testing_candidate_application import (
+            TestingCandidateApplication,
+            TestingCandidateApplicationPlan,
+        )
+        from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+        from tests.test_odoo_testing_restore import generation
+
+        namespace = testing_candidate_namespace("site", "cm", "candidate-operation")
+        source = migrated.model_copy(
+            update={"product": "site", "context": "cm", "target_image": candidate.image.digest}
+        )
+        identity = RuntimeIdentity(
+            product="site",
+            context="cm",
+            instance="testing",
+            deployment_record_id="candidate-deployment",
+            artifact_id=candidate_id,
+            source_git_ref=PR_HEAD,
+            image_digest=candidate.image.digest,
+            image_reference=f"{IMAGE_REPOSITORY}@{candidate.image.digest}",
+        )
+        plan = TestingCandidateApplicationPlan(
+            product="site",
+            context="cm",
+            operation_id="candidate-operation",
+            namespace=namespace,
+            target_id="candidate-compose",
+            base_url="https://testing.example.invalid",
+            artifact=candidate,
+            runtime_identity=identity,
+            source="migrated",
+            native_source=source,
+            generation=generation().model_copy(
+                update={
+                    "product": "site",
+                    "context": "cm",
+                    "operation_id": "candidate-operation",
+                    "namespace": namespace,
+                    "target_id": "candidate-compose",
+                    "domain_host": "testing.example.invalid",
+                    "source_mode": "container-export",
+                    "source_binding_sha256": source.binding_sha256,
+                    "migrated_source": source,
+                    "drill_storage_budget": OdooTestingDrillStorageBudget(
+                        database_bytes=1024,
+                        filestore_bytes=1024,
+                        staging_bytes=1024,
+                        reserve_bytes=1024,
+                    ),
+                }
+            ),
+            authority_sha256="b" * 64,
+            credential_bindings_sha256="c" * 64,
+        )
+        allocation = TestingCandidateAllocation(
+            namespace=namespace,
+            product="site",
+            context="cm",
+            operation_id="candidate-operation",
+            intent_sha256="d" * 64,
+            serving_target_id="old-target",
+            server_id="server",
+            project_id="project",
+            environment_id="environment",
+            compose_id="candidate-compose",
+            resources_binding_sha256="b" * 64,
+            application=TestingCandidateApplication(plan=plan),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.store.write_provider_target_record(
+            ProviderTargetRecord(
+                context="cm",
+                instance="testing",
+                provider_id="dokploy",
+                target_category="compose",
+                target_id=allocation.serving_target_id,
+                display_name="old-testing",
+                provider_target_type="compose",
+                source_label="fixture",
+                updated_at=allocation.created_at.isoformat(),
+            )
+        )
+        self.store.compare_and_write_testing_candidate(None, allocation)
+        self.store.write_environment_inventory(
+            EnvironmentInventory(
+                context="cm",
+                instance="testing",
+                updated_at="2026-09-30T12:00:00Z",
+                source_git_ref=PR_HEAD,
+                deployment_record_id="candidate-deployment",
+                runtime_identity=identity,
+                deploy=DeploymentEvidence(
+                    deploy_mode="testing-rebuild",
+                    target_name=namespace,
+                    target_type="compose",
+                    status="pass",
+                ),
+            )
+        )
+        return candidate_id
+
+    def test_native_candidate_inventory_does_not_report_prior_release_as_already_deployed(
+        self,
+    ) -> None:
+        candidate_id = self.serving_candidate()
+        profile = self.store.read_product_profile_record("site")
+        plan, verified = _plan_testing_target(
+            record_store=self.store,
+            profile=profile,
+            repository_id=REPOSITORY_ID,
+            transport=self.github,
+        )
+        self.assertEqual(plan["current_artifact_id"], candidate_id)
+        self.assertEqual(plan["current_commit"], PR_HEAD)
+        self.assertEqual(
+            (plan["action"], plan["reason"], plan["held"]), ("none", "ancestor_build", True)
+        )
+        self.assertIsNone(verified)
+        self.github.add_run(40, NEWEST)
+        self.github.runs[40]["run_started_at"] = "2026-10-01T12:00:00Z"
+        get_json = self.github.get_json
+
+        def divergent_main(path: str) -> object:
+            if path == f"/repos/{REPOSITORY}/compare/{PR_HEAD}...{NEWEST}":
+                return {
+                    "status": "diverged",
+                    "base_commit": {"sha": PR_HEAD},
+                    "merge_base_commit": {"sha": DEPLOYABLE},
+                }
+            if path == f"/repos/{REPOSITORY}/actions/runs/40/attempts/1":
+                return self.github.runs[40]
+            return get_json(path)
+
+        with patch.object(self.github, "get_json", side_effect=divergent_main):
+            held, verified = _plan_testing_target(
+                record_store=self.store,
+                profile=profile,
+                repository_id=REPOSITORY_ID,
+                transport=self.github,
+            )
+        self.assertEqual(held["action"], "none")
+        self.assertEqual(
+            (held["action"], held["reason"], held["held"]),
+            ("none", "source_order_unverified", True),
+        )
+        self.assertIsNone(verified)
+        self.github.first_parents[NEWEST] = PR_HEAD
+        self.github.first_parents[PR_HEAD] = DEPLOYABLE
+        self.github.add_run(40, NEWEST)
+        forward, verified = _plan_testing_target(
+            record_store=self.store,
+            profile=profile,
+            repository_id=REPOSITORY_ID,
+            transport=self.github,
+        )
+        self.assertEqual(forward["action"], "deploy")
+        self.assertIsNotNone(verified)
+        assert verified is not None
+        self.assertEqual(verified.manifest.source_commit, NEWEST)
+
+    def test_explicit_release_selection_keeps_release_baseline_while_candidate_serves(self) -> None:
+        from control_plane.product_reconcile import (
+            latest_verified_testing_release,
+            verified_testing_rebuild_artifact,
+        )
+
+        statuses: tuple[Literal["pass", "reconciliation_required", "fail"], ...] = (
+            "pass",
+            "reconciliation_required",
+            "fail",
+        )
+        for status in statuses:
+            with self.subTest(status=status):
+                self.doCleanups()
+                self.setUp()
+                self.serving_candidate(status)
+                profile = self.store.read_product_profile_record("site")
+                lane = next(item for item in profile.lanes if item.instance == "testing")
+                with patch.object(
+                    self.store,
+                    "list_odoo_stable_target_replacement_operation_records",
+                    side_effect=AssertionError("Do not enumerate operation history"),
+                ):
+                    selected = latest_verified_testing_release(self.store, profile, lane)
+                    self.assertEqual(selected.manifest.source_commit, DEPLOYABLE)
+                    held, _ = _plan_testing_target(
+                        record_store=self.store,
+                        profile=profile,
+                        repository_id=REPOSITORY_ID,
+                        transport=self.github,
+                    )
+                    self.assertEqual((held["current_pull_request_number"], held["held"]), (5, True))
+        self.github.add_run(10, OLDER)
+        with self.assertRaises(BuildProvenanceError):
+            verified_testing_rebuild_artifact(
+                self.store, profile, lane, artifact_id="artifact-cm-run-10-1", source_git_ref=OLDER
+            )
+        self.github.add_run(40, NEWEST)
+        self.assertEqual(
+            latest_verified_testing_release(self.store, profile, lane).manifest.source_commit,
+            NEWEST,
+        )
+        self.github.runs.pop(20)
+        for explicit in (False, True):
+            plan, verified = _plan_testing_target(
+                record_store=self.store,
+                profile=profile,
+                repository_id=REPOSITORY_ID,
+                transport=self.github,
+                for_rebuild=explicit,
+            )
+            self.assertEqual(plan["reason"], "incomplete_build_runs")
+            self.assertIsNone(verified)
+        self.github.add_run(20, DEPLOYABLE)
+        self.github.first_parents[NEWEST] = OLDER
+        for explicit in (False, True):
+            plan, verified = _plan_testing_target(
+                record_store=self.store,
+                profile=profile,
+                repository_id=REPOSITORY_ID,
+                transport=self.github,
+                for_rebuild=explicit,
+            )
+            self.assertEqual(plan["reason"], "incomplete_commit_history")
+            self.assertIsNone(verified)
+
     def test_stale_success_filter_does_not_hide_the_newest_successful_build(self) -> None:
         self._running_release(10, OLDER)
         self.github.add_run(20, DEPLOYABLE)

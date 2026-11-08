@@ -18,6 +18,7 @@ from control_plane.build_provenance import (
     record_verified_build_artifact,
     verify_build_artifact,
     verify_generic_web_build,
+    verify_requested_build_artifact,
 )
 from control_plane.contracts.artifact_identity import BuildPurpose
 from control_plane.github_read_cache import GitHubReadCache
@@ -45,6 +46,8 @@ class FakeGitHub:
             first_parents if first_parents is not None else {TIP: COMMIT, COMMIT: ""}
         )
         self.pull_request_head = pull_request_head
+        self.pull_request_state = "open"
+        self.pull_request_repository_id = int(REPOSITORY_ID)
         self.manifest = manifest or artifact_manifest_v2(
             image_repository=IMAGE_REPOSITORY, tenant_source_repository=REPOSITORY
         ).model_dump(mode="json")
@@ -54,6 +57,8 @@ class FakeGitHub:
             return {"id": int(REPOSITORY_ID), "default_branch": "main"}
         if path.startswith(f"/repos/{REPOSITORY}/actions/runs?"):
             return {"workflow_runs": [run for run in self.runs if f"event={run['event']}" in path]}
+        if path in {f"/repos/{REPOSITORY}/actions/runs/{run['id']}" for run in self.runs}:
+            return next(run for run in self.runs if path.endswith(f"/{run['id']}"))
         if path.startswith(f"/repos/{REPOSITORY}/commits?"):
             if "page=1" not in path:
                 return []
@@ -62,7 +67,13 @@ class FakeGitHub:
                 for sha, parent in self.first_parents.items()
             ]
         if path.startswith(f"/repos/{REPOSITORY}/pulls/"):
-            return {"head": {"sha": self.pull_request_head}}
+            return {
+                "state": self.pull_request_state,
+                "head": {
+                    "sha": self.pull_request_head,
+                    "repo": {"id": self.pull_request_repository_id},
+                },
+            }
         if "/artifacts?" in path:
             run_id = path.split("/actions/runs/")[1].split("/")[0]
             return {
@@ -99,6 +110,7 @@ def _run(
         "conclusion": conclusion,
         "repository": {"id": int(REPOSITORY_ID)},
         "head_repository": {"id": head_repository_id},
+        "pull_requests": [{"number": 9}] if event == "pull_request" else [],
     }
 
 
@@ -118,6 +130,64 @@ def _verify(
 
 
 class BuildProvenanceTests(unittest.TestCase):
+    def test_requested_candidate_retains_preview_provenance_and_cannot_enter_release_store(
+        self,
+    ) -> None:
+        github = FakeGitHub(runs=[_run(event="pull_request", head_branch="candidate")])
+        verified = verify_requested_build_artifact(
+            transport=github,
+            repository=REPOSITORY,
+            repository_id=REPOSITORY_ID,
+            commit=COMMIT,
+            context="site",
+            image_repository=IMAGE_REPOSITORY,
+            artifact_id="artifact-site-run-7-1",
+        )
+        self.assertEqual(verified, _verify(github, purpose="preview", pull_request_number=9))
+        store = Mock()
+        with self.assertRaises(BuildProvenanceError) as caught:
+            record_verified_build_artifact(record_store=store, verified=verified)
+        self.assertEqual(caught.exception.code, "build_purpose_mismatch")
+        store.write_artifact_manifest.assert_not_called()
+
+    def test_requested_candidate_refuses_changed_head_closed_pr_wrong_product_and_attempt(
+        self,
+    ) -> None:
+        cases: tuple[dict[str, object], ...] = (
+            {"pull_request_head": "b" * 40},
+            {"pull_request_state": "closed"},
+            {"artifact_id": "artifact-other-run-7-1"},
+            {"artifact_id": "artifact-site-run-7-2"},
+            {"repository_id": "202"},
+            {"image_repository": "ghcr.io/other/product"},
+            {"run": {"head_repository": {"id": 202}}},
+            {"run": {"event": "workflow_dispatch"}},
+            {"run": {"event": "push"}},
+            {"pull_request_repository_id": 202},
+            {"run": {"pull_requests": []}},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                run_changes = changes.get("run", {})
+                assert isinstance(run_changes, dict)
+                run = {**_run(event="pull_request"), **run_changes}
+                github = FakeGitHub(runs=[run])
+                github.pull_request_head = str(changes.get("pull_request_head", COMMIT))
+                github.pull_request_state = str(changes.get("pull_request_state", "open"))
+                github.pull_request_repository_id = int(
+                    str(changes.get("pull_request_repository_id", REPOSITORY_ID))
+                )
+                with self.assertRaises(BuildProvenanceError):
+                    verify_requested_build_artifact(
+                        transport=github,
+                        repository=REPOSITORY,
+                        repository_id=str(changes.get("repository_id", REPOSITORY_ID)),
+                        commit=COMMIT,
+                        context="site",
+                        image_repository=str(changes.get("image_repository", IMAGE_REPOSITORY)),
+                        artifact_id=str(changes.get("artifact_id", "artifact-site-run-7-1")),
+                    )
+
     def test_quota_deadline_honors_reset_and_retry_after(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)
         reset = now + timedelta(minutes=10)

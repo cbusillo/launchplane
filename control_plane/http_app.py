@@ -1,4 +1,5 @@
 from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.http_routes.runner_lanes import register_runner_lane_service_routes
 from control_plane.http_routes.runner_host_hygiene_configuration import (
     register_runner_host_hygiene_configuration_routes,
@@ -10884,12 +10885,12 @@ def create_launchplane_fastapi_app(
                 message="Durable operation authorization provenance is unavailable.",
             ) from error
 
-        def native_testing_preflight() -> None:
+        def native_testing_preflight() -> ArtifactIdentityManifest | None:
             from control_plane.testing_rebuild_preflight import admit_current_testing_rebuild
 
             if not isinstance(record_store, PostgresRecordStore):
                 raise ValueError("Native testing preflight requires database storage.")
-            admit_current_testing_rebuild(
+            return admit_current_testing_rebuild(
                 root=resolved_control_plane_root,
                 store=record_store,
                 request=apply_request.replacement,

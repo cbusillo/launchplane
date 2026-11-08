@@ -87,6 +87,7 @@ from control_plane.build_provenance import (
     record_verified_build_artifact,
     verify_build_artifact,
     verify_generic_web_build,
+    verify_requested_build_artifact,
 )
 from control_plane.contracts.record_failures import record_failure_summary
 from control_plane.contracts.promotion_record import env_key_names
@@ -739,7 +740,10 @@ def reconcile_testing_target(
     def testing_runs_desired() -> bool:
         # Re-read now: the worker may have published this release since the plan read it.
         current_artifact_id, current_digest = _current_testing_release(
-            record_store=record_store, profile=profile, lane=lane
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+            inventory=_testing_inventory(record_store, lane),
         )
         plan.update(current_artifact_id=current_artifact_id, current_image_digest=current_digest)
         return (
@@ -1149,7 +1153,10 @@ def _deploy_generic_web_testing(
     if outcome.error or outcome.deferred:
         return outcome
     current_artifact_id, current_digest = _current_testing_release(
-        record_store=record_store, profile=profile, lane=lane
+        record_store=record_store,
+        profile=profile,
+        lane=lane,
+        inventory=_testing_inventory(record_store, lane),
     )
     if desired.manifest.image.digest.lower() != current_digest:
         # A recorded success Launchplane's testing record does not show (a recovery that
@@ -1696,13 +1703,15 @@ def _plan_testing_target(
     profile: LaunchplaneProductProfileRecord,
     repository_id: str,
     transport: BuildProvenanceTransport,
+    for_rebuild: bool = False,
 ) -> tuple[dict[str, object], VerifiedBuildArtifact | VerifiedGenericWebBuild | None]:
     """Desired: the newest first-parent default-branch commit with a verified release build."""
     lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
     if lane is None:
         raise ProductReconcileError(f"Product {profile.product} has no testing lane.")
+    inventory = _testing_inventory(record_store, lane)
     current_artifact_id, current_digest = _current_testing_release(
-        record_store=record_store, profile=profile, lane=lane
+        record_store=record_store, profile=profile, lane=lane, inventory=inventory
     )
     current_commit = ""
     current_run_id = 0
@@ -1715,23 +1724,38 @@ def _plan_testing_target(
                 current_run_id = current_manifest.source_build.run_id
         except FileNotFoundError:
             pass
-    if current_artifact_id and current_manifest is None:
-        try:
-            inventory = record_store.read_environment_inventory(
-                context_name=lane.context, instance_name="testing"
+    if current_artifact_id and current_manifest is None and inventory is not None:
+        current_commit = inventory.source_git_ref
+        if profile.driver_id == "odoo" and inventory.deploy.deploy_mode == "testing-rebuild":
+            current_manifest = _published_testing_candidate_manifest(
+                record_store, profile, lane, inventory, repository_id
             )
-            current_commit = inventory.source_git_ref
-        except FileNotFoundError:
-            pass
+    retained_candidate = (
+        current_manifest is not None
+        and current_manifest.source_build is not None
+        and current_manifest.source_build.purpose == "preview"
+    )
+    baseline = (
+        _testing_release_baseline(record_store, lane)
+        if retained_candidate
+        else LaneBuild(
+            current_artifact_id,
+            current_commit,
+            f"{profile.image.repository}@{current_digest}",
+            current_manifest.source_build if current_manifest is not None else None,
+        )
+    )
     selection: dict[str, object] = {}
     desired, rejected, absent_reason = _desired_release(
         transport=transport,
         profile=profile,
         repository_id=repository_id,
         lane=lane,
-        current_commit=current_commit,
-        current_run_id=current_run_id,
-        current_image_digest=current_digest,
+        current_commit=baseline.commit,
+        current_run_id=baseline.source_build.run_id
+        if baseline.source_build is not None
+        else current_run_id,
+        current_image_digest=_image_reference_digest(baseline.image),
         selection=selection,
     )
     plan: dict[str, object] = {
@@ -1745,6 +1769,9 @@ def _plan_testing_target(
         "current_commit": current_commit,
         **selection,
     }
+    if retained_candidate:
+        assert current_manifest is not None and current_manifest.source_build is not None
+        plan["current_pull_request_number"] = current_manifest.source_build.pull_request_number
     if rejected:
         plan["rejected_builds"] = rejected
     if desired is None:
@@ -1765,8 +1792,23 @@ def _plan_testing_target(
         desired_commit=desired.manifest.source_commit,
         desired_image_digest=desired_digest,
     )
-    if desired_artifact_id == current_artifact_id or desired_digest == current_digest:
-        plan.update(action="none", reason="already_deployed", held=False)
+    comparison = (
+        baseline
+        if retained_candidate and for_rebuild
+        else LaneBuild(
+            current_artifact_id,
+            current_commit,
+            f"{profile.image.repository}@{current_digest}",
+        )
+    )
+    if desired_artifact_id == comparison.artifact_id or desired_digest == _image_reference_digest(
+        comparison.image
+    ):
+        plan.update(
+            action="none",
+            reason="already_deployed",
+            held=False,
+        )
         if isinstance(desired, VerifiedGenericWebBuild):
             try:
                 deployed = cast(GenericWebDeployStore, record_store).read_deployment_record(
@@ -1778,7 +1820,7 @@ def _plan_testing_target(
                 if deployed.post_deploy_update.status == "pending":
                     plan.update(action="deploy", reason="testing_qualification_pending")
     else:
-        if current_artifact_id and not current_commit:
+        if comparison.artifact_id and not comparison.commit:
             plan.update(action="none", reason="current_source_unverified", held=True)
             return plan, None
         try:
@@ -1786,11 +1828,15 @@ def _plan_testing_target(
                 record_store=record_store,
                 profile=profile,
                 transport=transport,
+                require_descendant=retained_candidate and not for_rebuild,
                 current=LaneBuild(
-                    current_artifact_id,
-                    current_commit,
-                    f"{profile.image.repository}@{current_digest}",
-                    observed_at=current_lane_build(
+                    comparison.artifact_id,
+                    comparison.commit,
+                    comparison.image,
+                    comparison.source_build,
+                    observed_at=baseline.observed_at
+                    if retained_candidate and for_rebuild
+                    else current_lane_build(
                         record_store, context=lane.context, instance=lane.instance
                     ).observed_at,
                 ),
@@ -3836,6 +3882,43 @@ class _TestingRebuildBuildReads:
         return _testing_build_read(self.transport.get_bytes, path)
 
 
+def verified_testing_rebuild_artifact(
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    *,
+    artifact_id: str,
+    source_git_ref: str,
+) -> VerifiedBuildArtifact:
+    if profile.driver_id != "odoo" or lane.instance != "testing":
+        raise ValueError("Requested build selection requires an Odoo testing lane.")
+    identity = product_repository_identity(record_store, profile)
+    try:
+        return verify_requested_build_artifact(
+            transport=_TestingRebuildBuildReads(
+                resolve_build_provenance_transport(record_store, profile)
+            ),
+            repository=profile.repository,
+            repository_id=identity.repository_id,
+            commit=source_git_ref,
+            context=lane.context,
+            image_repository=profile.image.repository,
+            artifact_id=artifact_id,
+        )
+    except BuildProvenanceError as error:
+        if error.code != "build_purpose_mismatch":
+            raise
+    verified = latest_verified_testing_build(record_store, profile, lane)
+    if (verified.manifest.artifact_id, verified.manifest.source_commit) != (
+        artifact_id,
+        source_git_ref,
+    ):
+        raise BuildProvenanceError(
+            "The selected build is not the current testing release.", code="build_purpose_mismatch"
+        )
+    return verified
+
+
 def latest_verified_testing_build(
     record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
 ) -> VerifiedBuildArtifact:
@@ -3860,6 +3943,7 @@ def latest_verified_testing_release(
         ),
         profile=profile,
         repository_id=identity.repository_id,
+        for_rebuild=True,
     )
     if verified is None:
         raise ProductReconcileError(
@@ -4040,13 +4124,115 @@ def _desired_release(
     return None, rejected, "no_verified_build"
 
 
+def _testing_inventory(
+    record_store: ProductReconcileStore,
+    lane: ProductLaneProfile,
+) -> EnvironmentInventory | None:
+    try:
+        return record_store.read_environment_inventory(
+            context_name=lane.context, instance_name="testing"
+        )
+    except FileNotFoundError:
+        return None
+
+
+def _testing_release_baseline(
+    record_store: ProductReconcileStore, lane: ProductLaneProfile
+) -> LaneBuild:
+    try:
+        release = record_store.read_release_tuple_record(
+            context_name=lane.context, channel_name="testing"
+        )
+    except FileNotFoundError:
+        return LaneBuild()
+    try:
+        manifest = record_store.read_artifact_manifest(release.artifact_id)
+    except FileNotFoundError as error:
+        raise ProductReconcileError(
+            "The recorded testing release baseline is unavailable.",
+            code="current_source_unverified",
+        ) from error
+    return LaneBuild(
+        release.artifact_id,
+        manifest.source_commit,
+        f"{manifest.image.repository}@{release.image_digest or manifest.image.digest}",
+        manifest.source_build,
+        observed_at=release.minted_at,
+    )
+
+
+def _published_testing_candidate_manifest(
+    record_store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    inventory: EnvironmentInventory,
+    repository_id: str,
+) -> ArtifactIdentityManifest:
+    if not isinstance(record_store, PostgresRecordStore):
+        raise ProductReconcileError(
+            "Native testing custody requires database storage.", code="current_source_unverified"
+        )
+    allocation = record_store.read_testing_candidate(inventory.deploy.target_name)
+    try:
+        if allocation is None or allocation.application is None:
+            raise ValueError("The current native candidate is unavailable.")
+        operation = record_store.read_odoo_stable_target_replacement_operation_record(
+            allocation.operation_id
+        )
+        manifest = operation.testing_candidate_manifest
+        if (
+            manifest is None
+            or manifest.source_build is None
+            or inventory.runtime_identity is None
+            or (
+                (allocation.product, allocation.context, operation.product, operation.context)
+                != (profile.product, lane.context, profile.product, lane.context)
+                or inventory.runtime_identity != allocation.application.plan.runtime_identity
+                or manifest != allocation.application.plan.artifact
+                or operation.request.migrated_source != allocation.application.plan.native_source
+                or (
+                    manifest.artifact_id,
+                    manifest.source_commit,
+                    manifest.image.repository,
+                    manifest.source_build.repository,
+                    manifest.source_build.repository_id,
+                )
+                != (
+                    inventory.runtime_identity.artifact_id,
+                    inventory.source_git_ref,
+                    profile.image.repository,
+                    profile.repository,
+                    repository_id,
+                )
+            )
+        ):
+            raise ValueError("The published candidate differs from its original evidence.")
+        return manifest
+    except (FileNotFoundError, ValueError) as error:
+        raise ProductReconcileError(
+            "The current native candidate evidence is unavailable.",
+            code="current_source_unverified",
+        ) from error
+
+
 def _current_testing_release(
     *,
     record_store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
+    inventory: EnvironmentInventory | None,
 ) -> tuple[str, str]:
     if profile.driver_id == "odoo":
+        if (
+            inventory is not None
+            and inventory.deploy.deploy_mode == "testing-rebuild"
+            and inventory.runtime_identity is not None
+        ):
+            native_identity = inventory.runtime_identity
+            return native_identity.artifact_id, (
+                native_identity.image_digest
+                or _image_reference_digest(native_identity.image_reference)
+            ).lower()
         try:
             release = record_store.read_release_tuple_record(
                 context_name=lane.context, channel_name="testing"
@@ -4055,11 +4241,7 @@ def _current_testing_release(
             return "", ""
         digest = release.image_digest or _artifact_digest(record_store, release.artifact_id)
         return release.artifact_id, digest.lower()
-    try:
-        inventory = record_store.read_environment_inventory(
-            context_name=lane.context, instance_name="testing"
-        )
-    except FileNotFoundError:
+    if inventory is None:
         return "", ""
     identity = inventory.runtime_identity
     if identity is None:

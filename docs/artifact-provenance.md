@@ -43,8 +43,8 @@ repository. The build workflow path is the fixed contract path
 
 ## Verifying an artifact for a commit
 
-Input: product, commit SHA, purpose (`release` for testing and prod, `preview`
-for a PR preview, with the PR number).
+Input: product, commit SHA, purpose (`release` for ordinary testing and prod,
+`preview` for a PR preview or exact migrated native testing candidate, with the PR number).
 
 1. List the repository's workflow runs for `head_sha = commit` through the
    GitHub API, with Launchplane's own App installation token.
@@ -84,11 +84,18 @@ identity, and promotion and rollback read that.
 
 ## Where each purpose may go
 
-- Only `release` artifacts are recorded in the artifact store, and testing
-  deploys, prod promotions, rollbacks and restores read only that store. A
-  `preview` artifact is handed to its own preview deploy and never recorded
-  there, so it can never be promoted. A PR's workflow file comes from the PR
-  itself and can build anything.
+- Only `release` artifacts are recorded in the artifact store. Production,
+  promotion, rollback and ordinary stable deployment consumers read that store.
+  A `preview` artifact never enters it and cannot be promoted. A PR's workflow
+  file comes from the PR itself and can build anything.
+- An exact requested canonical Build can supply a migrated native testing
+  rebuild before the PR merges. The service verifies the product repository,
+  successful run/attempt, open PR's current head, manifest and image repository;
+  the offline pair must bind that exact product, context and image digest.
+  Candidate provenance stays on the original testing operation and its normal
+  private application plan. Before first application preparation the worker
+  rechecks it; retained preparation and recovery use the original evidence even
+  if the PR later changes. This supplies no release artifact or release tuple.
 
 ## Why a `release` run is trustworthy
 
