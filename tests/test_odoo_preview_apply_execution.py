@@ -139,6 +139,23 @@ def _validated_refresh_request() -> tuple[OdooPreviewApplyEnvelope, OdooPreviewA
 
 
 class RunOdooPreviewApplyOperationTests(unittest.TestCase):
+    def test_pre_diagnostics_issued_plan_keeps_its_execution_fingerprint(self) -> None:
+        from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+
+        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        original = _issued_plan(request).model_dump(mode="json")
+        original.pop("blockers")
+        original.pop("steps")
+        provenance = cast(dict[str, object], original["plan_provenance"])
+        provenance["plan_sha256"] = nonvalidating_compact_sorted_json_sha256(
+            {key: value for key, value in original.items() if key != "plan_provenance"}
+        )
+        retained = OdooPreviewApplyInputsResult.model_validate(original)
+        validated = validate_odoo_preview_issued_plan(
+            plan_id=_PLAN_ID, issued_plan=retained, request=request
+        )
+        self.assertEqual(validated.apply, request.apply)
+
     def test_failed_native_diagnostics_survive_without_repeating_provider_effects(self) -> None:
         from control_plane.copy_readback_diagnostics import CopyFailureStage, ReadbackPredicate
 
@@ -1237,6 +1254,17 @@ class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
         execute.assert_not_called()
         return cast(dict[str, object], response.json()["result"])
 
+    async def assert_apply_blocker_matches(self, result: dict[str, object]) -> None:
+        with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+            response = await self.fixture.preview_apply()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "disposable_lane_safety_unknown")
+        self.assertEqual(
+            response.json()["error"]["message"],
+            cast(list[dict[str, object]], result["blockers"])[0]["message"],
+        )
+        execute.assert_not_called()
+
     async def test_protected_preview_plan_keeps_conditional_steps_while_apply_refuses(self) -> None:
         for facts in (
             {"usage": "in_use"},
@@ -1254,9 +1282,7 @@ class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.plan("conditional-" + next(iter(facts)))
                 self.assertEqual(result["status"], "blocked")
                 self.assertTrue(result["blockers"])
-                self.assertEqual(
-                    result["steps"], [item.name for item in self.candidate.dry_run_plan.operations]
-                )
+                self.assertTrue(result["steps"])
                 self.assertIsNone(result["plan_provenance"])
                 self.assertEqual(
                     self.fixture.store.read_disposable_lane_safety(
@@ -1270,15 +1296,7 @@ class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
                     self.fixture.store.read_preview_record(self.fixture.preview.preview_id),
                     self.fixture.preview,
                 )
-                with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
-                    response = await self.fixture.preview_apply()
-                self.assertEqual(response.status_code, 409, response.text)
-                self.assertEqual(response.json()["error"]["code"], "disposable_lane_safety_unknown")
-                self.assertEqual(
-                    response.json()["error"]["message"],
-                    cast(list[dict[str, object]], result["blockers"])[0]["message"],
-                )
-                execute.assert_not_called()
+                await self.assert_apply_blocker_matches(result)
 
     async def test_staff_hold_is_a_concrete_plan_blocker(self) -> None:
         from control_plane.contracts.dokploy_target_record import (
@@ -1303,6 +1321,85 @@ class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertTrue(result["blockers"])
         self.assertTrue(result["steps"])
+        await self.assert_apply_blocker_matches(result)
+
+    async def test_routing_blocker_is_retained_without_running_safety_admission(self) -> None:
+        from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployDryRunBlocker
+
+        self.candidate = self.candidate.model_copy(deep=True)
+        self.candidate.status = "blocked"
+        self.candidate.plan_provenance = None
+        self.candidate.error_message = "Preview environment is unavailable"
+        self.candidate.dry_run_plan.status = "blocked"
+        self.candidate.dry_run_plan.operations = ()
+        self.candidate.dry_run_plan.rollback_operations = ()
+        self.candidate.dry_run_plan.blockers = (
+            OdooPreviewDokployDryRunBlocker(
+                code="environment_id_missing", message=self.candidate.error_message
+            ),
+        )
+        with patch("control_plane.http_app.require_director_odoo_preview_admission") as safety:
+            result = await self.plan("routing-blocker")
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["error_message"], self.candidate.error_message)
+        self.assertTrue(cast(dict[str, object], result["dry_run_plan"])["blockers"])
+        safety.assert_not_called()
+
+    async def test_scoped_plan_reader_cannot_request_director_original_admission(self) -> None:
+        from control_plane.service_auth import LaunchplaneAuthzPolicy, LocalOperatorPolicyRule
+        from control_plane.odoo_preview_apply_http import OdooPreviewApplyInputsEnvelope
+        from tests.support.auth import scoped_agent_transport
+
+        self.fixture.app = self.fixture.make_app(
+            policy=LaunchplaneAuthzPolicy(
+                local_operators=(
+                    LocalOperatorPolicyRule(
+                        subjects=(self.fixture.config.local_operator_subject,),
+                        token_labels=(self.fixture.config.local_operator_token_label,),
+                        products=(self.fixture.profile.product,),
+                        contexts=(self.candidate.context,),
+                        actions=("odoo_preview_apply_inputs.read",),
+                    ),
+                )
+            )
+        )
+        original = build_launchplane_mutation_reservation_id(
+            scope="fixture", route_path=ODOO_PREVIEW_APPLY_ROUTE, idempotency_key="original"
+        )
+        payload = {
+            "product": self.fixture.profile.product,
+            "inputs": self.candidate.plan_request.model_dump(mode="json"),
+        }
+        with self.assertRaises(ValueError):
+            OdooPreviewApplyInputsEnvelope.model_validate(
+                {
+                    **payload,
+                    "preserve_original_reservation_id": original,
+                    "unrecorded_original_reservation_id": original,
+                }
+            )
+        with (
+            scoped_agent_transport(),
+            patch.object(
+                preview_http, "_build_odoo_preview_apply_inputs", return_value=self.candidate
+            ),
+            patch("control_plane.http_app.require_director_odoo_preview_admission") as admission,
+        ):
+            plain = await self.fixture.post(
+                "/v1/drivers/odoo/preview-apply-inputs", payload, "scoped-plain"
+            )
+            self.assertEqual(plain.status_code, 202, plain.text)
+            for reference in (
+                "preserve_original_reservation_id",
+                "unrecorded_original_reservation_id",
+            ):
+                response = await self.fixture.post(
+                    "/v1/drivers/odoo/preview-apply-inputs",
+                    {**payload, reference: original},
+                    reference,
+                )
+                self.assertEqual(response.status_code, 403, response.text)
+        admission.assert_not_called()
 
     async def test_unrecorded_recipient_cannot_use_another_lane_slug(self) -> None:
         from sqlalchemy import delete
@@ -1320,6 +1417,18 @@ class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
         result = await self.plan("unowned-first-recipient")
         self.assertEqual(result["status"], "blocked")
         self.assertTrue(result["blockers"])
+        from control_plane.disposable_lanes import (
+            DisposableLaneSafetyUnknown,
+            require_disposable_preview_operation,
+        )
+
+        with self.assertRaises(DisposableLaneSafetyUnknown) as refusal:
+            require_disposable_preview_operation(
+                self.fixture.store, profile=self.fixture.profile, issued_plan=self.candidate
+            )
+        self.assertEqual(
+            cast(list[dict[str, object]], result["blockers"])[0]["message"], str(refusal.exception)
+        )
 
     async def test_creation_facts_keep_only_copy_and_production_protection(self) -> None:
         from control_plane.contracts.disposable_lane_creation import DisposableLaneCreation
@@ -1362,6 +1471,7 @@ class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
                         self.candidate.preview_slug,
                     )
                 )
+                await self.assert_apply_blocker_matches(result)
 
     async def test_missing_lifecycle_allows_first_service_creation_without_invented_facts(
         self,
@@ -1409,7 +1519,16 @@ class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
 
         candidate = self.candidate.model_copy(deep=True)
         candidate.dry_run_plan.compose_ref = "production-compose"
+        candidate.operation = "destroy"
+        candidate.plan_request.operation = "destroy"
+        candidate.runtime_plan.operation = "destroy"
+        candidate.dry_run_plan.operation = "destroy"
         self.candidate = candidate
+        self.fixture.payload["apply"]["dry_run_plan"]["compose_ref"] = (
+            candidate.dry_run_plan.compose_ref
+        )
+        self.fixture.payload["apply"]["dry_run_plan"]["operation"] = "destroy"
+        self.fixture.issue_preview()
         self.fixture.store.write_provider_target_record(
             ProviderTargetRecord(
                 context=candidate.context,
@@ -1426,6 +1545,22 @@ class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertTrue(result["blockers"])
         self.assertTrue(result["steps"])
+        from control_plane.disposable_lanes import (
+            DisposableLaneSafetyUnknown,
+            require_disposable_preview_operation,
+        )
+
+        with self.assertRaises(DisposableLaneSafetyUnknown) as refusal:
+            require_disposable_preview_operation(
+                self.fixture.store, profile=self.fixture.profile, issued_plan=self.candidate
+            )
+        self.assertEqual(
+            cast(list[dict[str, object]], result["blockers"])[0]["message"], str(refusal.exception)
+        )
+        with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+            response = await self.fixture.preview_apply()
+        self.assertEqual(response.status_code, 409, response.text)
+        execute.assert_not_called()
 
 
 if __name__ == "__main__":

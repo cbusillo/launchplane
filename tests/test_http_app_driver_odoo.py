@@ -619,7 +619,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("template-smtp-pass", response.text)
         self.assertNotIn("template-db-secret", json.dumps(response.json()))
 
-    async def test_odoo_preview_apply_inputs_keeps_destroy_steps_for_unowned_discovered_target(
+    async def test_odoo_preview_apply_inputs_builds_conditional_destroy_for_discovered_target(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -719,15 +719,12 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 202)
         result = response.json()["result"]
-        self.assertEqual(result["status"], "blocked")
-        self.assertTrue(result["blockers"])
-        self.assertEqual(
-            result["steps"], [item["name"] for item in result["dry_run_plan"]["operations"]]
-        )
+        self.assertEqual(result["status"], "ready")
+        self.assertTrue(result["steps"])
         self.assertEqual(result["runtime_plan"]["target"]["target_id"], "compose-cm-pr-42")
         self.assertEqual(result["dry_run_plan"]["compose_ref"], "compose-cm-pr-42")
         self.assertEqual(result["dry_run_plan"]["operation"], "destroy")
-        self.assertIsNone(result["plan_provenance"])
+        self.assertTrue(result["plan_provenance"]["plan_id"].startswith("odoo-preview-plan-"))
 
     async def test_odoo_preview_apply_inputs_handler_file_miss_is_not_found(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

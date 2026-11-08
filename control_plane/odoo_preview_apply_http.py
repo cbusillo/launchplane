@@ -17,11 +17,6 @@ from control_plane import live_target_runtime as control_plane_live_target_runti
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import runtime_platform_credentials
 from control_plane.preview_source import PreviewSourceDecision
-from control_plane.disposable_lanes import (
-    DisposableLaneSafetyUnknown,
-    DisposablePreviewOperationStore,
-    require_disposable_preview_operation,
-)
 
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot, preview_snapshot
 from control_plane.odoo_testing_restore import preflight_fresh_testing_intent
@@ -108,7 +103,6 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewDokployApplyRequest,
     OdooPreviewDokployApplyResult,
     OdooPreviewDokployDryRunPlan,
-    OdooPreviewDokployDryRunBlocker,
     build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
     observe_odoo_preview_dokploy_apply,
@@ -149,9 +143,8 @@ class OdooPreviewApplyConfigError(click.ClickException):
         self.missing_keys = tuple(sorted(missing_keys))
 
 
-class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
+class _OdooPreviewOperationEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    apply: OdooPreviewDokployApplyRequest
     preserve_original_reservation_id: str = Field(
         default="",
         max_length=128,
@@ -166,12 +159,20 @@ class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
     )
 
     @model_validator(mode="after")
+    def _validate_original_references(self) -> "_OdooPreviewOperationEnvelope":
+        if self.preserve_original_reservation_id and self.unrecorded_original_reservation_id:
+            raise ValueError("Preview preservation and unrecorded recovery cannot be combined.")
+        return self
+
+
+class OdooPreviewApplyEnvelope(_OdooPreviewOperationEnvelope):
+    apply: OdooPreviewDokployApplyRequest
+
+    @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooPreviewApplyEnvelope":
         _validate_driver_envelope_product(self.product, label="Odoo preview apply")
         if self.product.strip() != self.apply.dry_run_plan.product.strip():
             raise ValueError("Odoo preview apply requires matching product values.")
-        if self.preserve_original_reservation_id and self.unrecorded_original_reservation_id:
-            raise ValueError("Preview preservation and unrecorded recovery cannot be combined.")
         if (
             self.unrecorded_original_reservation_id
             and self.apply.dry_run_plan.operation != "refresh"
@@ -180,8 +181,7 @@ class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
         return self
 
 
-class OdooPreviewApplyInputsEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
+class OdooPreviewApplyInputsEnvelope(_OdooPreviewOperationEnvelope):
     inputs: OdooPreviewApplyInputsRequest
 
     @model_validator(mode="after")
@@ -189,7 +189,54 @@ class OdooPreviewApplyInputsEnvelope(_ProductRouteEnvelope):
         _validate_driver_envelope_product(self.product, label="Odoo preview apply inputs")
         if self.product.strip() != self.inputs.product.strip():
             raise ValueError("Odoo preview apply inputs require matching product values.")
+        if self.unrecorded_original_reservation_id and self.inputs.operation != "refresh":
+            raise ValueError("Unrecorded preview recovery requires a refresh operation.")
         return self
+
+
+def require_director_odoo_preview_admission(
+    store: object,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    issued_plan: OdooPreviewApplyInputsResult,
+    references: _OdooPreviewOperationEnvelope,
+    operation_record_id: str,
+    control_plane_root: Path,
+    captured_schedule_binding: dict[str, object] | None = None,
+) -> str:
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if references.preserve_original_reservation_id:
+        from control_plane.preview_preservation import require_preview_preservation_admission
+
+        return require_preview_preservation_admission(
+            store=cast(PostgresRecordStore, store),
+            profile=profile,
+            issued_plan=issued_plan,
+            original_reservation_id=references.preserve_original_reservation_id,
+            operation_record_id=operation_record_id,
+            captured_schedule_binding=captured_schedule_binding,
+        ).preservation_id
+    if references.unrecorded_original_reservation_id:
+        from control_plane.preview_reservation_recovery import require_unrecorded_preview_refresh
+
+        return require_unrecorded_preview_refresh(
+            cast(PostgresRecordStore, store),
+            profile=profile,
+            issued_plan=issued_plan,
+            original_reservation_id=references.unrecorded_original_reservation_id,
+            operation_record_id=operation_record_id,
+            control_plane_root=control_plane_root,
+        )
+    from control_plane.preview_source import require_source_free_preview_history
+    from control_plane.disposable_lanes import require_disposable_preview_operation
+
+    require_source_free_preview_history(
+        store, profile=profile, issued_plan=issued_plan, operation_record_id=operation_record_id
+    )
+    return require_disposable_preview_operation(
+        cast(PostgresRecordStore, store), profile=profile, issued_plan=issued_plan
+    )
 
 
 def resolve_odoo_preview_apply_profile(
@@ -219,33 +266,13 @@ def build_odoo_preview_apply_inputs_result(
     request: OdooPreviewApplyInputsRequest,
     database_url: str | None,
 ) -> dict[str, object]:
-    result = _build_odoo_preview_apply_inputs(
+    return _build_odoo_preview_apply_inputs(
         control_plane_root=control_plane_root,
         record_store=record_store,
         profile=profile,
         request=request,
         database_url=database_url,
-    )
-    try:
-        require_disposable_preview_operation(
-            cast(DisposablePreviewOperationStore, record_store),
-            profile=profile,
-            issued_plan=result,
-        )
-    except (DisposableLaneSafetyUnknown, FileNotFoundError, ValueError) as error:
-        result = result.model_copy(
-            update={
-                "status": "blocked",
-                "plan_provenance": None,
-                "blockers": (
-                    OdooPreviewDokployDryRunBlocker(
-                        code="disposable_lane_safety_unknown", message=str(error)
-                    ),
-                ),
-                "error_message": str(error),
-            }
-        )
-    return result.model_dump(mode="json")
+    ).model_dump(mode="json")
 
 
 def _build_odoo_preview_apply_inputs(

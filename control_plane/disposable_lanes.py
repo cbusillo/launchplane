@@ -473,16 +473,6 @@ def require_disposable_preview_operation(
 ) -> str:
     if store.read_product_profile_record(profile.product) != profile:
         raise DisposableLaneSafetyUnknown("The preview profile changed; plan again.")
-    if (
-        profile.driver_id != "odoo"
-        or issued_plan.preview_slug
-        != profile.preview.slug_template.format(number=issued_plan.plan_request.pr_number)
-        or any(
-            (lane.context, lane.instance) == (issued_plan.context, issued_plan.preview_slug)
-            for lane in profile.lanes
-        )
-    ):
-        raise DisposableLaneSafetyUnknown("The requested lane is not this product's Odoo preview.")
     compose_id = issued_plan.dry_run_plan.compose_ref
     unrecorded_creation = (
         issued_plan.operation == "refresh"
@@ -491,6 +481,16 @@ def require_disposable_preview_operation(
             store, profile, issued_plan.context, issued_plan.preview_slug
         )
     )
+    if unrecorded_creation and (
+        profile.driver_id != "odoo"
+        or issued_plan.preview_slug
+        != profile.preview.slug_template.strip().format(number=issued_plan.plan_request.pr_number)
+        or any(
+            (lane.context, lane.instance) == (issued_plan.context, issued_plan.preview_slug)
+            for lane in profile.lanes
+        )
+    ):
+        raise DisposableLaneSafetyUnknown("The requested lane is not this product's Odoo preview.")
     preview = (
         None
         if unrecorded_creation

@@ -964,6 +964,80 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.admit()
 
+    def test_http_plan_uses_preservation_admission_for_the_serving_needed_copy(self) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.disposable_lanes import record_safety
+        from tests.support.http import request
+
+        self.record_serving_original()
+        preview = self.store.list_preview_records()[0]
+        record_safety(
+            self.store,
+            self.profile.product,
+            preview.context,
+            self.issued.preview_slug,
+            preview=preview,
+            data="only_copy",
+        )
+        before = self.store.read_original_mutation_intent(self.original)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        payload = {
+            "product": self.profile.product,
+            "inputs": self.issued.plan_request.model_dump(mode="json"),
+        }
+        with (
+            patch(
+                "control_plane.http_app.build_odoo_preview_apply_inputs_result",
+                return_value=self.issued.model_dump(mode="json"),
+            ),
+            patch("control_plane.preview_preservation.run_preview_preservation") as preserve,
+            patch("control_plane.http_app.prepare_odoo_preview_apply_operation") as prepare,
+        ):
+            blocked = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    "/v1/drivers/odoo/preview-apply-inputs",
+                    payload=payload,
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "ordinary-needed-copy",
+                    },
+                )
+            )
+            planned = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    "/v1/drivers/odoo/preview-apply-inputs",
+                    payload={
+                        **payload,
+                        "preserve_original_reservation_id": self.original.record_id,
+                    },
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "preserving-needed-copy",
+                    },
+                )
+            )
+        self.assertEqual(blocked.status_code, 202, blocked.text)
+        self.assertEqual(blocked.json()["result"]["status"], "blocked")
+        self.assertEqual(planned.status_code, 202, planned.text)
+        self.assertEqual(planned.json()["result"]["status"], "ready")
+        self.assertEqual(self.store.read_original_mutation_intent(self.original), before)
+        self.assertEqual(self.store.read_preview_record(preview.preview_id), preview)
+        preserve.assert_not_called()
+        prepare.assert_not_called()
+
     def assert_retirement_receipt_survives_destroy(self, *, recorded: bool) -> None:
         from control_plane.odoo_preview_apply_http import apply_odoo_preview_lifecycle_evidence
 

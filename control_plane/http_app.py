@@ -581,6 +581,7 @@ from control_plane.odoo_preview_apply_http import (
     validate_odoo_preview_issued_plan,
     validate_odoo_preview_lifecycle_response_current,
     validate_odoo_preview_profile_authority,
+    require_director_odoo_preview_admission,
 )
 from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
 from control_plane.odoo_post_deploy_http import (
@@ -726,6 +727,7 @@ from control_plane.workflows.odoo_prod_backup_restore import (
 )
 from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsResult,
+    OdooPreviewDokployDryRunBlocker,
 )
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
@@ -871,7 +873,6 @@ from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
     disposable_lane_configuration,
     require_disposable_lane,
-    require_disposable_preview_operation,
     resolve_disposable_observation_binding,
     disposable_lane_observation_sha256,
 )
@@ -6732,10 +6733,45 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        issued_plan = issue_odoo_preview_apply_plan(
-            result=driver_result,
-            plan_id=plan_id,
-        )
+        preview_plan = issue_odoo_preview_apply_plan(result=driver_result, plan_id=plan_id)
+        if (
+            inputs_request.preserve_original_reservation_id
+            or inputs_request.unrecorded_original_reservation_id
+        ) and not director_agent_identity(identity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Original-bound preview planning requires the authenticated Director agent.",
+            )
+        if director_agent_identity(identity) and preview_plan.status == "ready":
+            try:
+                require_director_odoo_preview_admission(
+                    record_store,
+                    profile=product_profile,
+                    issued_plan=preview_plan,
+                    references=inputs_request,
+                    operation_record_id=build_launchplane_mutation_reservation_id(
+                        scope=idempotency_scope(identity),
+                        route_path=_ODOO_PREVIEW_APPLY_ROUTE,
+                        idempotency_key=plan_id,
+                    ),
+                    control_plane_root=resolved_control_plane_root,
+                )
+            except (DisposableLaneSafetyUnknown, FileNotFoundError, ValueError) as error:
+                preview_plan = preview_plan.model_copy(
+                    update={
+                        "status": "blocked",
+                        "plan_provenance": None,
+                        "blockers": (
+                            OdooPreviewDokployDryRunBlocker(
+                                code="disposable_lane_safety_unknown", message=str(error)
+                            ),
+                        ),
+                        "error_message": str(error),
+                    }
+                )
+        issued_plan = preview_plan
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={},
@@ -6928,57 +6964,21 @@ def create_launchplane_fastapi_app(
                     route_path=preview_apply_operation.route_path,
                     idempotency_key=preview_apply_operation.idempotency_key,
                 )
-                if service_apply_request.preserve_original_reservation_id:
-                    from control_plane.preview_preservation import (
-                        require_preview_preservation_admission,
-                    )
-
-                    authority = require_preview_preservation_admission(
-                        store=cast(PostgresRecordStore, record_store),
-                        profile=current_profile,
-                        issued_plan=issued_plan,
-                        original_reservation_id=service_apply_request.preserve_original_reservation_id,
-                        operation_record_id=operation_record_id,
-                        captured_schedule_binding=preview_apply_operation.adapter.schedule_binding,
-                    )
-                    if preview_binding and authority.preservation_id != preview_binding:
-                        raise DisposableLaneSafetyUnknown(
-                            "Original preservation authority changed."
-                        )
-                    preview_binding = authority.preservation_id
-                    return
-                if service_apply_request.unrecorded_original_reservation_id:
-                    from control_plane.preview_reservation_recovery import (
-                        require_unrecorded_preview_refresh,
-                    )
-
-                    binding = require_unrecorded_preview_refresh(
-                        cast(PostgresRecordStore, record_store),
-                        profile=current_profile,
-                        issued_plan=issued_plan,
-                        original_reservation_id=service_apply_request.unrecorded_original_reservation_id,
-                        operation_record_id=operation_record_id,
-                        control_plane_root=resolved_control_plane_root,
-                    )
-                    if preview_binding and binding != preview_binding:
-                        raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
-                    preview_binding = binding
-                    return
-                from control_plane.preview_source import require_source_free_preview_history
-
-                require_source_free_preview_history(
+                binding = require_director_odoo_preview_admission(
                     record_store,
                     profile=current_profile,
                     issued_plan=issued_plan,
+                    references=service_apply_request,
                     operation_record_id=operation_record_id,
-                )
-                binding = require_disposable_preview_operation(
-                    cast(PostgresRecordStore, record_store),
-                    profile=current_profile,
-                    issued_plan=issued_plan,
+                    control_plane_root=resolved_control_plane_root,
+                    captured_schedule_binding=preview_apply_operation.adapter.schedule_binding,
                 )
                 if preview_binding and binding != preview_binding:
-                    raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
+                    raise DisposableLaneSafetyUnknown(
+                        "Original preservation authority changed."
+                        if service_apply_request.preserve_original_reservation_id
+                        else "Preview bindings changed; plan again."
+                    )
                 preview_binding = binding
             except (DisposableLaneSafetyUnknown, FileNotFoundError, ValueError) as error:
                 raise _launchplane_http_error(

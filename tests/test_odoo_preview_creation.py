@@ -18,6 +18,7 @@ from control_plane.odoo_preview_apply_http import (
 from control_plane.odoo_preview_resources import (
     PREVIEW_RESOURCE_PROGRAM,
     preview_resource_environment,
+    require_existing_preview_resources,
 )
 from control_plane.workflows.odoo_preview_runtime import (
     ODOO_PREVIEW_REQUIRED_ENV_KEYS,
@@ -488,21 +489,40 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.fixture.store.write_clean_testing_snapshot(snapshot)
 
-    async def test_unavailable_snapshot_custody_cannot_normalize_an_existing_target(self) -> None:
-        import click
-
+    async def test_planning_defers_native_resource_and_snapshot_work_to_apply(self) -> None:
         self.assertEqual((await self.fixture.preview_apply()).status_code, 409)
         mutations = list(self.mutations)
-        self.enable_clean_snapshot()
-        with (
-            patch(
-                "control_plane.preview_filestore.prepare_preview_filestore",
-                side_effect=click.ClickException("Needed foreign snapshot storage"),
-            ) as prepare,
-        ):
-            self.assertIsNotNone(self.plan().runtime_plan.target)
-        prepare.assert_called_once()
+        for snapshot in (False, True):
+            with self.subTest(snapshot=snapshot):
+                if snapshot:
+                    self.enable_clean_snapshot()
+                with (
+                    patch("control_plane.preview_filestore.prepare_preview_filestore") as prepare,
+                    patch("control_plane.dokploy.post_deploy.run_manual_data_schedule") as native,
+                ):
+                    plan = self.plan()
+                self.assertEqual(plan.status, "ready")
+                self.assertTrue(plan.steps)
+                prepare.assert_not_called()
+                native.assert_not_called()
         self.assertEqual(self.mutations, mutations)
+
+    def inspect_unstarted_recipient(self, *, pending_filestore: bool) -> str:
+        assert self.compose is not None
+        plan = OdooPreviewApplyEnvelope.model_validate(self.fixture.payload).apply.dry_run_plan
+        return require_existing_preview_resources(
+            host="https://provider.example.test",
+            token="fixture",
+            compose_id=self.compose["composeId"],
+            compose_name=plan.compose_name,
+            context=self.fixture.profile.preview.context,
+            instance=plan.preview_slug,
+            environment=self.environment,
+            checkpoint=lambda: None,
+            unstarted=True,
+            expected_server_id=self.server_id,
+            pending_filestore=pending_filestore,
+        )
 
     async def test_missing_snapshot_declaration_cannot_admit_retained_storage(self) -> None:
         self.assertEqual((await self.fixture.preview_apply()).status_code, 409)
@@ -513,8 +533,10 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
         directory.mkdir(parents=True)
         needed = directory / "needed-data"
         needed.write_text("preserve me")
-        with patch("control_plane.preview_filestore.prepare_preview_filestore", return_value=None):
-            self.assertIsNotNone(self.plan().runtime_plan.target)
+        import click
+
+        with self.assertRaises(click.ClickException):
+            self.inspect_unstarted_recipient(pending_filestore=False)
         self.assertEqual(needed.read_text(), "preserve me")
 
     async def test_snapshot_partial_allocation_requires_each_project_owner(self) -> None:
@@ -530,16 +552,15 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
                 for project in ("foreign-project", None, self.compose["appName"]):
                     with self.subTest(resource=key, project=project):
                         self.host_volume_projects[name] = project
-                        with patch(
-                            "control_plane.preview_filestore.prepare_preview_filestore",
-                            return_value={
-                                "name": self.environment["ODOO_DATA_VOLUME"] + "-filestore"
-                            },
-                        ):
-                            plan = self.plan()
-                        self.assertEqual(
-                            plan.runtime_plan.target is None, project == self.compose["appName"]
-                        )
+                        if project == self.compose["appName"]:
+                            self.assertTrue(
+                                self.inspect_unstarted_recipient(pending_filestore=True)
+                            )
+                        else:
+                            import click
+
+                            with self.assertRaises(click.ClickException):
+                                self.inspect_unstarted_recipient(pending_filestore=True)
             finally:
                 self.host_volumes.remove(name)
                 directory.rmdir()
