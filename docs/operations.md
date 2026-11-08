@@ -2758,26 +2758,15 @@ resource discrepancy through supported read-only inventory, never a replay
 under another actor. Keep original requests and keys; legacy receipts are
 history, not proof of a current target's identity or health.
 
-Use `Generic Web Preview Authorization` for reviewed `onboard`, `expand`,
-`contract`, and `retire` operations. `onboard` bootstraps the managed preview
-rules for an existing product that has no current `operator.generic-web-preview`
-rules; it rejects a different existing managed rule set. The workflow derives
-the same conventional caller paths and immutable repository identity, submits no
-hand-authored policy JSON, and applies only through the protected managed
-reconcile contract.
-
-For products previously owned by the retired per-product generic-preview
-secret, run `expand` at the new Launchplane SHA, repin the product callers, then
-run `contract` at that same SHA. This reviewed overlap removes legacy managed
-rule identities without an authorization gap. Use `retire` when offboarding the
-product entirely.
-
-Use `Product Onboarding Manifest (Advanced)` only when the typed generic-web
-contract does not fit, and `Dokploy Target Setup` for adoption, production,
-compose or repair operations. Keep the existing generic-web caller-rule
-planner and retirement/readback routes for old products. Its App client ID and
-private-key inputs are shared with `Generic Web Preview Authorization`; this
-onboarding removal does not retire credentials, grants or policy records.
+Use `Product Onboarding Manifest (Advanced)` (`POST /v1/product-onboarding/apply`)
+only when the typed generic-web contract does not fit, and `Dokploy Target Setup`
+for adoption, production, compose or repair operations. To remove legacy
+`operator.generic-web-preview` caller rules, run `Generic Web Preview Authorization`
+with `operation=retire` (`POST /v1/authz-policies/managed-rule-sets/generic-web-preview/plan`
+and the protected managed reconcile apply; see [service-boundary.md](service-boundary.md)).
+Keep the existing planner, retirement/readback routes, and shared GitHub App
+inputs until those legacy rules are retired; onboarding workflow removal does
+not retire credentials, grants or policy records.
 
 - Promotions and deploys reference explicit artifact identifiers.
 - Missing control-plane config is a hard error, not a silent fallback.

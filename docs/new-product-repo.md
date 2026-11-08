@@ -54,31 +54,26 @@ these up. Save inputs and reviewed receipts in admin-owned state outside the
 product repository; the runbook includes the metadata lookup and recovery steps.
 
 The native path creates an empty testing application and the product/lane
-records without preview/testing caller grants. The retired `Product Onboarding`
-workflow and its reusable worker are removed; use the native original-actor/key
-readback, continuation and reviewed retention path for native allocations.
-Target/record qualification does not prove working previews or real-repository
-artifact provenance; verify those through the ordinary event-driven path.
-First Odoo testing edge publication accepts profile URLs already naming its intended
-HTTPS hostname; it creates the missing binding and verifies public TLS afterward.
+records without preview/testing caller grants. Target/record qualification does
+not prove working previews or real-repository artifact provenance; verify those
+through the ordinary event-driven path. First Odoo testing edge publication
+accepts profile URLs already naming its intended HTTPS hostname; it creates the
+missing binding and verifies public TLS afterward. For preview wildcard ingress
+setup or repair, use `POST /v1/drivers/ingress/route-apply` (see
+[preview wildcard creation](driver-development.md#preview-wildcard-creation)).
 
-Reapplying an advanced manifest updates its declared settings while preserving
-existing service-owned state, including the Client, live classification,
-release acceptance and [recorded release request](release-review.md). Image
-scanning policy is retained. Lane and preview state is carried over only for
-the same recorded route; a different lane context does not inherit the old
-lane's cutover or extension authority. Use each bounded service operation to
-change settings the manifest does not own.
-
-If live proof finds that an existing preview wildcard ingress route needs a
-Launchplane-managed repair, `Generic Web Preview Authorization` can temporarily
-include the scoped `Ingress Route Dry Run` and `Ingress Route Apply` workflow
-rules. Expand with `include_ingress_operator=true` and the exact reviewed
-reusable-workflow SHA, perform the route dry-run/apply, then contract with the
-same SHA and `include_ingress_operator=false`. The planner copies the pinned
-ingress workflow identity from the active policy and fails closed when no single
-template exists; admins do not hand-author authz JSON or edit a per-product
-policy secret.
+When the typed contract does not fit, reapplying an advanced manifest through
+`Product Onboarding Manifest (Advanced)` (`POST /v1/product-onboarding/apply`)
+updates its declared settings while preserving existing service-owned state,
+including the Client, live classification, release acceptance and
+[recorded release request](release-review.md). Image scanning policy is
+retained. Lane and preview state is carried over only for the same recorded
+route; a different lane context does not inherit the old lane's cutover or
+extension authority. Use each bounded service operation to change settings the
+manifest does not own, such as
+`POST /v1/product-profiles/expected-config/apply` (see [records.md](records.md))
+and `POST /v1/product-profiles/health-monitoring/apply` (see
+[runtime-dependency-health.md](runtime-dependency-health.md)).
 
 Existing caller-rule retirement after archival or App offboarding follows the
 [onboarding cleanup runbook](operations.md#conventional-generic-web-onboarding).
