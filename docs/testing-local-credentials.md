@@ -32,8 +32,8 @@ use, isolation, source and custody protections remain required.
 
 ## Existing lanes: plan, apply, read back
 
-Deploy compatible API and workers before using this path. From a task checkout,
-use the installed admin helper for its configured transport and identity:
+From a task checkout, use the installed admin helper for its configured transport
+and identity:
 
 ```bash
 uv run python scripts/prepare-testing-credentials.py dry-run \
