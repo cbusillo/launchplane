@@ -147,6 +147,48 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(stale.status_code, 409, stale.text)
         self.assertEqual(self.store.list_runtime_environment_records(), ())
 
+    async def test_npmplus_input_writes_only_exact_service_bindings(self) -> None:
+        from control_plane.npmplus import (
+            NPMPLUS_IDENTITY_ENV_KEY,
+            NPMPLUS_SECRET_ENV_KEY,
+        )
+
+        self.seed_director()
+        director = _human("director", 9004, "admin")
+        environment = secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION
+        read = await self.service_read(director, environment)
+        self.assertEqual(read.status_code, 200, read.text)
+        self.assertEqual(
+            {field["binding_key"] for field in read.json()["fields"]},
+            {NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY},
+        )
+        for field in read.json()["fields"]:
+            value = f"synthetic-{field['binding_key']}"
+            payload = {
+                "product": "launchplane",
+                "environment": environment,
+                "request_revision": field["request_revision"],
+                "value": value,
+            }
+            for human in (_human(), _human("operator", 9002, "admin")):
+                denied = await self.post(payload, human=human)
+                self.assertEqual(denied.status_code, 403, denied.text)
+            written = await self.post(payload, human=director)
+            self.assertEqual(written.status_code, 200, written.text)
+            self.assertNotIn(value, written.text)
+            self.assertEqual(
+                secrets.resolve_context_secret_value_from_store(
+                    record_store=self.store,
+                    integration=environment,
+                    context_name="launchplane",
+                    binding_key=field["binding_key"],
+                ),
+                value,
+            )
+            stale = await self.post(payload, human=director)
+            self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(self.store.list_runtime_environment_records(), ())
+
     async def test_director_stores_exact_context_bindings_without_plaintext_readback(self) -> None:
         self.seed_director()
         director = _human("renamed-director", 9004, "admin")

@@ -7,7 +7,7 @@ from http.cookiejar import CookieJar
 from http.client import HTTPException
 from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 import click
@@ -22,8 +22,34 @@ type JsonObject = dict[str, JsonValue]
 
 PREVIEW_DNS_INTEGRATION = "preview_dns_cloudflare"
 PREVIEW_DNS_BINDING = "api_token"
+NPMPLUS_BASE_URL_ENV_KEY = "LAUNCHPLANE_NPMPLUS_BASE_URL"
+NPMPLUS_IDENTITY_ENV_KEY = "LAUNCHPLANE_NPMPLUS_IDENTITY"
+NPMPLUS_SECRET_ENV_KEY = "LAUNCHPLANE_NPMPLUS_SECRET"
 DNS_ISSUANCE_TIMEOUT_SECONDS = 300
 _MAX_ERROR_BODY_BYTES = 64 * 1024
+
+
+def validate_npmplus_base_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value.strip())
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or not parsed.hostname.rstrip(".")
+            or "%" in parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or any(character.isspace() for character in value)
+        ):
+            raise ValueError
+        _ = parsed.port
+        if parsed.port == 0:
+            raise ValueError
+    except ValueError:
+        raise ValueError("NPMplus service endpoint is invalid.") from None
+    return value.rstrip("/")
 
 
 NpmplusForwardScheme = Literal["http", "https", "path", "empty", "grpc", "grpcs"]

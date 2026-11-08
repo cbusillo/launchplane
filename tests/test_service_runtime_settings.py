@@ -71,6 +71,37 @@ def _service_env(store: PostgresRecordStore) -> dict[str, object]:
 
 
 class ServiceRuntimeSettingTests(unittest.TestCase):
+    def test_npmplus_endpoint_is_reviewed_nonsecret_configuration(self) -> None:
+        from control_plane.npmplus import NPMPLUS_BASE_URL_ENV_KEY
+
+        key = NPMPLUS_BASE_URL_ENV_KEY
+        setting = ServiceRuntimeSettingRequest(
+            key=key, value="https://edge.example.test", reason="Record the existing endpoint."
+        )
+        plan = self.call(setting)
+        self.assertEqual(_service_env(self.store), EXISTING_ENV)
+        self.call(
+            setting.model_copy(
+                update={"mode": "apply", "expected_plan_digest": plan["plan_digest"]}
+            ),
+            "edge-endpoint",
+        )
+        self.assertEqual(_service_env(self.store), {**EXISTING_ENV, key: setting.value})
+        self.assertEqual(self.store.list_secret_records(), ())
+        for value in (
+            "",
+            "https://user:secret@edge.example.test",
+            "https://edge.example.test?token=x",
+            "https://edge.example.test#secret",
+            "https://edge.example.test:bad",
+            "file:///tmp/edge",
+            "https://edge.example.test:0",
+            "https://.",
+            "http://[fe80::1%eth0]:81",
+        ):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                ServiceRuntimeSettingRequest(key=key, value=value, reason=setting.reason)
+
     def setUp(self) -> None:
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
