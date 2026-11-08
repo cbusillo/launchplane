@@ -477,7 +477,7 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             ("other_driver", "unsupported_lane"),
             ("missing_target", "target_unavailable"),
             ("alias", "target_alias"),
-            ("held_alias", "staff_testing_hold"),
+            ("held_alias", "target_alias"),
         ):
             with self.subTest(scenario=scenario):
                 self.store.write_product_profile_record(
@@ -560,7 +560,9 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
         assert evidence is not None
         self.assertEqual(evidence.usage, "in_use")
 
-    async def test_service_collection_runs_real_reader_against_provider_fixture(self) -> None:
+    async def test_service_collection_accepts_complete_negative_probe_without_creation_history(
+        self,
+    ) -> None:
         profile = self.store.read_product_profile_record("example-site")
         self.store.write_product_profile_record(profile.model_copy(update={"driver_id": "odoo"}))
         target = self.store.read_dokploy_target_record(
@@ -594,6 +596,10 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
         self.assertEqual(response.status_code, 202, response.text)
         transport.assert_called_once()
         self.assertEqual(response.json()["result"]["usage"], "unused")
+        self.assertEqual(
+            response.json()["result"]["odoo_usage"]["reason_code"],
+            "complete",
+        )
         self.assertNotIn("private-token", response.text)
 
     async def test_unknown_reads_and_assertions_cannot_clear_use_after_binding_change(self) -> None:

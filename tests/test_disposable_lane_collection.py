@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 
@@ -8,6 +9,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetStaffTestingHold,
+    TestingHoldPurpose,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -31,6 +33,7 @@ from control_plane.odoo_walkthrough import (
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.test_odoo_testing_restore import generation
+from tests.test_disposable_lane_authority import _DisposableRuntimeAuthorityFixture
 
 
 class UsageEvidenceExpiryTests(unittest.TestCase):
@@ -507,3 +510,191 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
             )
         )
         self.store.read_fresh_odoo_testing_generation.assert_not_called()
+
+
+class CurrentGenerationUsageAgreementTests(_DisposableRuntimeAuthorityFixture):
+    def test_initial_generation_still_protects_current_use_without_creation_history(self) -> None:
+        from control_plane import odoo_testing_usage
+        from control_plane.dokploy import api, source
+        from control_plane.testing_initial_generation import require_testing_generation_usage
+
+        profile = self.store.read_product_profile_record("example-site").model_copy(
+            update={"driver_id": "odoo"}
+        )
+        self.store.write_product_profile_record(profile)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        identity = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        with (
+            patch.object(
+                source, "read_dokploy_config", return_value=("https://provider.invalid", "fixture")
+            ),
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={
+                    "name": target.target_name,
+                    "appName": "fixture",
+                    "serverId": "fixture",
+                },
+            ),
+            patch.object(
+                odoo_testing_usage,
+                "_read_remote",
+                side_effect=lambda **kw: kw["receive"](
+                    {"type": "complete", "recent_signins": True, "authenticated_sessions": False}
+                ),
+            ) as probe,
+            self.assertRaises(ValueError),
+        ):
+            require_testing_generation_usage(
+                Path(self.temporary.name),
+                self.store,
+                profile.product,
+                self.context,
+                target,
+                identity,
+            )
+        probe.assert_called()
+
+    async def test_isolation_hold_keeps_collection_inspection_and_admission_on_one_usage_answer(
+        self,
+    ) -> None:
+        from control_plane import odoo_testing_usage, testing_rebuild_service
+        from control_plane.dokploy import api, source
+        from control_plane.testing_rebuild_driver import TestingRebuildRefused
+
+        profile = self.store.read_product_profile_record("example-site").model_copy(
+            update={"driver_id": "odoo"}
+        )
+        self.store.write_product_profile_record(profile)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        identity = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        current_generation = generation().model_copy(
+            update={
+                "product": profile.product,
+                "context": self.context,
+                "target_id": identity.target_id,
+                "prepared_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+                "completed_at": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(),
+            }
+        )
+        self.store.write_fresh_odoo_testing_generation(
+            current_generation.model_copy(update={"completed_at": ""})
+        )
+        self.store.write_fresh_odoo_testing_generation(current_generation)
+        target.target_name = current_generation.namespace
+        operation: Any = SimpleNamespace(
+            product=profile.product,
+            context=self.context,
+            authorization=None,
+            request=SimpleNamespace(data_source_mode="empty"),
+        )
+        scenarios: tuple[tuple[str, TestingHoldPurpose, str], ...] = (
+            ("unused", "isolation_staging", ""),
+            ("in_use", "isolation_staging", "testing_in_use"),
+            ("unknown", "isolation_staging", ""),
+            ("unused", "staff_testing", "testing_staff_hold"),
+        )
+        for usage, purpose, refusal in scenarios:
+            with self.subTest(usage=usage, purpose=purpose):
+                self.store.clear_disposable_lane_safety(profile.product, self.context, "testing")
+                target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+                    purpose=purpose,
+                    reason="Fixture use",
+                    recorded_by="fixture-agent",
+                    recorded_at=target.updated_at,
+                )
+                self.store.write_dokploy_target_record(target)
+                intent: Any = SimpleNamespace(
+                    profile=profile,
+                    before=SimpleNamespace(target=target, target_id=identity),
+                    old=None,
+                )
+                frame = {
+                    "type": "complete",
+                    "recent_signins": usage == "in_use",
+                    "authenticated_sessions": False,
+                }
+                if usage == "unknown":
+                    frame = {
+                        "type": "complete",
+                        "unavailable": True,
+                        "reason_code": "database_connection_unavailable",
+                    }
+                with (
+                    patch.object(
+                        source,
+                        "read_dokploy_config",
+                        return_value=("https://provider.invalid", "fixture"),
+                    ),
+                    patch.object(
+                        api,
+                        "fetch_dokploy_target_payload",
+                        return_value={
+                            "name": target.target_name,
+                            "appName": current_generation.namespace + "-abc123",
+                            "serverId": "fixture",
+                        },
+                    ),
+                    patch.object(
+                        odoo_testing_usage,
+                        "_read_remote",
+                        side_effect=lambda **kw: kw["receive"](frame),
+                    ) as probe,
+                    patch(
+                        "control_plane.http_app.collect_testing_resource_facts", return_value=None
+                    ),
+                ):
+                    before = await self.observe()
+                    collected = await self.observe(
+                        mode="collect",
+                        expected_binding_sha256=before.json()["result"]["binding_sha256"],
+                    )
+                    self.assertEqual(collected.status_code, 202, collected.text)
+                    probe.assert_called()
+                    expected = "in_use" if purpose == "staff_testing" else usage
+                    self.assertEqual(collected.json()["result"]["usage"], expected)
+                    self.assertEqual(
+                        collected.json()["result"]["odoo_usage"]["reason_code"],
+                        frame.get("reason_code", "complete"),
+                    )
+                    inspected = await self.observe()
+                    self.assertEqual(inspected.json()["result"]["observation"]["usage"], expected)
+                    self.store.clear_disposable_lane_safety(
+                        profile.product, self.context, "testing"
+                    )
+                    probe.reset_mock()
+                    if refusal:
+                        with self.assertRaises(TestingRebuildRefused) as caught:
+                            testing_rebuild_service.check_testing_rebuild_protection(
+                                Path(self.temporary.name),
+                                self.store,
+                                operation,
+                                intent,
+                                actor="fixture-agent",
+                            )
+                        self.assertEqual(caught.exception.code, refusal)
+                    else:
+                        testing_rebuild_service.check_testing_rebuild_protection(
+                            Path(self.temporary.name),
+                            self.store,
+                            operation,
+                            intent,
+                            actor="fixture-agent",
+                        )
+                    if purpose == "isolation_staging":
+                        probe.assert_called()
+                self.assertEqual(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ),
+                    target,
+                )

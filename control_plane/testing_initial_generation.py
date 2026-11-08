@@ -134,6 +134,8 @@ def require_testing_generation_usage(
         target_id=target_id,
         control_plane_root=root,
         database_url=store.database_url,
+        record_store=store,
+        product=product,
     )
     evidence = store.read_disposable_lane_safety(product, context, "testing")
     known_use = evidence is not None and evidence.current_usage() == "in_use"

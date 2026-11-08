@@ -699,6 +699,8 @@ def check_testing_rebuild_protection(
         target_id=intent.before.target_id,
         control_plane_root=root,
         database_url=store.database_url,
+        record_store=store,
+        product=operation.product,
     )
     reported_usage = (
         "in_use" if safety is not None and safety.current_usage() == "in_use" else usage.usage
@@ -1299,6 +1301,8 @@ class NativeTestingRebuildExecution:
                 target_id=self.intent.before.target_id,
                 control_plane_root=self.root,
                 database_url=self.store.database_url,
+                record_store=self.store,
+                product=self.operation.product,
             )
             reported_usage = (
                 "in_use"
