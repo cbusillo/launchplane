@@ -275,6 +275,37 @@ replanning into another effect. Blocked apply-inputs responses have no apply
 provenance and are not persisted as issued plans, so a later retry can
 re-evaluate recovered dependencies.
 
+For a Director agent, preview apply-inputs shares HTTP apply's recorded-safety
+checks. A recorded hold, current human use, needed copy,
+production resource sharing, or target ownership conflict returns HTTP 202 with
+`status: blocked` and concrete `blockers`. The proposed `dry_run_plan.operations`
+remain present so the response explains the conditional work.
+The nested runtime and Dokploy plans describe routing; their readiness alone
+does not authorize apply. A blocked response has no apply provenance. Planning
+does not prepare an executor, capture native state, allocate resources, or run
+an operational checkpoint. Apply still rechecks current protection and returns
+409 on a safety conflict, including protection recorded after plan issuance.
+Original-bound recovery, preservation and closed-PR cleanup retain their existing
+execution checks. Missing lifecycle history alone does not block planning those
+conditional operations. A plan does not establish original custody, source-free
+history, native resource isolation or readiness to execute. Those checks still
+run on the existing apply path, including for an interrupted creation's recipient.
+Empty blockers are omitted, preserving retained execution fingerprints.
+The inputs envelope accepts the same `preserve_original_reservation_id` or
+`unrecorded_original_reservation_id` as apply, so planning selects that existing
+admission path. They cannot be combined, unrecorded recovery requires refresh,
+and original-bound planning requires the Director agent. Both plan and apply
+share original and target protection checks. Planning validates any recorded server
+binding but defers absent future execution proof without constructing preservation
+authority. Apply still requires its authentic server binding. Planning never
+captures or changes the original.
+
+First service creation uses the same rule on both callers: absent preview history
+does not refuse a refresh that creates an unbound recipient. No usage, data, or
+isolation observation is invented. Existing lifecycle and creation facts retain
+their protections; a retained target or original operation still needs its own
+current ownership, custody and execution checks.
+
 Odoo destroy observation treats a missing provider lookup as inconclusive until
 two complete, bounded compose inventories agree that neither the original ID
 nor a replacement with its name exists, and the exact compose's domain list is

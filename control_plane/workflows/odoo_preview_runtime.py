@@ -88,6 +88,7 @@ _IMMUTABLE_IMAGE_REFERENCE_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[A-Za-z0-9._-]+$"
 )
 OdooPreviewDokployDryRunBlockerCode = Literal[
+    "disposable_lane_safety_unknown",
     "endpoint_path_missing",
     "environment_id_missing",
     "preview_url_invalid",
@@ -238,6 +239,11 @@ class OdooPreviewApplyInputsResult(BaseModel):
     runtime_plan: OdooPreviewRuntimePlan
     dry_run_plan: OdooPreviewDokployDryRunPlan
     plan_provenance: OdooPreviewApplyPlanProvenance | None = None
+    blockers: tuple[OdooPreviewDokployDryRunBlocker, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     # Template-lane integration credentials the preview receives blank because no
     # key-safety rule allows them on previews. Key names only, never values.
     omitted_integration_credential_keys: tuple[str, ...] = ()
@@ -284,6 +290,8 @@ class OdooPreviewApplyInputsResult(BaseModel):
             raise ValueError("Odoo preview apply inputs result requires matching dry-run operation")
         if self.status == "blocked" and self.plan_provenance is not None:
             raise ValueError("Blocked Odoo preview plans cannot include apply provenance")
+        if self.status == "ready" and self.blockers:
+            raise ValueError("Ready Odoo preview plans cannot include safety blockers")
         self.error_message = self.error_message.strip()
         return self
 
@@ -356,12 +364,11 @@ def build_odoo_preview_apply_inputs(
     if (
         target is not None
         and request.operation == "refresh"
-        and _preview_target_is_unstarted(
+        and _preview_target_needs_creation_plan(
             control_plane_root=control_plane_root,
             record_store=record_store,
             profile=profile,
             target=target,
-            compose_name=compose_name,
             template_compose_id=template_compose_id,
             database_url=database_url,
         )
@@ -472,27 +479,20 @@ def build_odoo_preview_apply_inputs(
     )
 
 
-def _preview_target_is_unstarted(
+def _preview_target_needs_creation_plan(
     *,
     control_plane_root: Path,
     record_store: object,
     profile: LaunchplaneProductProfileRecord,
     target: OdooPreviewRuntimeTargetEvidence,
-    compose_name: str,
     template_compose_id: str,
     database_url: str | None,
 ) -> bool:
-    from control_plane.clean_testing_snapshot import preview_snapshot
     from control_plane.disposable_lanes import (
         DisposableLaneStore,
         require_disposable_lane,
         resolve_disposable_preview,
     )
-    from control_plane.odoo_preview_resources import (
-        preview_resource_environment,
-        require_existing_preview_resources,
-    )
-    from control_plane.preview_filestore import prepare_preview_filestore
     from control_plane.storage.postgres import PostgresRecordStore
 
     if not isinstance(record_store, PostgresRecordStore) or not template_compose_id:
@@ -544,37 +544,6 @@ def _preview_target_is_unstarted(
             )
         ):
             return False
-        environment = preview_resource_environment(compose_name)
-        filestore = None
-        if profile.preview.clean_testing_snapshot:
-            filestore = prepare_preview_filestore(
-                host=host,
-                token=token,
-                server_id=server_id,
-                project=str(payload.get("appName") or ""),
-                data_volume=environment["ODOO_DATA_VOLUME"],
-                database_volume=environment["ODOO_DB_VOLUME"],
-                logs_volume=environment["ODOO_LOG_VOLUME"],
-                database_name=environment["ODOO_DB_NAME"],
-                snapshot=preview_snapshot(record_store, profile),
-                apply=False,
-                dispatch_guard=lambda dispatch: dispatch(),
-            )
-        require_existing_preview_resources(
-            host=host,
-            token=token,
-            compose_id=target.target_id,
-            compose_name=compose_name,
-            context=preview.context,
-            instance=target.instance,
-            environment=environment,
-            checkpoint=lambda: None,
-            unstarted=True,
-            expected_server_id=server_id,
-            pending_filestore=filestore is not None,
-        )
-    except NativeSourceAuthorizationDenied:
-        raise
     except (FileNotFoundError, ValueError, click.ClickException):
         return False
     return True

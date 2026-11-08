@@ -40,6 +40,44 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.prepare_fixture()
 
+    async def test_conditional_http_plan_does_not_block_original_bound_recovery(self) -> None:
+        from control_plane import odoo_preview_apply_http as preview_http
+
+        candidate = _issued_plan(self.request)
+        with patch.object(preview_http, "_build_odoo_preview_apply_inputs", return_value=candidate):
+            blocked = await self.fixture.post(
+                "/v1/drivers/odoo/preview-apply-inputs",
+                {
+                    "product": self.profile.product,
+                    "inputs": candidate.plan_request.model_dump(mode="json"),
+                },
+                "ordinary-unrecorded-plan",
+            )
+            self.assertEqual(blocked.status_code, 202, blocked.text)
+            self.assertEqual(blocked.json()["result"]["status"], "blocked")
+            response = await self.fixture.post(
+                "/v1/drivers/odoo/preview-apply-inputs",
+                {
+                    "product": self.profile.product,
+                    "inputs": candidate.plan_request.model_dump(mode="json"),
+                    "unrecorded_original_reservation_id": self.original.record_id,
+                },
+                "original-bound-plan",
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        planned = response.json()["result"]
+        self.assertEqual(planned["status"], "ready")
+        self.assertNotIn("blockers", planned)
+        self.fixture.plan_id = planned["plan_provenance"]["plan_id"]
+        with patch(
+            "control_plane.http_app.execute_odoo_preview_apply_result",
+            return_value=self.passing_result(),
+        ) as execute:
+            applied = await self.fixture.preview_apply()
+        self.assertEqual(applied.status_code, 202, applied.text)
+        execute.assert_called_once()
+        self.assert_original_preserved()
+
     def prepare_fixture(
         self,
         *,
