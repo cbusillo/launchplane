@@ -329,7 +329,7 @@ class TestingStorageTests(TestingDrillScenario):
             self.prepare(execute)
         execute.assert_not_called()
 
-    def test_expired_general_facts_allow_only_read_only_capacity(self) -> None:
+    def test_expired_positive_facts_do_not_block_disposable_copy_maintenance(self) -> None:
         from datetime import timedelta
         from tests.support.disposable_lanes import record_safety
 
@@ -356,17 +356,16 @@ class TestingStorageTests(TestingDrillScenario):
             dispatch(sent)
             return {"capacity": True, "disposals": ["disposed"]}
 
-        with self.assertRaisesRegex(DrillPrerequisite, "usage_custody_or_isolation_unverified"):
-            prepare_drill_storage(
-                self.store,
-                self.worker,
-                Path("."),
-                execute=execute,
-                now=self.now,
-                checkpoint=lambda: None,
-            )
-        sent.assert_not_called()
-        self.assertEqual(self.evidence().disposal_pending, 1)
+        prepare_drill_storage(
+            self.store,
+            self.worker,
+            Path("."),
+            execute=execute,
+            now=self.now,
+            checkpoint=lambda: None,
+        )
+        sent.assert_called_once()
+        self.assertEqual(self.evidence().disposal_pending, 0)
 
     def test_failed_activated_drill_keeps_its_disposal_in_the_ledger(self) -> None:
         receipt = self.old_receipt()

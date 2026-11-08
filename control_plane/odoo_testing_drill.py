@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from pydantic import JsonValue
 
+from control_plane.disposable_lanes import recorded_lane_protection
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
@@ -189,7 +190,7 @@ def require_drill_use_unprotected(
     observed = datetime.fromtimestamp(now, timezone.utc) if now is not None else None
     try:
         # Missing tracked authority is an unreadable hold check, never no hold.
-        store.read_dokploy_target_record(context_name=context, instance_name="testing")
+        target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
         hold = read_staff_testing_hold(record_store=store, context=context)
         recorded = store.read_disposable_lane_safety(product, context, "testing")
         protected = (
@@ -211,9 +212,10 @@ def require_drill_use_unprotected(
         raise DrillEvidenceUnavailable("staff_hold_or_protection_check_unreadable") from error
     if hold is not None:
         raise DrillSkipped("staff_testing_hold")
-    if recorded is not None and (protected or recorded.data == "only_copy"):
+    protection = recorded_lane_protection(target, recorded)
+    if protected or protection.only_copy:
         raise DrillSkipped("lane_use_or_only_copy_protected")
-    if recorded is not None and recorded.production_resources in {"shared", "separation_ready"}:
+    if protection.resources_protected:
         raise DrillSkipped("testing_resources_protected")
 
 

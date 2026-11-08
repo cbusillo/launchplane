@@ -828,6 +828,9 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
                     "domain_host": "pr-42.cm-preview.example.test",
                     "compose_name": "cm-odoo-preview-pr-42",
                     "resource_provenance": {
+                        "created_by": "service:odoo-preview",
+                        "data": "reproducible",
+                        "production_resources": "isolated",
                         "binding_sha256": "b" * 64,
                         "qualified_at": profile.updated_at,
                         "recipient_state": "unstarted",
@@ -865,6 +868,21 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
                 anchor_repo="odoo-tenant-cm",
                 anchor_pr_number=42,
             )
+            from control_plane.disposable_lanes import (
+                read_disposable_lane_binding,
+            )
+
+            creation = previews[0].resource_provenance
+            assert creation is not None
+            expected = read_disposable_lane_binding(
+                store,
+                profile=profile,
+                context="cm",
+                instance="pr-42",
+                preview=previews[0],
+                preview_lifecycle=False,
+            )
+            self.assertEqual(creation.lane_binding_sha256, expected.binding_sha256)
 
         self.assertEqual(first_result.status, "completed")
         self.assertEqual(first_result.response_status_code, 202)
@@ -896,6 +914,11 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         )
         self.assertEqual(len(previews), 1)
         self.assertEqual(previews[0].state, "active")
+        assert previews[0].resource_provenance is not None
+        self.assertEqual(
+            previews[0].resource_provenance.binding_sha256,
+            execute_apply.return_value["resource_provenance"]["binding_sha256"],
+        )
 
 
 class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):

@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 import click
 
 from control_plane.contracts.artifact_identity import ArtifactSourceBuild
+from control_plane.contracts.disposable_lane_creation import DisposableLaneCreation
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
@@ -592,6 +593,7 @@ def build_preview_record(
     serving_generation_id: str = "",
     latest_generation_id: str = "",
     latest_manifest_fingerprint: str = "",
+    resource_provenance: DisposableLaneCreation | None = None,
 ) -> PreviewRecord:
     resolved_preview_id = preview_id or generate_preview_id(
         context_name=context_name,
@@ -628,6 +630,7 @@ def build_preview_record(
         serving_generation_id=serving_generation_id,
         latest_generation_id=latest_generation_id,
         latest_manifest_fingerprint=latest_manifest_fingerprint,
+        resource_provenance=resource_provenance,
     )
 
 
@@ -761,6 +764,7 @@ def build_preview_record_from_request(
         serving_generation_id=request.serving_generation_id,
         latest_generation_id=request.latest_generation_id,
         latest_manifest_fingerprint=request.latest_manifest_fingerprint,
+        resource_provenance=existing_preview.resource_provenance if existing_preview else None,
     )
 
 

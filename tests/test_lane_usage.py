@@ -173,12 +173,8 @@ class LaneUsageTests(unittest.TestCase):
     def test_down_recovery_keeps_independent_isolation_and_nonrecovery_custody(self) -> None:
         self.health()
         for facts in (
-            {"data": "unknown", "production_resources": "unknown"},
             {"data": "unknown", "production_resources": "shared"},
-            {
-                "observed_at": self.now - timedelta(minutes=10),
-                "expires_at": self.now - timedelta(minutes=9),
-            },
+            {"data": "only_copy"},
         ):
             with self.subTest(facts=facts):
                 record_safety(
@@ -203,7 +199,7 @@ class LaneUsageTests(unittest.TestCase):
             observed_at=self.now,
             expires_at=self.now + timedelta(minutes=5),
         )
-        with self.assertRaises(DisposableLaneSafetyUnknown):
+        self.assertTrue(
             require_disposable_lane(
                 self.store,
                 product=self.product,
@@ -211,6 +207,7 @@ class LaneUsageTests(unittest.TestCase):
                 instance="testing",
                 now=self.now,
             )
+        )
 
     def test_unknown_occupancy_does_not_require_downtime_or_a_non_use_declaration(self) -> None:
         for status in (None, 200, 403):

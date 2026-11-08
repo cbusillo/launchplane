@@ -2,6 +2,7 @@ import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from control_plane.contracts.disposable_lane_creation import DisposableLaneCreation
 from control_plane.contracts.public_hosts import normalize_public_hosts, retained_hostname_identity
 
 DokployTargetType = Literal["compose", "application"]
@@ -148,6 +149,11 @@ class DokployTargetRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
+    resource_provenance: DisposableLaneCreation | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     context: str
     instance: str
     project_name: str = ""

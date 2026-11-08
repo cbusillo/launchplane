@@ -2056,6 +2056,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         self.assertEqual(result.resource_provenance["recipient_state"], "unstarted")
         self.assertTrue(result.resource_provenance["qualified_at"])
+        from control_plane.contracts.disposable_lane_creation import DisposableLaneCreation
+
+        DisposableLaneCreation.model_validate(
+            {**result.resource_provenance, "lane_binding_sha256": "a" * 64}
+        )
         if fail_preparation:
             self.assertEqual(result.status, "fail")
             delete_compose.assert_not_called()

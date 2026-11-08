@@ -5,6 +5,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.disposable_lane_creation import (
+    DisposableLaneCreation as DisposableLaneCreation,
+)
 
 
 ODOO_PREVIEW_RESOURCES_OK_MARKER = "preview_resources_ok"

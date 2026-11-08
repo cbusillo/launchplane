@@ -329,15 +329,11 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
             self.assertEqual(status, 403, payload)
             executor.assert_not_called()
 
-    def test_protective_and_unknown_facts_refuse_before_execution(self) -> None:
-        past = datetime.now(timezone.utc) - timedelta(minutes=5)
+    def test_protective_facts_refuse_before_execution(self) -> None:
         for changes in (
             {"usage": "in_use"},
             {"data": "only_copy"},
-            {"data": "unknown"},
             {"production_resources": "shared"},
-            {"production_resources": "unknown"},
-            {"observed_at": past, "expires_at": past + timedelta(seconds=1)},
         ):
             with self.subTest(changes=changes):
                 record_safety(

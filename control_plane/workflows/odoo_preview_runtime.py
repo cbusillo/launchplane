@@ -1956,6 +1956,12 @@ def _execute_refresh(
                     qualified_at=datetime.now(timezone.utc).isoformat(),
                     recipient_state="unstarted" if creating_compose else "existing",
                 )
+                if creating_compose:
+                    resource_provenance.update(
+                        created_by="service:odoo-preview",
+                        data="reproducible",
+                        production_resources="isolated",
+                    )
 
         qualify_resources()
         with guard():

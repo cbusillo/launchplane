@@ -1,5 +1,6 @@
 """The native testing rebuild inside the existing durable replacement action."""
 
+from control_plane.disposable_lanes import recorded_lane_protection
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -679,16 +680,16 @@ def check_testing_rebuild_protection(
     if not testing_rebuild_hold_allows(operation, intent, target, actor=actor):
         raise TestingRebuildRefused("testing_staff_hold", "This testing lane has a protected hold.")
     safety = store.read_disposable_lane_safety(operation.product, operation.context, "testing")
-    if safety is not None:
-        if safety.data == "only_copy":
-            raise TestingRebuildRefused(
-                "testing_needed_copy", "Testing holds the only needed copy of data."
-            )
-        if safety.production_resources in {"shared", "separation_ready"}:
-            raise TestingRebuildRefused(
-                "testing_production_resources_shared",
-                "Testing must be separated from its shared production resources before rebuilding.",
-            )
+    protection = recorded_lane_protection(target, safety)
+    if protection.only_copy:
+        raise TestingRebuildRefused(
+            "testing_needed_copy", "Testing holds the only needed copy of data."
+        )
+    if protection.resources_protected:
+        raise TestingRebuildRefused(
+            "testing_production_resources_shared",
+            "Testing must be separated from its shared production resources before rebuilding.",
+        )
     if isinstance(intent, GenericWebTestingRebuildIntent):
         if safety is not None and safety.current_usage() == "in_use":
             raise _testing_use_refusal(safety)
@@ -1277,10 +1278,13 @@ class NativeTestingRebuildExecution:
         safety = self.store.read_disposable_lane_safety(
             self.operation.product, self.operation.context, "testing"
         )
-        if safety is not None and (
-            safety.data == "only_copy"
-            or safety.production_resources in {"shared", "separation_ready"}
-        ):
+        protection = recorded_lane_protection(
+            self.store.read_dokploy_target_record(
+                context_name=self.operation.context, instance_name="testing"
+            ),
+            safety,
+        )
+        if protection.only_copy or protection.resources_protected:
             if recovery:
                 raise NativeTestingRebuildPending(
                     "Recovery is paused by protected-copy or production-resource evidence. "

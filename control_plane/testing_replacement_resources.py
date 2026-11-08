@@ -1,7 +1,6 @@
 """Create empty replacement resources while retaining the old testing target."""
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections.abc import Callable
 from typing import Literal
@@ -13,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.disposable_lane import (
-    DisposableLaneSafety,
+    DisposableLaneCreation,
     TESTING_REPLACEMENT_RESOURCES_ROUTE,
 )
 from control_plane.contracts.disposable_lane import DisposableTestingResourcePreparation
@@ -29,7 +28,9 @@ from control_plane.contracts.product_profile_record import (
     product_context_owner_map,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.disposable_lanes import (
+    LaneConfigurationRecord,
     disposable_lane_binding_sha256,
     disposable_lane_configuration,
 )
@@ -68,6 +69,62 @@ from control_plane.workflows.dokploy_target_adoption import (
 )
 
 ROUTE = TESTING_REPLACEMENT_RESOURCES_ROUTE
+
+
+def testing_creation_target(
+    store: PostgresRecordStore,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    target: DokployTargetRecord,
+    target_id: DokployTargetIdRecord,
+    bundle: ProductAuthorityBundle,
+    operation_id: str,
+    retained_target_id: str,
+    production_resources: Literal["isolated", "separation_ready"],
+    isolation_evidence: str,
+    qualified_configuration: tuple[LaneConfigurationRecord, ...] | None = None,
+) -> DokployTargetRecord:
+    runtime_keys = {
+        (item.record.scope, item.record.context, item.record.instance)
+        for item in bundle.runtime_environment_writes
+    }
+    secret_ids = {item.secret_id for item in bundle.secret_records}
+    binding_ids = {item.binding_id for item in bundle.secret_bindings}
+    configuration = tuple(
+        item
+        for item in (
+            qualified_configuration
+            if qualified_configuration is not None
+            else disposable_lane_configuration(store, target.context, target.instance)
+        )
+        if not (
+            isinstance(item, RuntimeEnvironmentRecord)
+            and (item.scope, item.context, item.instance) in runtime_keys
+            or isinstance(item, SecretRecord)
+            and item.secret_id in secret_ids
+            or isinstance(item, SecretBinding)
+            and item.binding_id in binding_ids
+        )
+    ) + (
+        *(item.record for item in bundle.runtime_environment_writes),
+        *bundle.secret_records,
+        *bundle.secret_bindings,
+    )
+    binding = disposable_lane_binding_sha256(
+        profile, target, target_id, configuration=configuration
+    )
+    creation = DisposableLaneCreation(
+        created_by="service:fresh-testing-bootstrap"
+        if production_resources == "isolated"
+        else "service:testing-replacement-resources",
+        lane_binding_sha256=binding,
+        data="reproducible",
+        production_resources=production_resources,
+        replaces_operation_id=operation_id,
+        replaced_target_id=retained_target_id,
+        isolation_evidence=isolation_evidence,
+    )
+    return target.model_copy(update={"resource_provenance": creation})
 
 
 class IncompleteTestingResources(ValueError):
@@ -639,6 +696,10 @@ class TestingReplacementResourceAdapter:
             )
         ):
             raise ValueError("Qualified volume names cannot be replaced by a secret binding.")
+        bundle = ProductAuthorityBundle(
+            required_context_owner=(self.product, self.request.context),
+            expected_product_profiles=(profile,),
+        )
         if preparation.resources_binding_sha256:
             if preparation.resources_binding_sha256 != resources.binding_sha256 or (
                 current_runtime is None
@@ -668,57 +729,40 @@ class TestingReplacementResourceAdapter:
                     }
                 )
             )
-            self.store.write_product_authority_bundle(
-                ProductAuthorityBundle(
-                    required_context_owner=(self.product, self.request.context),
-                    expected_product_profiles=(profile,),
-                    runtime_environment_writes=(
+            bundle = bundle.model_copy(
+                update={
+                    "runtime_environment_writes": (
                         RuntimeEnvironmentWrite(
                             record=runtime,
                             expected_record=current_runtime,
                             expected_absent=current_runtime is None,
                         ),
-                    ),
-                )
+                    )
+                }
             )
+        created_target = testing_creation_target(
+            self.store,
+            profile=profile,
+            target=target,
+            target_id=target_id,
+            bundle=bundle,
+            operation_id=operation.operation_id,
+            retained_target_id=preparation.retained_target_id,
+            production_resources="separation_ready",
+            isolation_evidence=f"service:testing-resources:{resources.binding_sha256}",
+        )
+        self.store.write_product_authority_bundle(
+            bundle.model_copy(update={"dokploy_targets": (created_target,)})
+        )
+        if not preparation.resources_binding_sha256:
             self.store.compare_and_write_disposable_resource_preparation(
                 expected=preparation,
                 replacement=preparation.model_copy(
-                    update={
-                        "resources_binding_sha256": resources.binding_sha256,
-                    }
+                    update={"resources_binding_sha256": resources.binding_sha256}
                 ),
             )
-        binding = disposable_lane_binding_sha256(
-            profile,
-            target,
-            target_id,
-            configuration=disposable_lane_configuration(
-                self.store, self.request.context, "testing"
-            ),
-        )
-        now = datetime.now(timezone.utc)
-        reference = f"service:testing-resources:{resources.binding_sha256}"
-        self.store.write_disposable_lane_safety(
-            DisposableLaneSafety(
-                product=self.product,
-                context=self.request.context,
-                instance="testing",
-                observed_by="service:testing-replacement-resources",
-                observer_kind="director_agent",
-                binding_sha256=binding,
-                usage="unused",
-                data="reproducible",
-                production_resources="separation_ready",
-                usage_evidence=reference,
-                data_evidence=reference,
-                isolation_evidence=reference,
-                replaces_operation_id=operation.operation_id,
-                replaced_target_id=preparation.retained_target_id,
-                observed_at=now,
-                expires_at=now + timedelta(minutes=5),
-            )
-        )
+        assert created_target.resource_provenance is not None
+        binding = created_target.resource_provenance.lane_binding_sha256
         return TestingReplacementResourcesReadback(
             product=self.product,
             context=self.request.context,

@@ -1,5 +1,6 @@
 from collections.abc import Callable, Iterable
 
+from control_plane.disposable_lanes import recorded_lane_protection
 from control_plane.contracts.public_hosts import retained_hostname_identity
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -62,10 +63,16 @@ def require_first_testing_target_unprotected(
     ):
         raise ValueError("The testing compose is shared with another lane.")
     evidence = store.read_disposable_lane_safety(product, context, "testing")
-    if evidence is not None and (
-        evidence.current_usage() == "in_use"
-        or evidence.data == "only_copy"
-        or evidence.production_resources in {"shared", "separation_ready"}
+    try:
+        target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+    except FileNotFoundError:
+        target = None
+    protection = recorded_lane_protection(target, evidence)
+    if (
+        evidence is not None
+        and evidence.current_usage() == "in_use"
+        or protection.only_copy
+        or protection.resources_protected
     ):
         raise ValueError("Testing use, data custody or resource sharing protects this lane.")
     return evidence
