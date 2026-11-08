@@ -2,6 +2,7 @@ import { expect, test, waitForState } from "./state";
 
 for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "session-unauthenticated", "watch-denied", "denied", "stale-build", "preflight-unavailable", "generic-pending", "generic-success", "held-resume", "held-resume-denied", "held-resume-lost-reply", "settlement-excluded", "settlement-lost-reply", "settlement-denied", "settlement-observed", "replay-conflict-settlement", "settlement-mismatch", "denied-reload", "storage-initial", "storage-dispatch", "storage-after-dispatch", "storage-clear", "storage-read"] as const) {
   test(`testing rebuild keeps its address and original request after ${outcome} @responsive`, async ({ page }, testInfo) => {
+    await page.route("**/ui/products?fixture=empty", route => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Fixture setup</title>" }), { times: 1 });
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
       const module = await import("/ui/src/dev-fixtures.ts");
