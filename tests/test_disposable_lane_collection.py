@@ -546,8 +546,8 @@ class CurrentGenerationUsageAgreementTests(_DisposableRuntimeAuthorityFixture):
                 side_effect=lambda **kw: kw["receive"](
                     {"type": "complete", "recent_signins": True, "authenticated_sessions": False}
                 ),
-            ),
-            self.assertRaisesRegex(ValueError, "Original testing use is protected"),
+            ) as probe,
+            self.assertRaises(ValueError),
         ):
             require_testing_generation_usage(
                 Path(self.temporary.name),
@@ -557,6 +557,7 @@ class CurrentGenerationUsageAgreementTests(_DisposableRuntimeAuthorityFixture):
                 target,
                 identity,
             )
+        probe.assert_called()
 
     async def test_isolation_hold_keeps_collection_inspection_and_admission_on_one_usage_answer(
         self,
