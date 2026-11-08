@@ -143,9 +143,8 @@ class OdooPreviewApplyConfigError(click.ClickException):
         self.missing_keys = tuple(sorted(missing_keys))
 
 
-class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
+class _OdooPreviewOperationEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    apply: OdooPreviewDokployApplyRequest
     preserve_original_reservation_id: str = Field(
         default="",
         max_length=128,
@@ -160,12 +159,20 @@ class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
     )
 
     @model_validator(mode="after")
+    def _validate_original_references(self) -> "_OdooPreviewOperationEnvelope":
+        if self.preserve_original_reservation_id and self.unrecorded_original_reservation_id:
+            raise ValueError("Preview preservation and unrecorded recovery cannot be combined.")
+        return self
+
+
+class OdooPreviewApplyEnvelope(_OdooPreviewOperationEnvelope):
+    apply: OdooPreviewDokployApplyRequest
+
+    @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooPreviewApplyEnvelope":
         _validate_driver_envelope_product(self.product, label="Odoo preview apply")
         if self.product.strip() != self.apply.dry_run_plan.product.strip():
             raise ValueError("Odoo preview apply requires matching product values.")
-        if self.preserve_original_reservation_id and self.unrecorded_original_reservation_id:
-            raise ValueError("Preview preservation and unrecorded recovery cannot be combined.")
         if (
             self.unrecorded_original_reservation_id
             and self.apply.dry_run_plan.operation != "refresh"
@@ -174,8 +181,7 @@ class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
         return self
 
 
-class OdooPreviewApplyInputsEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
+class OdooPreviewApplyInputsEnvelope(_OdooPreviewOperationEnvelope):
     inputs: OdooPreviewApplyInputsRequest
 
     @model_validator(mode="after")
@@ -183,7 +189,65 @@ class OdooPreviewApplyInputsEnvelope(_ProductRouteEnvelope):
         _validate_driver_envelope_product(self.product, label="Odoo preview apply inputs")
         if self.product.strip() != self.inputs.product.strip():
             raise ValueError("Odoo preview apply inputs require matching product values.")
+        if self.unrecorded_original_reservation_id and self.inputs.operation != "refresh":
+            raise ValueError("Unrecorded preview recovery requires a refresh operation.")
         return self
+
+
+def require_director_odoo_preview_admission(
+    store: object,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    issued_plan: OdooPreviewApplyInputsResult,
+    references: _OdooPreviewOperationEnvelope,
+    operation_record_id: str,
+    control_plane_root: Path,
+    captured_schedule_binding: dict[str, object] | None = None,
+) -> str | None:
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if references.preserve_original_reservation_id:
+        from control_plane.preview_preservation import (
+            require_preview_preservation_admission,
+            require_preview_preservation_plan,
+        )
+
+        if not operation_record_id:
+            require_preview_preservation_plan(
+                store=cast(PostgresRecordStore, store),
+                profile=profile,
+                issued_plan=issued_plan,
+                original_reservation_id=references.preserve_original_reservation_id,
+            )
+            return None
+        return require_preview_preservation_admission(
+            store=cast(PostgresRecordStore, store),
+            profile=profile,
+            issued_plan=issued_plan,
+            original_reservation_id=references.preserve_original_reservation_id,
+            operation_record_id=operation_record_id,
+            captured_schedule_binding=captured_schedule_binding,
+        ).preservation_id
+    if references.unrecorded_original_reservation_id:
+        from control_plane.preview_reservation_recovery import require_unrecorded_preview_refresh
+
+        return require_unrecorded_preview_refresh(
+            cast(PostgresRecordStore, store),
+            profile=profile,
+            issued_plan=issued_plan,
+            original_reservation_id=references.unrecorded_original_reservation_id,
+            operation_record_id=operation_record_id,
+            control_plane_root=control_plane_root,
+        )
+    from control_plane.preview_source import require_source_free_preview_history
+    from control_plane.disposable_lanes import require_disposable_preview_operation
+
+    require_source_free_preview_history(
+        store, profile=profile, issued_plan=issued_plan, operation_record_id=operation_record_id
+    )
+    return require_disposable_preview_operation(
+        cast(PostgresRecordStore, store), profile=profile, issued_plan=issued_plan
+    )
 
 
 def resolve_odoo_preview_apply_profile(

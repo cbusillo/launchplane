@@ -6038,6 +6038,11 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
         )
 
+        from control_plane.product_reconcile import _fingerprint
+
+        def historical_fingerprint(payload: dict[str, object]) -> str:
+            return _fingerprint({key: value for key, value in payload.items() if key != "blockers"})
+
         self.github.add_run(50, PR_HEAD, event="pull_request")
         build = self.provider.build_inputs
         execute = self.provider.execute_apply
@@ -6094,16 +6099,21 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             patch.object(self.provider, "execute_apply", side_effect=apply),
             patch.object(self.provider, "observe_apply", return_value=("unknown", None, False)),
         ):
-            self.request("preview", 5)
-            first = self.run_once().last_plan
-            original = self.store.list_held_odoo_preview_reservations(product="site")[0]
-            original_intent = self.store.read_original_mutation_intent(original)
-            expire(first)
-            changed = True
-            self.request("preview", 5)
-            successor = self.run_once().last_plan
-            self.assertEqual(successor["preview_operation_status"], "reconcile_required")
-            self.assertNotEqual(successor["preview_plan_id"], first["preview_plan_id"], successor)
+            with patch(
+                "control_plane.product_reconcile._fingerprint", side_effect=historical_fingerprint
+            ):
+                self.request("preview", 5)
+                first = self.run_once().last_plan
+                original = self.store.list_held_odoo_preview_reservations(product="site")[0]
+                original_intent = self.store.read_original_mutation_intent(original)
+                expire(first)
+                changed = True
+                self.request("preview", 5)
+                successor = self.run_once().last_plan
+                self.assertEqual(successor["preview_operation_status"], "reconcile_required")
+                self.assertNotEqual(
+                    successor["preview_plan_id"], first["preview_plan_id"], successor
+                )
             expire(successor)
             successor_dispatches = dispatches
             self.request("preview", 5)

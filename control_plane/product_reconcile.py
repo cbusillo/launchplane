@@ -2610,7 +2610,6 @@ def _run_preview_operation(
                         cast(PostgresRecordStore, record_store),
                         profile=profile,
                         issued_plan=operation_plan,
-                        allow_unrecorded_creation=True,
                     )
                 if preview_binding and binding != preview_binding:
                     raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")

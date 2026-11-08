@@ -17,6 +17,7 @@ from control_plane.odoo_preview_resources import preview_resource_environment
 from control_plane.storage.postgres import PostgresRecordStore
 
 if TYPE_CHECKING:
+    from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
     from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsResult
 
 PREVIEW_PRESERVATION_INSPECT_PHASE = "preview_preservation_inspect"
@@ -93,15 +94,13 @@ class PreviewPreservationAuthority(BaseModel):
         return canonical_json_sha256(self.model_dump(mode="json"))
 
 
-def read_preview_preservation_authority(
+def _read_preview_preservation_original(
     *,
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
     issued_plan: OdooPreviewApplyInputsResult,
     original_reservation_id: str,
-    operation_record_id: str = "",
-    captured_schedule_binding: dict[str, object] | None = None,
-) -> PreviewPreservationAuthority:
+) -> tuple[LaunchplaneIdempotencyRecord, OdooPreviewApplyInputsResult]:
     from control_plane.preview_reservation_recovery import original_preview_intent
 
     original = store.read_idempotency_record_by_id(original_reservation_id)
@@ -111,7 +110,6 @@ def read_preview_preservation_authority(
     old = retained.issued_plan
     old_target = old.dry_run_plan
     target = issued_plan.dry_run_plan
-    snapshot = old_target.clean_snapshot
     if (
         issued_plan.operation not in {"destroy", "refresh"}
         or old.operation != "refresh"
@@ -130,6 +128,26 @@ def read_preview_preservation_authority(
         )
     ):
         raise ValueError("Original preview preservation does not match this target.")
+    return original, old
+
+
+def read_preview_preservation_authority(
+    *,
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    issued_plan: OdooPreviewApplyInputsResult,
+    original_reservation_id: str,
+    operation_record_id: str = "",
+    captured_schedule_binding: dict[str, object] | None = None,
+) -> PreviewPreservationAuthority:
+    original, old = _read_preview_preservation_original(
+        store=store,
+        profile=profile,
+        issued_plan=issued_plan,
+        original_reservation_id=original_reservation_id,
+    )
+    target = issued_plan.dry_run_plan
+    snapshot = old.dry_run_plan.clean_snapshot
     original_records = original.response_payload.get("records")
     stable_identity = original.model_dump(
         include={
@@ -229,9 +247,6 @@ def require_preview_preservation_admission(
     operation_record_id: str,
     captured_schedule_binding: dict[str, object] | None = None,
 ) -> PreviewPreservationAuthority:
-    from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
-    from control_plane.workflows.odoo_preview_runtime import ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS
-
     authority = read_preview_preservation_authority(
         store=store,
         profile=profile,
@@ -240,9 +255,68 @@ def require_preview_preservation_admission(
         operation_record_id=operation_record_id,
         captured_schedule_binding=captured_schedule_binding,
     )
-    original = store.read_idempotency_record_by_id(original_reservation_id)
-    if original is None:
-        raise ValueError("Original preview preservation authority disappeared.")
+    _require_preview_preservation_protection(
+        store=store,
+        profile=profile,
+        issued_plan=issued_plan,
+        original_reservation_id=original_reservation_id,
+        operation_record_id=operation_record_id,
+    )
+    return authority
+
+
+def require_preview_preservation_plan(
+    *,
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    issued_plan: OdooPreviewApplyInputsResult,
+    original_reservation_id: str,
+) -> None:
+    original, old = _require_preview_preservation_protection(
+        store=store,
+        profile=profile,
+        issued_plan=issued_plan,
+        original_reservation_id=original_reservation_id,
+        operation_record_id="",
+    )
+    if (
+        old.dry_run_plan.clean_snapshot is None
+        and store.read_original_mutation_intent(original).get("schedule_binding") is not None
+    ):
+        _preservation_execution_server(
+            store=store,
+            profile=profile,
+            issued_plan=issued_plan,
+            original_reservation_id=original_reservation_id,
+            operation_record_id="",
+            captured_schedule_binding=None,
+        )
+
+
+def _require_preview_preservation_protection(
+    *,
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    issued_plan: OdooPreviewApplyInputsResult,
+    original_reservation_id: str,
+    operation_record_id: str,
+) -> tuple[LaunchplaneIdempotencyRecord, OdooPreviewApplyInputsResult]:
+    from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+    from control_plane.workflows.odoo_preview_runtime import ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS
+
+    original, old = _read_preview_preservation_original(
+        store=store,
+        profile=profile,
+        issued_plan=issued_plan,
+        original_reservation_id=original_reservation_id,
+    )
+    records = original.response_payload.get("records")
+    continuation = issued_plan.operation == "refresh"
+    serving_recipient = continuation or (
+        issued_plan.operation == "destroy"
+        and isinstance(records, dict)
+        and bool(records.get("generation_id"))
+    )
     target = issued_plan.dry_run_plan
     if any(
         held.record_id not in {original.record_id, operation_record_id}
@@ -309,7 +383,7 @@ def require_preview_preservation_admission(
                 )
             )
     if not retired_by_this_operation:
-        if authority.serving_recipient:
+        if serving_recipient:
             from control_plane.odoo_preview_qualification import read_preview_inspection_authority
 
             if preview is None or preview.state == "destroyed":
@@ -317,10 +391,10 @@ def require_preview_preservation_admission(
             serving = read_preview_inspection_authority(store, preview)
             if (
                 serving.selection.identity.deployment_record_id != original.record_id
-                or serving.target_id.target_id != authority.compose_id
+                or serving.target_id.target_id != target.compose_ref
             ):
                 raise ValueError("Recorded preservation requires the current serving original.")
-            if authority.continuation and issued_plan.plan_request.fishbowl_source is not None:
+            if continuation and issued_plan.plan_request.fishbowl_source is not None:
                 raise ValueError("Preserving continuation cannot import replacement data.")
         elif preview is not None:
             raise ValueError("Original-only preservation requires an unrecorded preview.")
@@ -355,16 +429,22 @@ def require_preview_preservation_admission(
         )
     except FileNotFoundError:
         tracked_target = None
+    if tracked_target is not None and tracked_target.policies.staff_testing_hold is not None:
+        raise ValueError(
+            "Original preview preservation has a staff-testing hold: "
+            + tracked_target.policies.staff_testing_hold.reason
+        )
     protection = recorded_lane_protection(tracked_target, report, preview)
     if (
         report is not None
         and report.current_usage() == "in_use"
         or protection.only_copy
-        and not authority.serving_recipient
+        and not serving_recipient
         or protection.resources_protected
     ):
         raise ValueError("Original preview preservation has a protected use or resource.")
-    return authority
+
+    return original, old
 
 
 def read_preview_preservation_source(

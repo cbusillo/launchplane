@@ -470,19 +470,27 @@ def require_disposable_preview_operation(
     *,
     profile: LaunchplaneProductProfileRecord,
     issued_plan: "OdooPreviewApplyInputsResult",
-    allow_unrecorded_creation: bool = False,
 ) -> str:
     if store.read_product_profile_record(profile.product) != profile:
         raise DisposableLaneSafetyUnknown("The preview profile changed; plan again.")
     compose_id = issued_plan.dry_run_plan.compose_ref
     unrecorded_creation = (
-        allow_unrecorded_creation
-        and issued_plan.operation == "refresh"
+        issued_plan.operation == "refresh"
         and compose_id.startswith("${created.composeId:")
         and not _owned_preview_candidates(
             store, profile, issued_plan.context, issued_plan.preview_slug
         )
     )
+    if unrecorded_creation and (
+        profile.driver_id != "odoo"
+        or issued_plan.preview_slug
+        != profile.preview.slug_template.format(number=issued_plan.plan_request.pr_number)
+        or any(
+            (lane.context, lane.instance) == (issued_plan.context, issued_plan.preview_slug)
+            for lane in profile.lanes
+        )
+    ):
+        raise DisposableLaneSafetyUnknown("The requested lane is not this product's Odoo preview.")
     preview = (
         None
         if unrecorded_creation
@@ -491,7 +499,7 @@ def require_disposable_preview_operation(
             profile,
             issued_plan.context,
             issued_plan.preview_slug,
-            allow_destroyed=issued_plan.operation in {"refresh", "destroy"},
+            allow_destroyed=True,
         )
     )
     creating_recipient = (
@@ -559,15 +567,18 @@ def require_unprotected_preview(
     preview: PreviewRecord | None = None,
 ) -> None:
     protection = recorded_lane_protection(target, evidence, preview)
-    if (
-        target is not None
-        and target.policies.staff_testing_hold is not None
-        or evidence is not None
-        and evidence.current_usage() == "in_use"
-        or protection.only_copy
-        or protection.resources_protected
-    ):
-        raise DisposableLaneSafetyUnknown("The preview has a recorded protected use or resource.")
+    if target is not None and target.policies.staff_testing_hold is not None:
+        raise DisposableLaneSafetyUnknown(
+            f"The preview has a staff-testing hold: {target.policies.staff_testing_hold.reason}"
+        )
+    if evidence is not None and evidence.current_usage() == "in_use":
+        raise DisposableLaneSafetyUnknown("The preview has recorded current human use.")
+    if protection.only_copy:
+        raise DisposableLaneSafetyUnknown("The preview holds the only needed copy of data.")
+    if protection.resources_protected:
+        raise DisposableLaneSafetyUnknown(
+            "The preview's resources are not separated from production."
+        )
 
 
 def resolve_disposable_preview(
