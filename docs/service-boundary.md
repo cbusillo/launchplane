@@ -3016,7 +3016,7 @@ schema. Service worker reconciliation writes retain their separate actions:
 - `POST /v1/service/verireel-workers/reconcile` uses the bearer/OIDC write
   identity path with `launchplane_service.reconcile_verireel_workers`.
 - `POST /v1/drivers/odoo/stable-bootstrap` uses the bearer/OIDC write identity
-  path with `odoo_stable_bootstrap.execute`.  bearer-token and human-session callers)
+  path with `odoo_stable_bootstrap.execute`.
 
 These admin reads use the same Launchplane authn/authz boundary as evidence
 ingress. The intent is to give admins a minimal typed read surface for the
