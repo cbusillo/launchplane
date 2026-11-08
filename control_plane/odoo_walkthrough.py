@@ -56,6 +56,7 @@ from control_plane.dokploy.odoo_walkthrough import (
 from control_plane.dokploy import source
 from control_plane.odoo_runtime_reads import (
     OdooRuntimeConnection,
+    require_exclusive_odoo_signin_origin,
     OdooRuntimeReadError,
     assert_selection_current,
     connect_runtime,
@@ -289,29 +290,9 @@ def _plan_preview_walkthrough(
             target_id=connection.evidence.target_id,
             mutation=True,
         )
-    parsed = urlsplit(connection.selection.base_url)
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.path not in {"", "/"}
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError("Preview sign-in requires its recorded HTTPS origin.")
-    if any(
-        (urlsplit(lane.base_url).hostname or "").rstrip(".") == (parsed.hostname or "").rstrip(".")
-        for profile in store.list_product_profile_records()
-        for lane in profile.lanes
-    ) or any(
-        preview.preview_id != request.preview_id
-        and preview.state != "destroyed"
-        and (urlsplit(preview.canonical_url).hostname or "").rstrip(".")
-        == (parsed.hostname or "").rstrip(".")
-        for preview in store.list_preview_records()
-    ):
-        raise ValueError("The preview origin aliases another lane.")
+    require_exclusive_odoo_signin_origin(
+        store, connection.selection.identity, connection.selection.base_url
+    )
     database = connection.credentials["ODOO_DB_NAME"]
     copy_binding = canonical_json_sha256(
         [

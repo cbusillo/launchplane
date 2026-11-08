@@ -1,8 +1,10 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Literal, Never
 
 from fastapi import Depends, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -72,6 +74,21 @@ class ProductReviewRouteDependencies:
     read_pull_request_notes: Callable[
         [LaunchplaneProductProfileRecord, int, str, bool], PullRequestNotes
     ]
+    control_plane_root: Path | None = None
+
+
+class ClientSignupEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str = Field(min_length=3, max_length=256, pattern=r"^[^/\s]+/[^/\s]+$")
+    pull_request: int | None = Field(default=None, ge=1)
+    generation_id: str = Field(min_length=1, max_length=512)
+    instance: Literal["preview", "testing"] = "preview"
+
+
+class ClientSigninMintEnvelope(ClientSignupEnvelope):
+    xmlid: str = Field(min_length=3, max_length=256, pattern=r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
+    reviewed_runtime_binding: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class ProductReviewDecisionEnvelope(BaseModel):
@@ -186,6 +203,133 @@ def register_product_review_routes(
             code="product_review_decision_not_found",
             message="This saved review decision was not found.",
         )
+
+    def signin_inputs(
+        envelope: ClientSignupEnvelope,
+        identity: LaunchplaneIdentity,
+        record_store: object,
+        trace_id: str,
+    ) -> tuple[object, LaunchplaneProductProfileRecord]:
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        store = review_store(record_store, trace_id)
+        profile = visible_profile(
+            store=store, repository=envelope.repository, identity=identity, trace_id=trace_id
+        )
+        if not viewer_is_product_owner(profile=profile, identity=identity):
+            unavailable(trace_id)
+        if (
+            not isinstance(record_store, PostgresRecordStore)
+            or dependencies.control_plane_root is None
+            or (envelope.pull_request is not None) != (envelope.instance == "preview")
+        ):
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="client_signup_unavailable",
+                message="Sign-in is unavailable for this lane.",
+            )
+        return record_store, profile
+
+    def signin_response(
+        operation: Callable[[], dict[str, object] | dict[str, str]], trace_id: str
+    ) -> JSONResponse:
+        try:
+            result = operation()
+        except Exception:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="client_signup_unavailable",
+                message="Sign-in could not be verified. Refresh the review.",
+            ) from None
+        return JSONResponse(
+            result, headers={"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
+        )
+
+    def list_native_client_users(
+        repository: Annotated[
+            str, Query(min_length=3, max_length=256, pattern=r"^[^/\s]+/[^/\s]+$")
+        ],
+        generation_id: Annotated[str, Query(min_length=1, max_length=512)],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        pull_request: Annotated[int | None, Query(ge=1)] = None,
+        instance: Literal["preview", "testing"] = "preview",
+    ) -> JSONResponse:
+        from control_plane.odoo_client_signup import ClientSigninLane, list_client_signin_users
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        envelope = ClientSignupEnvelope(
+            repository=repository,
+            generation_id=generation_id,
+            pull_request=pull_request,
+            instance=instance,
+        )
+        trace_id = common.next_trace_id()
+        _store, profile = signin_inputs(envelope, identity, record_store, trace_id)
+        assert isinstance(record_store, PostgresRecordStore)
+        root = dependencies.control_plane_root
+        assert root is not None
+        return signin_response(
+            lambda: list_client_signin_users(
+                store=record_store,
+                root=root,
+                profile=profile,
+                identity=identity,
+                lane=ClientSigninLane(**envelope.model_dump()),
+            ),
+            trace_id,
+        )
+
+    def mint_native_client_signin(
+        envelope: ClientSigninMintEnvelope,
+        identity: Annotated[
+            GitHubHumanIdentity, Depends(dependencies.read_github_human_browser_mutation_identity)
+        ],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> JSONResponse:
+        from control_plane.odoo_client_signup import ClientSigninLane, mint_client_signin
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        trace_id = common.next_trace_id()
+        _store, profile = signin_inputs(envelope, identity, record_store, trace_id)
+        assert isinstance(record_store, PostgresRecordStore)
+        root = dependencies.control_plane_root
+        assert root is not None
+        lane = ClientSigninLane(
+            repository=envelope.repository,
+            pull_request=envelope.pull_request,
+            generation_id=envelope.generation_id,
+            instance=envelope.instance,
+        )
+        return signin_response(
+            lambda: mint_client_signin(
+                store=record_store,
+                root=root,
+                profile=profile,
+                identity=identity,
+                lane=lane,
+                reviewed_runtime_binding=envelope.reviewed_runtime_binding,
+                xmlid=envelope.xmlid,
+            ),
+            trace_id,
+        )
+
+    app.add_api_route(
+        PRODUCT_REVIEW_ROUTE + "/sign-in",
+        list_native_client_users,
+        methods=["GET"],
+        operation_id="list_native_client_users",
+        summary="List native signup users privately for the recorded Client",
+    )
+    app.add_api_route(
+        PRODUCT_REVIEW_ROUTE + "/sign-in",
+        mint_native_client_signin,
+        methods=["POST"],
+        operation_id="mint_native_client_signin",
+        summary="Prepare a native signup invitation for the signed-in recorded Client",
+    )
 
     def build_response(
         *,

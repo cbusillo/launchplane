@@ -21,6 +21,7 @@ import { AppLink, productTopicsPath, useAppSearchParams } from "./router";
 import { needsNothingFromClient, untestedReason } from "./release-review-model";
 import { safeExternalUrl } from "./url";
 import { ClientTestNotes, OwnerReleaseReviewRoute } from "./OwnerReleaseReviewRoute";
+import { ClientSignupLinks } from "./ClientSignupLinks";
 
 import type {
   GitHubHumanIdentityResponse,
@@ -271,6 +272,7 @@ function ProductReviewCard({
       </header>
       {review.pull_request_title ? <h3>{review.pull_request_title}</h3> : null}
       <div className="owner-review-links">
+        {review.viewer_is_owner && review.preview_is_current && !fixtureMode && previewUrl ? <ClientSignupLinks repository={review.repository} pullRequest={review.pull_request_number} generationId={review.preview_generation_id} instance="preview" laneUrl={review.preview_url} /> : null}
         {previewUrl ? (
           <a
             className="button button-primary owner-review-preview"

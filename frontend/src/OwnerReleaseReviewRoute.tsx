@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ClientSignupLinks } from "./ClientSignupLinks";
 import Markdown from "react-markdown";
 import { requestReleaseReview, readReleaseReview, writeReleaseReviewDecision } from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
@@ -277,6 +278,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         // The urgent fix runs on the live site; testing may already carry newer work.
         ? liveSite ? <a className="button button-primary owner-review-preview" href={liveSite.toString()} target="_blank" rel="noreferrer">Open the live site</a> : null
         : testingUrl ? <a className="button button-primary owner-review-preview" href={testingUrl.toString()} target="_blank" rel="noreferrer">Open the testing site</a> : null}
+      {response.viewer_is_owner && checklist && !fixtureMode && testingUrl ? <ClientSignupLinks repository={checklist.repository} generationId={checklist.candidate.artifact_id} instance="testing" laneUrl={checklist.testing_url} /> : null}
       {latestDecision ? <section className="owner-review-latest" aria-label="Latest release decision">
         <h3>{DECISION_HEADINGS[latestDecision.decision]}</h3>
         {latestDecision.decision === "temporary_hotfix"
