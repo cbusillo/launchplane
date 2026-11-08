@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from http.client import HTTPException as HTTPTransportError
 from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from urllib.parse import urlsplit
 from urllib.request import (
     HTTPCookieProcessor,
@@ -47,6 +47,41 @@ from control_plane.workflows.odoo_preview_runtime import (
     odoo_compose_has_domain,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+
+if TYPE_CHECKING:
+    from control_plane.storage.postgres import PostgresRecordStore
+
+
+def require_exclusive_odoo_signin_origin(
+    store: PostgresRecordStore, identity: RuntimeIdentity, base_url: str
+) -> None:
+    parsed = urlsplit(base_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Odoo sign-in requires its recorded HTTPS origin.")
+    hostname = parsed.hostname.rstrip(".")
+    if any(
+        (urlsplit(lane.base_url).hostname or "").rstrip(".") == hostname
+        for profile in store.list_product_profile_records()
+        for lane in profile.lanes
+        if identity.environment_kind == "preview"
+        or (profile.product, lane.context, lane.instance)
+        != (identity.product, identity.context, identity.instance)
+    ) or any(
+        preview.preview_id != identity.preview_id
+        and preview.state != "destroyed"
+        and (urlsplit(preview.canonical_url).hostname or "").rstrip(".") == hostname
+        for preview in store.list_preview_records()
+    ):
+        raise ValueError("The sign-in origin aliases another lane.")
+
 
 ODOO_READ_REJECTED = "odoo_read_rejected"
 

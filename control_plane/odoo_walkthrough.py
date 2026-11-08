@@ -57,6 +57,7 @@ from control_plane.dokploy.odoo_walkthrough import (
 from control_plane.dokploy import source
 from control_plane.odoo_runtime_reads import (
     OdooRuntimeConnection,
+    require_exclusive_odoo_signin_origin,
     OdooRuntimeReadError,
     assert_selection_current,
     connect_runtime,
@@ -89,7 +90,7 @@ from control_plane.testing_serving_copy import (
     testing_receiver_generation,
 )
 from control_plane.testing_replacement_bootstrap import require_testing_credential_safety
-from control_plane.native_testing_route_refresh import plan_native_testing_route_refresh
+from control_plane.native_testing_route_refresh import native_testing_origin_matches
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.odoo_preview_runtime import odoo_compose_has_domain
@@ -296,29 +297,9 @@ def _plan_preview_walkthrough(
             target_id=connection.evidence.target_id,
             mutation=True,
         )
-    parsed = urlsplit(connection.selection.base_url)
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.path not in {"", "/"}
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError("Preview sign-in requires its recorded HTTPS origin.")
-    if any(
-        (urlsplit(lane.base_url).hostname or "").rstrip(".") == (parsed.hostname or "").rstrip(".")
-        for profile in store.list_product_profile_records()
-        for lane in profile.lanes
-    ) or any(
-        preview.preview_id != request.preview_id
-        and preview.state != "destroyed"
-        and (urlsplit(preview.canonical_url).hostname or "").rstrip(".")
-        == (parsed.hostname or "").rstrip(".")
-        for preview in store.list_preview_records()
-    ):
-        raise ValueError("The preview origin aliases another lane.")
+    require_exclusive_odoo_signin_origin(
+        store, connection.selection.identity, connection.selection.base_url
+    )
     database = connection.credentials["ODOO_DB_NAME"]
     copy_binding = canonical_json_sha256(
         [
@@ -495,24 +476,7 @@ def _walkthrough_preflight(
             if selection.identity.context != context:
                 raise ValueError("The product does not own this testing context.")
             parsed = urlsplit(selection.base_url)
-            if (
-                parsed.scheme != "https"
-                or not parsed.hostname
-                or parsed.username
-                or parsed.password
-                or parsed.path not in {"", "/"}
-                or parsed.query
-                or parsed.fragment
-            ):
-                raise ValueError("Testing sign-in requires its recorded HTTPS origin.")
-            if any(
-                lane.instance != "testing"
-                and (urlsplit(lane.base_url).hostname or "").rstrip(".")
-                == (parsed.hostname or "").rstrip(".")
-                for other_profile in store.list_product_profile_records()
-                for lane in other_profile.lanes
-            ):
-                raise ValueError("Testing origin aliases another lane.")
+            require_exclusive_odoo_signin_origin(store, selection.identity, selection.base_url)
     with checkpoint(WalkthroughPrerequisite.GENERATION, ()) as run:
         if run:
             generation = read_current_testing_generation(
@@ -587,14 +551,14 @@ def _walkthrough_preflight(
             assert parsed is not None
             if publication is not None:
                 if operation != "cleanup":
-                    route = plan_native_testing_route_refresh(
+                    if not native_testing_origin_matches(
                         store,
                         root=root,
-                        current=store.read_route_binding_record(
-                            product=product, context_name=context, instance_name="testing"
-                        ),
-                    )
-                    if route.status not in {"ready", "unchanged"}:
+                        product=product,
+                        context=context,
+                        target_id=connection.evidence.target_id,
+                        origin=connection.selection.base_url,
+                    ):
                         raise WalkthroughEvidenceUnavailable
             elif not odoo_compose_has_domain(
                 host=connection.host,

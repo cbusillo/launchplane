@@ -43,6 +43,7 @@ with tempfile.TemporaryDirectory() as directory:
     if settings.database_name!=spec['database'] or any(getattr(settings,key)!=getattr(runner_settings,key) for key in ('database_host','database_port','database_user','database_password')):
         raise ValueError('effective web database differs from the admitted runner transport')
     startup['_write_runtime_config'](settings)
+    os.environ.update(startup['_odoo_environment'](settings))
     parser=configparser.ConfigParser(interpolation=None)
     parser.read(settings.config_path)
     options=dict(parser['options'])
