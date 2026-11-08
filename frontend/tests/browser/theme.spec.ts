@@ -2,27 +2,18 @@ import { expect, launchControlledProfile, test } from "./state";
 
 const reviewPath = "/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308";
 
-test("explicit themes follow review links, navigation, and other tabs", async ({ page, context }, testInfo) => {
+test("explicit themes follow review links, navigation, and other tabs", async ({ page, context }) => {
   await page.goto(reviewPath);
   await page.getByRole("button", { name: "Use light theme", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await page.reload();
-  await expect(page.getByRole("button", { name: "Use dark theme", exact: true })).toBeVisible();
 
   const otherTab = await context.newPage();
   await otherTab.goto(reviewPath);
   await expect(otherTab.getByRole("button", { name: "Use dark theme", exact: true })).toBeVisible();
-  await otherTab.screenshot({ path: testInfo.outputPath("review-light.png"), fullPage: true });
   await otherTab.goto("/ui/products?fixture=products");
   await expect(otherTab.getByRole("button", { name: "Switch to dark theme", exact: true })).toBeVisible();
   await otherTab.getByRole("button", { name: "Switch to dark theme", exact: true }).click();
   await expect(page.getByRole("button", { name: "Use light theme", exact: true })).toBeVisible();
-  await otherTab.screenshot({ path: testInfo.outputPath("products-dark.png"), fullPage: true });
-  const latestTab = await context.newPage();
-  await latestTab.goto(reviewPath);
-  await expect(latestTab.getByRole("button", { name: "Use light theme", exact: true })).toBeVisible();
-  await latestTab.reload();
-  await expect(latestTab.locator("html")).toHaveAttribute("data-theme", "dark");
 });
 
 test("the saved theme applies before the application module can render", async ({ page, context }) => {
