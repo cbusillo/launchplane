@@ -183,7 +183,6 @@ PUBLIC_INGRESS_GITHUB_TOKEN_ENV_KEY = "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"
 MISSING_AUTHORITY_SHA256 = "missing"
 DEPLOY_FENCE_PROVIDER = "launchplane"
 DEPLOY_FENCE_CHECK_NAME = "launchplane-deploy-fence"
-DEPLOY_INCIDENT_DEFERRAL = timedelta(minutes=5)
 # A deploy records its new runtime identity when its own rollout check passes,
 # and the public route can still answer from the previous container for a few
 # seconds. A mismatch is probed once more after this delay before it counts.
@@ -1618,20 +1617,6 @@ def _plan_public_ingress_incident_transition(
     expected_incident_sha256 = (
         public_ingress_incident_record_sha256(existing) if existing is not None else ""
     )
-    if existing is None and incident_eligible:
-        deploying = _deployment_deferring_failure(record_store, record)
-        if deploying is not None:
-            return _PlannedIncidentTransition(
-                observation=record.model_copy(
-                    update={
-                        "summary": f"{record.summary} Incident deferred during recorded deploy "
-                        f"{deploying.record_id}, bounded from {deploying.deploy.started_at}."
-                    }
-                ),
-                incidents=(),
-                incident_events=(),
-                reminder_states=(),
-            )
     incident_events: list[PublicIngressIncidentEventRecord] = []
     reconciled_duplicates: list[PublicIngressIncidentRecord] = []
     reconciled_reminder_states: list[PublicIngressIncidentReminderStateRecord] = []
@@ -1710,6 +1695,7 @@ def _plan_public_ingress_incident_transition(
             expected_open_incident_sha256=expected_incident_sha256,
         )
     if record.status == "fail":
+        record = _associate_recorded_deployment(record_store, record)
         fingerprint = _observation_material_fingerprint(record)
         fingerprint_sha256 = public_ingress_material_fingerprint_sha256(fingerprint)
         linked_observation = record.model_copy(
@@ -3246,115 +3232,32 @@ def _profile_uses_generic_web(profile: LaunchplaneProductProfileRecord) -> bool:
         return False
 
 
-def _deployment_deferring_failure(
+def _associate_recorded_deployment(
     record_store: PublicIngressMonitorStore, record: PublicIngressObservationRecord
-) -> DeploymentRecord | None:
-    transient_codes = {
-        "http_error",
-        "health_status_error",
-        "connection_timeout",
-        "wrong_runtime_identity",
-        "unknown_error",
-    }
-    if (
-        record.purpose != "probe"
-        or record.status != "fail"
-        or record.check_kind not in {"public_http", "private_http"}
-        or any(
-            target.failure_code not in transient_codes
-            for target in record.targets
-            if target.status == "fail"
-        )
-    ):
-        return None
+) -> PublicIngressObservationRecord:
     read_latest = getattr(record_store, "read_latest_lane_deployment_record", None)
     if not callable(read_latest):
-        return None
+        return record
     deployment = cast(Callable[..., object], read_latest)(
         context_name=record.context, instance_name=record.instance
     )
     if not isinstance(deployment, DeploymentRecord):
-        return None
+        return record
+    if (deployment.context, deployment.instance) != (record.context, record.instance):
+        return record
     identity = deployment.runtime_identity
-    owners = [
-        profile.product
-        for profile in record_store.list_product_profile_records()
-        if profile.is_active
-        and any(
-            (lane.context, lane.instance) == (record.context, record.instance)
-            for lane in profile.lanes
-        )
-    ]
-    if (
-        deployment.deploy.status not in {"pending", "pass"}
-        or deployment.deploy.status == "pending"
-        and deployment.deploy.finished_at
-        or deployment.failure is not None
-        or deployment.post_deploy_update.status == "fail"
-        or deployment.destination_health.status == "fail"
-        or deployment.destination_health.status == "pass"
-        and deployment.destination_health.verified
-        and deployment.destination_health.runtime_identity_status == "match"
-        or owners != [record.product]
-        or identity is not None
-        and (identity.product, identity.context, identity.instance, identity.deployment_record_id)
-        != (record.product, record.context, record.instance, deployment.record_id)
-        or (deployment.context, deployment.instance) != (record.context, record.instance)
-    ):
-        return None
+    if identity is not None and identity.product != record.product:
+        return record
     try:
-        started = _parse_utc_timestamp(deployment.deploy.started_at)
-        observed = _parse_utc_timestamp(record.observed_at)
+        if _parse_utc_timestamp(deployment.deploy.started_at) > _parse_utc_timestamp(
+            record.observed_at
+        ):
+            return record
     except ValueError:
-        return None
-    if not started <= observed < started + DEPLOY_INCIDENT_DEFERRAL:
-        return None
-    if deployment.deploy.status == "pass":
-        try:
-            finished = _parse_utc_timestamp(deployment.deploy.finished_at)
-        except ValueError:
-            return None
-        if not started <= finished <= observed:
-            return None
-    previous = record_store.list_public_ingress_observation_records(
-        product=record.product,
-        context_name=record.context,
-        instance_name=record.instance,
-        check_name=record.check_name,
-        check_kind=record.check_kind,
-        limit=50,
+        return record
+    return record.model_copy(
+        update={"summary": f"{record.summary} Recorded deployment: {deployment.record_id}."}
     )
-    try:
-        observation_times = {
-            item.record_id: _parse_utc_timestamp(item.observed_at) for item in previous
-        }
-    except ValueError:
-        return None
-    if any(
-        item.purpose == "probe"
-        and item.status == "pass"
-        and started <= observation_times[item.record_id] <= observed
-        and any(
-            target.runtime_identity_status == "match"
-            and target.observed_runtime_identity is not None
-            and target.observed_runtime_identity.deployment_record_id == deployment.record_id
-            for target in item.targets
-        )
-        for item in previous
-    ):
-        return None
-    preceding_probe = next(
-        (item for item in previous if item.purpose == "probe" and item.status != "skipped"), None
-    )
-    if (
-        previous
-        and preceding_probe is None
-        or preceding_probe is not None
-        and preceding_probe.status == "fail"
-        and observation_times[preceding_probe.record_id] < started
-    ):
-        return None
-    return deployment
 
 
 def _expected_runtime_identity(

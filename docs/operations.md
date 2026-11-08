@@ -1602,32 +1602,18 @@ the newest attempt by start time, so a pending attempt cannot be hidden behind
 an older completed record. Pending and terminal deployment changes trigger a
 fresh check even when inventory has not changed.
 
-A new HTTP/identity incident is deferred for at most five minutes from its own
-lane's recorded deploy start while replacement readiness remains unproven.
-Provider completion can precede the actual container replacement. A passing
-probe with the replacement's matching runtime identity, or identity-verified
-release health, ends deferral immediately. A plain pass or the old runtime's
-identity cannot prove the replacement ready. The lane must belong exclusively
-to one active product; any recorded deployment identity must agree with it.
-A pending record must have no finish; a provider-completed record must have a
-valid finish between its start and the probe. Recorded failures are never
-deferred. Unorderable deployment history retains
-normal alerts; comparable start times are ordered in UTC. Only deploy identity,
-start, status, finish and failure presence enter scheduler revisions, so
-checkpoint-only evidence rewrites do not start another probe.
-Failed probes remain failed, retained evidence and cannot earn green time.
-Their summary identifies the deploy. Readiness, failure or expiry ends the
-deferral; the next failed probe opens the incident and its normal alert outbox.
-Existing incidents and failures preceding a new attempt stay alertable, so
-successive attempts cannot renew the window over an outage. DNS, TLS,
-configuration, dependency, delivery, fence and cadence failures are not deferred.
-No deployment, merge-train or recovery admission gate is added; monitoring does
-not change a deployment or settle its effects. Unsupported deployment reads
-retain normal incident behavior.
-Lanes that never report matching identity retain the full original deferral
-bound; a passing response without identity does not shorten it. Unorderable
-stored observation history retains normal alerts instead of interrupting the
-monitor run.
+Failing probes during a recorded deployment enter the normal incident path immediately.
+Each retained observation links its incident and expected runtime identity. Its
+summary identifies the latest recorded lane deployment at probe time when that
+history is available and orderable, including while inventory still expects the
+previous runtime. Missing deployment evidence never prevents incident recording.
+Repeated failures aggregate through the existing incident lifecycle; recovery
+resolves that same incident. Deployment time
+has no exception in lane health-history accounting: failed observations count as
+failed time toward the lane's availability target.
+Only deploy identity, start, status, finish and failure presence enter scheduler
+revisions, so checkpoint-only evidence rewrites do not start another probe.
+Monitoring does not change a deployment or settle its effects.
 
 A long change-triggered run can still delay a subsequent scheduled slot; multiple
 probe waves can also exceed the publication budget. Those are scheduler latency
