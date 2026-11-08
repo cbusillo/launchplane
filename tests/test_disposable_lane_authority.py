@@ -560,7 +560,9 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
         assert evidence is not None
         self.assertEqual(evidence.usage, "in_use")
 
-    async def test_service_collection_without_generation_boundary_keeps_the_live_read(self) -> None:
+    async def test_service_collection_accepts_complete_negative_probe_without_creation_history(
+        self,
+    ) -> None:
         profile = self.store.read_product_profile_record("example-site")
         self.store.write_product_profile_record(profile.model_copy(update={"driver_id": "odoo"}))
         target = self.store.read_dokploy_target_record(

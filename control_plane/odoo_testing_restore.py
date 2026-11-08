@@ -3,7 +3,6 @@
 import base64
 import inspect
 import json
-from datetime import datetime
 from control_plane.copy_readback_diagnostics import (
     ReadbackPredicate,
     copy_failure_diagnostics_library,
@@ -91,10 +90,6 @@ class FreshOdooTestingGeneration(BaseModel):
     retained_copy_binding: str = Field(
         default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: not value
     )
-
-    @property
-    def created_at(self) -> datetime:
-        return datetime.fromisoformat(self.prepared_at)
 
     @model_validator(mode="after")
     def _validate_source(self) -> "FreshOdooTestingGeneration":

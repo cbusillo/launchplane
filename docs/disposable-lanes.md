@@ -634,8 +634,10 @@ evidence because it cannot be distinguished from a person's activity there.
 The product, context, target and provider compose project must
 match that custody, which is rechecked after the probe. A missing or mismatched
 boundary retains the existing live login/session read, without inventing a
-cutoff or adding a positive-unused admission requirement. A failed generation
-lookup reports UNKNOWN with its actual failure code.
+cutoff or adding a positive-unused admission requirement. Positive use stays
+protective when a generation lookup fails or changes during the probe. An
+otherwise negative result stays UNKNOWN with the failed or changed lookup's
+reason code, preserving any independent current-use observation.
 Authenticated or partially authenticated session files count when their modification
 time is at or after that boundary. Restored earlier login/session history stays
 intact and does not establish current use. Current sessions remain protective

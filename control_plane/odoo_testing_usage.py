@@ -42,8 +42,6 @@ ODOO_USAGE_PROBE_REASON_CODES = frozenset(
         "database_connection_unavailable",
         "database_driver_unavailable",
         "database_network_unavailable",
-        "generation_boundary_unavailable",
-        "generation_changed",
         "login_history_unavailable",
         "probe_result_invalid",
         "process_inventory_unavailable",
@@ -72,6 +70,8 @@ ODOO_USAGE_PROBE_REASON_CODES = frozenset(
 ODOO_USAGE_REASON_CODES = ODOO_USAGE_PROBE_REASON_CODES | frozenset(
     [
         "complete",
+        "generation_boundary_unavailable",
+        "generation_changed",
         "diagnostics_unavailable",
         "diagnostics_unrecognized",
         "not_collected",
@@ -86,7 +86,6 @@ ODOO_USAGE_REASON_CODES = ODOO_USAGE_PROBE_REASON_CODES | frozenset(
         "provider_target_changed",
         "provider_target_unavailable",
         "provider_transport_unavailable",
-        "staff_testing_hold",
         "target_alias",
         "target_unavailable",
     ]
@@ -569,25 +568,31 @@ def testing_usage_generation_created_at(
         return None
     generation = store.read_fresh_odoo_testing_generation(product, target.context)
     candidate = store.find_testing_candidate_by_target(target_id.target_id)
-    if generation is not None and (
+    generation_matches = generation is not None and (
         (generation.product, generation.context, generation.instance, generation.target_id)
-        != (product, target.context, "testing", target_id.target_id)
-        or not candidate_compose_project_matches(generation.namespace, project)
-        or candidate is not None
-        and generation.operation_id != candidate.operation_id
-    ):
-        return None
-    if candidate is not None:
-        if (candidate.product, candidate.context, candidate.compose_id) != (
+        == (product, target.context, "testing", target_id.target_id)
+        and candidate_compose_project_matches(generation.namespace, project)
+    )
+    if (
+        candidate is not None
+        and (candidate.product, candidate.context, candidate.compose_id)
+        == (
             product,
             target.context,
             target_id.target_id,
-        ) or not candidate_compose_project_matches(candidate.namespace, project):
+        )
+        and candidate_compose_project_matches(candidate.namespace, project)
+    ):
+        if (
+            generation_matches
+            and generation is not None
+            and generation.operation_id != candidate.operation_id
+        ):
             return None
         created = candidate.created_at
-    elif generation is not None:
+    elif generation_matches and generation is not None:
         try:
-            created = generation.created_at
+            created = datetime.fromisoformat(generation.prepared_at)
         except ValueError:
             return None
     else:
@@ -622,13 +627,19 @@ def read_odoo_testing_usage(
         if not project:
             return OdooTestingUsage(reason_code="provider_target_unavailable")
         checkpoint = "generation_boundary_unavailable"
-        generation_created_at = (
-            testing_usage_generation_created_at(
-                record_store, product=product, target=target, target_id=target_id, project=project
-            )
-            if preview_spec is None
-            else None
-        )
+        generation_created_at = None
+        boundary_unavailable = False
+        if preview_spec is None:
+            try:
+                generation_created_at = testing_usage_generation_created_at(
+                    record_store,
+                    product=product,
+                    target=target,
+                    target_id=target_id,
+                    project=project,
+                )
+            except (SQLAlchemyError, ValueError, OSError):
+                boundary_unavailable = True
         frames: list[dict[str, object]] = []
         checkpoint = "provider_transport_unavailable"
         _read_remote(
@@ -667,11 +678,6 @@ def read_odoo_testing_usage(
             current.get(key) != provider.get(key) for key in ("name", "appName", "serverId")
         ):
             return OdooTestingUsage(reason_code="provider_target_changed")
-        checkpoint = "generation_boundary_unavailable"
-        if preview_spec is None and generation_created_at != testing_usage_generation_created_at(
-            record_store, product=product, target=target, target_id=target_id, project=project
-        ):
-            return OdooTestingUsage(reason_code="generation_changed")
         checkpoint = "probe_result_invalid"
         if (
             len(frames) == 1
@@ -711,6 +717,15 @@ def read_odoo_testing_usage(
         recent, sessions = frames[0]["recent_signins"], frames[0]["authenticated_sessions"]
         if type(recent) is not bool or type(sessions) is not bool:
             return OdooTestingUsage(reason_code="probe_result_invalid")
+        if preview_spec is None and not (recent or sessions):
+            if boundary_unavailable:
+                return OdooTestingUsage(reason_code="generation_boundary_unavailable")
+            checkpoint = "generation_boundary_unavailable"
+            if generation_created_at != testing_usage_generation_created_at(
+                record_store, product=product, target=target, target_id=target_id, project=project
+            ):
+                return OdooTestingUsage(reason_code="generation_changed")
+            checkpoint = "probe_result_invalid"
         hashes = frames[0].get("credential_hashes", [])
         if not isinstance(hashes, list):
             return OdooTestingUsage(reason_code="probe_result_invalid")

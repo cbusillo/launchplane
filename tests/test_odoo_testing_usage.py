@@ -196,6 +196,7 @@ class SessionInventoryTests(unittest.TestCase):
         argv: list[bytes] | None = None,
         generation_created_at: datetime | None = None,
         login_rows: tuple[tuple[int, datetime], ...] | None = None,
+        bounded: bool = True,
     ) -> dict[str, Any]:
         """Execute the emitted container probe, including its bounded exception handler."""
         config = MagicMock()
@@ -280,7 +281,9 @@ class SessionInventoryTests(unittest.TestCase):
             patch.object(Path, "glob", return_value=processes),
             redirect_stdout(output),
         ):
-            program = odoo_usage_container_program(instance, generation_created_at=self.created_at)
+            program = odoo_usage_container_program(
+                instance, generation_created_at=self.created_at if bounded else None
+            )
             if generation_created_at is None:
                 exec(program, {"__name__": "__main__"})
             else:
@@ -322,6 +325,21 @@ class SessionInventoryTests(unittest.TestCase):
                 )
                 self.assertEqual(session.read_bytes(), original[0])
                 self.assertEqual(session.stat().st_mtime, stamp.timestamp())
+
+    def test_missing_boundary_probe_keeps_old_authenticated_sessions_and_recent_logins(
+        self,
+    ) -> None:
+        sessions = self.path / "sessions"
+        sessions.mkdir()
+        session = sessions / "restored"
+        session.write_text(json.dumps({"db": "testing_db", "uid": 42}))
+        os.utime(session, (1, 1))
+        result = self.probe_result(
+            bounded=False, login_rows=((7, datetime.now(UTC) - timedelta(hours=1)),)
+        )
+        self.assertIs(result["recent_signins"], True)
+        self.assertIs(result["authenticated_sessions"], True)
+        self.assertEqual(result["actors"], ["odoo-user:42", "odoo-user:7"])
 
     def test_preview_container_reads_sessions_and_signins_with_preview_identity(self) -> None:
         result = self.probe_result("sessions_used", recent=True, instance="preview")
@@ -564,9 +582,15 @@ class UsageReaderTests(unittest.TestCase):
                 self.assertNotIn("private-provider-token", repr(result))
 
     def test_generation_boundary_comes_from_current_custody_and_is_rechecked(self) -> None:
-        self.remote.side_effect = lambda **kw: kw["receive"](
-            {"type": "complete", "recent_signins": False, "authenticated_sessions": False}
-        )
+        captured_mismatch: dict[str, Any] = {"__name__": "fixture"}
+
+        def mismatch_probe(**kwargs: Any) -> None:
+            exec(kwargs["payload"]["container_program"], captured_mismatch)
+            kwargs["receive"](
+                {"type": "complete", "recent_signins": False, "authenticated_sessions": False}
+            )
+
+        self.remote.side_effect = mismatch_probe
         self.provider.return_value["appName"] = self.generation.namespace + "-abc123"
         for field, value in (
             ("target_id", "retired"),
@@ -580,6 +604,7 @@ class UsageReaderTests(unittest.TestCase):
                 setattr(self.generation, field, value)
                 result = self.read()
                 self.assertEqual((result.usage, result.reason_code), ("unused", "complete"))
+                self.assertIsNone(captured_mismatch["GENERATION_CREATED_AT"])
                 setattr(self.generation, field, previous)
         self.assertEqual(self.read().usage, "unused")
         captured_legacy: dict[str, Any] = {"__name__": "fixture"}
@@ -594,7 +619,7 @@ class UsageReaderTests(unittest.TestCase):
         self.assertEqual(self.read().usage, "unused")
         self.assertEqual(
             captured_legacy["GENERATION_CREATED_AT"],
-            self.generation.created_at.timestamp(),
+            datetime.fromisoformat(self.generation.prepared_at).timestamp(),
         )
         self.store.read_fresh_odoo_testing_generation.return_value = None
         self.assertEqual(self.read().usage, "unused")
@@ -623,6 +648,10 @@ class UsageReaderTests(unittest.TestCase):
         )
         self.store.read_fresh_odoo_testing_generation.return_value = self.generation
         self.assertEqual(self.read().usage, "unused")
+        self.generation.target_id = "other-generation-target"
+        self.assertEqual(self.read().usage, "unused")
+        self.assertEqual(captured["GENERATION_CREATED_AT"], candidate.created_at.timestamp())
+        self.generation.target_id = self.target_id.target_id
         candidate.operation_id = "different-original"
         self.assertEqual(self.read().usage, "unused")
         self.assertIsNone(captured["GENERATION_CREATED_AT"])
@@ -658,14 +687,86 @@ class UsageReaderTests(unittest.TestCase):
         self.assertEqual(
             (result.usage, result.reason_code), ("unknown", "generation_boundary_unavailable")
         )
-        self.remote.assert_not_called()
+        self.remote.assert_called()
+
+    def test_boundary_failure_or_change_cannot_erase_positive_use(self) -> None:
+        for recent, sessions in ((True, False), (False, True)):
+            for failure in ("before", "after", "changed", "ambiguous"):
+                with self.subTest(recent=recent, sessions=sessions, failure=failure):
+                    self.store.read_fresh_odoo_testing_generation.side_effect = None
+                    self.generation.prepared_at = self.target.updated_at
+                    if failure == "ambiguous":
+                        self.store.find_testing_candidate_by_target.side_effect = ValueError(
+                            "fixture"
+                        )
+                    else:
+                        self.store.find_testing_candidate_by_target.side_effect = None
+                    if failure == "before":
+                        self.store.read_fresh_odoo_testing_generation.side_effect = SQLAlchemyError(
+                            "fixture"
+                        )
+
+                    def probe(**kwargs: Any) -> None:
+                        kwargs["receive"](
+                            {
+                                "type": "complete",
+                                "recent_signins": recent,
+                                "authenticated_sessions": sessions,
+                            }
+                        )
+                        if failure == "after":
+                            self.store.read_fresh_odoo_testing_generation.side_effect = (
+                                SQLAlchemyError("fixture")
+                            )
+                        elif failure == "changed":
+                            self.generation.prepared_at = "2026-10-17T00:00:00Z"
+
+                    self.remote.side_effect = probe
+                    result = self.read()
+                    self.assertEqual((result.usage, result.reason_code), ("in_use", "complete"))
+
+    def test_boundary_failure_or_change_cannot_certify_negative_use(self) -> None:
+        for failure in ("before", "after", "changed"):
+            with self.subTest(failure=failure):
+                self.store.read_fresh_odoo_testing_generation.side_effect = None
+                self.generation.prepared_at = self.target.updated_at
+                if failure == "before":
+                    self.store.read_fresh_odoo_testing_generation.side_effect = SQLAlchemyError(
+                        "fixture"
+                    )
+
+                def probe(**kwargs: Any) -> None:
+                    kwargs["receive"](
+                        {
+                            "type": "complete",
+                            "recent_signins": False,
+                            "authenticated_sessions": False,
+                        }
+                    )
+                    if failure == "after":
+                        self.store.read_fresh_odoo_testing_generation.side_effect = SQLAlchemyError(
+                            "fixture"
+                        )
+                    elif failure == "changed":
+                        self.generation.prepared_at = "2026-10-17T00:00:00Z"
+
+                self.remote.side_effect = probe
+                result = self.read()
+                self.assertEqual(result.usage, "unknown")
+                self.assertEqual(
+                    result.reason_code,
+                    "generation_changed"
+                    if failure == "changed"
+                    else "generation_boundary_unavailable",
+                )
+                self.assertIsNone(result.recent_signins)
+                self.assertIsNone(result.authenticated_sessions)
 
     def test_missing_generation_preserves_probe_failure_without_inventing_unused(self) -> None:
         self.store.read_fresh_odoo_testing_generation.return_value = None
         for reason in (
             "database_connection_unavailable",
             "session_file_unreadable",
-            "generation_boundary_unavailable",
         ):
             with self.subTest(reason=reason):
                 self.remote.side_effect = lambda **kw: kw["receive"](

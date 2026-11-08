@@ -74,7 +74,7 @@ def read_drill_recent_signins(
     history_database = history_database or database
     # Preparation precedes any possible testing use. Completion is too late:
     # people can sign in after web opens but before final health is recorded.
-    prepared = history.created_at
+    prepared = datetime.fromisoformat(history.prepared_at.replace("Z", "+00:00"))
     completed = datetime.fromisoformat(history.completed_at.replace("Z", "+00:00"))
     if (
         prepared.utcoffset() is None
