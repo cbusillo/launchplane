@@ -1,0 +1,10 @@
+class classproperty[T]:
+    def __init__(self, fget: Callable[[typing.Any], T]) -> None:
+        self.fget = classmethod(fget)
+
+    def __get__(self, instance, owner: type | None = None, /) -> T:
+        return self.fget.__get__(None, owner)()
+
+    @property
+    def __doc__(self):
+        return self.fget.__doc__

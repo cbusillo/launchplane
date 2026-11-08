@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import click
 from sqlalchemy import select
@@ -46,6 +47,33 @@ from control_plane.testing_publication_storage import (
 )
 from control_plane.testing_serving_copy import published_testing_copy
 from control_plane.testing_address_storage import effective_testing_route, read_testing_address
+
+
+def native_testing_origin_matches(
+    store: db.PostgresRecordStore,
+    *,
+    root: Path,
+    product: str,
+    context: str,
+    target_id: str,
+    origin: str,
+) -> bool:
+    route = plan_native_testing_route_refresh(
+        store,
+        root=root,
+        current=store.read_route_binding_record(
+            product=product,
+            context_name=context,
+            instance_name="testing",
+        ),
+    )
+    return (
+        route.status in {"ready", "unchanged"}
+        and route.native_review_sources is not None
+        and route.native_review_sources.target_id == target_id
+        and route.record is not None
+        and urlsplit(origin).hostname in {domain.domain_name for domain in route.record.domains}
+    )
 
 
 def plan_native_testing_route_refresh(
