@@ -6799,10 +6799,18 @@ class PostgresRecordStore(HumanSessionStore):
         apply_provider: Callable[[Callable[[str, str, int], None]], None],
         pending_effects: tuple[PublicHostEffect, ...] = (),
         verify_provider: Callable[[], None] | None = None,
+        validate_configuration: Callable[[], None] | None = None,
     ) -> None:
         """Checkpoint owned effects before the atomic config/success-receipt commit."""
 
         def guard(session: Any) -> None:
+            if validate_configuration is not None:
+                outer = getattr(self._disposable_authority_context, "session", None)
+                self._disposable_authority_context.session = session
+                try:
+                    validate_configuration()
+                finally:
+                    self._disposable_authority_context.session = outer
             requested_hosts = bundle.dokploy_targets[0].hostname_claims | frozenset(
                 retained_hostname_identity(effect.host) for effect in pending_effects
             )

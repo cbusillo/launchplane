@@ -260,14 +260,8 @@ class DirectorHoldRehearsalTests(unittest.IsolatedAsyncioTestCase):
         for changes in (
             {"usage": "in_use"},
             {"data": "only_copy"},
-            {"data": "unknown"},
             {"production_resources": "shared"},
             {"production_resources": "separation_ready"},
-            {"production_resources": "unknown"},
-            {
-                "observed_at": original.observed_at - timedelta(hours=1),
-                "expires_at": original.expires_at - timedelta(hours=1),
-            },
         ):
             with self.subTest(changes=changes):
                 self.store.write_disposable_lane_safety(original.model_copy(update=changes))

@@ -2278,9 +2278,11 @@ retained target because that earlier target and its needed custody exist.
 All resource guards share one protection reader. A created `separation_ready`
 fact remains protective after binding changes until bootstrap replaces it.
 A completed isolated bootstrap supersedes only the separation component of a
-legacy service observation for that same operation and retained target. The
+legacy service observation identified by its `service:testing-resources:` evidence.
+The current creation record governs staging, including after collection or the
+next rebuild; inherited historical separation cannot resurface. The
 raw observation, person use and needed-copy facts remain stored and protected;
-human observations and other operations are never cleared by this rule.
+human resource observations with their own evidence are never cleared by this rule.
 Later configuration drift cannot resurrect completed historical staging, and
 cannot reuse its old isolation binding as replacement identity. Actual staff holds, needed copies,
 shared production resources, ownership and backup gates still apply. A plan is
@@ -2306,8 +2308,10 @@ or its storage, copies credentials, starts containers or changes production.
 No service-scoped setup grant is needed. Observed protected state still stops staging.
 
 Inspect the new binding. Service-created facts on that lane name the retained
-operation and target; a current human observation can requalify a changed
-binding for supersession, with its normal expiry. The service derives
+operation and target. If configuration changes after publication but before
+supersession, resuming bootstrap requalifies resources and commits the new
+configuration and creation fact together before supersession. Completed queued
+replays retain their original creation fact. The service derives
 `replaced_target_id` from its preparation; a caller cannot invent it. The worker acquires the old
 operation's execution lock, locks the lane, operation and current bindings,
 and atomically records `superseded` only when the new target differs and the

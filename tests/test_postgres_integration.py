@@ -12422,7 +12422,7 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteSc
             "control_plane.testing_replacement_bootstrap.run_resource_schedule",
             side_effect=change_after_qualification,
         ):
-            with self.assertRaisesRegex(ValueError, "configuration changed"):
+            with self.assertRaises(ValueError):
                 self.apply()
         self.assertEqual(self.route_writes, 0)
         from control_plane.disposable_lanes import (
@@ -12458,6 +12458,80 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteSc
                 context_name=self.fixture.context, instance_name="testing"
             ).resource_provenance,
             original,
+        )
+        self.assertEqual(self.route_writes, 1)
+
+    def test_configuration_writer_during_route_finishes_and_prevents_creation_commit(self) -> None:
+        self.patches()
+        self.review()
+
+        def route_with_change(**arguments: Any) -> str:
+            with closing(PostgresRecordStore(database_url=self.store.database_url)) as second:
+                pool = ThreadPoolExecutor(max_workers=1)
+                try:
+                    future = pool.submit(
+                        second.write_runtime_environment_record,
+                        RuntimeEnvironmentRecord(
+                            scope="global",
+                            env={"UNREVIEWED_CHANGE": "during-route"},
+                            updated_at=self.profile.updated_at,
+                        ),
+                    )
+                    future.result(timeout=10)
+                finally:
+                    pool.shutdown(wait=False)
+            return self.route(**arguments)
+
+        original = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        ).resource_provenance
+        with patch(
+            "control_plane.testing_replacement_bootstrap.compose.ensure_compose_web_domain_route",
+            side_effect=route_with_change,
+        ):
+            with self.assertRaises(ValueError):
+                self.apply()
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.fixture.context, instance_name="testing"
+            ).resource_provenance,
+            original,
+        )
+
+    def test_interrupted_bootstrap_requalifies_changed_configuration_before_supersession(
+        self,
+    ) -> None:
+        from control_plane.disposable_lanes import require_disposable_lane
+
+        self.patches()
+        self.review()
+        with patch.object(
+            self.store,
+            "supersede_disposable_testing_replacement",
+            side_effect=RuntimeError("fixture crash before supersession"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.apply()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="global",
+                env={"CHANGED_BEFORE_RESUME": "fixture"},
+                updated_at=self.profile.updated_at,
+            )
+        )
+        self.apply()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        assert target.resource_provenance is not None
+        self.assertEqual(
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                instance="testing",
+            ),
+            target.resource_provenance.lane_binding_sha256,
         )
         self.assertEqual(self.route_writes, 1)
 

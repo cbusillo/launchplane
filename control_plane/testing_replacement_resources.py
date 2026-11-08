@@ -30,6 +30,7 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.disposable_lanes import (
+    LaneConfigurationRecord,
     disposable_lane_binding_sha256,
     disposable_lane_configuration,
 )
@@ -81,6 +82,7 @@ def testing_creation_target(
     retained_target_id: str,
     production_resources: Literal["isolated", "separation_ready"],
     isolation_evidence: str,
+    qualified_configuration: tuple[LaneConfigurationRecord, ...] | None = None,
 ) -> DokployTargetRecord:
     runtime_keys = {
         (item.record.scope, item.record.context, item.record.instance)
@@ -90,7 +92,11 @@ def testing_creation_target(
     binding_ids = {item.binding_id for item in bundle.secret_bindings}
     configuration = tuple(
         item
-        for item in disposable_lane_configuration(store, target.context, target.instance)
+        for item in (
+            qualified_configuration
+            if qualified_configuration is not None
+            else disposable_lane_configuration(store, target.context, target.instance)
+        )
         if not (
             isinstance(item, RuntimeEnvironmentRecord)
             and (item.scope, item.context, item.instance) in runtime_keys

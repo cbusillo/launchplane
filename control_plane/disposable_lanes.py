@@ -254,19 +254,10 @@ def recorded_lane_protection(
     preview: PreviewRecord | None = None,
 ) -> RecordedLaneProtection:
     creation = target.resource_provenance if target else None
-    completed_staging = (
+    inherited_service_staging = (
         observation is not None
         and creation is not None
-        and observation.observed_by == "service:testing-replacement-resources"
-        and observation.observer_kind == "director_agent"
         and observation.isolation_evidence.startswith("service:testing-resources:")
-        and bool(observation.replaces_operation_id)
-        and bool(observation.replaced_target_id)
-        and creation.created_by == "service:fresh-testing-bootstrap"
-        and creation.data == "reproducible"
-        and creation.production_resources == "isolated"
-        and creation.replaces_operation_id == observation.replaces_operation_id
-        and creation.replaced_target_id == observation.replaced_target_id
     )
     creations = (creation, preview.resource_provenance if preview else None)
     return RecordedLaneProtection(
@@ -277,7 +268,7 @@ def recorded_lane_protection(
         separation_ready=(
             observation is not None
             and observation.production_resources == "separation_ready"
-            and not completed_staging
+            and not inherited_service_staging
         )
         or any(
             item is not None and item.production_resources == "separation_ready"

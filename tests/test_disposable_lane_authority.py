@@ -1909,7 +1909,7 @@ class DisposableCreationFactsTests(_DisposableRuntimeAuthorityFixture):
         with self.assertRaises(DisposableLaneSafetyUnknown):
             disposable_testing_supersession(operation, bindings)
 
-    def test_completed_legacy_service_staging_does_not_clear_human_or_other_operation_protection(
+    def test_creation_replaces_inherited_service_staging_and_preserves_human_protection(
         self,
     ) -> None:
         from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
@@ -1918,9 +1918,17 @@ class DisposableCreationFactsTests(_DisposableRuntimeAuthorityFixture):
         self.record_creation(replaces_operation_id="original", replaced_target_id="retained")
         cases: tuple[tuple[dict[str, str], bool], ...] = (
             ({}, True),
-            ({"observed_by": "human-fixture"}, False),
-            ({"replaces_operation_id": "other-original"}, False),
-            ({"replaced_target_id": "other-target"}, False),
+            (
+                {
+                    "observed_by": "collector-fixture",
+                    "replaces_operation_id": "",
+                    "replaced_target_id": "",
+                },
+                True,
+            ),
+            ({"replaces_operation_id": "other-original"}, True),
+            ({"replaced_target_id": "other-target"}, True),
+            ({"isolation_evidence": "human:resources-still-attached"}, False),
             ({"usage": "in_use"}, False),
             ({"data": "only_copy"}, False),
         )

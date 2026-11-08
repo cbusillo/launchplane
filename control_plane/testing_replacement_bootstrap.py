@@ -566,13 +566,14 @@ class TestingReplacementBootstrapAdapter:
                     request=self.request,
                     allow_bootstrap_resume=True,
                 )
+                qualified_configuration = disposable_lane_configuration(
+                    self.store, self.request.context, "testing"
+                )
                 qualified_binding = disposable_lane_binding_sha256(
                     profile,
                     target,
                     target_id,
-                    configuration=disposable_lane_configuration(
-                        self.store, self.request.context, "testing"
-                    ),
+                    configuration=qualified_configuration,
                 )
 
             def check() -> None:
@@ -606,6 +607,20 @@ class TestingReplacementBootstrapAdapter:
                         raise ValueError(
                             "Testing configuration changed after resource qualification."
                         )
+
+            def validate_publication_configuration() -> None:
+                if (
+                    disposable_lane_binding_sha256(
+                        profile,
+                        target,
+                        target_id,
+                        configuration=disposable_lane_configuration(
+                            self.store, self.request.context, "testing"
+                        ),
+                    )
+                    != qualified_binding
+                ):
+                    raise ValueError("Testing configuration changed after resource qualification.")
 
             resources = OdooTestingResources(
                 product=self.product,
@@ -645,6 +660,7 @@ class TestingReplacementBootstrapAdapter:
                     and creation.created_by == "service:fresh-testing-bootstrap"
                     and creation.production_resources == "isolated"
                     and creation.replaces_operation_id == existing_generation.operation_id
+                    and creation.lane_binding_sha256 == qualified_binding
                 ):
                     self._require_domains(existing_generation)
                     check()
@@ -783,69 +799,70 @@ class TestingReplacementBootstrapAdapter:
                 )
                 checkpoint(generation.domain_host, domain_id, profile.runtime_port)
 
-            with self.store.serialize_disposable_testing_resources():
-                check()
-                from control_plane.testing_local_credentials import with_generated_credentials
+            check()
+            from control_plane.testing_local_credentials import with_generated_credentials
 
-                credential_bundle = with_generated_credentials(
-                    ProductAuthorityBundle(),
-                    self.store,
-                    profile,
-                    self.request.context,
-                    actor="service:testing-bootstrap",
-                    generation=generation.operation_id,
-                    only_keys=FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
-                )
-                publication = ProductAuthorityBundle(
-                    secret_records=credential_bundle.secret_records,
-                    secret_versions=credential_bundle.secret_versions,
-                    secret_bindings=credential_bundle.secret_bindings,
-                    secret_audit_events=credential_bundle.secret_audit_events,
-                    secret_delivery_read_sets=credential_bundle.secret_delivery_read_sets,
-                    required_context_owner=(self.product, self.request.context),
-                    expected_product_profiles=(profile,),
-                    product_profiles=(updated_profile,),
-                    dokploy_targets=(updated_target,),
-                    provider_target_writes=(
-                        ProviderTargetWrite(record=updated_provider, expected_record=provider),
+            credential_bundle = with_generated_credentials(
+                ProductAuthorityBundle(),
+                self.store,
+                profile,
+                self.request.context,
+                actor="service:testing-bootstrap",
+                generation=generation.operation_id,
+                only_keys=FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
+            )
+            publication = ProductAuthorityBundle(
+                secret_records=credential_bundle.secret_records,
+                secret_versions=credential_bundle.secret_versions,
+                secret_bindings=credential_bundle.secret_bindings,
+                secret_audit_events=credential_bundle.secret_audit_events,
+                secret_delivery_read_sets=credential_bundle.secret_delivery_read_sets,
+                required_context_owner=(self.product, self.request.context),
+                expected_product_profiles=(profile,),
+                product_profiles=(updated_profile,),
+                dokploy_targets=(updated_target,),
+                provider_target_writes=(
+                    ProviderTargetWrite(record=updated_provider, expected_record=provider),
+                ),
+                runtime_environment_writes=(
+                    RuntimeEnvironmentWrite(
+                        record=runtime,
+                        expected_record=current_runtime,
+                        expected_absent=current_runtime is None,
                     ),
-                    runtime_environment_writes=(
-                        RuntimeEnvironmentWrite(
-                            record=runtime,
-                            expected_record=current_runtime,
-                            expected_absent=current_runtime is None,
-                        ),
+                ),
+            )
+            created_target = testing_creation_target(
+                self.store,
+                profile=updated_profile,
+                target=updated_target,
+                target_id=target_id,
+                bundle=publication,
+                operation_id=generation.operation_id,
+                retained_target_id=allocation.retained_target_id,
+                production_resources="isolated",
+                isolation_evidence="service:fresh-testing-bootstrap:"
+                + generation_binding(generation),
+                qualified_configuration=qualified_configuration,
+            )
+            publication = publication.model_copy(update={"dokploy_targets": (created_target,)})
+            self.store.write_product_public_hosts_bundle(
+                publication,
+                expected_target=target,
+                expected_target_id=target_id,
+                expected_provider_target=provider,
+                apply_provider=route,
+                verify_provider=lambda: self._require_domains(generation),
+                validate_configuration=validate_publication_configuration,
+                pending_effects=(
+                    PublicHostEffect(
+                        host=generation.domain_host,
+                        provider_host=host,
+                        target_id=generation.target_id,
+                        runtime_port=profile.runtime_port,
                     ),
-                )
-                created_target = testing_creation_target(
-                    self.store,
-                    profile=updated_profile,
-                    target=updated_target,
-                    target_id=target_id,
-                    bundle=publication,
-                    operation_id=generation.operation_id,
-                    retained_target_id=allocation.retained_target_id,
-                    production_resources="isolated",
-                    isolation_evidence="service:fresh-testing-bootstrap:"
-                    + generation_binding(generation),
-                )
-                publication = publication.model_copy(update={"dokploy_targets": (created_target,)})
-                self.store.write_product_public_hosts_bundle(
-                    publication,
-                    expected_target=target,
-                    expected_target_id=target_id,
-                    expected_provider_target=provider,
-                    apply_provider=route,
-                    verify_provider=lambda: self._require_domains(generation),
-                    pending_effects=(
-                        PublicHostEffect(
-                            host=generation.domain_host,
-                            provider_host=host,
-                            target_id=generation.target_id,
-                            runtime_port=profile.runtime_port,
-                        ),
-                    ),
-                )
+                ),
+            )
             old_check()
             lease.assert_current()
         return generation, operation, plan
