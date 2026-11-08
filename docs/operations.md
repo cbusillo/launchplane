@@ -116,15 +116,13 @@ without changing the operation's status, original key or recovery fences.
 
 ## Repository Inventory
 
-Use the deployed service for repository inventory reads and mutations. Submit
-an exact immutable GitHub repository identity and a deterministic append-only
-record. Run `dry_run` before apply. Apply is PostgreSQL-only, requires an
-`Idempotency-Key`, and compares the supplied current record ID inside the same
-transaction that appends the revision and completes the idempotency response.
-Retiring a repository removes its active repository-scope inventory membership
-without granting or revoking authorization. A dry-run of an already-persisted
-record returns a conflict because replay is valid only when apply reuses the
-original idempotency key.
+Use the deployed [repository inventory routes](service-boundary.md#repository-inventory)
+and [record format](records.md#repository-inventory). Run `dry_run` before apply.
+PostgreSQL apply requires `Idempotency-Key` and compares the current record ID
+in the transaction appending the revision and completing replay evidence.
+Retirement removes active inventory membership without granting or revoking
+authorization. A dry-run of a persisted record conflicts; replay requires apply
+with the original key.
 
 ## Command Groups
 
@@ -247,56 +245,24 @@ returns only record IDs, revisions, lifecycle status, provider type, and
 destination kind. It never returns provider hosts, usernames, guest IDs,
 storage IDs, credentials, managed-secret values, or runtime-environment values.
 
-Admins submit exact revisioned target and policy records to
-`POST /v1/production-backup-authority/apply`. Run `mode=dry_run`, review the
-canonical `authority_digest`, then submit the same payload with `mode=apply`,
-the reviewed digest, expected-current record IDs, and an `Idempotency-Key`.
-The production lane's **Actions → Production backup authority** card reads
-service-held pending proposals. An agent submits inert backup input through the
-existing privileged-policy proposal route; the service pins its dry run. The
-Director opens the returned product link and approves or declines with one click,
-without a file or digest comparison. The card identifies target additions or
-revisions without exposing provider coordinates. See the
+For the production Actions card, proposal review and decision recovery, see the
 [backup proposal contract](production-backup-provider.md#review-a-proposed-backup-policy).
+Capture, worker compatibility and mandatory snapshot plus independent-backup
+requirements follow the [shared backup service contract](production-backup-provider.md#service-contract).
 
-Browser writes use the existing CSRF-checked session dependency and the unchanged
-`production_backup_authority.write` authorization model. A browser target revision
-also checks this action on every active lane using that target, including inside
-the locked write. A product-scoped caller cannot revise another product's target;
-an administrator already authorized on every affected lane retains that authority.
-The card accepts only target revisions used by the submitted policy and a
-promotion action supported by the product's current driver. It shows target
-kinds, revisions and whether each is new, revised or retained. Private provider
-coordinates and proposal input remain server-held. The browser sends only the
-proposal identity and decision; after an interrupted response it re-reads the
-stored decision and retries only the original decision event. A settled conflict
-leaves Decline available. Approval changes no capture, restore, promotion or
-deployment, and worker credentials/capture qualification remain separate.
+Admins submit typed authority writes to `POST /v1/production-backup-authority/apply`:
+run `mode=dry_run`, review `authority_digest`, then repeat the payload with
+`mode=apply`, the reviewed digest, expected-current record IDs and an
+`Idempotency-Key`. PostgreSQL commits target and policy revisions with replay
+evidence atomically. Changed records, endpoints, target kinds or digests refuse;
+the digest also binds active target IDs and digests for policy-only updates.
+See [authority records](records.md#production-backup-authority-records).
 
-Apply is PostgreSQL-only and commits all target supersessions, target revisions,
-policy supersession, policy revision, and idempotency evidence atomically.
-Conflicting revisions, changed expected-current records, invalid target kinds,
-different provider endpoints, and stale reviewed digests fail closed. The
-reviewed digest also binds the exact active source and destination target
-record IDs and digests resolved during dry-run, including policy-only updates
-that do not write new target revisions.
-
-The compatibility route
-`POST /v1/production-backup-authority/legacy-runtime-migration` refuses new
-migration attempts without reading runtime-environment backup values or writing
-targets and policies. Submit explicit reviewed typed records through
-`POST /v1/production-backup-authority/apply` instead. Historical idempotent
-responses remain replayable; they do not create new authority. A new attempt
-returns the compatibility error `legacy_backup_migration_conflict` (409); this
-is a permanent refusal, so retrying it cannot migrate authority.
-
-The legacy VeriReel capture route and delegated executor are removed. Capture
-through `POST /v1/production-backup-gates` after typed policy onboarding. The
-shared queue worker lives in `workflows/production_backup_gate_operation_worker.py`;
-existing `verireel-workers` service/CLI entrypoints remain compatibility wiring
-for that shared queue, including historical operation reads and cancellation. Both snapshot and independent backup remain mandatory. Removing
-obsolete live runtime keys, onboarding production policy and proving a real
-promotion remain separate guarded operations under #2309.
+`POST /v1/production-backup-authority/legacy-runtime-migration` permanently
+refuses new attempts with `409 legacy_backup_migration_conflict`, without reading
+runtime values or writing authority. Historical responses remain replayable.
+Use explicit typed input on the apply route; runtime-key removal and real
+promotion proof remain separate guarded operations under #2309.
 
 ## Mutation Reservation Recovery
 
@@ -323,13 +289,8 @@ time. Do not repair reservation rows with direct SQL or an arbitrary checkout;
 shared/live recovery belongs in a typed Launchplane service endpoint or domain
 reconciler.
 
-Product preview TLS apply is the first migrated DB-only route. Its reservation,
-profile compare-and-write, and response completion share one transaction, so a
-completion-persistence failure rolls back the profile change and a no-op apply
-still produces replay evidence. Before planning, the route uses the database
-clock to reject active claims, replay completed claims, transition bound expired
-claims to reconciliation, and release only expired unbound orphan claims that
-cannot have committed the atomic profile write.
+For preview TLS transaction and reservation behavior, see the
+[profile mutation contract](service-boundary.md#product-profile-endpoints).
 
 ## Transactional Outbox Workers
 
@@ -431,15 +392,8 @@ completion. The delivery dedupe key includes a hashed transition identity: repla
 of one request reuses its row, while a later dispatch with the same workflow
 inputs creates a new row instead of being suppressed forever.
 
-The workflow input set includes `promotion_intent_id`, equal to the persisted
-outbox delivery ID. Product workflows must pass it to the raw live promotion
-route and use it as that request's `Idempotency-Key`; the service revalidates
-the current evidence and target against the intent before execution. Without an
-intent, a recorded Client approval or admin override of the current release
-checklist authorizes the live call, because that decision is already the human
-go-ahead for exactly that build. A release that needs no review does not count.
-The separate `generic_web_prod_promotion.execute_unreviewed` authorization action
-is the only supported escape hatch for deliberately unreviewed automation.
+For `promotion_intent_id` binding and raw promotion authorization, see the
+[product promotion contract](service-boundary.md#admin-read-endpoints).
 
 GitHub workflow dispatch does not provide a provider idempotency token. Its
 worker therefore persists the observation window and an in-doubt marker before
@@ -456,16 +410,11 @@ rehearsals deliver synchronously.
 
 ## Durable Provider Operations
 
-Provider-backed routes that mutate an external system share the durable
-provider-operation runner (`control_plane/provider_operations.py`). The runner
-reserves and binds a deterministic provider reconciliation key before the effect
-begins, performs the effect through a provider adapter, and records terminal
-evidence only after the effect returns. Odoo preview apply
-(`/v1/drivers/odoo/preview-apply`) and generic web deploy
-(`/v1/drivers/generic-web/deploy`) are the first migrated provider routes; the
-former replaces the previous process-local apply lock. Both require an
-`Idempotency-Key` header and Launchplane database storage, and fail closed with
-`503 database_storage_required` on non-database stores.
+Odoo preview apply (`/v1/drivers/odoo/preview-apply`) and generic web deploy
+(`/v1/drivers/generic-web/deploy`) use the shared
+[durable provider-operation runner](records.md#durable-provider-operations).
+Both require `Idempotency-Key` and database storage; non-database stores return
+`503 database_storage_required`.
 
 - A concurrent request with the same key while the effect runs returns `409
 mutation_in_progress`; a completed effect replays; a different request
@@ -1027,38 +976,9 @@ including loopback local development, rather than using file-backed JSON state
 as authority. The GitHub OIDC audience is explicit admin/process wiring;
 production code must not default it to a live domain.
 
-Current implementation scope:
-
-- `GET /v1/health`
-- `GET /v1/artifacts/protected`
-- `POST /v1/evidence/backup-gates`
-- `POST /v1/evidence/deployments`
-- `POST /v1/evidence/promotions`
-- `POST /v1/evidence/previews/generations`
-- `POST /v1/evidence/previews/destroyed`
-- `GET /v1/authz-policies/active`
-- `POST /v1/authz-policies/managed-rule-sets/generic-web-preview/plan`
-- `POST /v1/authz-policies/managed-rule-sets/reconcile`
-- `POST /v1/authz-diagnostics/github-actions/evaluate`
-- `GET /v1/authz-diagnostics/active-policy/health`
-- `GET /v1/authz-diagnostics/activation-preflight/self`
-- `POST /v1/authz-diagnostics/candidate-policy/preview`
-- `GET /v1/route-bindings/records/current`
-- `POST /v1/route-bindings/reconcile`
-- `POST /v1/route-bindings/odoo-testing/controller/run-once`
-- `POST /v1/route-bindings/external/reconcile`
-- `POST /v1/provider-targets/operations`
-- `POST /v1/product-onboarding/apply`
-- `POST /v1/product-profiles/stable-lane-repair/apply`
-- `POST /v1/products/public-ingress-monitor/run-once`
-- `GET /v1/health-alert-drills` and `POST /v1/health-alert-drills` —
-  [current routing and isolated Discord test alerts](health-alert-drills.md)
-- `POST /v1/public-ingress/notification-policies/apply`
-- `POST /v1/previews/lifecycle-plan`
-- `POST /v1/drivers/odoo/post-deploy`
-- `POST /v1/drivers/odoo/prod-backup-gate`
-- `POST /v1/drivers/odoo/prod-promotion`
-- `POST /v1/drivers/odoo/prod-rollback`
+For the route inventory and authorization contracts, see the
+[service boundary](service-boundary.md#current-implementation-status).
+Export the current schema with `uv run launchplane service export-openapi`.
 
 `Generic Web Preview Authorization` preserves live GitHub App metadata lookup
 for onboarding and rule rotation. Retirement is different: it can remove a
@@ -1091,100 +1011,8 @@ active policy record/revision plus opaque identity and rule fingerprints and
 failed selector categories; it never returns workflow refs, repositories,
 policy values, or other principal rules. Ordinary route denials remain generic.
 
-`POST /v1/authz-diagnostics/effective-access/evaluate` is the DB-native
-administrator read path for one explicit principal/action/product/context and
-explicit context-or-instance target scope, with one exact instance required for
-instance scope. The caller must be a GitHub administrator or local
-administrator with `authz_policy_effective_access.read`. The route reloads the
-single active DB policy record, delegates the decision to the ordinary policy
-evaluator, and returns only the supplied scope, allowed/denied decision, one
-bounded reason code, and active record/revision/digest. It does not return rule
-matches, selector values, managed IDs, principal values, or permission lists.
-
-`GET /v1/authz-diagnostics/active-policy/health` is the separately authorized
-DB-native administrator health read. The caller must be a GitHub administrator
-or local administrator with `authz_policy_health.read`. The route authorizes
-against the runtime policy, reloads the single active DB policy record, and
-authorizes again before returning immutable policy provenance, bounded health
-reason codes, managed-set rule counts, and reachable admin rule
-counts. It never returns managed rule IDs, rule hashes, selectors, actions, or
-principal identities. Missing or multiple active records fail closed, and the
-read does not authorize a policy write or production grant.
-
-`GET /v1/authz-diagnostics/activation-preflight/self` is the supported Director
-activation self-check. A signed-in browser human calls it with the Launchplane
-session cookie; Authorization headers, bodies, query parameters, and
-caller-selected identities are rejected. The service verifies the cookie
-without renewal, requires current stored claims, ignores the persisted session
-role, re-derives authority from the single active DB policy, and returns only
-the fixed policy-administration decision, an hour-bounded evaluation time, an
-opaque keyed policy generation, and a trace ID. Missing or invalid sessions and
-missing or ambiguous policy state fail closed. No CLI bearer helper or direct
-database fallback exists, and no grant or other durable record is created.
-
-`POST /v1/authz-diagnostics/candidate-policy/preview` is the non-persisting
-administrator preview for one exact schema-v2 or schema-v3 candidate policy. The caller must
-be a GitHub administrator or local administrator with
-`authz_policy_candidate_preview.read`; Launchplane authorizes against runtime
-policy, reloads the single active DB record, and authorizes again. The service
-validates every managed candidate set through the existing reconciliation
-contract and evaluates at most 25 caller-supplied probes against the active and
-candidate policies through the ordinary evaluator with denial-context recording
-disabled. Responses contain only active record/revision/digest, submitted and
-canonical evaluated-candidate digests, a normalization flag, bounded counts and
-reason categories, and old/new probe decisions. They expose
-no rules, managed IDs, rule hashes, selectors, actions, principal identifiers,
-tokens, secrets, or topology. Browser calls retain same-origin and CSRF checks
-without session renewal or rotation, and no policy, session, denial, audit,
-idempotency, outbox, provider, runtime, secret, or durable-operation record is
-written.
-
-Authorization schema v3 belongs to the retired ordinary-agent
-delegated-delivery design and is scheduled for deletion (#2437); do not build
-on it. Schema-v3 candidate previews include `ordinary_agents` in structural rule
-counts and changed-collection reporting. Effective-access probes remain closed
-to the five established caller identity types, and ordinary rules do not enter
-administrator reachability, applying-administrator retention, strict-human
-evidence, or quorum. Managed reconciliation dry-runs may explicitly migrate v2
-to v3 while replacing one reviewed managed set and preserving every unrelated
-set. Schema-v3 apply remains fenced.
-
-`POST /v1/authz-diagnostics/repository-scope/read` provides one bounded
-DB-backed comparison for authorization portfolio audits. Supply at most 100
-exact repositories already known from the pinned GitHub/planning evidence. The
-service does not echo those identities. Candidate results use only their input
-index, a matched/not-found/ambiguous state, an opaque handle for exact matches,
-and bounded membership categories. Do not place repository identities in URLs,
-logs, issue comments, or published evidence merely to use this route.
-
-The caller needs the separate `authz_repository_scope.read` action and must be
-an authenticated GitHub human, `local_operator`, or local administrator. The
-route performs runtime-policy preflight, reloads the single active DB policy,
-and reauthorizes before reading product, repository, and retained work-request records.
-GitHub Actions and terminal agents cannot use the route; do not borrow a
-workflow identity or dispatch a protected workflow as a workaround.
-
-Treat `coverage.state=partial` as blocked. The bounded gaps report only source,
-reason code, and count. Reconcile both directions: every DB entry must match a
-candidate and every candidate must exist in DB scope. Expand or correct the
-caller-known candidate set through the sanctioned #2177 evidence process, but
-do not inspect the database directly or widen another grant. Opaque handles are
-stable only within the returned `handle_generation`; if that marker changes after
-canonical managed-secret key-ring rotation, regenerate the comparison instead of
-correlating old and new handles. Legacy passphrase-only secret configuration
-cannot derive public handles and returns a fail-closed unavailable response. The
-response is `Cache-Control: no-store` and remains a narrow repository-existence
-oracle even though it exposes no repository names.
-Each source query retains at most 1,000 records; `source_truncated` keeps the
-result partial until the authoritative source can be reconciled within bounds.
-An expired or malformed lease on a claimed/running work request likewise keeps
-coverage partial until the normal recovery path refreshes that record.
-
-Successful and partial reads perform no policy, session, idempotency, outbox,
-provider, runtime, workflow, secret, deployment, or durable-operation mutation.
-A denied request may append the ordinary redacted denial record, which contains
-no candidate or repository identity. Landing the route does not grant
-production access.
+For effective-access, policy-health, activation-preflight, candidate-policy and
+repository-scope reads, use the [authorization diagnostic contracts](service-boundary.md#browser-mutation-boundary).
 
 Standard `authorization_denied` HTTP failures with a captured policy evaluation
 write a redacted `launchplane_authz_denials` audit record on a best-effort basis.
@@ -2262,23 +2090,8 @@ re-reads the current DB-backed profile, rejects stale plans, and preserves every
 unrelated profile field. Do not replace this workflow with whole-profile API,
 direct DB, or direct provider mutation.
 
-Use the manual Product Health Monitoring workflow to create or update one
-stable-lane `public_http` check without replacing the product profile. Run
-`mode=dry-run` with the exact product/context/instance, check name, desired
-enabled state, runtime-identity requirement, and admin reason. The workflow
-does not accept URLs, domains, provider targets, proxy details, or certificate
-references; Launchplane preserves or derives the URL from the current DB-backed
-lane. Enabling strict runtime identity requires an existing lane-owned HTTPS
-host. Review the current/requested values, resolved URL, profile digest, and plan
-SHA-256. Apply from a second run with identical target and desired values, the
-reviewed digest, a unique idempotency key, and confirmation
-`APPLY PRODUCT HEALTH MONITORING`. The service re-reads the complete profile and
-atomically rejects stale or concurrent edits. Authority uses separate exact-
-instance `product_profile.health_monitoring.plan` and `.apply` actions supplied
-through the dedicated `product-health-monitoring` managed authz set. That set
-owns only the generic wrapper's exact immutable reusable-worker grant; real
-product, context, instance, check, and endpoint values remain explicit admin
-input and DB-backed Launchplane records.
+For health-check intent changes, use the
+[Product Health Monitoring procedure](#lane-health-monitoring).
 
 Use the manual Product Prelaunch Rebuild Policy workflow when an Odoo lane must
 authorize a reviewed destructive rebuild before stable target replacement. Run
