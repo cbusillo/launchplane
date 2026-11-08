@@ -2260,7 +2260,10 @@ Service-created testing and preview lanes retain creation facts on their existin
 binding and time returned by its existing inspection. Creation facts have no
 expiry and do not assert that nobody is using a lane now. The testing resource
 writer records `separation_ready`; bootstrap records `isolated` after qualification.
-These writers no longer create five-minute occupancy observations.
+These writers no longer create five-minute occupancy observations. Creation
+facts commit in the existing authority bundle with the exact runtime and
+credential metadata they qualify. Bootstrap compares its qualified snapshot
+under the existing authority lock and does not restamp completed replays.
 
 The disposable reader uses current matching creation facts and independently
 preserves observed use, needed copies and shared production resources. A
@@ -2270,7 +2273,16 @@ unknown or nonmatching positive observation is not protected state. Older
 stored records remain readable without backfill. Missing earlier observations
 prove neither safety nor protected state and do not refuse an otherwise owned
 lane. Supersession still needs current qualified evidence of its captured
-retained target because that earlier target and its needed custody exist. Actual staff holds, needed copies,
+retained target because that earlier target and its needed custody exist.
+
+All resource guards share one protection reader. A created `separation_ready`
+fact remains protective after binding changes until bootstrap replaces it.
+A completed isolated bootstrap supersedes only the separation component of a
+legacy service observation for that same operation and retained target. The
+raw observation, person use and needed-copy facts remain stored and protected;
+human observations and other operations are never cleared by this rule.
+Later configuration drift cannot resurrect completed historical staging, and
+cannot reuse its old isolation binding as replacement identity. Actual staff holds, needed copies,
 shared production resources, ownership and backup gates still apply. A plan is
 never evidence that those checks passed. Generation-scoped usage and preview
 plan/admission alignment remain separate from this creation-fact contract.

@@ -1837,29 +1837,16 @@ class DisposableCreationFactsTests(_DisposableRuntimeAuthorityFixture):
         )
 
     def record_creation(self, **changes: str) -> str:
-        binding = self.admit()
-        target = self.store.read_dokploy_target_record(
-            context_name=self.context, instance_name="testing"
-        )
-        payload = target.model_dump()
-        payload["resource_provenance"] = {
-            "created_by": "service:fresh-testing-bootstrap",
-            "lane_binding_sha256": binding,
-            "data": "reproducible",
-            "production_resources": "isolated",
-            **changes,
-        }
-        self.store.write_dokploy_target_record(DokployTargetRecord.model_validate(payload))
-        return binding
+        from tests.support.disposable_lanes import record_creation
+        from control_plane.disposable_lanes import resolve_disposable_observation_binding
+
+        record_creation(self.store, "example-site", self.context, **changes)
+        return resolve_disposable_observation_binding(
+            self.store, product="example-site", context=self.context, instance="testing"
+        ).binding_sha256
 
     def test_no_earlier_observation_is_not_protected_state(self) -> None:
         self.assertTrue(self.admit())
-
-    def test_persisted_creation_survives_age_and_stale_positive_observation(self) -> None:
-        binding = self.record_creation()
-        now = datetime.now(timezone.utc)
-        record_safety(self.store, "example-site", self.context, "testing")
-        self.assertEqual(self.admit(now=now + timedelta(days=30)), binding)
 
     def test_creation_does_not_override_observed_use_needed_copy_or_shared_production(self) -> None:
         from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
@@ -1874,16 +1861,6 @@ class DisposableCreationFactsTests(_DisposableRuntimeAuthorityFixture):
                 record_safety(self.store, "example-site", self.context, "testing", **unsafe)
                 with self.assertRaises(DisposableLaneSafetyUnknown):
                     self.admit()
-
-    def test_binding_change_does_not_turn_old_positive_facts_into_protection(self) -> None:
-        self.record_creation()
-        target = self.store.read_dokploy_target_record(
-            context_name=self.context, instance_name="testing"
-        )
-        self.store.write_dokploy_target_record(
-            target.model_copy(update={"env": {"DATA_VOLUME": "different-storage"}})
-        )
-        self.assertTrue(self.admit())
 
     def test_expired_positive_observation_is_not_protected_state(self) -> None:
         record_safety(self.store, "example-site", self.context, "testing")
@@ -1931,3 +1908,71 @@ class DisposableCreationFactsTests(_DisposableRuntimeAuthorityFixture):
         bindings.target = target.model_copy(update={"env": {"DATA_VOLUME": "different-storage"}})
         with self.assertRaises(DisposableLaneSafetyUnknown):
             disposable_testing_supersession(operation, bindings)
+
+    def test_completed_legacy_service_staging_does_not_clear_human_or_other_operation_protection(
+        self,
+    ) -> None:
+        from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
+        from control_plane.dokploy_testing_domain import require_first_testing_target_unprotected
+
+        self.record_creation(replaces_operation_id="original", replaced_target_id="retained")
+        cases: tuple[tuple[dict[str, str], bool], ...] = (
+            ({}, True),
+            ({"observed_by": "human-fixture"}, False),
+            ({"replaces_operation_id": "other-original"}, False),
+            ({"replaced_target_id": "other-target"}, False),
+            ({"usage": "in_use"}, False),
+            ({"data": "only_copy"}, False),
+        )
+        for changes, admitted in cases:
+            with self.subTest(changes=changes):
+                record_safety(
+                    self.store,
+                    "example-site",
+                    self.context,
+                    "testing",
+                    **{
+                        "observed_by": "service:testing-replacement-resources",
+                        "production_resources": "separation_ready",
+                        "isolation_evidence": "service:testing-resources:qualified",
+                        "replaces_operation_id": "original",
+                        "replaced_target_id": "retained",
+                        **changes,
+                    },
+                )
+                original = self.store.read_disposable_lane_safety(
+                    "example-site", self.context, "testing"
+                )
+                if admitted:
+                    self.assertTrue(self.admit())
+                    require_first_testing_target_unprotected(
+                        self.store,
+                        product="example-site",
+                        context=self.context,
+                        provider=self.store.read_provider_target_record(
+                            context_name=self.context, instance_name="testing"
+                        ),
+                    )
+                    target = self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    )
+                    self.store.write_dokploy_target_record(
+                        target.model_copy(update={"env": {"NEW_CONFIG": "changed"}})
+                    )
+                    self.assertTrue(self.admit())
+                else:
+                    with self.assertRaises(DisposableLaneSafetyUnknown):
+                        self.admit()
+                    with self.assertRaises(ValueError):
+                        require_first_testing_target_unprotected(
+                            self.store,
+                            product="example-site",
+                            context=self.context,
+                            provider=self.store.read_provider_target_record(
+                                context_name=self.context, instance_name="testing"
+                            ),
+                        )
+                self.assertEqual(
+                    self.store.read_disposable_lane_safety("example-site", self.context, "testing"),
+                    original,
+                )

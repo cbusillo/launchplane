@@ -38,7 +38,7 @@ from control_plane.testing_never_served import (
     read_never_served_testing_usage,
     NeverServedRecords,
 )
-from tests.support.disposable_lanes import record_safety
+from tests.support.disposable_lanes import record_safety, record_creation
 from tests.support.stored_profiles import persist_historical_preview_transport
 from tests.test_odoo_testing_restore import generation
 from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapScenario
@@ -118,6 +118,7 @@ class NeverServedTestingTests(unittest.TestCase):
         )
         for kind in ("public_http", "private_http"):
             self.store.write_public_ingress_observation_record(self.check(kind))
+        record_creation(self.store, self.product, self.context)
 
     def check(self, kind: str, *, passed: bool = False) -> PublicIngressObservationRecord:
         lane = next(lane for lane in self.profile.lanes if lane.instance == "testing")

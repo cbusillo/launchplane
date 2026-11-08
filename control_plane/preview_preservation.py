@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 import click
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.disposable_lanes import recorded_lane_protection
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy import api, source
@@ -348,11 +349,19 @@ def require_preview_preservation_admission(
     report = store.read_disposable_lane_safety(
         profile.product, issued_plan.context, issued_plan.preview_slug
     )
-    if report is not None and (
-        report.current_usage() == "in_use"
-        or report.data == "only_copy"
+    try:
+        tracked_target = store.read_dokploy_target_record(
+            context_name=issued_plan.context, instance_name=issued_plan.preview_slug
+        )
+    except FileNotFoundError:
+        tracked_target = None
+    protection = recorded_lane_protection(tracked_target, report, preview)
+    if (
+        report is not None
+        and report.current_usage() == "in_use"
+        or protection.only_copy
         and not authority.serving_recipient
-        or report.production_resources in {"shared", "separation_ready"}
+        or protection.resources_protected
     ):
         raise ValueError("Original preview preservation has a protected use or resource.")
     return authority

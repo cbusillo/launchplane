@@ -12390,13 +12390,6 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteSc
         self.scenario("normal")
         from control_plane.disposable_lanes import require_disposable_lane
 
-        self.assertIsNone(
-            self.store.read_disposable_lane_safety(
-                self.profile.product,
-                self.fixture.context,
-                "testing",
-            )
-        )
         target = self.store.read_dokploy_target_record(
             context_name=self.fixture.context, instance_name="testing"
         )
@@ -12409,6 +12402,92 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteSc
                 instance="testing",
             ),
             target.resource_provenance.lane_binding_sha256,
+        )
+
+    def test_bootstrap_rejects_configuration_changed_during_resource_readback(self) -> None:
+        self.patches()
+        self.review()
+
+        def change_after_qualification(**arguments: Any) -> None:
+            arguments["checkpoint"]()
+            self.store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="global",
+                    env={"UNREVIEWED_CHANGE": "fixture"},
+                    updated_at=self.profile.updated_at,
+                )
+            )
+
+        with patch(
+            "control_plane.testing_replacement_bootstrap.run_resource_schedule",
+            side_effect=change_after_qualification,
+        ):
+            with self.assertRaisesRegex(ValueError, "configuration changed"):
+                self.apply()
+        self.assertEqual(self.route_writes, 0)
+        from control_plane.disposable_lanes import (
+            require_disposable_lane,
+            DisposableLaneSafetyUnknown,
+        )
+
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                instance="testing",
+            )
+
+    def test_committed_bootstrap_replay_does_not_recertify_changed_configuration(self) -> None:
+        self.patches()
+        self.review()
+        self.apply()
+        original = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        ).resource_provenance
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="global",
+                env={"UNREVIEWED_CHANGE": "fixture"},
+                updated_at=self.profile.updated_at,
+            )
+        )
+        self.apply()
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.fixture.context, instance_name="testing"
+            ).resource_provenance,
+            original,
+        )
+        self.assertEqual(self.route_writes, 1)
+
+    def test_bootstrap_completes_legacy_service_staging_without_clearing_observation(self) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        preparation = self.store.read_disposable_replacement_preparation(
+            self.fixture.operation.operation_id
+        )
+        assert preparation is not None
+        record_safety(
+            self.store,
+            self.profile.product,
+            self.fixture.context,
+            "testing",
+            observed_by="service:testing-replacement-resources",
+            production_resources="separation_ready",
+            isolation_evidence="service:testing-resources:qualified",
+            replaces_operation_id=self.fixture.operation.operation_id,
+            replaced_target_id=preparation.retained_target_id,
+        )
+        original = self.store.read_disposable_lane_safety(
+            self.profile.product, self.fixture.context, "testing"
+        )
+        self.scenario("normal")
+        self.assertEqual(
+            self.store.read_disposable_lane_safety(
+                self.profile.product, self.fixture.context, "testing"
+            ),
+            original,
         )
 
     def test_first_execution_result_keeps_intent_binding_and_original_bootstrap_receipt(

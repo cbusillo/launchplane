@@ -16,7 +16,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.disposable_lane import (
     DisposableTestingResourcePreparation,
-    DisposableLaneCreation,
     TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
 )
 from control_plane.contracts.dokploy_target_record import PublicHostEffect
@@ -65,6 +64,7 @@ from control_plane.testing_replacement_resources import (
     resource_context,
     resource_preparation_payload,
     run_resource_schedule,
+    testing_creation_target,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.odoo_testing_native_source import (
@@ -566,6 +566,14 @@ class TestingReplacementBootstrapAdapter:
                     request=self.request,
                     allow_bootstrap_resume=True,
                 )
+                qualified_binding = disposable_lane_binding_sha256(
+                    profile,
+                    target,
+                    target_id,
+                    configuration=disposable_lane_configuration(
+                        self.store, self.request.context, "testing"
+                    ),
+                )
 
             def check() -> None:
                 lease.assert_current()
@@ -577,6 +585,27 @@ class TestingReplacementBootstrapAdapter:
                 with self.store.serialize_disposable_testing_resources():
                     if bootstrap_plan(self.store, self.product, self.request) != plan:
                         raise ValueError("Testing bootstrap metadata changed.")
+                    current = self.store.read_dokploy_target_record(
+                        context_name=self.request.context, instance_name="testing"
+                    )
+                    current_id = self.store.read_dokploy_target_id_record(
+                        context_name=self.request.context, instance_name="testing"
+                    )
+                    current_profile = self.store.read_product_profile_record(self.product)
+                    if (
+                        disposable_lane_binding_sha256(
+                            current_profile,
+                            current,
+                            current_id,
+                            configuration=disposable_lane_configuration(
+                                self.store, self.request.context, "testing"
+                            ),
+                        )
+                        != qualified_binding
+                    ):
+                        raise ValueError(
+                            "Testing configuration changed after resource qualification."
+                        )
 
             resources = OdooTestingResources(
                 product=self.product,
@@ -609,10 +638,17 @@ class TestingReplacementBootstrapAdapter:
                 ).hostname
                 == existing_generation.domain_host
             ):
-                self._require_domains(existing_generation)
-                check()
-                self._publish_creation(existing_generation, allocation.retained_target_id)
-                return existing_generation, operation, plan
+                creation = target.resource_provenance
+                if (
+                    existing_generation.reconcile_requested_at
+                    or creation is not None
+                    and creation.created_by == "service:fresh-testing-bootstrap"
+                    and creation.production_resources == "isolated"
+                    and creation.replaces_operation_id == existing_generation.operation_id
+                ):
+                    self._require_domains(existing_generation)
+                    check()
+                    return existing_generation, operation, plan
             from control_plane.clean_testing_snapshot import snapshot_storage_budget
 
             generation = existing_generation or FreshOdooTestingGeneration(
@@ -747,20 +783,20 @@ class TestingReplacementBootstrapAdapter:
                 )
                 checkpoint(generation.domain_host, domain_id, profile.runtime_port)
 
-            check()
-            from control_plane.testing_local_credentials import with_generated_credentials
+            with self.store.serialize_disposable_testing_resources():
+                check()
+                from control_plane.testing_local_credentials import with_generated_credentials
 
-            credential_bundle = with_generated_credentials(
-                ProductAuthorityBundle(),
-                self.store,
-                profile,
-                self.request.context,
-                actor="service:testing-bootstrap",
-                generation=generation.operation_id,
-                only_keys=FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
-            )
-            self.store.write_product_public_hosts_bundle(
-                ProductAuthorityBundle(
+                credential_bundle = with_generated_credentials(
+                    ProductAuthorityBundle(),
+                    self.store,
+                    profile,
+                    self.request.context,
+                    actor="service:testing-bootstrap",
+                    generation=generation.operation_id,
+                    only_keys=FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
+                )
+                publication = ProductAuthorityBundle(
                     secret_records=credential_bundle.secret_records,
                     secret_versions=credential_bundle.secret_versions,
                     secret_bindings=credential_bundle.secret_bindings,
@@ -780,70 +816,39 @@ class TestingReplacementBootstrapAdapter:
                             expected_absent=current_runtime is None,
                         ),
                     ),
-                ),
-                expected_target=target,
-                expected_target_id=target_id,
-                expected_provider_target=provider,
-                apply_provider=route,
-                verify_provider=lambda: self._require_domains(generation),
-                pending_effects=(
-                    PublicHostEffect(
-                        host=generation.domain_host,
-                        provider_host=host,
-                        target_id=generation.target_id,
-                        runtime_port=profile.runtime_port,
+                )
+                created_target = testing_creation_target(
+                    self.store,
+                    profile=updated_profile,
+                    target=updated_target,
+                    target_id=target_id,
+                    bundle=publication,
+                    operation_id=generation.operation_id,
+                    retained_target_id=allocation.retained_target_id,
+                    production_resources="isolated",
+                    isolation_evidence="service:fresh-testing-bootstrap:"
+                    + generation_binding(generation),
+                )
+                publication = publication.model_copy(update={"dokploy_targets": (created_target,)})
+                self.store.write_product_public_hosts_bundle(
+                    publication,
+                    expected_target=target,
+                    expected_target_id=target_id,
+                    expected_provider_target=provider,
+                    apply_provider=route,
+                    verify_provider=lambda: self._require_domains(generation),
+                    pending_effects=(
+                        PublicHostEffect(
+                            host=generation.domain_host,
+                            provider_host=host,
+                            target_id=generation.target_id,
+                            runtime_port=profile.runtime_port,
+                        ),
                     ),
-                ),
-            )
+                )
             old_check()
             lease.assert_current()
-            self._publish_creation(generation, allocation.retained_target_id)
         return generation, operation, plan
-
-    def _publish_creation(
-        self, generation: FreshOdooTestingGeneration, retained_target_id: str
-    ) -> None:
-        with self.store.serialize_disposable_testing_resources():
-            read_current_testing_generation(
-                self.store,
-                product=self.product,
-                context=self.request.context,
-                instance="testing",
-                bootstrap_preparation=True,
-            )
-            profile = self.store.read_product_profile_record(self.product)
-            target = self.store.read_dokploy_target_record(
-                context_name=self.request.context, instance_name="testing"
-            )
-            target_id = self.store.read_dokploy_target_id_record(
-                context_name=self.request.context, instance_name="testing"
-            )
-            binding = disposable_lane_binding_sha256(
-                profile,
-                target,
-                target_id,
-                configuration=disposable_lane_configuration(
-                    self.store, self.request.context, "testing"
-                ),
-            )
-            self.store.compare_and_write_dokploy_target_record(
-                expected_record=target,
-                replacement_record=target.model_copy(
-                    update={
-                        "resource_provenance": DisposableLaneCreation(
-                            created_by="service:fresh-testing-bootstrap",
-                            lane_binding_sha256=binding,
-                            replaces_operation_id=generation.operation_id,
-                            replaced_target_id=retained_target_id,
-                            isolation_evidence="service:fresh-testing-bootstrap:"
-                            + generation_binding(generation),
-                            data="reproducible",
-                            production_resources="isolated",
-                        ),
-                    }
-                ),
-                required_context_owner=(self.product, self.request.context),
-            )
 
     def _require_domains(self, generation: FreshOdooTestingGeneration) -> None:
         if not self._domains(generation):

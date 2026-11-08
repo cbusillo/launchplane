@@ -237,6 +237,55 @@ def require_lane_target_ownership(
         raise DisposableLaneSafetyUnknown("The target aliases another lane's target.")
 
 
+@dataclass(frozen=True)
+class RecordedLaneProtection:
+    only_copy: bool
+    shared: bool
+    separation_ready: bool
+
+    @property
+    def resources_protected(self) -> bool:
+        return self.shared or self.separation_ready
+
+
+def recorded_lane_protection(
+    target: DokployTargetRecord | None,
+    observation: DisposableLaneSafety | None,
+    preview: PreviewRecord | None = None,
+) -> RecordedLaneProtection:
+    creation = target.resource_provenance if target else None
+    completed_staging = (
+        observation is not None
+        and creation is not None
+        and observation.observed_by == "service:testing-replacement-resources"
+        and observation.observer_kind == "director_agent"
+        and observation.isolation_evidence.startswith("service:testing-resources:")
+        and bool(observation.replaces_operation_id)
+        and bool(observation.replaced_target_id)
+        and creation.created_by == "service:fresh-testing-bootstrap"
+        and creation.data == "reproducible"
+        and creation.production_resources == "isolated"
+        and creation.replaces_operation_id == observation.replaces_operation_id
+        and creation.replaced_target_id == observation.replaced_target_id
+    )
+    creations = (creation, preview.resource_provenance if preview else None)
+    return RecordedLaneProtection(
+        only_copy=(observation is not None and observation.data == "only_copy")
+        or any(item is not None and item.data == "only_copy" for item in creations),
+        shared=(observation is not None and observation.production_resources == "shared")
+        or any(item is not None and item.production_resources == "shared" for item in creations),
+        separation_ready=(
+            observation is not None
+            and observation.production_resources == "separation_ready"
+            and not completed_staging
+        )
+        or any(
+            item is not None and item.production_resources == "separation_ready"
+            for item in creations
+        ),
+    )
+
+
 def require_disposable_lane(
     store: DisposableLaneStore,
     *,
@@ -344,38 +393,7 @@ def require_disposable_lane(
     binding = disposable_lane_binding_sha256(
         profile, target, target_id, preview, disposable_lane_configuration(store, context, instance)
     )
-    creation_binding = (
-        disposable_lane_binding_sha256(
-            profile,
-            target,
-            target_id,
-            preview,
-            disposable_lane_configuration(store, context, instance),
-            preview_lifecycle=False,
-        )
-        if preview
-        else binding
-    )
-    facts = (
-        evidence,
-        *(
-            fact
-            for fact in (
-                target.resource_provenance if target else None,
-                preview.resource_provenance if preview else None,
-            )
-            if fact is not None
-            and (
-                fact.lane_binding_sha256 == creation_binding
-                or fact.data == "only_copy"
-                or fact.production_resources == "shared"
-            )
-        ),
-    )
-    protected_resources = any(
-        fact is not None and fact.production_resources in {"shared", "separation_ready"}
-        for fact in facts
-    )
+    protection = recorded_lane_protection(target, evidence, preview)
     down_recovery = (
         recovery and not (preview_operation or retirement) and usage.reason == "verified_down"
     )
@@ -384,7 +402,7 @@ def require_disposable_lane(
             raise DisposableLaneSafetyUnknown(
                 "Existing-container recovery requires an owned testing lane."
             )
-        if usage.protected or protected_resources:
+        if usage.protected or protection.resources_protected:
             raise DisposableLaneSafetyUnknown(
                 "Recovery is held by use, needed data or shared production resources."
             )
@@ -413,11 +431,7 @@ def require_disposable_lane(
         # Retirement stops an owned application; it neither starts a lane nor
         # needs a recipe for reproducing disposable output. Known exceptions
         # remain holds, including old observations: expiry cannot erase them.
-        if (
-            usage.protected
-            or protected_resources
-            or any(fact is not None and fact.data == "only_copy" for fact in facts)
-        ):
+        if usage.protected or protection.resources_protected or protection.only_copy:
             raise DisposableLaneSafetyUnknown(
                 "Retirement is held by recorded usage, needed data or shared resources."
             )
@@ -441,15 +455,12 @@ def require_disposable_lane(
             preview,
             disposable_lane_configuration(store, context, instance),
         )
-    if usage.protected or any(
-        fact is not None
-        and (
-            fact.data == "only_copy"
-            or fact.production_resources == "shared"
-            or fact.production_resources == "separation_ready"
-            and not separation_only
-        )
-        for fact in facts
+    if (
+        usage.protected
+        or protection.only_copy
+        or protection.shared
+        or protection.separation_ready
+        and not separation_only
     ):
         raise DisposableLaneSafetyUnknown(
             "The lane is in use, holds needed data or shares production resources."
@@ -556,24 +567,14 @@ def require_unprotected_preview(
     evidence: DisposableLaneSafety | None,
     preview: PreviewRecord | None = None,
 ) -> None:
-    facts = (
-        evidence,
-        target.resource_provenance if target else None,
-        preview.resource_provenance if preview else None,
-    )
+    protection = recorded_lane_protection(target, evidence, preview)
     if (
         target is not None
         and target.policies.staff_testing_hold is not None
         or evidence is not None
         and evidence.current_usage() == "in_use"
-        or any(
-            fact is not None
-            and (
-                fact.data == "only_copy"
-                or fact.production_resources in {"shared", "separation_ready"}
-            )
-            for fact in facts
-        )
+        or protection.only_copy
+        or protection.resources_protected
     ):
         raise DisposableLaneSafetyUnknown("The preview has a recorded protected use or resource.")
 

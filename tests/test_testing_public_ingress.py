@@ -167,7 +167,7 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
             source_observation=source_observation,
         )
         self.store.write_native_testing_copy_capture(self.copy_witness)
-        from tests.support.disposable_lanes import record_safety
+        from tests.support.disposable_lanes import record_safety, record_creation
 
         preparation = self.store.read_disposable_replacement_preparation(
             self.fixture.operation.operation_id
@@ -181,6 +181,7 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
             replaces_operation_id=self.fixture.operation.operation_id,
             replaced_target_id=preparation.retained_target_id,
         )
+        record_creation(self.store, self.profile.product, self.fixture.context)
         self.assertTrue(self.store.supersede_disposable_testing_replacement(self.fixture.operation))
         superseded = self.store.read_odoo_stable_target_replacement_operation_record(
             self.fixture.operation.operation_id

@@ -1,6 +1,7 @@
 from pathlib import Path
 from collections.abc import Callable
 
+from control_plane.disposable_lanes import recorded_lane_protection
 from control_plane.application_state_volume import (
     ApplicationStateVolumeAdapter,
     state_volume_target_key,
@@ -108,17 +109,21 @@ def qualify_application_staging_lift(
     ):
         raise ValueError("The application aliases another lane's recipient.")
     evidence = store.read_disposable_lane_safety(request.product, request.context, request.instance)
-    if evidence is not None and (
-        lane_usage_protected(
-            store,
-            product=request.product,
-            context=request.context,
-            instance=request.instance,
-            usage=evidence.current_usage(),
-            require_unused=False,
+    recorded = recorded_lane_protection(target, evidence)
+    if (
+        evidence is not None
+        and (
+            lane_usage_protected(
+                store,
+                product=request.product,
+                context=request.context,
+                instance=request.instance,
+                usage=evidence.current_usage(),
+                require_unused=False,
+            )
         )
-        or evidence.data == "only_copy"
-        or evidence.production_resources in {"shared", "separation_ready"}
+        or recorded.only_copy
+        or recorded.resources_protected
     ):
         raise DisposableLaneSafetyUnknown(
             "Recorded person use or protected resources must be resolved."

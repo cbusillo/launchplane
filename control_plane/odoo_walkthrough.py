@@ -1,5 +1,6 @@
 """Testing-only account custody. All external effects remain inside the service."""
 
+from control_plane.disposable_lanes import recorded_lane_protection
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 
 from dataclasses import dataclass, field
@@ -279,7 +280,13 @@ def _plan_preview_walkthrough(
         if owned.preview_id != request.preview_id:
             raise ValueError("The cleanup target is not this product's preview.")
         safety = store.read_disposable_lane_safety(request.product, request.context, slot)
-        if safety is not None and safety.production_resources in {"shared", "separation_ready"}:
+        try:
+            tracked_target = store.read_dokploy_target_record(
+                context_name=request.context, instance_name=slot
+            )
+        except FileNotFoundError:
+            tracked_target = None
+        if recorded_lane_protection(tracked_target, safety, preview).resources_protected:
             raise ValueError("Shared production resources forbid test-account cleanup.")
         require_fixture_target_ownership(
             store,

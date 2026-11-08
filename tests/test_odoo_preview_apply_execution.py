@@ -869,8 +869,6 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
                 anchor_pr_number=42,
             )
             from control_plane.disposable_lanes import (
-                DisposableLaneSafetyUnknown,
-                require_unprotected_preview,
                 read_disposable_lane_binding,
             )
 
@@ -885,18 +883,6 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
                 preview_lifecycle=False,
             )
             self.assertEqual(creation.lane_binding_sha256, expected.binding_sha256)
-            with self.assertRaises(DisposableLaneSafetyUnknown):
-                require_unprotected_preview(
-                    None,
-                    None,
-                    previews[0].model_copy(
-                        update={
-                            "resource_provenance": creation.model_copy(
-                                update={"production_resources": "shared"}
-                            ),
-                        }
-                    ),
-                )
 
         self.assertEqual(first_result.status, "completed")
         self.assertEqual(first_result.response_status_code, 202)
@@ -929,8 +915,10 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         self.assertEqual(len(previews), 1)
         self.assertEqual(previews[0].state, "active")
         assert previews[0].resource_provenance is not None
-        self.assertEqual(previews[0].resource_provenance.data, "reproducible")
-        self.assertEqual(previews[0].resource_provenance.binding_sha256, "b" * 64)
+        self.assertEqual(
+            previews[0].resource_provenance.binding_sha256,
+            execute_apply.return_value["resource_provenance"]["binding_sha256"],
+        )
 
 
 class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
