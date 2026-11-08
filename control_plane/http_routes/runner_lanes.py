@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.runner_lane_service import (
     RUNNER_LANE_SERVICE_ROUTE,
+    RUNNER_LANE_LIFECYCLE_WORKFLOW_PATH,
     SERVICE_CONTEXT,
     RunnerLaneServiceRequest,
     RunnerLaneServiceResponse,
@@ -33,7 +34,7 @@ def register_runner_lane_service_routes(
             identity.event_name != "workflow_dispatch"
             or identity.ref_type != "branch"
             or identity.workflow_ref
-            != f"{identity.repository}/.github/workflows/runner-lane-registration.yml@{identity.ref}"
+            != f"{identity.repository}/{RUNNER_LANE_LIFECYCLE_WORKFLOW_PATH}@{identity.ref}"
             or identity.job_workflow_ref not in {"", identity.workflow_ref}
         ):
             raise dependencies.http_error(
