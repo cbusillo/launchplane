@@ -86,8 +86,10 @@ reconciliation rules apply to dispatches whose provider effect is uncertain.
 Dispatch observation matches the original job's unique workflow run title.
 The scan verifies job/source identity; only the executor downloads the recipe.
 
-The existing outbox record also projects the original launcher's terminal
-failure, with its workflow link, into failed operations. It does not silently
+The scan observes outstanding launcher records even after the tenant run finishes.
+The existing outbox record projects terminal launcher failure into failed
+operations; its stored external URL retains the original run link. The inspection
+surface supplies the tenant job/run IDs in routing inputs. It does not silently
 register a replacement. Inspect that original run and its cleanup receipt:
 after correcting the failure and confirming cleanup, use the existing failed-run
 recovery on that same workflow run. An uncertain cleanup must first reconcile
@@ -95,6 +97,10 @@ the original receipt through its always-step or `--cleanup-only`. A successful
 recovery of that original run clears the outbox failure. The queued tenant job
 can still be waiting while its launcher is failed; the operations record is the
 failure signal, not a claim that the tenant test ran.
+If dispatch failed before any launcher run existed, correct the reported
+dispatch failure, then cancel and **Re-run all jobs** on the tenant workflow.
+That explicit new workflow attempt has new job identities. Never delete the
+original outbox row, change its marker or blindly retry an unknown dispatch.
 
 The lifecycle executor builds the same-attempt recipe, creates one fresh
 container with private filesystem and Docker configuration, and supplies the

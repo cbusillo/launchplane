@@ -91,6 +91,14 @@ class AddonRunnerDispatchStore(RunnerLaneStore, Protocol):
     def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
 
     def write_outbox_delivery_record(self, record: OutboxDeliveryRecord) -> None: ...
+
+    def list_outbox_delivery_records(
+        self,
+        *,
+        states: tuple[str, ...] = (),
+        kind: str = "",
+        aggregate_type: str = "",
+    ) -> tuple[OutboxDeliveryRecord, ...]: ...
     def read_outbox_delivery_record(self, delivery_id: str) -> OutboxDeliveryRecord: ...
     def enqueue_outbox_delivery_with_idempotency(
         self, request: OutboxWithIdempotencyRequest
@@ -131,6 +139,26 @@ def runner_lifecycle_workflow_source(store: object) -> tuple[str, str]:
 def request_addon_runner_containers(
     store: AddonRunnerDispatchStore, *, control_plane_root: Path
 ) -> tuple[str, ...]:
+    for record in store.list_outbox_delivery_records(
+        states=("delivered", "failed"),
+        kind="github_workflow_dispatch",
+        aggregate_type="ephemeral_addon_job",
+    ):
+        if record.state == "delivered" and record.payload.get("run_status") == "completed":
+            continue
+        try:
+            observe_addon_launcher(store, record, control_plane_root=control_plane_root)
+        except (
+            LookupError,
+            OSError,
+            ValueError,
+            RuntimeError,
+            click.ClickException,
+            SQLAlchemyError,
+        ) as error:
+            _LOGGER.warning(
+                "Original addon launcher observation unavailable (%s).", type(error).__name__
+            )
     source_repository, source_ref = runner_lifecycle_workflow_source(store)
     repositories = {
         profile.repository for profile in store.list_product_profile_records() if profile.is_active
@@ -139,9 +167,7 @@ def request_addon_runner_containers(
     for repository in sorted(repositories):
         try:
             dispatched.extend(
-                _request_repository_addon_runners(
-                    store, repository, source_repository, source_ref, control_plane_root
-                )
+                _request_repository_addon_runners(store, repository, source_repository, source_ref)
             )
         except (
             LookupError,
@@ -160,7 +186,6 @@ def _request_repository_addon_runners(
     repository: str,
     source_repository: str,
     source_ref: str,
-    control_plane_root: Path,
 ) -> tuple[str, ...]:
     dispatched: list[str] = []
     with runner_lifecycle_token(store, repository) as credential:
@@ -173,7 +198,7 @@ def _request_repository_addon_runners(
             for job in queue.jobs:
                 try:
                     delivery_id = _request_addon_runner(
-                        store, token, job, source_repository, source_ref, control_plane_root
+                        store, token, job, source_repository, source_ref
                     )
                     if delivery_id:
                         dispatched.append(delivery_id)
@@ -197,7 +222,6 @@ def _request_addon_runner(
     job: RunnerQueueWaitJob,
     source_repository: str,
     source_ref: str,
-    control_plane_root: Path,
 ) -> str:
     attempts = [
         match[1]
@@ -214,8 +238,7 @@ def _request_addon_runner(
     )
     delivery = _addon_runner_delivery(request, source_repository, source_ref)
     try:
-        existing = store.read_outbox_delivery_record(delivery.delivery_id)
-        observe_addon_launcher(store, existing, control_plane_root=control_plane_root)
+        store.read_outbox_delivery_record(delivery.delivery_id)
         return ""
     except FileNotFoundError:
         pass
@@ -275,7 +298,11 @@ def observe_addon_launcher(
     success = run.get("conclusion") == "success"
     state = "delivered" if success else "failed"
     error_code = "" if success else "ephemeral_addon_launcher_failed"
-    if record.state == state and record.error_code == error_code:
+    if (
+        record.state == state
+        and record.error_code == error_code
+        and record.payload.get("run_status") == "completed"
+    ):
         return
     store.write_outbox_delivery_record(
         record.model_copy(

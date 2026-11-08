@@ -16,6 +16,49 @@ from tests.test_runner_lane_service import installation_token
 
 
 class LifecycleWorkflowSourceTests(TestCase):
+    def test_cleanup_failure_is_observed_after_the_tenant_queue_is_empty(self) -> None:
+        request = AddonRunnerRequest(repository="example/repo", run_id=12, run_attempt=2, job_id=35)
+        delivery = service._addon_runner_delivery(request, "example/control", "refs/heads/main")
+        delivery = delivery.model_copy(
+            update={
+                "state": "delivered",
+                "action": "dispatched_workflow",
+                "external_id": "78",
+                "provider_operation_key": "original-dispatch-marker",
+            }
+        )
+        store = Mock()
+        store.list_product_profile_records.return_value = ()
+        store.list_outbox_delivery_records.return_value = (delivery,)
+        with (
+            patch.object(service, "read_active_authz_policy_record", return_value=self.policy()),
+            patch.object(
+                service,
+                "launchplane_github_token",
+                side_effect=lambda **_: nullcontext("synthetic-token"),
+            ),
+            patch.object(
+                service,
+                "github_api_request",
+                return_value={
+                    "id": 78,
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "event": "workflow_dispatch",
+                    "display_title": delivery.payload["expected_run_title"],
+                    "path": service.RUNNER_LANE_LIFECYCLE_WORKFLOW_PATH,
+                    "head_branch": delivery.payload["ref"],
+                },
+            ),
+        ):
+            with self.assertLogs(service.__name__, level="WARNING"):
+                service.request_addon_runner_containers(store, control_plane_root=Path("."))
+        failed = store.write_outbox_delivery_record.call_args.args[0]
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(failed.external_id, delivery.external_id)
+        self.assertEqual(failed.provider_operation_key, delivery.provider_operation_key)
+        store.enqueue_outbox_delivery_with_idempotency.assert_not_called()
+
     def test_launcher_failure_and_original_run_recovery_are_visible_without_redispatch(
         self,
     ) -> None:
@@ -73,6 +116,7 @@ class LifecycleWorkflowSourceTests(TestCase):
         store.list_product_profile_records.return_value = (
             SimpleNamespace(is_active=True, repository="example/repo"),
         )
+        store.list_outbox_delivery_records.return_value = ()
 
         def read_existing(delivery_id: str) -> object:
             if delivery_id not in deliveries:
@@ -135,7 +179,7 @@ class LifecycleWorkflowSourceTests(TestCase):
         rule = {
             "repository": "example/control",
             "workflow_refs": [
-                "example/control/.github/workflows/runner-lane-registration.yml@refs/heads/main"
+                f"example/control/{service.RUNNER_LANE_LIFECYCLE_WORKFLOW_PATH}@refs/heads/main"
             ],
             "event_names": ["workflow_dispatch"],
             "actions": ["runner_lane_registration_audit.write"],
@@ -161,7 +205,7 @@ class LifecycleWorkflowSourceTests(TestCase):
         for changes in (
             {
                 "workflow_refs": [
-                    "example/control/.github/workflows/runner-lane-registration.yml@refs/heads/*"
+                    f"example/control/{service.RUNNER_LANE_LIFECYCLE_WORKFLOW_PATH}@refs/heads/*"
                 ]
             },
             {"actions": ["runner_lane_inventory.read"]},
