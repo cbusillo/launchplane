@@ -12,6 +12,19 @@ name: Runner Lane Lifecycle
         options:
           - register
           - retire
+          - ephemeral
+      run_id:
+        description: Exact source run for an ephemeral addon job.
+        type: string
+        default: ""
+      run_attempt:
+        description: Exact source run attempt for an ephemeral addon job.
+        type: string
+        default: ""
+      job_id:
+        description: Exact queued addon job identity.
+        type: string
+        default: ""
       repository:
         description: owner/name repository that owns the runner lane.
         required: true
@@ -61,6 +74,7 @@ concurrency:
 
 jobs:
   runner-lane-lifecycle:
+    timeout-minutes: 65
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}
@@ -125,6 +139,9 @@ jobs:
                 exit 1
               fi
               ;;
+            ephemeral)
+              expected_confirmation="run ephemeral addon job"
+              ;;
             *)
               echo "Unsupported runner lane lifecycle operation." >&2
               exit 1
@@ -137,6 +154,7 @@ jobs:
           fi
 
       - name: Read pre-lifecycle inventory
+        if: inputs.operation != 'ephemeral'
         shell: bash
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
@@ -271,8 +289,58 @@ jobs:
           status="$(jq -r '.status // ""' runner-lane-lifecycle-result.json)"
           echo "lifecycle_status=$status" >>"$GITHUB_OUTPUT"
 
+      - name: Run one fresh ephemeral addon runner container
+        if: inputs.operation == 'ephemeral'
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          SOURCE_RUN_ID: ${{ inputs.run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.run_attempt }}
+          SOURCE_JOB_ID: ${{ inputs.job_id }}
+          MUTATE_REQUESTED: ${{ inputs.mutate }}
+        run: |
+          set -euo pipefail
+          mutate_flag=--dry-run
+          if [ "$MUTATE_REQUESTED" = "true" ]; then mutate_flag=--mutate; fi
+          uv run launchplane runner-lane-ephemeral \
+            --repository "$TARGET_REPOSITORY" \
+            --run-id "$SOURCE_RUN_ID" --run-attempt "$SOURCE_RUN_ATTEMPT" --job-id "$SOURCE_JOB_ID" \
+            --host-name "$RUNNER_REGISTRATION_HOST" \
+            --execution-lane "$RUNNER_REGISTRATION_EXECUTION_LANE" \
+            --service-user "$RUNNER_REGISTRATION_SERVICE_USER" \
+            --service-url "$LAUNCHPLANE_SERVICE_URL" \
+            --output "$RUNNER_TEMP/ephemeral-addon-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            "$mutate_flag"
+
+      - name: Reconcile original addon resources after cancellation or failure
+        if: always() && inputs.operation == 'ephemeral' && inputs.mutate
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          SOURCE_RUN_ID: ${{ inputs.run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.run_attempt }}
+          SOURCE_JOB_ID: ${{ inputs.job_id }}
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/ephemeral-addon-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [ -f "$output/result.json" ]; then
+            uv run launchplane runner-lane-ephemeral --cleanup-only --mutate \
+              --repository "$TARGET_REPOSITORY" \
+              --run-id "$SOURCE_RUN_ID" --run-attempt "$SOURCE_RUN_ATTEMPT" --job-id "$SOURCE_JOB_ID" \
+              --host-name "$RUNNER_REGISTRATION_HOST" \
+              --execution-lane "$RUNNER_REGISTRATION_EXECUTION_LANE" \
+              --service-user "$RUNNER_REGISTRATION_SERVICE_USER" \
+              --service-url "$LAUNCHPLANE_SERVICE_URL" --output "$output"
+          fi
+
+      - name: Preserve ephemeral addon lifecycle evidence
+        if: always() && inputs.operation == 'ephemeral'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ephemeral-addon-lifecycle-${{ inputs.job_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ephemeral-addon-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+
       - name: Upload lifecycle result
-        if: always()
+        if: always() && inputs.operation != 'ephemeral'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runner-lane-lifecycle-result
@@ -282,6 +350,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Fail on unexpected lifecycle result
+        if: inputs.operation != 'ephemeral'
         env:
           MUTATE_REQUESTED: ${{ inputs.mutate }}
           LIFECYCLE_STATUS: >-

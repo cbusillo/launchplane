@@ -4,10 +4,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import time
+import logging
 from typing import TYPE_CHECKING, Protocol, cast
+from sqlalchemy.exc import SQLAlchemyError
+import click
 
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.notifications import DiscordNotificationSuperseded
+from control_plane.runner_lane_service import request_addon_runner_containers
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.generic_web_promotion_workflow import (
     dispatch_generic_web_promotion_workflow_delivery,
 )
@@ -25,6 +30,8 @@ DEFAULT_OUTBOX_WORKER_LEASE_SECONDS = 300
 DEFAULT_OUTBOX_WORKER_POLL_SECONDS = 5
 DEFAULT_OUTBOX_WORKER_ERROR_BACKOFF_SECONDS = 10
 DEFAULT_OUTBOX_WORKER_MAX_CONSECUTIVE_ERRORS = 5
+ADDON_RUNNER_SCAN_SECONDS = 60
+_LOGGER = logging.getLogger(__name__)
 
 
 class OutboxWorkerStore(Protocol):
@@ -196,7 +203,26 @@ def run_outbox_worker_loop(
     discussion_reminder_sender: DiscussionReminderSender | None = None,
 ) -> None:
     consecutive_errors = 0
+    last_addon_scan = float("-inf")
     while not should_stop():
+        if (
+            isinstance(record_store, PostgresRecordStore)
+            and time.monotonic() - last_addon_scan >= ADDON_RUNNER_SCAN_SECONDS
+        ):
+            last_addon_scan = time.monotonic()
+            try:
+                request_addon_runner_containers(record_store)
+            except (
+                LookupError,
+                OSError,
+                ValueError,
+                RuntimeError,
+                SQLAlchemyError,
+                click.ClickException,
+            ) as error:
+                _LOGGER.warning(
+                    "Addon runner dispatch scan unavailable (%s).", type(error).__name__
+                )
         try:
             result = run_outbox_worker_once(
                 record_store=record_store,

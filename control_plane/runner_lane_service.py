@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.client import HTTPException
 import logging
+import re
 from typing import Literal, Protocol
 
 import click
@@ -10,6 +11,18 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane import secrets
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.outbox_delivery import (
+    OutboxDeliveryRecord,
+    build_outbox_delivery_id,
+    build_outbox_dedupe_key,
+)
+from control_plane.durable_operation_authorization import read_active_authz_policy_record
+from control_plane.service_auth import authz_selector_matches
+from control_plane.storage.postgres import OutboxWithIdempotencyRequest
+from control_plane.runner_queue_wait_github import GitHubRunnerQueueWaitReader
+from control_plane.contracts.runner_queue_wait import RunnerQueueWaitJob
+from control_plane.timestamps import utc_now_timestamp
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.github_app_configuration import (
     RUNNER_LIFECYCLE_GITHUB_APP_CLIENT_ID_KEY,
@@ -33,6 +46,13 @@ from control_plane.runner_lane_github import (
     GitHubRunnerLaneInventoryReader,
     GitHubRunnerLaneRegistrationTokenFetcher,
     GitHubRunnerLaneRetirer,
+)
+from control_plane.build_provenance import BuildProvenanceError, GitHubBuildProvenanceTransport
+from control_plane.workflows.runner_lane_ephemeral import (
+    ADDON_RUNNER_JOB_NAMES,
+    ADDON_RUNNER_LABEL_PREFIX,
+    AddonRunnerRequest,
+    read_addon_job,
 )
 from control_plane.runtime_environments import (
     RuntimeEnvironmentRecordStore,
@@ -61,18 +81,195 @@ class RunnerLaneStore(secrets.SecretReadStore, RuntimeEnvironmentRecordStore, Pr
     def list_repository_inventory_records(self) -> tuple[RepositoryInventoryRecord, ...]: ...
 
 
+class AddonRunnerDispatchStore(RunnerLaneStore, Protocol):
+    def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+    def read_outbox_delivery_record(self, delivery_id: str) -> OutboxDeliveryRecord: ...
+    def enqueue_outbox_delivery_with_idempotency(
+        self, request: OutboxWithIdempotencyRequest
+    ) -> OutboxDeliveryRecord: ...
+
+
+def runner_lifecycle_workflow_source(store: object) -> tuple[str, str]:
+    record = read_active_authz_policy_record(store)
+    sources: set[tuple[str, str]] = set()
+    for rule in record.policy.github_actions:
+        if "runner_lane_registration_audit.write" not in rule.actions or not rule.allows_scope(
+            action="runner_lane_registration_audit.write",
+            product=SERVICE_CONTEXT,
+            context=SERVICE_CONTEXT,
+            target=None,
+            schema_version=record.policy.schema_version,
+        ):
+            continue
+        if (rule.event_names and "workflow_dispatch" not in rule.event_names) or rule.environments:
+            continue
+        prefix = f"{rule.repository}/.github/workflows/runner-lane-registration.yml@"
+        for workflow in rule.workflow_refs:
+            ref = workflow.removeprefix(prefix)
+            if workflow == ref or not re.fullmatch(r"refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*", ref):
+                continue
+            if rule.refs and ref not in rule.refs:
+                continue
+            if rule.job_workflow_refs and not authz_selector_matches(
+                workflow, rule.job_workflow_refs
+            ):
+                continue
+            sources.add((rule.repository, ref))
+    if len(sources) != 1:
+        raise LookupError("One existing exact runner lifecycle dispatch binding is required.")
+    return sources.pop()
+
+
+def request_addon_runner_containers(store: AddonRunnerDispatchStore) -> tuple[str, ...]:
+    source_repository, source_ref = runner_lifecycle_workflow_source(store)
+    repositories = {
+        profile.repository for profile in store.list_product_profile_records() if profile.is_active
+    }
+    dispatched: list[str] = []
+    for repository in sorted(repositories):
+        try:
+            dispatched.extend(
+                _request_repository_addon_runners(store, repository, source_repository, source_ref)
+            )
+        except (
+            LookupError,
+            OSError,
+            ValueError,
+            RuntimeError,
+            click.ClickException,
+            SQLAlchemyError,
+        ) as error:
+            _LOGGER.warning("Addon runner request scan unavailable (%s).", type(error).__name__)
+    return tuple(dispatched)
+
+
+def _request_repository_addon_runners(
+    store: AddonRunnerDispatchStore,
+    repository: str,
+    source_repository: str,
+    source_ref: str,
+) -> tuple[str, ...]:
+    dispatched: list[str] = []
+    with runner_lifecycle_token(store, repository) as credential:
+        token = credential.token
+        reader = GitHubRunnerQueueWaitReader(
+            transport=UrllibMergeTrainGitHubTransport(token=token.token)
+        )
+        for status in ("queued", "in_progress"):
+            queue = reader.read_runner_queue_wait(repository=repository, workflow_status=status)
+            for job in queue.jobs:
+                try:
+                    delivery_id = _request_addon_runner(
+                        store, token, job, source_repository, source_ref
+                    )
+                    if delivery_id:
+                        dispatched.append(delivery_id)
+                except (BuildProvenanceError, OSError, ValueError, RuntimeError) as error:
+                    _LOGGER.warning(
+                        "Addon runner job request unavailable (%s).", type(error).__name__
+                    )
+    return tuple(dispatched)
+
+
+def _request_addon_runner(
+    store: AddonRunnerDispatchStore,
+    token: GitHubAppInstallationToken,
+    job: RunnerQueueWaitJob,
+    source_repository: str,
+    source_ref: str,
+) -> str:
+    if job.status != "queued" or job.job_name not in ADDON_RUNNER_JOB_NAMES:
+        return ""
+    attempts = [
+        match[1]
+        for label in job.labels
+        if (match := re.fullmatch(rf"{ADDON_RUNNER_LABEL_PREFIX}{job.run_id}-([1-9][0-9]*)", label))
+    ]
+    if len(attempts) != 1:
+        return ""
+    request = AddonRunnerRequest(
+        repository=token.repository,
+        run_id=job.run_id,
+        run_attempt=int(attempts[0]),
+        job_id=job.github_id,
+    )
+    delivery = _addon_runner_delivery(request, source_repository, source_ref)
+    try:
+        store.read_outbox_delivery_record(delivery.delivery_id)
+        return ""
+    except FileNotFoundError:
+        pass
+    observed = read_addon_job(
+        transport=GitHubBuildProvenanceTransport(token=token),
+        request=request,
+        repository_id=token.repository_id,
+    )
+    if observed.get("status") != "queued":
+        return ""
+    stored = store.enqueue_outbox_delivery_with_idempotency(
+        OutboxWithIdempotencyRequest(delivery=delivery)
+    )
+    return stored.delivery_id
+
+
+def _addon_runner_delivery(
+    request: AddonRunnerRequest, source_repository: str, source_ref: str
+) -> OutboxDeliveryRecord:
+    key = build_outbox_dedupe_key(
+        kind="github_workflow_dispatch",
+        parts=("ephemeral-addon", request.repository, str(request.job_id)),
+    )
+    now = utc_now_timestamp()
+    return OutboxDeliveryRecord(
+        delivery_id=build_outbox_delivery_id(kind="github_workflow_dispatch", dedupe_key=key),
+        kind="github_workflow_dispatch",
+        aggregate_type="ephemeral_addon_job",
+        aggregate_id=f"{request.repository}:{request.job_id}",
+        dedupe_key=key,
+        created_at=now,
+        updated_at=now,
+        next_attempt_at=now,
+        payload={
+            "repository": source_repository,
+            "workflow_id": "runner-lane-registration.yml",
+            "ref": source_ref.removeprefix("refs/heads/"),
+            "credential_context": SERVICE_CONTEXT,
+            "inputs": {
+                "operation": "ephemeral",
+                "repository": request.repository,
+                "lane_name": request.name,
+                "audit_record_key": f"ephemeral-addon/{request.job_id}",
+                "mutate": "true",
+                "confirmation": "run ephemeral addon job",
+                "run_id": str(request.run_id),
+                "run_attempt": str(request.run_attempt),
+                "job_id": str(request.job_id),
+            },
+        },
+    )
+
+
 class RunnerLaneServiceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     repository: str
-    operation: Literal["inventory", "active_runs", "registration_token", "retire"]
+    operation: Literal["inventory", "active_runs", "registration_token", "retire", "addon_job"]
     runner_id: int | None = Field(default=None, gt=0)
+    run_id: int | None = Field(default=None, gt=0)
+    run_attempt: int | None = Field(default=None, gt=0)
+    job_id: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def validate_target(self) -> "RunnerLaneServiceRequest":
         self.repository = repository_full_name(self.repository)
         if (self.operation == "retire") != (self.runner_id is not None):
             raise ValueError("Only retirement requires an exact runner id.")
+        job_fields = (self.run_id, self.run_attempt, self.job_id)
+        if self.operation == "addon_job":
+            if any(value is None for value in job_fields):
+                raise ValueError("Addon job reads require exact run, attempt and job ids.")
+        elif any(value is not None for value in job_fields):
+            raise ValueError("Only addon job reads accept job identities.")
         return self
 
 
@@ -171,6 +368,22 @@ def execute_runner_lane_service_request(
                     repository=request.repository
                 )
             }
+        elif request.operation == "addon_job":
+            assert (
+                request.run_id is not None
+                and request.run_attempt is not None
+                and request.job_id is not None
+            )
+            payload = read_addon_job(
+                transport=GitHubBuildProvenanceTransport(token=token),
+                request=AddonRunnerRequest(
+                    repository=request.repository,
+                    run_id=request.run_id,
+                    run_attempt=request.run_attempt,
+                    job_id=request.job_id,
+                ),
+                repository_id=token.repository_id,
+            )
         elif request.operation == "registration_token":
             registration_token, record = GitHubRunnerLaneRegistrationTokenFetcher(
                 transport=transport

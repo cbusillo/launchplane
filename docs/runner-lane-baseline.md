@@ -65,6 +65,52 @@ Docker CLI plugin used by `docker buildx build --load`.
 
 ## Operations
 
+### One-job addon runners
+
+Private product addon jobs can use fresh runner containers through the retained
+Runner Lane Lifecycle workflow. Production image builds remain GitHub-hosted.
+The product owns its container recipe and test commands. Before queuing the
+addon job, its workflow uploads `addon-runner-recipe-{run_attempt}` containing
+exactly `Dockerfile`, `entrypoint.sh`, and `source-commit` (the run's head SHA).
+The job is named `addon-tests` or `addon-validation` and requests `self-hosted`
+plus `lp-addon-{run_id}-{run_attempt}`. Fork runs, public repositories,
+`pull_request_target`, old attempts, and mismatched recipe sources are refused.
+
+The existing outbox worker scans queued addon jobs every minute. It uses the
+Runner Lifecycle App's existing repository-scoped Actions read permission to
+verify the job and artifact digest, then queues the retained lifecycle workflow
+once per job through the existing outbox. Its dispatch source comes from the
+existing exact lifecycle authorization rule; no second source binding or grant
+is needed. Missing or ambiguous authority remains unavailable. Existing outbox
+reconciliation rules apply to dispatches whose provider effect is uncertain.
+
+The lifecycle executor builds the same-attempt recipe, creates one fresh
+container with private filesystem and Docker configuration, and supplies the
+short-lived registration token on standard input. The recipe must use native
+`config.sh --ephemeral`, report its native runner ID and ephemeral flag as its
+first stdout JSON line, and start `run.sh`. The token must stay out of process
+arguments and listener environment. A successful listener exit alone does not
+prove the addon job passed: the executor reads the actual job conclusion.
+
+The container has its own Docker daemon and anonymous data volume, with no host
+socket, source, credential, or cache mounts. It is privileged and therefore does
+not claim guest or host-administrator isolation. The executor limits its CPU,
+memory and processes. Container, registration and image identities are recorded
+before subsequent effects. Normal completion, failure and cancellation remove
+the original container and its volumes, retire any remaining exact runner
+registration, and remove the recipe image. Cleanup failures remain failed,
+never inferred absent from a Docker error. The workflow's always-step can
+reconcile the saved original receipt with `runner-lane-ephemeral --cleanup-only`;
+it does not register another runner. Receipts and redacted runner logs are
+retained as workflow artifacts. A host loss can leave cleanup unconfirmed and
+requires reconciliation of those original identities.
+
+This implements the container choice recorded in
+[infrastructure issue 613](https://github.com/cbusillo/shiny-infra-ops/issues/613#issuecomment-6724167129).
+Revisit the executor architecture when outside contributors gain push or PR
+rights, production image builds leave hosted GitHub, or tenant count outgrows
+the selected host. Host Docker-access housekeeping remains a separate track.
+
 Use the existing read-only inventory command before adding or controlling runner
 lanes:
 

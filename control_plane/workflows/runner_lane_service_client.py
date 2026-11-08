@@ -16,6 +16,7 @@ from control_plane.runner_lane_service import (
     RunnerLaneServiceRequest,
     RunnerLaneServiceResponse,
 )
+from control_plane.workflows.runner_lane_ephemeral import AddonRunnerRequest
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,6 +88,17 @@ class ServiceRunnerLaneClient:
     def read_runner_lane_inventory(self, *, repository: str) -> RunnerLaneInventory:
         return RunnerLaneInventory.model_validate(
             self.operation(RunnerLaneServiceRequest(repository=repository, operation="inventory"))
+        )
+
+    def read_addon_job(self, request: AddonRunnerRequest) -> dict[str, object]:
+        return self.operation(
+            RunnerLaneServiceRequest(
+                repository=request.repository,
+                operation="addon_job",
+                run_id=request.run_id,
+                run_attempt=request.run_attempt,
+                job_id=request.job_id,
+            )
         )
 
     def fetch_registration_token(
