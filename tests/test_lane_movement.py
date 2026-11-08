@@ -333,6 +333,17 @@ class LaneMovementTests(unittest.TestCase):
                 desired=LaneBuild("after", DEPLOYABLE, source_build=after),
                 transport=self.github,
             )
+            for commit in (DEPLOYABLE, OLDER):
+                with self.subTest(commit=commit), self.assertRaises(LaneMovementRefused) as refused:
+                    require_forward_build(
+                        record_store=self.store,
+                        profile=self.profile,
+                        current=LaneBuild("before", OLDER, source_build=before),
+                        desired=LaneBuild("after", commit, source_build=after),
+                        transport=self.github,
+                        require_descendant=True,
+                    )
+                self.assertEqual(refused.exception.code, "source_order_unverified")
             after.run_id = 30
             with self.assertRaises(LaneMovementRefused):
                 require_forward_build(

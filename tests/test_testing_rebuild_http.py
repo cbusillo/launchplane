@@ -129,7 +129,9 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         assert source is not None
         candidate = self.manifest.model_copy(
             update={
-                "artifact_id": "artifact-example-run-77-1",
+                "artifact_id": (
+                    f"artifact-{self.fixture.operation.context}-run-{source.run_id}-{source.run_attempt}"
+                ),
                 "source_commit": "d" * 40,
                 "source_build": source.model_copy(
                     update={"event": "pull_request", "purpose": "preview", "pull_request_number": 8}

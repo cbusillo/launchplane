@@ -1123,6 +1123,34 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             (plan["action"], plan["reason"], plan["held"]), ("none", "ancestor_build", True)
         )
         self.assertIsNone(verified)
+        self.github.add_run(40, NEWEST)
+        self.github.runs[40]["run_started_at"] = "2026-10-01T12:00:00Z"
+        get_json = self.github.get_json
+
+        def divergent_main(path: str) -> object:
+            if path == f"/repos/{REPOSITORY}/compare/{PR_HEAD}...{NEWEST}":
+                return {
+                    "status": "diverged",
+                    "base_commit": {"sha": PR_HEAD},
+                    "merge_base_commit": {"sha": DEPLOYABLE},
+                }
+            if path == f"/repos/{REPOSITORY}/actions/runs/40/attempts/1":
+                return self.github.runs[40]
+            return get_json(path)
+
+        with patch.object(self.github, "get_json", side_effect=divergent_main):
+            held, verified = _plan_testing_target(
+                record_store=self.store,
+                profile=profile,
+                repository_id=REPOSITORY_ID,
+                transport=self.github,
+            )
+        self.assertEqual(held["action"], "none")
+        self.assertEqual(
+            (held["action"], held["reason"], held["held"]),
+            ("none", "source_order_unverified", True),
+        )
+        self.assertIsNone(verified)
         self.github.first_parents[NEWEST] = PR_HEAD
         self.github.first_parents[PR_HEAD] = DEPLOYABLE
         self.github.add_run(40, NEWEST)

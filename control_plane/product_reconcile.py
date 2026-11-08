@@ -1828,6 +1828,7 @@ def _plan_testing_target(
                 record_store=record_store,
                 profile=profile,
                 transport=transport,
+                require_descendant=retained_candidate and not for_rebuild,
                 current=LaneBuild(
                     comparison.artifact_id,
                     comparison.commit,
