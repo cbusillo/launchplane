@@ -371,7 +371,8 @@ record, and exact context-scoped `LAUNCHPLANE_NPMPLUS_IDENTITY` and
 and private ingress, application-route custody and private health use this
 same reader. Missing, ambiguous, disabled or mismatched records fail closed
 without host-environment fallback. Private health rechecks the record endpoint
-after its probe. These service credentials never enter a product runtime render.
+and configured credentials after its probe. Product runtime rendering also
+refuses legacy raw copies of these service credentials.
 See [NPMplus credential input](secrets.md#npmplus-api-credentials) for adoption
 and the [migration issue](https://github.com/cbusillo/launchplane/issues/3510)
 for remaining activation and copy-retirement proof.

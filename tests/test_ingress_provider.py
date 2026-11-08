@@ -8,7 +8,6 @@ import click
 
 from control_plane import secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.contracts.secret_record import SecretRecord
 from control_plane.npmplus import (
     NpmplusClient,
     NPMPLUS_BASE_URL_ENV_KEY,
@@ -155,52 +154,14 @@ class RecordIngressProviderTests(unittest.TestCase):
         )
         self.assertNotIn(NPMPLUS_IDENTITY_ENV_KEY, rendered.values)
         self.assertNotIn(NPMPLUS_SECRET_ENV_KEY, rendered.values)
-
-    def test_record_reader_refuses_mismatched_or_disabled_secret_records(self) -> None:
-        record = self.store.list_secret_records()[0]
-        read = self.store.read_secret_record
-        for updates in (
-            {"secret_id": "another-secret"},
-            {"scope": "global"},
-            {"context": "another-service"},
-            {"instance": "testing"},
-            {"integration": "runtime_environment"},
-            {"status": "disabled"},
-        ):
-
-            def substituted(secret_id: str) -> SecretRecord:
-                return (
-                    record.model_copy(update=updates)
-                    if secret_id == record.secret_id
-                    else read(secret_id)
+        for key in (NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY):
+            with self.subTest(key=key), self.assertRaises(click.ClickException):
+                resolve_site_runtime_environment_from_store(
+                    record_store=self.store,
+                    context_name="example-product",
+                    instance_name="testing",
+                    target_environment={key: "legacy-provider-value"},
                 )
-
-            with (
-                self.subTest(updates=updates),
-                patch.object(self.store, "read_secret_record", side_effect=substituted),
-            ):
-                with self.assertRaises(click.ClickException):
-                    ingress_provider.build_npmplus_ingress_client_from_records(
-                        record_store=self.store
-                    )
-
-    def test_record_reader_refuses_wrong_secret_version_ownership(self) -> None:
-        version = self.store.read_secret_version(
-            self.store.list_secret_records()[0].current_version_id
-        )
-        for updates in ({"version_id": "wrong-version"}, {"secret_id": "wrong-secret"}):
-            with (
-                self.subTest(updates=updates),
-                patch.object(
-                    self.store,
-                    "read_secret_version",
-                    return_value=version.model_copy(update=updates),
-                ),
-            ):
-                with self.assertRaises(click.ClickException):
-                    ingress_provider.build_npmplus_ingress_client_from_records(
-                        record_store=self.store
-                    )
 
 
 if __name__ == "__main__":

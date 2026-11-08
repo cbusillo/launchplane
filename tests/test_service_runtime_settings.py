@@ -93,6 +93,9 @@ class ServiceRuntimeSettingTests(unittest.TestCase):
             "https://edge.example.test#secret",
             "https://edge.example.test:bad",
             "file:///tmp/edge",
+            "https://edge.example.test:0",
+            "https://.",
+            "http://[fe80::1%eth0]:81",
         ):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 ServiceRuntimeSettingRequest(key=key, value=value, reason=setting.reason)

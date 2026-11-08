@@ -35,6 +35,8 @@ def validate_npmplus_base_url(value: str) -> str:
         if (
             parsed.scheme not in {"http", "https"}
             or not parsed.hostname
+            or not parsed.hostname.rstrip(".")
+            or "%" in parsed.hostname
             or parsed.username is not None
             or parsed.password is not None
             or parsed.query
@@ -43,6 +45,8 @@ def validate_npmplus_base_url(value: str) -> str:
         ):
             raise ValueError
         _ = parsed.port
+        if parsed.port == 0:
+            raise ValueError
     except ValueError:
         raise ValueError("NPMplus service endpoint is invalid.") from None
     return value.rstrip("/")
@@ -387,6 +391,9 @@ class NpmplusHttpOpener(Protocol):
 
 
 class NpmplusClient:
+    def uses_same_credentials(self, other: "NpmplusClient") -> bool:
+        return self._credentials == other._credentials
+
     @property
     def base_url(self) -> str:
         return self._credentials.normalized_base_url

@@ -183,7 +183,10 @@ def fetch_testing_private_health(
     )
     try:
         if (
-            npmplus_service_base_url_from_records(record_store=store) != api_url
+            not client.uses_same_credentials(
+                build_npmplus_ingress_client_from_records(record_store=store)
+            )
+            or npmplus_service_base_url_from_records(record_store=store) != api_url
             or _edge_health_origin(client, api_url) != edge_origin
             or adapter._snapshot()[0] != snapshot
             or latest_testing_private_ingress_receipt(

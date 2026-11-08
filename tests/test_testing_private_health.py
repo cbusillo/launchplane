@@ -28,6 +28,81 @@ from tests.test_outbound_http import _FakeConnection, _FakeResponse, _resolver_f
 
 
 class TestingPrivateHealthTests(PrivateIngressFixture):
+    def test_credential_rotation_or_disable_during_probe_refuses_success(self) -> None:
+        import os
+        from control_plane import secrets
+        from control_plane.npmplus import (
+            NpmplusClient,
+            NPMPLUS_IDENTITY_ENV_KEY,
+            NPMPLUS_SECRET_ENV_KEY,
+        )
+        from control_plane.workflows.ingress_provider import (
+            build_npmplus_ingress_client_from_records,
+        )
+
+        self.create()
+        with patch.dict(
+            os.environ, {secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "fixture-health-key"}
+        ):
+            for name in (
+                "list_proxy_hosts",
+                "get_certificate",
+                "get_access_list",
+                "list_other_host_domains",
+            ):
+                self.enterContext(patch.object(NpmplusClient, name, getattr(self.client, name)))
+            self.enterContext(
+                patch.object(
+                    NpmplusClient,
+                    "get_proxy_host",
+                    new=lambda _client, host_id, **_flags: next(
+                        host for host in self.client.proxy_hosts if host.id == host_id
+                    ),
+                )
+            )
+            with patch(
+                "control_plane.testing_private_health.build_npmplus_ingress_client_from_records",
+                side_effect=build_npmplus_ingress_client_from_records,
+            ):
+                for change in (NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY, "disabled"):
+                    with self.subTest(change=change):
+                        for key in (NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY):
+                            secrets.write_secret_value(
+                                record_store=self.store,
+                                scope="context",
+                                context_name="launchplane",
+                                integration=secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                                name=key,
+                                binding_key=key,
+                                plaintext_value="fixture-" + key,
+                            )
+
+                        def change_credential(*args: Any, **kwargs: Any) -> PublicHttpResponse:
+                            if change == "disabled":
+                                binding = next(
+                                    binding
+                                    for binding in self.store.list_secret_bindings()
+                                    if binding.binding_key == NPMPLUS_SECRET_ENV_KEY
+                                )
+                                self.store.write_secret_binding(
+                                    binding.model_copy(update={"status": "disabled"})
+                                )
+                            else:
+                                secrets.write_secret_value(
+                                    record_store=self.store,
+                                    scope="context",
+                                    context_name="launchplane",
+                                    integration=secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                                    name=change,
+                                    binding_key=change,
+                                    plaintext_value="rotated-fixture",
+                                )
+                            return PublicHttpResponse(200, self.endpoint.url, 0, (), b"healthy")
+
+                        self.transport.side_effect = change_credential
+                        with self.assertRaises(PublicHttpDestinationError):
+                            self.fetch()
+
     def setUp(self) -> None:
         super().setUp()
         self.transport = self.enterContext(

@@ -198,6 +198,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
                     "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET": "new-manager-secret",
                 },
                 "oauth_env_removals": ("LAUNCHPLANE_NPMPLUS_SECRET",),
+                "oauth_env_expected_values": {"LAUNCHPLANE_NPMPLUS_SECRET": "npmplus-secret"},
                 "no_cache": True,
             }
         )

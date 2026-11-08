@@ -4251,6 +4251,18 @@ def create_launchplane_fastapi_app(
 
             resolved_ingress_provider_factory = npmplus_ingress_provider_from_client_factory
 
+    def ingress_provider_for_store(record_store: object, trace_id: str) -> IngressProvider:
+        if resolved_ingress_provider_factory is not None:
+            return resolved_ingress_provider_factory()
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="NPMplus service credentials require database records.",
+            )
+        return default_ingress_provider(record_store=record_store)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         try:
@@ -23601,11 +23613,7 @@ def create_launchplane_fastapi_app(
         preflight_result: NpmplusIngressApplyResult | None = None
         guarded_instance_apply = False
         try:
-            ingress_provider = (
-                resolved_ingress_provider_factory()
-                if resolved_ingress_provider_factory is not None
-                else default_ingress_provider(record_store=record_store)
-            )
+            ingress_provider = ingress_provider_for_store(record_store, trace_id)
             if resolved_ingress_request.route.dns_challenge:
                 if (
                     instance_name
@@ -26068,11 +26076,7 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
         )
         try:
-            ingress_provider = (
-                resolved_ingress_provider_factory()
-                if resolved_ingress_provider_factory is not None
-                else default_ingress_provider(record_store=record_store)
-            )
+            ingress_provider = ingress_provider_for_store(record_store, trace_id)
             write_ingress_route_pending_audit_record(
                 ingress_store=canary_store,
                 trace_id=trace_id,

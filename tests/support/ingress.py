@@ -33,6 +33,9 @@ from tests.support.http import get as http_get
 class _FakeNpmplusIngressClient:
     base_url = "https://edge.example.test"
 
+    def uses_same_credentials(self, other: object) -> bool:
+        return self is other
+
     def __init__(self, proxy_hosts: tuple[NpmplusProxyHost, ...] = ()) -> None:
         self.proxy_hosts = list(proxy_hosts)
         self.calls: list[str] = []

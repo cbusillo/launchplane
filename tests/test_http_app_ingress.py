@@ -1121,6 +1121,26 @@ class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_default_provider_requires_database_storage(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_route.plan", product="launchplane", context="reon-prod"
+                ),
+                record_store_factory=lambda: store,
+            )
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/ingress/route-apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=_npmplus_ingress_route_payload(),
+            )
+            self.assertEqual(response.status_code, 503, response.text)
+            self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
     async def test_default_route_uses_the_request_store_and_managed_credentials(self) -> None:
         from control_plane import secrets
         from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord

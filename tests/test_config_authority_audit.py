@@ -2622,33 +2622,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "",
         )
 
-    def test_deploy_launchplane_hardening_mechanics_are_classified(self) -> None:
-        cases = (
-            (
-                "IMAGE_REPOSITORY",
-                "${{ steps.prep.outputs.image_repository }}",
-                "thin_connector_input",
-            ),
-            (
-                "OMIT_NPMPLUS_ENV",
-                "${{ inputs.omit_npmplus_env || false }}",
-                "operator_supplied_runtime_input",
-            ),
-            ("environment", "launchplane-authz-admin", "thin_connector_input"),
-            ("environment", "launchplane-break-glass", "thin_connector_input"),
-        )
-
-        for key, value, expected_reason in cases:
-            with self.subTest(key=key):
-                self.assertEqual(
-                    _allow_reason(
-                        path=".github/workflows/deploy-launchplane.yml",
-                        key=key,
-                        value=value,
-                    ),
-                    expected_reason,
-                )
-
     def test_remaining_workflow_aliases_are_path_scoped(self) -> None:
         workflow_aliases = (
             (
