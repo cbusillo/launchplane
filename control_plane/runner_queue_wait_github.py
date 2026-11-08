@@ -43,11 +43,14 @@ class GitHubRunnerQueueWaitReader:
         constrained_threshold_seconds: int = 300,
         inventory_capacity_constrained: bool | None = None,
         inventory_capacity_reason: str = "",
+        workflow_status: str = "",
     ) -> RunnerQueueWaitSummary:
         repository_path = _repository_path(repository)
         observed_at = self.clock.now().isoformat().replace("+00:00", "Z")
         workflow_runs = self._read_workflow_runs(
-            repository=repository_path, workflow_run_limit=workflow_run_limit
+            repository=repository_path,
+            workflow_run_limit=workflow_run_limit,
+            status=workflow_status,
         )
         jobs: list[RunnerQueueWaitJob] = []
         for workflow_run in workflow_runs:
@@ -74,11 +77,14 @@ class GitHubRunnerQueueWaitReader:
         )
 
     def _read_workflow_runs(
-        self, *, repository: str, workflow_run_limit: int
+        self, *, repository: str, workflow_run_limit: int, status: str = ""
     ) -> tuple[object, ...]:
         if workflow_run_limit < 1:
             raise ValueError("workflow run limit must be at least 1.")
-        query = urlencode({"per_page": str(min(workflow_run_limit, 100))})
+        parameters = {"per_page": str(min(workflow_run_limit, 100))}
+        if status:
+            parameters["status"] = status
+        query = urlencode(parameters)
         payload = self.transport.request(
             method="GET", path=f"/repos/{repository}/actions/runs?{query}"
         )

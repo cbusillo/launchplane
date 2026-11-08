@@ -50,6 +50,53 @@ def _workflow_delivery() -> OutboxDeliveryRecord:
 
 
 class OutboxWorkerTests(unittest.TestCase):
+    def test_concurrent_workflow_runs_reconcile_only_the_original_dispatch_title(self) -> None:
+        from control_plane.workflows.generic_web_promotion_workflow import (
+            _workflow_provider_operation_key,
+            dispatch_generic_web_promotion_workflow_delivery,
+        )
+
+        record = _workflow_delivery()
+        title = "fixture-operation-35"
+        record = record.model_copy(
+            update={
+                "state": "reconcile_required",
+                "provider_operation_key": _workflow_provider_operation_key(
+                    repository="example/repo",
+                    workflow_id="deploy.yml",
+                    ref="main",
+                    dispatch_started_at="2026-07-13T00:00:00Z",
+                    inputs={"dry_run": "false", "bump": "patch"},
+                ),
+                "payload": {**record.payload, "expected_run_title": title},
+            }
+        )
+        runs = [
+            {"id": identifier, "created_at": "2026-07-13T00:00:01Z", "display_title": name}
+            for identifier, name in ((101, "another-operation"), (102, title))
+        ]
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
+                return_value="synthetic-token",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
+                return_value={"workflow_runs": runs},
+            ) as api,
+        ):
+            result = dispatch_generic_web_promotion_workflow_delivery(
+                record=record,
+                control_plane_root=Path("."),
+                mark_provider_started=lambda *_: self.fail(
+                    "An original dispatch must not be replaced."
+                ),
+            )
+        self.assertEqual(result.state, "delivered")
+        self.assertEqual(result.external_id, "102")
+        self.assertEqual(result.provider_operation_key, record.provider_operation_key)
+        self.assertFalse(any(call.kwargs.get("method") == "POST" for call in api.call_args_list))
+
     def test_transient_github_failure_schedules_bounded_retry(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

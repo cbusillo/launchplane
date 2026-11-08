@@ -1,6 +1,7 @@
 from json import JSONDecodeError
 import json
 import os
+import socket
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.parse import urlsplit
@@ -45,6 +46,12 @@ from control_plane.runner_lane_github import GitHubRepositoryActiveRunReader
 from control_plane.runner_lane_github import RunnerLaneRegistrationTokenFetcher
 from control_plane.runner_queue_wait_github import GitHubRunnerQueueWaitReader
 from control_plane.workflows.runner_lane_service_client import ServiceRunnerLaneClient
+from control_plane.workflows.runner_lane_ephemeral import (
+    AddonRunnerRequest,
+    cleanup_ephemeral_addon_job,
+    install_cancellation_handlers,
+    run_ephemeral_addon_job,
+)
 from control_plane.workflows.runner_lane_registration_executor import (
     RunnerLaneRegistrationExecutorRequest,
 )
@@ -103,6 +110,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 
 def register_runner_lane_commands(main: click.Group) -> None:
+    main.add_command(runner_lane_ephemeral, name="runner-lane-ephemeral")
     main.add_command(runner_inventory, name="runner-inventory")
     main.add_command(runner_queue_wait, name="runner-queue-wait")
     main.add_command(runner_baseline_observe, name="runner-baseline-observe")
@@ -126,6 +134,86 @@ def register_runner_lane_commands(main: click.Group) -> None:
         runner_host_hygiene_executor,
         name="runner-host-hygiene-executor",
     )
+
+
+@click.command("runner-lane-ephemeral")
+@click.option("--repository", required=True)
+@click.option("--run-id", required=True, type=click.IntRange(min=1))
+@click.option("--run-attempt", required=True, type=click.IntRange(min=1))
+@click.option("--job-id", required=True, type=click.IntRange(min=1))
+@click.option("--host-name", required=True)
+@click.option("--execution-lane", required=True)
+@click.option("--service-user", required=True)
+@click.option("--service-url", required=True)
+@click.option("--output", required=True, type=click.Path(path_type=Path))
+@click.option("--mutate/--dry-run", default=False)
+@click.option("--cleanup-only", is_flag=True)
+def runner_lane_ephemeral(
+    repository: str,
+    run_id: int,
+    run_attempt: int,
+    job_id: int,
+    host_name: str,
+    execution_lane: str,
+    service_user: str,
+    service_url: str,
+    output: Path,
+    mutate: bool,
+    cleanup_only: bool,
+) -> None:
+    request = AddonRunnerRequest(
+        repository=repository, run_id=run_id, run_attempt=run_attempt, job_id=job_id
+    )
+    environment = RunnerLaneRegistrationExecutorRequest(
+        repository=repository,
+        host_name=host_name,
+        execution_lane=execution_lane,
+        service_user=service_user,
+        lane_name=request.name,
+        registration_root=str(output.parent.resolve()),
+        labels=(request.label,),
+        audit_record_key=f"ephemeral-addon/{job_id}",
+    )
+    try:
+        validate_runner_registration_environment(request=environment)
+        if socket.gethostname().casefold() != host_name.casefold():
+            raise ValueError("Ephemeral addon lifecycle is on another host.")
+        install_cancellation_handlers()
+        client = _service_runner_lane_client(service_url, "LAUNCHPLANE_SERVICE_TOKEN")
+        if cleanup_only:
+            if not mutate:
+                raise ValueError("Original resource cleanup requires --mutate.")
+            result = cleanup_ephemeral_addon_job(client=client, request=request, output=output)
+            click.echo(json.dumps(result, indent=2))
+            if result.get("cleanup_errors"):
+                raise ValueError("Addon resource cleanup is unconfirmed.")
+            return
+        if not mutate:
+            job = client.read_addon_job(request)
+            click.echo(
+                json.dumps(
+                    {
+                        "status": "ready",
+                        "mutate": False,
+                        "job_id": job_id,
+                        "job_status": job.get("status"),
+                        "source_commit": job.get("source_commit"),
+                    }
+                )
+            )
+            return
+        result = run_ephemeral_addon_job(
+            client=client,
+            request=request,
+            output=output,
+        )
+    except (OSError, ValueError, MergeTrainGitHubError) as error:
+        raise click.ClickException(
+            f"Ephemeral addon lifecycle failed ({type(error).__name__})."
+        ) from error
+    click.echo(json.dumps(result, indent=2))
+    if result["status"] not in {"completed", "not_queued"}:
+        raise click.ClickException("Ephemeral addon job or cleanup did not complete.")
 
 
 @click.command("runner-inventory")

@@ -65,6 +65,81 @@ Docker CLI plugin used by `docker buildx build --load`.
 
 ## Operations
 
+### One-job addon runners
+
+Private product addon jobs can use fresh runner containers through the retained
+Runner Lane Lifecycle workflow. Production image builds remain GitHub-hosted.
+The product owns its container recipe and test commands. Before queuing the
+addon job, its workflow uploads `addon-runner-recipe-{run_attempt}` containing
+exactly `Dockerfile`, `entrypoint.sh`, and `source-commit` (the run's head SHA).
+Failed-job retries can reuse the most recent verified recipe from an earlier
+attempt of that same immutable source/run; they still create a fresh container
+for the current job/attempt. The recipe contains source, never job state.
+The job requests `self-hosted` plus `lp-addon-{run_id}-{run_attempt}`; its name
+and commands belong to the product. Fork runs, public repositories,
+`pull_request_target`, old job attempts, and mismatched recipe sources are refused.
+
+The existing outbox worker scans queued addon jobs every minute. It uses the
+Runner Lifecycle App's existing repository-scoped Actions read permission to
+verify the job source, then queues the retained lifecycle workflow
+once per job through the existing outbox. Its dispatch source comes from the
+existing exact lifecycle authorization rule; no second source binding or grant
+is needed. Missing or ambiguous authority remains unavailable. Existing outbox
+reconciliation rules apply to dispatches whose provider effect is uncertain.
+Dispatch observation matches the original job's unique workflow run title.
+The scan verifies job/source identity; only the executor downloads the recipe.
+The executor verifies its artifact digest and same-source identity before building.
+
+The scan observes outstanding launcher records even after the tenant run finishes.
+The existing outbox record projects terminal launcher failure into failed
+operations; its stored external URL retains the original run link. The inspection
+surface supplies the tenant job/run IDs in routing inputs. It does not silently
+register a replacement. Inspect that original run and its cleanup receipt:
+after correcting the failure and confirming cleanup, use the existing failed-run
+recovery on that same workflow run. An uncertain cleanup must first reconcile
+the original receipt through its always-step or `--cleanup-only`. A successful
+recovery of that original run clears the outbox failure. The queued tenant job
+can still be waiting while its launcher is failed; the operations record is the
+failure signal, not a claim that the tenant test ran.
+If dispatch failed before any launcher run existed, correct the reported
+dispatch failure, then cancel and **Re-run all jobs** on the tenant workflow.
+That explicit new workflow attempt has new job identities. Never delete the
+original outbox row, change its marker or blindly retry an unknown dispatch.
+
+The lifecycle executor builds the same-source recipe, creates one fresh
+container with private filesystem and Docker configuration, and supplies the
+short-lived registration token on standard input. The recipe must use native
+`config.sh --ephemeral`, report its native runner ID and ephemeral flag as its
+first stdout JSON line, and start `run.sh`. The token must stay out of process
+arguments and listener environment. A successful listener exit alone does not
+prove the addon job passed: the executor reads the actual job conclusion.
+
+The container has a private cgroup namespace, its own Docker daemon and anonymous
+data volume, with no host
+socket, source, credential, or cache mounts. It is privileged and therefore does
+not claim guest or host-administrator isolation. The executor limits its CPU,
+memory and processes. Container, registration and image identities are recorded
+before subsequent effects. Cleanup requests a bounded graceful container stop,
+then confirms removal even if stopping fails. Normal completion, failure and cancellation remove
+the original container and its volumes, retire any remaining exact runner
+registration, and remove the recipe image. Cleanup failures remain failed,
+never inferred absent from a Docker error. The workflow's always-step can
+reconcile the saved original receipt with `runner-lane-ephemeral --cleanup-only`;
+it does not register another runner. Receipts and redacted runner logs are
+retained as workflow artifacts. A host loss can leave cleanup unconfirmed and
+requires reconciliation of those original identities.
+
+This implements the container choice recorded in
+[infrastructure issue 613](https://github.com/cbusillo/shiny-infra-ops/issues/613#issuecomment-6724167129).
+Revisit the executor architecture when outside contributors gain push or PR
+rights, production image builds leave hosted GitHub, or tenant count outgrows
+the selected host. Host Docker-access housekeeping remains a separate track.
+The retained operations lane remains occupied until the addon job and cleanup
+finish, so its existing runner count bounds concurrency. The minute-based scan
+uses the existing installation's API budget. Observe actual queue waits and
+rate-limit evidence during delivery; do not infer spare capacity or expand the
+host/lane/App configuration from this recipe.
+
 Use the existing read-only inventory command before adding or controlling runner
 lanes:
 
@@ -215,8 +290,8 @@ privilege boundary, and verifies that GitHub inventory reports exactly one
 online lane with the expected labels before writing a `completed` audit. If any
 step fails, the executor writes a `failed` audit. The raw registration token must
 never be written to the audit record, command output, or JSON result.
-GitHub's runner `config.sh` still requires the token as a command-line option,
-so the ops lane must treat same-user process inspection on the host as privileged
+The persistent registration executor passes the token as a command-line option,
+so its ops lane must treat same-user process inspection on the host as privileged
 and keep unrelated workloads off the constrained service user during mutation.
 
 The retirement CLI entrypoint is:
