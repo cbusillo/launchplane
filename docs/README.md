@@ -85,8 +85,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   applicability proof and atomic historical disposition without an admission.
 - [runner-lane-baseline.md](runner-lane-baseline.md) — self-hosted runner lane
   baseline, Docker credential isolation, and readiness contract.
-- [runner-host-hygiene.md](runner-host-hygiene.md) — report-only shared runner
-  host hygiene evidence, budgets, and future apply boundary.
+- [runner-host-hygiene.md](runner-host-hygiene.md) — shared runner host reports,
+  audited maintenance, budgets, and recovery.
 - [agent-context-boundary.md](agent-context-boundary.md) — public-safe agent
   context, caller profiles, scoped intent, redaction, and provenance boundary.
 - [`agent-operator-contract.md`](agent-operator-contract.md) — generated,
