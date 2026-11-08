@@ -1,9 +1,12 @@
 import base64
+import fcntl
 import json
+import os
+import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from control_plane.dokploy.cutover_host_files import ProductHostFileRoute, ProductHostPreparedSites
 from control_plane.dokploy.prepared_host import (
@@ -105,6 +108,22 @@ class ProductHostRouteTests(unittest.TestCase):
             delayed._replace_owned(
                 json.dumps(route_payload(self.target, NEW), sort_keys=True), admitted
             )
+        self.assertEqual(self.route.observed_target(), OLD)
+
+    def test_command_delayed_past_its_admission_window_never_applies(self) -> None:
+        admitted = self.route._read_owned()
+        lock = os.open(self.route.lock, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, lock)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with (
+            patch("control_plane.dokploy.cutover_host_files.HOST_COMMAND_ADMISSION_SECONDS", 0.5),
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            self.route._replace_owned(
+                json.dumps(route_payload(self.target, NEW), sort_keys=True), admitted
+            )
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        self.assertEqual(self.host.route_file.read_text(), admitted)
         self.assertEqual(self.route.observed_target(), OLD)
 
     def test_watch_proof_refuses_a_directory_the_proxy_does_not_watch(self) -> None:

@@ -426,10 +426,13 @@ provider watches the mounted destination, and that host and container see the
 same directory device and inode. Publication takes a host lock in the authority
 directory, rechecks that mount, and replaces the file only when its current
 bytes and the lane's host generation both still match what the worker read.
-Every route publication advances that generation, including one that finds the
-route already applied, and so do pause activation and retention, which share
-the same lane lock and generation. A delayed or obsolete command therefore
-refuses after any later decision, even when the route returns to identical bytes. Applied readback reads Traefik's API from inside that container. The
+Every route publication advances that generation after its write, including
+one that finds the route already applied, and so do pause activation and
+retention, which share the same lane lock and generation. Reads take the same
+lock. A host command also refuses unless it holds the lock within half the
+persisted cutover reconciliation delay of starting, so a command whose reply
+was lost either applies before any recovery can claim the operation or never
+applies. Applied readback reads Traefik's API from inside that container. The
 initial file must already name the serving slot, and applied Traefik authority
 must agree with its single exact route. Missing mounts or file permissions are
 activation prerequisites. Changing live ingress access remains a Director stop

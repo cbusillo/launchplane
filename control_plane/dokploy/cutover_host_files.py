@@ -5,6 +5,7 @@ from typing import Any
 
 import yaml
 
+from control_plane.contracts.odoo_prod_promotion_operation import ODOO_CUTOVER_RECONCILIATION_DELAY
 from control_plane.contracts.prepared_public_site import PreparedPublicSite
 from control_plane.dokploy.prepared_host import (
     ACTIVE_PAUSE_FILE,
@@ -26,6 +27,7 @@ MANAGED_PROXY_CONTAINER = "dokploy-traefik"
 HOST_FILE_HELPERS = r"""
 import fcntl,hashlib,json,os,subprocess,sys,tempfile,time
 from pathlib import Path
+STARTED=time.monotonic()
 spec=json.load(sys.stdin)
 def docker(*arguments):
     return subprocess.run(['docker',*arguments],capture_output=True,text=True,timeout=60,check=True).stdout
@@ -33,14 +35,15 @@ def hold_lock(path):
     path=Path(path)
     if not path.parent.is_dir() or path.parent.is_symlink(): raise ValueError('host lock directory is unavailable')
     descriptor=os.open(path,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
-    deadline=time.monotonic()+30
     while True:
         try:
             fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            return descriptor
+            break
         except BlockingIOError:
-            if time.monotonic()>=deadline: raise
+            if time.monotonic()-STARTED>=spec['admission_seconds']: raise ValueError('host command admission expired')
             time.sleep(0.1)
+    if time.monotonic()-STARTED>=spec['admission_seconds']: raise ValueError('host command admission expired')
+    return descriptor
 def sync_directory(directory):
     descriptor=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
     try: os.fsync(descriptor)
@@ -63,15 +66,16 @@ def read_generation(path):
     except FileNotFoundError: return 0
     if type(value) is not int or value<0: raise ValueError('host generation is malformed')
     return value
-def advance_generation(path,expected):
-    path=Path(path)
-    if read_generation(path)!=expected: return False
-    temporary=write_temporary(path.parent,json.dumps(expected+1),'.generation-','.pending')
+def replace_owned(path,content,prefix):
+    temporary=write_temporary(path.parent,content,prefix,'.pending')
     try: os.replace(temporary,path)
     except BaseException:
         os.unlink(temporary); raise
     sync_directory(path.parent)
-    return True
+def advance_generation(expected):
+    replace_owned(Path(spec['generation']),json.dumps(expected+1),'.generation-')
+def admitted(expected):
+    return read_generation(spec['generation'])==expected
 """
 
 ROUTE_HOST_PROGRAM = (
@@ -94,24 +98,22 @@ if spec['mode']=='watch':
     destination=watched_destination()
     print(json.dumps({'destination':destination,'static':docker('exec',spec['proxy'],'cat',spec['static'])}))
 elif spec['mode']=='read':
+    hold_lock(spec['lock'])
     generation=read_generation(spec['generation'])
     content=read_owned(route)
     print(json.dumps({'present':content is not None,'content':content or '','generation':generation}))
-elif spec['mode']=='publish':
+elif spec['mode'] in {'publish','fence'}:
     hold_lock(spec['lock'])
     watched_destination()
-    if sha256(read_owned(route))!=spec['expected_sha256'] or not advance_generation(spec['generation'],spec['expected_generation']):
+    if sha256(read_owned(route))!=spec['expected_sha256'] or not admitted(spec['expected_generation']):
         print(json.dumps({'outcome':'predecessor_changed'}))
+    elif spec['mode']=='fence':
+        advance_generation(spec['expected_generation'])
+        print(json.dumps({'outcome':'fenced'}))
     else:
-        temporary=write_temporary(directory,spec['content'],'.cutover-','.pending')
-        try: os.replace(temporary,route)
-        except BaseException:
-            os.unlink(temporary); raise
-        sync_directory(directory)
+        replace_owned(route,spec['content'],'.cutover-')
+        advance_generation(spec['expected_generation'])
         print(json.dumps({'outcome':'published','sha256':sha256(read_owned(route))}))
-elif spec['mode']=='fence':
-    hold_lock(spec['lock'])
-    print(json.dumps({'outcome':'fenced' if advance_generation(spec['generation'],spec['expected_generation']) else 'predecessor_changed'}))
 else:
     raise ValueError('unknown route host mode')
 """
@@ -137,6 +139,7 @@ def owned_name(name):
     return name
 directory=site_directory()
 if spec['mode']=='read':
+    hold_lock(spec['lock'])
     generation=read_generation(spec['generation'])
     content=read_owned(directory/owned_name(spec['name'])) if directory.is_dir() else None
     print(json.dumps({'present':content is not None,'content':content or '','generation':generation}))
@@ -156,29 +159,30 @@ elif spec['mode']=='activate':
     path=directory/'active.json'
     if not directory.is_dir() or path.is_symlink(): raise ValueError('prepared publication is unavailable')
     if read_owned(directory/owned_name(spec['name'])) is None: raise ValueError('prepared publication has no staged bundle')
-    if not advance_generation(spec['generation'],spec['expected_generation']): raise ValueError('prepared publication changed after admission')
-    temporary=write_temporary(directory,spec['content'],'.active-','.pending')
-    try: os.replace(temporary,path)
-    except BaseException:
-        os.unlink(temporary); raise
-    sync_directory(directory)
+    if not admitted(spec['expected_generation']): raise ValueError('prepared publication changed after admission')
+    replace_owned(path,spec['content'],'.active-')
+    advance_generation(spec['expected_generation'])
     print(json.dumps({'content':read_owned(path)}))
 elif spec['mode']=='prune':
     hold_lock(spec['lock'])
-    if not advance_generation(spec['generation'],spec['expected_generation']): raise ValueError('prepared publication changed during retention')
-    if spec['deactivate'] is not None:
-        if read_owned(directory/'active.json')!=spec['deactivate']: raise ValueError('prepared publication changed during retention')
-        (directory/'active.json').unlink()
-    for item in spec['remove']:
-        path=directory/owned_name(item['name'])
-        if sha256(read_owned(path))!=item['sha256']: raise ValueError('prepared retention differs from its durable reconstruction')
-        path.unlink()
+    if not admitted(spec['expected_generation']): raise ValueError('prepared publication changed during retention')
+    if spec['deactivate'] is not None and read_owned(directory/'active.json')!=spec['deactivate']:
+        raise ValueError('prepared publication changed during retention')
+    paths=[directory/owned_name(item['name']) for item in spec['remove']]
+    if any(sha256(read_owned(path))!=item['sha256'] for path,item in zip(paths,spec['remove'])):
+        raise ValueError('prepared retention differs from its durable reconstruction')
+    if spec['deactivate'] is not None: (directory/'active.json').unlink()
+    for path in paths: path.unlink()
     sync_directory(directory)
-    print(json.dumps({'pruned':len(spec['remove'])}))
+    advance_generation(spec['expected_generation'])
+    print(json.dumps({'pruned':len(paths)}))
 else:
     raise ValueError('unknown prepared host mode')
 """
 )
+
+
+HOST_COMMAND_ADMISSION_SECONDS = ODOO_CUTOVER_RECONCILIATION_DELAY.total_seconds() / 2
 
 
 def lane_fence(lock_directory: str, route_id: str) -> tuple[str, str]:
@@ -220,7 +224,9 @@ class ProductHostFileRoute(TraefikFileRoute):
             "mode": mode,
             "route_file": str(self.target.route_file),
             "proxy": MANAGED_PROXY_CONTAINER,
+            "lock": self.lock,
             "generation": self.generation,
+            "admission_seconds": HOST_COMMAND_ADMISSION_SECONDS,
             **values,
         }
 
@@ -238,7 +244,11 @@ class ProductHostFileRoute(TraefikFileRoute):
         frame = run_host_program(
             self.execute,
             ROUTE_HOST_PROGRAM,
-            self._request("fence", lock=self.lock, expected_generation=self.admitted[1]),
+            self._request(
+                "fence",
+                expected_sha256=content_sha256(self.admitted[0]),
+                expected_generation=self.admitted[1],
+            ),
         )
         if frame != {"outcome": "fenced"}:
             raise ValueError("route authority changed; refusing a stale traffic switch")
@@ -277,7 +287,6 @@ class ProductHostFileRoute(TraefikFileRoute):
             ROUTE_HOST_PROGRAM,
             self._request(
                 "publish",
-                lock=self.lock,
                 expected_sha256=content_sha256(predecessor),
                 expected_generation=self.admitted[1],
                 content=payload,
@@ -332,6 +341,7 @@ class ProductHostPreparedSites:
             "site": self.site,
             "lock": self.lock,
             "generation": self.generation,
+            "admission_seconds": HOST_COMMAND_ADMISSION_SECONDS,
             **values,
         }
         return run_host_program(command, PREPARED_HOST_PROGRAM, request)
