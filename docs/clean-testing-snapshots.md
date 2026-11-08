@@ -7,9 +7,7 @@ create a PR preview. Testing reads the product's qualified real source.
 Previews read a frozen, sanitized snapshot captured immediately after a
 successful refresh, before testing serves staff.
 
-The source contract is tracked in [#4756](https://github.com/cbusillo/launchplane/issues/4756).
 The preview API binds its selected snapshot into the existing issued plan.
-CM import-completion integration remains a prerequisite on [#4753](https://github.com/cbusillo/launchplane/issues/4753).
 This page does not establish live activation or qualify any product's data source.
 
 ## Refresh and publication
@@ -195,72 +193,12 @@ PostgreSQL 17 and separate preview database volumes still require a full
 database restore. Snapshot capture retains its existing clone-or-copy behavior;
 only new preview filestores use overlays. This does not provide database copy-on-write.
 
-## Idle previews
+See [preview memory admission](preview-memory-admission.md#idle-previews) for
+idle-preview sleep and wake mechanics.
 
-Service-issued previews without upstream connections put their public route on
-a small router from the same immutable image. It receives the preview generation
-identity, with no application environment file, data mount or source credential.
-The existing network layout stays the same. A private Unix socket lets Launchplane
-read activity and coordinate sleep through its existing provider transport.
-There is no public control endpoint or outbound wake callback.
+## Snapshot opt-in and custody
 
-After fifteen minutes without traffic and with no open connections or active
-runner execution, Launchplane freezes forwarding and stops web, the runner and
-PostgreSQL. It retains their containers, database, attachments and overlay source.
-A visitor sees a page that checks again while Launchplane starts the preview.
-A waiting non-GET request is forwarded once after wake, or receives a temporary
-failure if startup exceeds its bounded wait. The router never replays it.
-
-Sleep and wake use the existing preview executor and product locks plus the
-host project lock. They are best-effort, idempotent operations without durable
-provider reservations or retained intents. Each pass observes the current ready
-generation, gateway receipt and service state. A partial stop finishes on a later
-pass, after any failure backoff, before admitting a requested wake. This lets
-the next wake measure headroom after the stop completes. An admitted partial
-wake uses the gateway's persisted receipt as its idempotency key while a recent
-visitor is asking. When visits stop for the idle interval, an unfinished wake
-returns to sleep. A router or scheduler restart needs only another observation;
-a lost successful completion response preserves the running services.
-A failed stop/start backs off that preview for five minutes in memory, allowing
-other previews and ordinary refresh/destroy operations to proceed; no retry
-intent or budget is stored. Busy host locks and failed observations retry on the
-next pass. Manual stops, staff testing holds, changed generations, other
-provider reservations and unavailable custody still block idle effects.
-Existing previews gain the router on their next normal data-preserving refresh.
-
-Wakes serialize on the host and check the configured memory headroom threshold
-and disk reserve before starting stopped services. PostgreSQL starts first,
-followed by runner and web. A wake keeps the existing executor and host startup
-locks for one attempt, with one shared five-minute health deadline. Docker
-reporting a stopped, restarting or unhealthy service fails the attempt at once.
-The gateway opens only after all services pass health and the exact runtime
-identity agrees. Insufficient capacity leaves the preview asleep; a later pass
-checks capacity again. The gateway's wake receipt identifies recovery; any
-attempt that still needs to start stopped services checks current memory and
-disk again. If admission refuses a partial wake, its running services stop so
-it releases their memory before the next pass. It does not reserve capacity
-across an interruption. A preview that
-never becomes healthy can be refreshed or destroyed through the ordinary
-preview path. Data-preserving refreshes also credit their own running services
-after matching the current target's identity; cold starts still meet the memory
-floor.
-
-The normal schema migration removes historical idle reservations and their
-retained intents, leaving other operations intact. A database constraint refuses
-late idle-reservation writes from an older overlapping service before effects.
-Gateway receipt IDs keep the existing wire format for routers already deployed;
-they are opaque correlation IDs and no longer refer to database reservations.
-Refresh and destroy use their own ordinary recovery paths and have no idle
-supersession special case.
-Quiet polling does not take the preview executor lock or perform a host-wide
-storage inspection. Full qualification runs under exclusion before effects.
-
-## Product transition and custody
-
-OPW's preview repair landed in PR4734. Its transition still needs the Director's
-actual testing hold lift and the existing source/artifact/custody qualification.
-After source deployment, opt the product in and run its first admitted
-refresh. A Director agent may conditionally set only `preview.clean_testing_snapshot`
+A Director agent may conditionally set only `preview.clean_testing_snapshot`
 from false to true through the existing `POST /v1/product-profiles` route. Read the
 current profile and strong `ETag`, preserve every other field, and submit that
 exact replacement with `If-Match` and a stable `Idempotency-Key`; read back the
@@ -276,11 +214,9 @@ New preview copies refuse until a reviewed budget exists and an admitted refresh
 publishes a clean snapshot. Existing preview data remains intact. Enable the existing daily
 drill only with its qualified source, storage budget and custody checks. This changes no production key or access grant.
 
-CM first needs CMSEED's qualified Fishbowl/RepairShopr fill and supported
-sanitizer/import-completion execution. Capture must attach to that completion;
-an ordinary code deploy must never snapshot staff-edited testing. CM's
-production reader is the later source once CM runs its business on Odoo.
-Existing Client-used previews remain protected.
+Capture must attach to qualified sanitized refresh or import completion;
+an ordinary code deploy must never snapshot staff-edited testing.
+Existing Client-used previews and testing holds remain protected.
 
 Snapshot bytes remain in private host custody, independently of testing or
 preview volume retirement. Cleanup keeps the published source and its predecessor,

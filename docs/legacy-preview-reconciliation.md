@@ -320,5 +320,3 @@ review. The apply payload names `mode: apply` and otherwise repeats the exact
 plan intent. The helper supplies review fields only from that matching,
 successful, eligible saved plan. It accepts HTTPS service origins, refuses
 redirects, emits bounded protocol metadata, and never retries an uncertain write.
-Source delivery and fixture tests do not establish deployed capability,
-provider absence, caller authority or live retirement acceptance.

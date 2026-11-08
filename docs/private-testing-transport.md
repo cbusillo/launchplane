@@ -294,9 +294,7 @@ reservation lease.
 
 The optional image settlement reference lives in the existing producer-owned
 execution receipt and cannot be removed or changed after recording. Empty
-references are omitted from old receipt serialization. Older service versions
-reject receipts containing the new reference rather than guessing its meaning;
-deploy the receipt producer and recovery reader together. Follow the existing
+references are omitted from receipt serialization. Follow the existing
 [service recovery guidance](operations.md#launchplane-service-deploy-posture)
 with a compatible rollback reader or a fixed forward build. Keep the retained
 proof when reverting unrelated code.
