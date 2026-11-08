@@ -74,8 +74,10 @@ def history_snapshot(engine: Engine, names: tuple[str, ...]) -> str:
     """Canonical comparison of all columns/rows for backup-restoration proof."""
     result: dict[str, list[dict[str, Any]]] = {}
     with engine.connect() as connection:
+        metadata = MetaData()
+        metadata.reflect(bind=connection, only=names, resolve_fks=False)
         for name in sorted(names):
-            table = Table(name, MetaData(), autoload_with=connection)
+            table = metadata.tables[name]
             rows = connection.execute(select(table).order_by(*table.primary_key.columns)).mappings()
             result[name] = [dict(row) for row in rows]
     return json.dumps(result, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
