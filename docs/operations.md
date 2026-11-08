@@ -3353,9 +3353,9 @@ alone is not proof that an existing testing copy has been repaired.
   tenant repositories do not need direct access to Launchplane self-hosted
   runners; privileged provider mutations still execute inside the deployed
   Launchplane service.
-- For Odoo rollback target selection, use the
-  [admin release panel](#odoo-admin-release-panel); deployment and evidence follow
-  the [rollback waterfall](#odoo-rollback-and-re-promote-waterfall).
+- `POST /v1/drivers/odoo/prod-rollback` uses the
+  [Odoo stable executor](driver-descriptors.md) and the target-selection rule
+  described in the [admin release panel](#odoo-admin-release-panel).
 - `POST /v1/drivers/odoo/prod-backup-gate` captures the DB and filestore backup
   evidence required before Odoo prod promotion. See
   [online Odoo recovery tuples](odoo-online-backups.md) for the capture,
@@ -3885,7 +3885,8 @@ through these routes.
 - **Roll back** shows the artifact the rollback will redeploy, asks for a reason
   and confirmation, and queues it with `POST /v1/odoo-prod-rollbacks`. The route
   resolves the target once, before any effect: the explicit `artifact_id`, or
-  the previous passing prod deployment's artifact. It refuses with
+  the newest passing prod deployment's artifact that differs from the lane's
+  latest deployment. It refuses with
   `rollback_target_missing` when there is none. The target is stored on the
   operation and shown while it runs; the worker redeploys exactly that target
   and never re-resolves it.

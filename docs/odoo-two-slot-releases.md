@@ -248,6 +248,12 @@ shared inventory before native image/settings verification. An incomplete or
 uncertain recreation keeps the release held. Source delivery does not install
 this capability or configure a real lane.
 
+Startup preflight requires each writer's literal Compose image to match the
+slot's immutable image, the authoritative `.env` last in `env_file`, and no
+explicit `ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64` environment override. Interpolated images or
+later env-file overrides refuse before effects. The private runner resolves
+current container identities after recreation.
+
 ### Interrupted startup recovery
 
 `DokploySlotStartup` requires an explicit host `authority_directory`: an existing,
@@ -308,8 +314,8 @@ not qualify the installed service package, remote transport, actual process
 interruption, physical-database drain, native settings commits or public traffic.
 Both slots use the same fixture image, so this rehearsal does not qualify
 cross-image slot identity checks. The inline host programs run on the test
-interpreter, not the remote host's Python. Those remain part of #3268's
-installed and full-release qualification.
+interpreter, not the remote host's Python. Installed and real-release proof
+remain with the [qualification and activation work](#records-retries-and-activation).
 
 `configure_startup` merges the selected snapshot and its legacy indexing parameter
 into both slots' durable managed startup payloads, preserves unrelated settings
@@ -522,8 +528,6 @@ legacy started marker or missing boundary witness remains UNKNOWN.
 
 Original inverse recovery deliberately continues under its original guards,
 with the persisted reconciliation delay, after the forward budget is exhausted.
-Replay cannot start another upgrade, choose a new target or admitted caller,
-or starve other lanes.
 
 Before a pause, guarded candidate preparation acquires the pinned immutable restore
 image and checks its native tools and PostgreSQL archive major version. Provider discovery

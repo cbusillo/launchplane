@@ -123,7 +123,8 @@ Promotion consumes bounded cutover failures through its existing automatic
 rollback/finalization path. A rollback's newer checkpoint cannot be overwritten
 by the promotion's earlier deployment snapshot. New candidates must belong to
 the product's configured image and source repository. These checks grant no
-access and leave installed-provider/actual release qualification on #3268.
+access; installed-provider and real-release proof remain with the
+[qualification and activation work](odoo-two-slot-releases.md#records-retries-and-activation).
 
 Traffic completion is distinct from committing deployment and serving inventory.
 The source cutover holds the lane through both operations using

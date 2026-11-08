@@ -3,8 +3,9 @@ title: Prepared public serving during Odoo database updates
 ---
 
 `prepared_public_site`, `prepared_public_pause` and the typed
-`contracts/prepared_public_site` contract supply public serving for
-[Odoo two-slot releases](odoo-two-slot-releases.md).
+`contracts/prepared_public_site` contract supply source support for public
+serving. Installed qualification and activation follow
+[Odoo two-slot releases](odoo-two-slot-releases.md#records-retries-and-activation).
 
 ## Preparation
 
