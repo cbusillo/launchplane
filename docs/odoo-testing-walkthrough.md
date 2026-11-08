@@ -289,13 +289,9 @@ Retrying the original key settles evidence without repeating those steps, then
 cleanup remains available. Browser work holds the existing heartbeat lease and
 Odoo lane reservation; recovery never replays browser commands.
 
-Deploy compatible API and browser-service code together through normal
-Launchplane delivery. No schema migration, product build setting, GitHub secret
-or policy mutation is part of this source change. Before rolling back the API,
+Before rolling back the API,
 clean up task accounts through this route. Otherwise retain a compatible image
-and its encrypted history for supported cleanup. Live account/sign-in proof
-is a separate post-landing session; source tests and fixture browser evidence
-do not claim any real testing walkthrough passed.
+and its encrypted history for supported cleanup.
 
 Before a provision or initial-copy attempt, use the product's read-only
 `GET /v1/products/{product}/path-check?path=testing&intent=provision` to see all independent

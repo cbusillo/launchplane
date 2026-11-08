@@ -68,13 +68,8 @@ Fresh-generation boundaries use separate keys in the existing metadata store,
 with the unchanged record format. A separate per-artifact traversal checkpoint
 survives generation changes, completion and intervening desired artifacts. It
 skips only previously reviewed terminal history and never authorizes a budget
-reset. Older workers ignore fresh boundaries and may stop with an attempt-chain
-error after long fresh history. When rolling forward, the current worker also reads
-newer legacy-key checkpoints written by the older API. Keep the API and worker
-on compatible source to use this continuation; storage rollback or counter edits are not recovery.
+reset. Storage rollback or counter edits are not recovery.
 
 This route accepts only testing lanes. It neither promotes to production nor
 clears old operations, restores data, changes access, or lifts a staff hold.
-The service and its worker must both run this version before use. Re-arm metadata
-lives in a separate record; the queue payload keeps its existing format so an
-older Launchplane image can still read and claim work after emergency rollback.
+Re-arm metadata lives in a separate record from the queue payload.
