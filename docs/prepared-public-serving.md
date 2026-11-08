@@ -3,11 +3,8 @@ title: Prepared public serving during Odoo database updates
 ---
 
 `prepared_public_site`, `prepared_public_pause` and the typed
-`contracts/prepared_public_site` contract supply the public-serving foundation
-for the one-phase release design in #3237 and #3262. The two-slot provider
-orchestrator (#3266) owns production activation, authoritative route switching,
-private readiness, backup/update ordering and recovery. This capability does not
-change the current production deployment path or grant access.
+`contracts/prepared_public_site` contract supply public serving for
+[Odoo two-slot releases](odoo-two-slot-releases.md).
 
 ## Preparation
 
@@ -92,9 +89,8 @@ The record exposes begin, end, full elapsed duration, `prepared-public` served
 mode and `reduced_service=true`. The interval includes public-write blocking,
 fence/drain, backup coordination, maintenance, readiness, switch and writer
 resumption. Zero 5xx means readers stayed served, not full application service.
-Use these typed records in #3266's DB-backed release integration. The provided
-`tests.support.prepared_public_storage.FilePublicPauseStore` and its bundle JSON
-utilities are isolated proof fixtures; shared production truth remains DB-backed.
+The provided `tests.support.prepared_public_storage.FilePublicPauseStore` and its
+bundle JSON utilities are isolated proof fixtures; shared production truth remains DB-backed.
 Provider adapters must enforce exclusive/idempotent operations on a release;
 these file utilities are not a distributed lock or production record store.
 

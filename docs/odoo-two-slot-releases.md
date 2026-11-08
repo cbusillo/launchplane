@@ -215,12 +215,12 @@ startup, warming, readiness, route application and writer resumption. Zero 5xx
 while forms pause is reduced service, which remains visible in the bundle and
 record.
 
-Activate through the exact Client-accepted service release with explicit slot,
-volume/network, prepared-serving, proxy and runtime capabilities already
-available; this is separate from source/component acceptance. Missing provider
-access or activation prerequisites are reported, never bypassed with a local
-live-target command. Real-release acceptance remains on #3268 and the parent
-#3237. Delivery follows the repository's [delivery boundary](../AGENTS.md#delivery-boundary).
+Installed qualification remains on [launchplane#4844](https://github.com/cbusillo/launchplane/issues/4844),
+real-release acceptance on [launchplane#3268](https://github.com/cbusillo/launchplane/issues/3268),
+and architecture decisions on [launchplane#5751](https://github.com/cbusillo/launchplane/issues/5751).
+Source support is not lane activation. Missing prerequisites are reported,
+never bypassed with a local live-target command. Activation requires the exact
+Client-accepted gated release and the installed capabilities described here.
 
 ## Typed website settings
 
@@ -284,14 +284,6 @@ same shared writer object, and independent effective image/settings/indexing
 verification precedes the receipt. Missing readback, guard loss or a lost reply
 keeps the operation held; a later call begins with fresh observation. There is no
 unbounded retry loop, deployment fallback or shell repair procedure.
-
-Before activation, [the installed qualification](https://github.com/cbusillo/launchplane/issues/3268)
-must prove the host package/transport, persistent authority directory and its
-atomic publication permissions, exact Compose behavior under interruption,
-logical-writer database observer, guard/pause callbacks and shared writer wiring.
-Qualify these capabilities and representative forward/rollback recovery in
-isolation before any exact Client-accepted gated real release; source tests do
-not activate a lane.
 
 The opt-in `tests.test_odoo_slot_startup_rehearsal` exercises the startup adapter
 against real, stopped Docker Compose services. Select an already-local immutable
@@ -515,14 +507,6 @@ response bodies, provider errors and container logs are excluded. These
 diagnostics do not change the original operation's reconciliation hold,
 readiness deadline, writer fences or recovery authority.
 
-The installed qualification uses isolated representative Odoo 20 data and the
-shipped web/scheduler commands. It must prove real scheduled ticks without HTTP,
-physical drain, coherent capture/restore, browser readiness, persisted prepared
-serving and original-operation forward/rollback recovery. Infrastructure backup
-provider simulation in that fixture is explicitly separate from native logical
-backup proof. It neither proves a real infrastructure backup nor activates a
-live lane. Parent #3268 still waits for its exact accepted real-release event.
-
 ### Source recovery and retention
 
 Canonical maintenance seals a failed outcome in its existing exclusive attempt
@@ -538,10 +522,8 @@ legacy started marker or missing boundary witness remains UNKNOWN.
 
 Original inverse recovery deliberately continues under its original guards,
 with the persisted reconciliation delay, after the forward budget is exhausted.
-Before activation, #4844 must inject a persistent inverse failure and its repair,
-prove recovery can finish beyond that budget, and prove replay cannot start
-another upgrade, choose a new target or admitted caller, or starve other lanes. This source
-choice preserves cleanup when the forward attempt budget has been spent.
+Replay cannot start another upgrade, choose a new target or admitted caller,
+or starve other lanes.
 
 Before a pause, guarded candidate preparation acquires the pinned immutable restore
 image and checks its native tools and PostgreSQL archive major version. Provider discovery
@@ -644,7 +626,6 @@ Disposable source checks include an opt-in native coordinator-death regression:
 LAUNCHPLANE_TEST_RESTORE_IMAGE=<already-local-immutable-postgres-image> uv run --extra dev python -m unittest tests.test_cutover_restore_probe.NativeRestoreLifetimeTests
 ```
 
-These checks do not qualify integrated Community 20 settings, representative Odoo
-workflow data or a real infrastructure backup provider. Those prerequisites and
-the installed forward/rollback qualification remain on #4844; #3268 retains its
-real accepted-release finish line.
+These source checks do not qualify installed forward/rollback recovery,
+integrated Community 20 settings, representative workflow data or a real
+infrastructure backup provider.

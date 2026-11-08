@@ -42,8 +42,7 @@ program's checks, effect ordering, arguments and output. Both the package and it
 installer report the archive version; actions also report their program version.
 Scheduled readback verifies both.
 The provider's materialization limit still applies to command arguments and
-bootstrap chunks. The compressed fresh-restore and rehearsal program envelopes
-are removed.
+bootstrap chunks.
 
 The archive contains no runtime records, product settings, credentials or restore
 data. Inputs continue to come from the operation's existing reviewed records.
