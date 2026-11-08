@@ -87,6 +87,7 @@ from control_plane.build_provenance import (
     record_verified_build_artifact,
     verify_build_artifact,
     verify_generic_web_build,
+    verify_requested_build_artifact,
 )
 from control_plane.contracts.record_failures import record_failure_summary
 from control_plane.contracts.promotion_record import env_key_names
@@ -3834,6 +3835,30 @@ class _TestingRebuildBuildReads:
 
     def get_bytes(self, path: str) -> bytes:
         return _testing_build_read(self.transport.get_bytes, path)
+
+
+def verified_testing_rebuild_artifact(
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    *,
+    artifact_id: str,
+    source_git_ref: str,
+) -> VerifiedBuildArtifact:
+    if profile.driver_id != "odoo" or lane.instance != "testing":
+        raise ValueError("Requested build selection requires an Odoo testing lane.")
+    identity = product_repository_identity(record_store, profile)
+    return verify_requested_build_artifact(
+        transport=_TestingRebuildBuildReads(
+            resolve_build_provenance_transport(record_store, profile)
+        ),
+        repository=profile.repository,
+        repository_id=identity.repository_id,
+        commit=source_git_ref,
+        context=lane.context,
+        image_repository=profile.image.repository,
+        artifact_id=artifact_id,
+    )
 
 
 def latest_verified_testing_build(

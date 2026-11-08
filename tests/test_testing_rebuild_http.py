@@ -122,6 +122,60 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             )
         )
 
+    def test_migrated_candidate_plan_does_not_compare_against_current_release(self) -> None:
+        from tests.test_migrated_testing_source import MigratedTestingRequestTests
+
+        source = self.manifest.source_build
+        assert source is not None
+        candidate = self.manifest.model_copy(
+            update={
+                "artifact_id": "artifact-example-run-77-1",
+                "source_commit": "d" * 40,
+                "source_build": source.model_copy(
+                    update={"event": "pull_request", "purpose": "preview", "pull_request_number": 8}
+                ),
+            }
+        )
+        migrated = MigratedTestingRequestTests().request().migrated_source
+        assert migrated is not None
+        replacement = self.fixture.operation.request.model_copy(
+            update={
+                "artifact_id": candidate.artifact_id,
+                "source_git_ref": candidate.source_commit,
+                "data_source_mode": "migrated_restore",
+                "allow_empty_data": False,
+                "migrated_source": migrated.model_copy(
+                    update={
+                        "product": self.product,
+                        "context": self.fixture.operation.context,
+                        "target_image": candidate.image.digest,
+                    }
+                ),
+            }
+        )
+        with (
+            patch(
+                "control_plane.product_reconcile.verified_testing_rebuild_artifact",
+                create=True,
+                return_value=VerifiedBuildArtifact(manifest=candidate),
+            ),
+            patch.object(preflight, "_inspect_execution", side_effect=lambda *args: args[4]),
+        ):
+            plan, verified = preflight.inspect_current_testing_rebuild(
+                root=self.fixture.root,
+                store=self.store,
+                request=replacement,
+                actor="fixture-agent",
+            )
+        self.assertEqual(
+            (plan.artifact_id, plan.source_git_ref),
+            (candidate.artifact_id, candidate.source_commit),
+        )
+        self.assertEqual(verified.manifest, candidate)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(candidate.artifact_id)
+        self.assertEqual(self.fixture.effects, [])
+
     def test_invalid_source_and_build_are_refused_before_conditional_planning(self) -> None:
         replacement = self.fixture.operation.request.model_copy(
             update={
@@ -277,6 +331,14 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
     async def test_director_rebuild_uses_current_verified_build_and_preserves_original_receipt(
         self,
     ) -> None:
+        await self.exercise_director_migrated_rebuild(candidate=False)
+
+    async def test_director_candidate_rebuild_retains_provenance_outside_release_store(
+        self,
+    ) -> None:
+        await self.exercise_director_migrated_rebuild(candidate=True)
+
+    async def exercise_director_migrated_rebuild(self, *, candidate: bool) -> None:
         from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
         from tests.test_migrated_testing_source import MigratedTestingRequestTests
         from control_plane.service_auth import (
@@ -293,6 +355,22 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         from control_plane.contracts.odoo_stable_target_replacement import (
             OdooStableTargetReplacementRequest,
         )
+
+        if candidate:
+            build = self.manifest.source_build
+            assert build is not None
+            self.manifest = self.manifest.model_copy(
+                update={
+                    "artifact_id": f"artifact-{self.fixture.operation.context}-run-{build.run_id}-{build.run_attempt}",
+                    "source_build": build.model_copy(
+                        update={
+                            "event": "pull_request",
+                            "purpose": "preview",
+                            "pull_request_number": 8,
+                        }
+                    ),
+                }
+            )
 
         config = BearerIdentityConfig(
             local_operator_token="fixture-operator",
@@ -333,7 +411,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         )
         self.enterContext(
             patch(
-                "control_plane.product_reconcile.latest_verified_testing_release",
+                "control_plane.product_reconcile.verified_testing_rebuild_artifact",
                 return_value=VerifiedBuildArtifact(manifest=self.manifest),
             )
         )
@@ -358,7 +436,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                 with (
                     self.subTest(failure=type(failure), route=route),
                     patch(
-                        "control_plane.product_reconcile.latest_verified_testing_release",
+                        "control_plane.product_reconcile.verified_testing_rebuild_artifact",
                         side_effect=failure,
                     ),
                 ):
@@ -394,9 +472,34 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(inspected.status_code, 202, inspected.text)
         with self.assertRaises(FileNotFoundError):
             self.store.read_artifact_manifest(self.manifest.artifact_id)
-        for changed in (
-            {"artifact_id": "unverified-build"},
-            {"source_git_ref": "f" * 40},
+        assert replacement.migrated_source is not None
+        for changed, expected_status in (
+            ({"artifact_id": "unverified-build"}, 400),
+            ({"source_git_ref": "f" * 40}, 400),
+            (
+                {
+                    "migrated_source": replacement.migrated_source.model_copy(
+                        update={"target_image": "sha256:" + "f" * 64}
+                    )
+                },
+                409,
+            ),
+            (
+                {
+                    "migrated_source": replacement.migrated_source.model_copy(
+                        update={"context": "other-context"}
+                    )
+                },
+                409,
+            ),
+            (
+                {
+                    "migrated_source": replacement.migrated_source.model_copy(
+                        update={"product": "other-product"}
+                    )
+                },
+                400,
+            ),
         ):
             with self.subTest(changed=changed):
                 mismatched = replacement.model_copy(update=changed).model_dump(
@@ -409,7 +512,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                     headers={"Authorization": "Bearer fixture-operator"},
                     payload={"product": self.product, "replacement": mismatched},
                 )
-                self.assertEqual(refused.status_code, 400, refused.text)
+                self.assertEqual(refused.status_code, expected_status, refused.text)
         with self.assertRaises(FileNotFoundError):
             self.store.read_artifact_manifest(self.manifest.artifact_id)
         ordinary = await request(
@@ -441,19 +544,29 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             payload={"product": self.product, "replacement": replacement.model_dump(mode="json")},
         )
         self.assertEqual(response.status_code, 202, response.text)
-        self.assertEqual(
-            self.store.read_artifact_manifest(self.manifest.artifact_id), self.manifest
-        )
+        if candidate:
+            with self.assertRaises(FileNotFoundError):
+                self.store.read_artifact_manifest(self.manifest.artifact_id)
+        else:
+            self.assertEqual(
+                self.store.read_artifact_manifest(self.manifest.artifact_id), self.manifest
+            )
         operations = self.store.list_odoo_stable_target_replacement_operation_records()
         saved = next(
             item for item in operations if item.idempotency_key == "native-director-rebuild"
         )
         self.assertEqual(saved.request, replacement)
+        self.assertEqual(saved.testing_candidate_manifest, self.manifest if candidate else None)
+        if candidate:
+            with self.assertRaises(ValueError):
+                self.store.write_odoo_stable_target_replacement_operation_record(
+                    saved.model_copy(update={"testing_candidate_manifest": None})
+                )
         self.assertTrue(saved.is_native_testing_rebuild)
         self.assertEqual(self.fixture.effects, [])
         self.assertEqual(self.fixture.current().target.policies.staff_testing_hold, hold)
         with patch(
-            "control_plane.product_reconcile.latest_verified_testing_release",
+            "control_plane.product_reconcile.verified_testing_rebuild_artifact",
             side_effect=AssertionError("An original request must not rediscover its build"),
         ):
             replayed = await request(
@@ -470,6 +583,62 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                 },
             )
         self.assertEqual(replayed.status_code, 202, replayed.text)
+        if candidate:
+            from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+
+            held = saved.model_copy(
+                update={
+                    "status": "reconciliation_required",
+                    "error_code": "authorization_denied",
+                    "error_message": "Fixture interrupted before preparation",
+                }
+            )
+            self.store.write_odoo_stable_target_replacement_operation_record(held)
+            reserved = self.store.reserve_mutation(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE,
+                idempotency_key=held.operation_id,
+                request_fingerprint=held.request_fingerprint,
+                lease_owner="fixture-worker",
+                reconciliation_key="original-candidate-provenance",
+            )
+            assert reserved.record is not None
+            marked = self.store.mark_mutation_reconcile_required(
+                reservation=reserved.record,
+                reconciliation_key="original-candidate-provenance",
+            )
+            assert marked.record is not None
+            outer = marked.record
+            with patch(
+                "control_plane.product_reconcile.verified_testing_rebuild_artifact",
+                side_effect=AssertionError("Resume must keep the original candidate"),
+            ):
+                resumed = await request(
+                    app,
+                    "POST",
+                    self.url + "/operations/" + held.operation_id + "/resume",
+                    headers={
+                        "Authorization": "Bearer fixture-operator",
+                        "Idempotency-Key": held.idempotency_key,
+                    },
+                    payload={
+                        "expected_updated_at": held.updated_at,
+                        "expected_attempt": held.attempt,
+                    },
+                )
+            self.assertEqual(resumed.status_code, 200, resumed.text)
+            current = self.store.read_odoo_stable_target_replacement_operation_record(
+                saved.operation_id
+            )
+            self.assertEqual(current.testing_candidate_manifest, saved.testing_candidate_manifest)
+            self.assertEqual(current.request, saved.request)
+            self.assertEqual(current.idempotency_key, saved.idempotency_key)
+            self.assertEqual(
+                self.store.read_idempotency_record(
+                    scope=REBUILD_SCOPE, route_path=REBUILD_ROUTE, idempotency_key=held.operation_id
+                ),
+                outer,
+            )
         cancelled = await request(
             app,
             "POST",

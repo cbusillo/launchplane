@@ -360,6 +360,73 @@ def verify_build_artifact(
     )
 
 
+def verify_requested_build_artifact(
+    *,
+    transport: BuildProvenanceTransport,
+    repository: str,
+    repository_id: str,
+    commit: str,
+    context: str,
+    image_repository: str,
+    artifact_id: str,
+) -> VerifiedBuildArtifact:
+    selected = re.fullmatch(
+        rf"artifact-{re.escape(context)}-run-([1-9][0-9]*)-([1-9][0-9]*)", artifact_id
+    )
+    if selected is None:
+        raise BuildProvenanceError(
+            "An exact build run identity is required.", code="manifest_invalid"
+        )
+    repository_path = _repository_path(repository)
+    run = _object(
+        transport.get_json(f"/repos/{repository_path}/actions/runs/{selected[1]}"), "workflow run"
+    )
+    purpose: BuildPurpose
+    number = None
+    if run.get("event") == "pull_request":
+        purpose = "preview"
+        pulls = _list(run.get("pull_requests"))
+        if len(pulls) != 1:
+            raise BuildProvenanceError(
+                "The build needs one source pull request.", code="pull_request_number_missing"
+            )
+        number = _int(_object(pulls[0], "pull request").get("number"), "pull request number")
+        pull = _object(
+            transport.get_json(f"/repos/{repository_path}/pulls/{number}"), "pull request"
+        )
+        head = _object(pull.get("head"), "pull request head")
+        if (
+            pull.get("state") != "open"
+            or str(head.get("sha") or "").lower() != commit.lower()
+            or _repository_id(head.get("repo")) != repository_id
+        ):
+            raise BuildProvenanceError(
+                "The candidate is not the open product pull request head.",
+                code="pull_request_head_mismatch",
+            )
+    elif run.get("event") == "push":
+        purpose = "release"
+    else:
+        raise BuildProvenanceError(
+            "The selected build has an unsupported purpose.", code="build_purpose_mismatch"
+        )
+    verified = verify_build_artifact(
+        transport=transport,
+        repository=repository,
+        repository_id=repository_id,
+        commit=commit,
+        purpose=purpose,
+        context=context,
+        image_repository=image_repository,
+        pull_request_number=number,
+    )
+    if verified.manifest.artifact_id != artifact_id:
+        raise BuildProvenanceError(
+            "The selected build run or attempt changed.", code="manifest_commit_mismatch"
+        )
+    return verified
+
+
 class GenericWebBuildImage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -542,15 +609,10 @@ class VerifiedArtifactStore(Protocol):
 def record_verified_build_artifact(
     *, record_store: VerifiedArtifactStore, verified: VerifiedBuildArtifact
 ) -> ArtifactIdentityManifest:
-    """Record a verified release artifact once; a differing record under its key is refused.
-
-    Testing deploys and prod promotions read only this store, so a preview
-    artifact is never recorded here: it goes straight to its own preview.
-    """
     manifest = verified.manifest
     if manifest.source_build is None or manifest.source_build.purpose != "release":
         raise BuildProvenanceError(
-            "Only a release build is recorded for testing and prod.", code="build_purpose_mismatch"
+            "Only a release build is recorded in the artifact store.", code="build_purpose_mismatch"
         )
     try:
         existing = record_store.read_artifact_manifest(manifest.artifact_id)

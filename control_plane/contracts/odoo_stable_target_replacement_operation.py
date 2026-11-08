@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.disposable_lane import (
     DisposableTestingSupersession,
 )
@@ -96,6 +97,11 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     request_fingerprint: str
     request: OdooStableTargetReplacementApplyRequest
     authorization: DurableOperationAuthorization | None = None
+    testing_candidate_manifest: ArtifactIdentityManifest | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     status: OdooStableTargetReplacementOperationStatus = "pending"
     phase: OdooStableTargetReplacementOperationPhase = "created"
     deployment_record_id: str = ""
@@ -184,6 +190,28 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
         self.runner_trace_id = self.runner_trace_id.strip()
         if self.product != self.request.product:
             raise ValueError("Odoo stable target replacement operation product must match request.")
+        candidate = self.testing_candidate_manifest
+        if candidate is not None:
+            build = candidate.source_build
+            migrated = self.request.migrated_source
+            if (
+                not self.is_native_testing_rebuild
+                or self.request.data_source_mode != "migrated_restore"
+                or migrated is None
+                or build is None
+                or build.purpose != "preview"
+                or build.event != "pull_request"
+                or build.pull_request_number is None
+                or candidate.artifact_id
+                != f"artifact-{self.context}-run-{build.run_id}-{build.run_attempt}"
+                or candidate.artifact_id != self.request.artifact_id
+                or candidate.source_commit != self.request.source_git_ref
+                or (migrated.product, migrated.context, migrated.target_image)
+                != (self.product, self.context, candidate.image.digest)
+            ):
+                raise ValueError(
+                    "Candidate provenance requires its original migrated testing request."
+                )
         if self.instance != self.request.instance:
             raise ValueError(
                 "Odoo stable target replacement operation instance must match request."
@@ -312,7 +340,7 @@ def odoo_stable_target_replacement_operation_is_terminal(
 def odoo_replacement_original_identity(
     record: OdooStableTargetReplacementOperationRecord,
 ) -> tuple[object, ...]:
-    return (
+    identity = (
         record.operation_id,
         record.product,
         record.context,
@@ -322,4 +350,9 @@ def odoo_replacement_original_identity(
         record.idempotency_key,
         record.request_fingerprint,
         record.request.model_dump(mode="json"),
+    )
+    return identity + (
+        (record.testing_candidate_manifest.model_dump(mode="json"),)
+        if record.testing_candidate_manifest is not None
+        else ()
     )

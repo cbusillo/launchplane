@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from control_plane.contracts.artifact_identity import artifact_manifest_matches_image_repository
+from control_plane.contracts.artifact_identity import (
+    ArtifactIdentityManifest,
+    artifact_manifest_matches_image_repository,
+)
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
@@ -226,6 +229,7 @@ def candidate_runtime_inputs(
     source: CandidateSource,
     migrated_source: MigratedOdooTestingSource | None = None,
     admitted_profile: LaunchplaneProductProfileRecord | None = None,
+    admitted_artifact: ArtifactIdentityManifest | None = None,
 ) -> TestingCandidateRuntimeInputs:
     """Read managed inputs only; no secret write, target adoption or live mutation."""
     if allocation.intent_sha256 != candidate_application_intent(
@@ -278,7 +282,17 @@ def candidate_runtime_inputs(
                 ),
             }
         )
-    artifact = store.read_artifact_manifest(artifact_id)
+    artifact = (
+        admitted_artifact
+        if admitted_artifact is not None
+        else store.read_artifact_manifest(artifact_id)
+    )
+    if artifact.artifact_id != artifact_id or (
+        admitted_artifact is not None and (source != "migrated" or migrated_source is None)
+    ):
+        raise CandidateRuntimeInputsChanged(
+            "Candidate provenance differs from its admitted testing source."
+        )
     if not artifact_manifest_matches_image_repository(
         artifact, expected_repository=profile.image.repository
     ) or missing_required_odoo_modules_from_artifact(artifact):
