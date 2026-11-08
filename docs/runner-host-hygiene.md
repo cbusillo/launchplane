@@ -202,8 +202,7 @@ uv run launchplane runner-host-hygiene-report \
 
 ## Apply Planning
 
-Apply planning records the safety boundary a future host adapter must satisfy,
-but it still does not execute cleanup:
+The local apply planner checks the safety boundary without executing cleanup:
 
 ```bash
 uv run launchplane runner-host-hygiene-apply-plan \
@@ -224,10 +223,6 @@ warm builders are retained, and an audit record key is present. Passing
 `--mutate` records admin intent in the request so the boundary can be tested;
 this CLI still prints a dry-run JSON plan and does not invoke Docker, systemd,
 SSH, GitHub, or a host adapter.
-
-When an audit key is provided, the CLI also emits a planned audit-record payload.
-That record is a contract for a future Launchplane-owned storage write, not a
-write performed by this local command.
 
 Launchplane storage supports durable runner-host hygiene audit records keyed by
 `audit_record_key`. Shared-service storage promotes the key, host, action,
@@ -277,7 +272,12 @@ fixed 100-audit scan ceiling from the requested result limit.
 
 ## Approved Ops-Lane Executor
 
-The first live executor is `.github/workflows/runner-host-hygiene.yml`. It runs
+The protected `.github/workflows/runner-host-hygiene.yml` workflow invokes
+`uv run launchplane runner-host-hygiene-executor`. It supplies
+`--audit-spool-root` for host-persistent delivery state and
+`--audit-artifact-file` for the redacted current-run envelope;
+`--resolve-action-started` is its interrupted-action recovery option, described
+below. The workflow runs
 on a dedicated self-hosted ops lane selected by the admin-managed
 `LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE` repository variable,
 authenticates back to
@@ -373,12 +373,7 @@ process evidence exists. Successful and blocking convergence is preserved in
 planned and terminal audit reports and is exposed through the sanitized
 runner-host hygiene read model.
 
-Launchplane's PostgreSQL integration job mounts `/var/lib/postgresql/data` as a
-bounded tmpfs. The official PostgreSQL image declares that path as a volume;
-overriding it keeps ephemeral test data out of durable anonymous Docker volumes
-while preserving the existing Actions service health check and dynamic port.
-
-It also supports `remove_buildkit_state_volumes`, implemented as a named
+The executor also supports `remove_buildkit_state_volumes`, implemented as a named
 single-volume `docker volume rm` call under the same lock. This action is
 intentionally not `docker volume prune`: the apply plan must name every target
 volume, the policy must allowlist those names from the separate
@@ -606,186 +601,23 @@ after the durable `action_started` marker, an admin may manually dispatch with
 `resolve_action_started=true`. That path captures current post evidence and
 writes a terminal failed audit without repeating the privileged action.
 
-Deploy the Launchplane service revision that understands the expanded audit
-contract before installing the matching helper or dispatching this workflow.
-Only after one audited dry run and each replacement mutation succeed should the
-legacy host-local Docker timers be disabled. A service still running the prior
-strict audit schema rejects the new evidence with HTTP 422; that blocks mutation
-by design rather than silently operating without accepted evidence.
-
 Cache and image prune requests accept whole-hour age filters no shorter than
 `168h`. Named warm builders and dangling images use `168h`. The scheduled
 default-daemon action supplies its retained-space ceiling instead; its required
 `prune_until` value is recorded with the request but is not applied when the
 size budget is present.
 
-Runner lane lifecycle uses a separate manual ops-lane workflow,
-`.github/workflows/runner-lane-registration.yml`. It shares the same approved
-host, execution-lane, service-user variables, and host lock, but it does not
-prune Docker state. Registration creates one repo-scoped Actions runner below
-the approved root and starts only the matching
-`launchplane-runner@<lane>.service`. Retirement requires an exact idle managed
-lane, stops and disables that exact root-authorized service, rechecks repository
-activity and GitHub identity, deletes only that runner registration, and removes
-the verified inactive directory. All lifecycle roots must be scoped absolute
-paths rather than bare `/` and reject explicit parent-directory (`..`)
-components. Benign `.` components, duplicate separators, and trailing separators
-remain supported when the normalized path stays scoped. Malformed roots fail
-model validation before a planned audit is written.
+Runner lane registration, retirement, and filesystem safety are documented in
+[runner-lane-baseline.md](runner-lane-baseline.md#lifecycle-executors). Lifecycle
+and hygiene mutations share the host lock. Host provisioning and replacement
+belong to the existing private
+[infrastructure runbook](https://github.com/cbusillo/shiny-infra-ops/blob/main/docs/infrastructure/remote-build-host.md);
+its host facts do not establish Launchplane readiness.
 
-Before creating an absent registration root, registration proves its nearest
-existing ancestor is a directory whose exact canonical path matches the approved
-lexical path. Symlinked ancestors, including dangling links, are refused before
-directory creation can follow them. The resulting root and new runner directory
-must be directories, non-symlinks, exactly canonical, owned by the requested
-service user, and within the approved root. Existing runner entries, including
-dangling symlinks, are refused rather than adopted or overwritten. Valid absent
-roots remain supported without privileged ownership changes.
-
-Registration validates the target without filesystem writes before acquiring its
-short-lived GitHub token, then repeats that validation before creating directories.
-A token-acquisition failure therefore leaves an absent root and lane absent, so
-the next dispatch can retry. Registration repeats the shared registration/retirement
-identity checks before and after extraction, before configuration, before service
-start, and before completed audit publication. It extracts and
-configures from a verified physical working directory. A detected path change
-fails the operation; these boundary checks are not a guarantee against arbitrary
-concurrent filesystem replacement. Failed command evidence redacts the known
-registration token before truncating or persisting it. File-backed lifecycle
-audits use bounded ASCII filenames below the filesystem component limit, retain
-ordinary short-key filename identity, and preserve the original audit key in the
-record. PostgreSQL key semantics are unchanged.
-
-The shared lock prevents
-runner lifecycle and Docker hygiene mutations from interleaving. Existing-lane
-adoption, remove/recreate, generic restarts, and scaling remain outside this
-slice.
-
-## Host Replacement Runbook
-
-`chris-testing` is no longer just a basic self-hosted runner. It also carries the
-Launchplane ops-gate lane used for runner-host hygiene, warm-builder evidence,
-and shared Docker state observation. Treat replacement as a controlled lane
-cutover, not as an interchangeable runner registration swap.
-
-Use this sequence when replacing `chris-testing` or standing up a parallel host:
-
-1. Provision the replacement host with Docker, GitHub Actions runner service
-   management, the constrained runner service user, and the same filesystem
-   permissions needed for Docker evidence and approved Docker cache or named
-   volume mutations. Do not copy host-level Docker credentials from the old
-   host.
-2. Register the replacement runner with the common Launchplane labels required
-   by [runner-lane-baseline.md](runner-lane-baseline.md), but keep the
-   `chris-testing-ops-gate` label and any production-shared lane label off until
-   the host passes readiness and hygiene evidence.
-3. Seed or rebuild any configured retained images on the replacement host.
-   The hygiene executor must be able to observe every value configured in
-   `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS` before the host can
-   receive the ops-gate label.
-4. Run `runner-baseline-observe` from a job on the replacement host and evaluate
-   the baseline readiness. The result must show required labels, the expected
-   service user/home-root constraints when configured, positive isolated Docker
-   credential evidence, and Docker toolchain evidence that satisfies the
-   configured Buildx minimum.
-5. Run the runner-host hygiene workflow manually with `mutate=false`, no target
-   volumes, and a replacement-specific audit key. The run must write an
-   accepted planned audit, block only on `mutate_not_requested`, observe the
-   configured retained images, and include image/volume inventory for the new host.
-6. Update the repository variables that define the approved hygiene host,
-   execution lane, service user, and retained warm builders only after the new
-   host has passing baseline and hygiene dry-run evidence. Keep the old values
-   recoverable in the issue or runbook comment used for the cutover.
-7. Add the `chris-testing-ops-gate` label to the replacement runner and remove
-   it from the old runner in the same maintenance window. Avoid a period where
-   two hosts carry the ops-gate label unless the workflow concurrency group and
-   repository variables intentionally name the replacement host.
-8. Re-run the hygiene workflow with `mutate=false` after the label and variable
-   cutover. Treat any host mismatch, missing warm-builder evidence, missing
-   inventory, or unexpected active-build failure as a rollback signal.
-9. Leave the old host registered without shared or ops-gate labels until one
-   scheduled dry-run has succeeded on the replacement host. Then drain/remove
-   the old runner through the runner-control planning boundary and archive its
-   final hygiene audit evidence.
-
-Rollback is to remove the ops-gate label from the replacement runner, restore
-the previous hygiene repository variables, and rerun the workflow with
-`mutate=false` on the old host. Do not run ad hoc Docker cleanup on either host
-as part of rollback; use the Launchplane-owned hygiene workflow or add a reviewed
-service endpoint first.
-
-## Adapter Boundary Planning
-
-Before a real host mutation adapter is implemented, admins can review the
-privileged execution boundary against a ready apply plan:
-
-```bash
-uv run launchplane runner-host-hygiene-adapter-boundary-plan \
-  --adapter-type remote_host_executor \
-  --host-name chris-testing \
-  --execution-lane chris-testing-ops-gate \
-  --service-user launchplane-runner-hygiene \
-  --repository-scope cbusillo/launchplane \
-  --privileged-scope docker_cache \
-  --audit-record-key runner-host-hygiene/2026-05-23/chris-testing \
-  --rollback-plan "Stop before mutation if retained builders are absent." \
-  --pre-apply-evidence df \
-  --pre-apply-evidence docker_summary \
-  --pre-apply-evidence warm_builders \
-  --post-apply-evidence df \
-  --post-apply-evidence docker_summary \
-  --post-apply-evidence warm_builders \
-  --approved-host chris-testing \
-  --allowed-adapter-type remote_host_executor \
-  --allowed-execution-lane chris-testing-ops-gate \
-  --allowed-service-user launchplane-runner-hygiene \
-  --allowed-repository-scope cbusillo/launchplane \
-  --allowed-privileged-scope docker_cache \
-  --required-pre-apply-evidence df \
-  --required-pre-apply-evidence docker_summary \
-  --required-pre-apply-evidence warm_builders \
-  --required-post-apply-evidence df \
-  --required-post-apply-evidence docker_summary \
-  --required-post-apply-evidence warm_builders \
-  --apply-plan-file runner-host-apply-plan.json
-```
-
-This command is still a planning surface. It fails closed unless the apply plan
-is ready, the host is approved, the proposal names an allowed adapter type,
-execution lane, service user, repository scope, narrow privileged scope, audit
-record key prefix, pre/post evidence set, and rollback or stop condition. It
-does not call Docker, systemd, SSH, GitHub runner registration APIs, or a host
-executor; the dedicated ops-lane executor is the separate apply surface.
-
-The privileged scope must match the planned action exactly:
-
-- `prune_docker_cache` requires `docker_cache`.
-- `prune_dangling_images` requires `docker_cache` and never includes tagged
-  images.
-- `remove_buildkit_state_volumes` requires `docker_volume` and may only remove
-  one explicitly requested, allowlisted, zero-link `buildx_buildkit_*_state`
-  named volume observed in the pre-apply report.
-- `prune_generated_run_cache` requires `generated_cache`.
-- `prune_runner_workdir` requires `runner_workdir`.
-- `restart_runner_service` requires `runner_service`.
-
-Extra privileged scopes block the boundary plan so a Docker-cache prune cannot
-quietly grow service-restart or work-directory powers.
-
-## Future Apply Requirements
-
-Before Launchplane grows additional host mutation powers, each apply design must
-name:
-
-- the disposable or explicitly approved host target
-- the runner lane and repository scope the host adapter is allowed to affect
-- the evidence snapshot captured before and after cleanup
-- the warm builder retention budget
-- the rollback or stop condition when cleanup cannot be completed safely
-- the audit record written back to Launchplane-owned storage
-
-Until those are present for another action, that action remains report-only or
-dry-run planning only.
+The local `runner-host-hygiene-adapter-boundary-plan` command remains a dry-run
+planner for a ready apply plan, not an execution path. It requires the exact
+action's privileged scope, approved host/lane/user/repository, audit key, pre/post
+evidence, and a rollback or stop condition; extra privileged scopes block it.
 
 ## Qualify an existing configuration after drift
 
