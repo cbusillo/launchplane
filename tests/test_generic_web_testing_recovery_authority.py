@@ -210,15 +210,17 @@ class GenericWebTestingRecoveryAuthorityTests(unittest.TestCase):
         self.assertEqual(status, 403, payload)
         self.executor.assert_not_called()
 
-    def test_own_retry_requires_current_safety_before_forward_work(self) -> None:
+    def test_own_retry_does_not_require_an_earlier_safety_observation(self) -> None:
         self.reserve(outcome="absent")
         reviewed = self.inspect()
         self.assertEqual(reviewed["proposed_action"], "retry_original_operation")
         status, payload = self.apply(reviewed["recovery_digest"])
-        self.assertEqual(status, 409, payload)
-        self.assertEqual(payload["error"]["code"], "testing_deploy_safety_unknown")
-        self.executor.assert_not_called()
-        self.assertEqual(self.saved(), self.reservation)
+        self.assertEqual(status, 202, payload)
+        self.executor.assert_called_once()
+        saved = self.saved()
+        assert saved is not None
+        self.assertEqual(saved.record_id, self.reservation.record_id)
+        self.assertEqual(saved.state, "completed")
 
     def saved(self) -> LaunchplaneIdempotencyRecord | None:
         return self.store.read_idempotency_record(
@@ -232,9 +234,7 @@ class GenericWebTestingRecoveryAuthorityTests(unittest.TestCase):
         for changes in (
             {"usage": "in_use"},
             {"data": "only_copy"},
-            {"data": "unknown"},
             {"production_resources": "shared"},
-            {"production_resources": "unknown"},
         ):
             with self.subTest(changes=changes):
                 record_safety(

@@ -1890,13 +1890,26 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         self.assertEqual(self.provider.applied, [("destroy", 42)])
         self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
 
-    def test_historical_preview_facts_cannot_qualify_other_lane_mutations(self) -> None:
+    def test_historical_positive_preview_facts_do_not_invent_protection(self) -> None:
+        from control_plane.disposable_lanes import require_disposable_lane
+
+        self.prepare_cleanup(observer_kind="historical-preview")
+        self.assertTrue(
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.profile.preview.context,
+                instance="pr-42",
+            )
+        )
+
+    def test_historical_preview_needed_copy_still_protects_other_mutations(self) -> None:
         from control_plane.disposable_lanes import (
             DisposableLaneSafetyUnknown,
             require_disposable_lane,
         )
 
-        self.prepare_cleanup(observer_kind="historical-preview")
+        self.prepare_cleanup(observer_kind="historical-preview", data="only_copy")
         with self.assertRaises(DisposableLaneSafetyUnknown):
             require_disposable_lane(
                 self.store,

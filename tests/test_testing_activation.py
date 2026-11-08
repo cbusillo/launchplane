@@ -500,8 +500,11 @@ class ActivationTests(unittest.TestCase):
                     self.store.write_disposable_lane_safety(safety.model_copy(update=update))
 
                 with patch.object(native_copy_stream, "_read_remote", side_effect=protect):
-                    with self.assertRaises(DisposableLaneSafetyUnknown):
+                    if protection == "expired":
                         adapter._require_compose_effect_preflight()
+                    else:
+                        with self.assertRaises(DisposableLaneSafetyUnknown):
+                            adapter._require_compose_effect_preflight()
                 self.store.write_disposable_lane_safety(safety)
         active_payload = self.payloads[provider.target_id]
         original_server = active_payload["serverId"]

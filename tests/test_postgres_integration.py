@@ -11604,11 +11604,18 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                     ),
                     fixture.operation,
                 )
-                safety = fixture.store.read_disposable_lane_safety(
-                    fixture.profile.product, fixture.context, "testing"
+                from control_plane.disposable_lanes import (
+                    DisposableLaneSafetyUnknown,
+                    require_disposable_lane,
                 )
-                assert safety is not None
-                self.assertEqual(safety.production_resources, "separation_ready")
+
+                with self.assertRaises(DisposableLaneSafetyUnknown):
+                    require_disposable_lane(
+                        fixture.store,
+                        product=fixture.profile.product,
+                        context=fixture.context,
+                        instance="testing",
+                    )
                 self.assertFalse(
                     fixture.store.supersede_disposable_testing_replacement(fixture.operation)
                 )
@@ -11776,7 +11783,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
         for scenario in (
             "test_collect_produces_real_resource_facts_then_admits_down_runtime_repair",
             "test_expired_positive_usage_is_retained_but_does_not_block_fresh_down_repair",
-            "test_needed_copy_and_failed_physical_inspection_still_refuse",
+            "test_needed_copy_protects_and_failed_inspection_remains_unknown",
             "test_resource_denial_and_binding_drift_do_not_publish",
             "test_recorded_shared_resources_survive_passing_inspection",
             "test_positive_usage_reads_are_distinct_but_retained_history_stays_stable",

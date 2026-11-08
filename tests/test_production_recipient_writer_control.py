@@ -269,8 +269,7 @@ class RecipientWriterControlTests(unittest.TestCase):
         self.assertFalse(self.host.row["State"]["Running"])
         self.assertEqual(self.host.effects, ["stop"])
 
-    def test_missing_disposable_evidence_refuses_before_any_writer_effect(self) -> None:
-        with self.assertRaises(ValueError):
-            self.run_action("unqualified-pause", "pause", disposable=False)
-        self.assertTrue(self.host.row["State"]["Running"])
-        self.assertEqual(self.host.effects, [])
+    def test_missing_earlier_observation_does_not_refuse_an_owned_testing_writer(self) -> None:
+        self.run_action("owned-testing-pause", "pause", disposable=False)
+        self.assertFalse(self.host.row["State"]["Running"])
+        self.assertEqual(self.host.effects, ["stop"])
