@@ -252,6 +252,8 @@ class FakeGitHub:
                     if f"head_sha={run['head_sha']}" in path and f"event={run['event']}" in path
                 ]
             }
+        if path in {f"/repos/{REPOSITORY}/actions/runs/{run_id}" for run_id in self.runs}:
+            return self.runs[int(path.rsplit("/", 1)[1])]
         if path.startswith(f"/repos/{REPOSITORY}/commits?"):
             if "page=1" not in path:
                 return []
@@ -926,6 +928,124 @@ class ProductReconcileStoreTests(ProductReconcileTestCase):
 
 
 class ProductReconcileTestingTests(ProductReconcileTestCase):
+    def test_requested_migrated_release_cannot_select_an_ancestor_build(self) -> None:
+        from control_plane.product_reconcile import verified_testing_rebuild_artifact
+
+        self._running_release(20, DEPLOYABLE)
+        self.github.add_run(10, OLDER)
+        profile = self.store.read_product_profile_record("site")
+        lane = next(item for item in profile.lanes if item.instance == "testing")
+        current = verified_testing_rebuild_artifact(
+            self.store, profile, lane, artifact_id="artifact-cm-run-20-1", source_git_ref=DEPLOYABLE
+        )
+        self.assertEqual(current.manifest.source_commit, DEPLOYABLE)
+        with self.assertRaises(BuildProvenanceError):
+            verified_testing_rebuild_artifact(
+                self.store, profile, lane, artifact_id="artifact-cm-run-10-1", source_git_ref=OLDER
+            )
+
+    def test_native_candidate_inventory_does_not_report_prior_release_as_already_deployed(
+        self,
+    ) -> None:
+        from tests.test_migrated_testing_source import MigratedTestingRequestTests
+
+        self._running_release(20, DEPLOYABLE)
+        candidate_id = "artifact-cm-run-30-1"
+        self.github.add_run(30, PR_HEAD, event="pull_request")
+        candidate = verify_build_artifact(
+            transport=self.github,
+            repository=REPOSITORY,
+            repository_id=REPOSITORY_ID,
+            commit=PR_HEAD,
+            purpose="preview",
+            context="cm",
+            image_repository=IMAGE_REPOSITORY,
+            pull_request_number=5,
+        ).manifest
+        migrated = MigratedTestingRequestTests().request().migrated_source
+        assert migrated is not None
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            OdooStableTargetReplacementOperationRecord(
+                operation_id="candidate-operation",
+                product="site",
+                context="cm",
+                instance="testing",
+                idempotency_key="candidate-original",
+                request_fingerprint="candidate-request",
+                request=OdooStableTargetReplacementApplyRequest(
+                    product="site",
+                    instance="testing",
+                    strategy="replace-and-cutover",
+                    data_source_mode="migrated_restore",
+                    artifact_id=candidate_id,
+                    source_git_ref=PR_HEAD,
+                    migrated_source=migrated.model_copy(
+                        update={
+                            "product": "site",
+                            "context": "cm",
+                            "target_image": candidate.image.digest,
+                        }
+                    ),
+                ),
+                testing_candidate_manifest=candidate,
+                status="pass",
+                phase="completed",
+                created_at="2026-09-30T12:00:00Z",
+                updated_at="2026-09-30T12:00:00Z",
+                finished_at="2026-09-30T12:00:00Z",
+            )
+        )
+        self.store.write_environment_inventory(
+            EnvironmentInventory(
+                context="cm",
+                instance="testing",
+                updated_at="2026-09-30T12:00:00Z",
+                source_git_ref=PR_HEAD,
+                deployment_record_id="candidate-deployment",
+                runtime_identity=RuntimeIdentity(
+                    product="site",
+                    context="cm",
+                    instance="testing",
+                    deployment_record_id="candidate-deployment",
+                    artifact_id=candidate_id,
+                    source_git_ref=PR_HEAD,
+                    image_reference=f"{IMAGE_REPOSITORY}@{_digest(PR_HEAD)}",
+                ),
+                deploy=DeploymentEvidence(
+                    deploy_mode="testing-rebuild",
+                    target_name="candidate",
+                    target_type="compose",
+                    status="pass",
+                ),
+            )
+        )
+        profile = self.store.read_product_profile_record("site")
+        plan, verified = _plan_testing_target(
+            record_store=self.store,
+            profile=profile,
+            repository_id=REPOSITORY_ID,
+            transport=self.github,
+        )
+        self.assertEqual(plan["current_artifact_id"], candidate_id)
+        self.assertEqual(plan["current_commit"], PR_HEAD)
+        self.assertEqual(
+            (plan["action"], plan["reason"], plan["held"]), ("none", "ancestor_build", True)
+        )
+        self.assertIsNone(verified)
+        self.github.first_parents[NEWEST] = PR_HEAD
+        self.github.first_parents[PR_HEAD] = DEPLOYABLE
+        self.github.add_run(40, NEWEST)
+        forward, verified = _plan_testing_target(
+            record_store=self.store,
+            profile=profile,
+            repository_id=REPOSITORY_ID,
+            transport=self.github,
+        )
+        self.assertEqual(forward["action"], "deploy")
+        self.assertIsNotNone(verified)
+        assert verified is not None
+        self.assertEqual(verified.manifest.source_commit, NEWEST)
+
     def test_stale_success_filter_does_not_hide_the_newest_successful_build(self) -> None:
         self._running_release(10, OLDER)
         self.github.add_run(20, DEPLOYABLE)

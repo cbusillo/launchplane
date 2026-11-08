@@ -208,6 +208,7 @@ class CandidateApplicationTests(unittest.TestCase):
                 self.store, "read_artifact_manifest", side_effect=FileNotFoundError
             ) as release_read,
         ):
+            execution.require_candidate_build()
             inputs = execution.current_candidate_inputs(allocation)
             self.assertEqual(inputs.plan.artifact, operation.testing_candidate_manifest)
             self.assertEqual(inputs.plan.native_source, migrated)
@@ -219,7 +220,8 @@ class CandidateApplicationTests(unittest.TestCase):
                 "Changed PR head", code="pull_request_head_mismatch"
             )
             with self.assertRaises(worker.NativeTestingRebuildAdmissionChanged):
-                execution.current_candidate_inputs(allocation)
+                execution.require_candidate_build()
+            self.assertEqual(execution.current_candidate_inputs(allocation).plan, inputs.plan)
             verify.side_effect = None
             changed = self.artifact.model_copy(
                 update={
@@ -228,7 +230,11 @@ class CandidateApplicationTests(unittest.TestCase):
             )
             verify.return_value = VerifiedBuildArtifact(manifest=changed)
             with self.assertRaises(worker.NativeTestingRebuildAdmissionChanged):
-                execution.current_candidate_inputs(allocation)
+                execution.require_candidate_build()
+            verify.side_effect = AssertionError(
+                "Retained preparation must not rediscover the PR build"
+            )
+            self.assertEqual(execution.current_candidate_inputs(allocation).plan, inputs.plan)
             with self.assertRaises(ValueError):
                 execution.build_plan(
                     allocation, inputs.plan.model_copy(update={"artifact": changed})

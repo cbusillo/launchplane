@@ -47,6 +47,7 @@ class FakeGitHub:
         )
         self.pull_request_head = pull_request_head
         self.pull_request_state = "open"
+        self.pull_request_repository_id = int(REPOSITORY_ID)
         self.manifest = manifest or artifact_manifest_v2(
             image_repository=IMAGE_REPOSITORY, tenant_source_repository=REPOSITORY
         ).model_dump(mode="json")
@@ -68,7 +69,10 @@ class FakeGitHub:
         if path.startswith(f"/repos/{REPOSITORY}/pulls/"):
             return {
                 "state": self.pull_request_state,
-                "head": {"sha": self.pull_request_head, "repo": {"id": int(REPOSITORY_ID)}},
+                "head": {
+                    "sha": self.pull_request_head,
+                    "repo": {"id": self.pull_request_repository_id},
+                },
             }
         if "/artifacts?" in path:
             run_id = path.split("/actions/runs/")[1].split("/")[0]
@@ -158,6 +162,8 @@ class BuildProvenanceTests(unittest.TestCase):
             {"image_repository": "ghcr.io/other/product"},
             {"run": {"head_repository": {"id": 202}}},
             {"run": {"event": "workflow_dispatch"}},
+            {"run": {"event": "push"}},
+            {"pull_request_repository_id": 202},
             {"run": {"pull_requests": []}},
         )
         for changes in cases:
@@ -168,6 +174,9 @@ class BuildProvenanceTests(unittest.TestCase):
                 github = FakeGitHub(runs=[run])
                 github.pull_request_head = str(changes.get("pull_request_head", COMMIT))
                 github.pull_request_state = str(changes.get("pull_request_state", "open"))
+                github.pull_request_repository_id = int(
+                    str(changes.get("pull_request_repository_id", REPOSITORY_ID))
+                )
                 with self.assertRaises(BuildProvenanceError):
                     verify_requested_build_artifact(
                         transport=github,

@@ -1556,7 +1556,6 @@ class NativeTestingRebuildExecution:
         self, allocation: TestingCandidateAllocation
     ) -> TestingCandidateRuntimeInputs:
         try:
-            self.require_candidate_build()
             return candidate_runtime_inputs(
                 root=self.root,
                 store=self.store,
@@ -1701,7 +1700,8 @@ class NativeTestingRebuildExecution:
                             "The original route writer is not proven excluded."
                         ) from None
         if existing_publication is None:
-            self.require_candidate_build()
+            if allocation is None or allocation.application is None:
+                self.require_candidate_build()
             self.guard()
             if allocation is None:
                 allocation = TestingCandidateAllocation(

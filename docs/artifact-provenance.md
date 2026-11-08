@@ -93,8 +93,9 @@ identity, and promotion and rollback read that.
   successful run/attempt, open PR's current head, manifest and image repository;
   the offline pair must bind that exact product, context and image digest.
   Candidate provenance stays on the original testing operation and its normal
-  private application plan. Worker preparation rechecks it and recovery keeps
-  that same evidence. This supplies no release artifact or release tuple.
+  private application plan. Before first application preparation the worker
+  rechecks it; retained preparation and recovery use the original evidence even
+  if the PR later changes. This supplies no release artifact or release tuple.
 
 ## Why a `release` run is trustworthy
 

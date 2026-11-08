@@ -1724,14 +1724,41 @@ def _plan_testing_target(
             current_commit = inventory.source_git_ref
         except FileNotFoundError:
             pass
+    if (
+        current_artifact_id
+        and profile.driver_id == "odoo"
+        and current_manifest is None
+        and isinstance(record_store, PostgresRecordStore)
+    ):
+        current_manifest = next(
+            (
+                manifest
+                for operation in record_store.list_odoo_stable_target_replacement_operation_records(
+                    product=profile.product, context_name=lane.context, instance_name="testing"
+                )
+                if (manifest := operation.testing_candidate_manifest) is not None
+                and manifest.artifact_id == current_artifact_id
+                and manifest.source_commit == current_commit
+                and manifest.image.digest == current_digest
+                and manifest.source_build is not None
+                and manifest.source_build.repository == profile.repository
+                and manifest.source_build.repository_id == repository_id
+            ),
+            None,
+        )
+    retained_candidate = (
+        current_manifest is not None
+        and current_manifest.source_build is not None
+        and current_manifest.source_build.purpose == "preview"
+    )
     selection: dict[str, object] = {}
     desired, rejected, absent_reason = _desired_release(
         transport=transport,
         profile=profile,
         repository_id=repository_id,
         lane=lane,
-        current_commit=current_commit,
-        current_run_id=current_run_id,
+        current_commit="" if retained_candidate else current_commit,
+        current_run_id=0 if retained_candidate else current_run_id,
         current_image_digest=current_digest,
         selection=selection,
     )
@@ -3848,17 +3875,30 @@ def verified_testing_rebuild_artifact(
     if profile.driver_id != "odoo" or lane.instance != "testing":
         raise ValueError("Requested build selection requires an Odoo testing lane.")
     identity = product_repository_identity(record_store, profile)
-    return verify_requested_build_artifact(
-        transport=_TestingRebuildBuildReads(
-            resolve_build_provenance_transport(record_store, profile)
-        ),
-        repository=profile.repository,
-        repository_id=identity.repository_id,
-        commit=source_git_ref,
-        context=lane.context,
-        image_repository=profile.image.repository,
-        artifact_id=artifact_id,
-    )
+    try:
+        return verify_requested_build_artifact(
+            transport=_TestingRebuildBuildReads(
+                resolve_build_provenance_transport(record_store, profile)
+            ),
+            repository=profile.repository,
+            repository_id=identity.repository_id,
+            commit=source_git_ref,
+            context=lane.context,
+            image_repository=profile.image.repository,
+            artifact_id=artifact_id,
+        )
+    except BuildProvenanceError as error:
+        if error.code != "build_purpose_mismatch":
+            raise
+    verified = latest_verified_testing_build(record_store, profile, lane)
+    if (verified.manifest.artifact_id, verified.manifest.source_commit) != (
+        artifact_id,
+        source_git_ref,
+    ):
+        raise BuildProvenanceError(
+            "The selected build is not the current testing release.", code="build_purpose_mismatch"
+        )
+    return verified
 
 
 def latest_verified_testing_build(
@@ -4072,6 +4112,22 @@ def _current_testing_release(
     lane: ProductLaneProfile,
 ) -> tuple[str, str]:
     if profile.driver_id == "odoo":
+        try:
+            inventory = record_store.read_environment_inventory(
+                context_name=lane.context, instance_name="testing"
+            )
+        except FileNotFoundError:
+            inventory = None
+        if (
+            inventory is not None
+            and inventory.deploy.deploy_mode == "testing-rebuild"
+            and inventory.runtime_identity is not None
+        ):
+            native_identity = inventory.runtime_identity
+            return native_identity.artifact_id, (
+                native_identity.image_digest
+                or _image_reference_digest(native_identity.image_reference)
+            ).lower()
         try:
             release = record_store.read_release_tuple_record(
                 context_name=lane.context, channel_name="testing"

@@ -2773,7 +2773,7 @@ or main. The service verifies its current open PR head and normal build provenan
 then binds the offline pair to that image. Admission retains the preview-purpose
 manifest on the original operation; it never registers it as a release artifact.
 The worker carries it into ordinary independent-copy preparation and rechecks
-provenance before fresh preparation effects. Retained preparation and recovery
+provenance before first application preparation. Retained preparation and recovery
 keep the original manifest, request, caller and candidate. A moved head or changed
 build cannot substitute another candidate. Use, needed-copy, separation, original
 data, Client and backup protections remain independent. Ordinary preview source

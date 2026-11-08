@@ -296,6 +296,7 @@ def verify_build_artifact(
     context: str,
     image_repository: str,
     pull_request_number: int | None = None,
+    require_open_pull_request: bool = False,
 ) -> VerifiedBuildArtifact:
     """Return the Odoo manifest GitHub's build run proves for this commit, or raise."""
     commit = commit.strip().lower()
@@ -306,6 +307,7 @@ def verify_build_artifact(
         commit=commit,
         purpose=purpose,
         pull_request_number=pull_request_number,
+        require_open_pull_request=require_open_pull_request,
     )
     try:
         manifest = ArtifactIdentityManifest.model_validate(manifest_payload)
@@ -381,44 +383,26 @@ def verify_requested_build_artifact(
     run = _object(
         transport.get_json(f"/repos/{repository_path}/actions/runs/{selected[1]}"), "workflow run"
     )
-    purpose: BuildPurpose
-    number = None
-    if run.get("event") == "pull_request":
-        purpose = "preview"
-        pulls = _list(run.get("pull_requests"))
-        if len(pulls) != 1:
-            raise BuildProvenanceError(
-                "The build needs one source pull request.", code="pull_request_number_missing"
-            )
-        number = _int(_object(pulls[0], "pull request").get("number"), "pull request number")
-        pull = _object(
-            transport.get_json(f"/repos/{repository_path}/pulls/{number}"), "pull request"
-        )
-        head = _object(pull.get("head"), "pull request head")
-        if (
-            pull.get("state") != "open"
-            or str(head.get("sha") or "").lower() != commit.lower()
-            or _repository_id(head.get("repo")) != repository_id
-        ):
-            raise BuildProvenanceError(
-                "The candidate is not the open product pull request head.",
-                code="pull_request_head_mismatch",
-            )
-    elif run.get("event") == "push":
-        purpose = "release"
-    else:
+    if run.get("event") != "pull_request":
         raise BuildProvenanceError(
-            "The selected build has an unsupported purpose.", code="build_purpose_mismatch"
+            "The selected candidate must be a pull request build.", code="build_purpose_mismatch"
         )
+    pulls = _list(run.get("pull_requests"))
+    if len(pulls) != 1:
+        raise BuildProvenanceError(
+            "The build needs one source pull request.", code="pull_request_number_missing"
+        )
+    number = _int(_object(pulls[0], "pull request").get("number"), "pull request number")
     verified = verify_build_artifact(
         transport=transport,
         repository=repository,
         repository_id=repository_id,
         commit=commit,
-        purpose=purpose,
+        purpose="preview",
         context=context,
         image_repository=image_repository,
         pull_request_number=number,
+        require_open_pull_request=True,
     )
     if verified.manifest.artifact_id != artifact_id:
         raise BuildProvenanceError(
@@ -527,6 +511,7 @@ def _verified_build_run(
     purpose: BuildPurpose,
     pull_request_number: int | None,
     check_current_head: bool = True,
+    require_open_pull_request: bool = False,
 ) -> tuple[ArtifactSourceBuild, dict[str, object]]:
     """The build run that proves this commit, and its uploaded manifest, unvalidated."""
     repository_path = _repository_path(repository)
@@ -569,7 +554,14 @@ def _verified_build_run(
                 "pull request",
             )
             head = _object(pull_request.get("head"), "pull request head")
-            if str(head.get("sha") or "").lower() != commit:
+            if (
+                str(head.get("sha") or "").lower() != commit
+                or require_open_pull_request
+                and (
+                    pull_request.get("state") != "open"
+                    or _repository_id(head.get("repo")) != repository_id
+                )
+            ):
                 raise BuildProvenanceError(
                     "The commit is not the pull request's current head.",
                     code="pull_request_head_mismatch",

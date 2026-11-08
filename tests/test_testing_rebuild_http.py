@@ -156,7 +156,6 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         with (
             patch(
                 "control_plane.product_reconcile.verified_testing_rebuild_artifact",
-                create=True,
                 return_value=VerifiedBuildArtifact(manifest=candidate),
             ),
             patch.object(preflight, "_inspect_execution", side_effect=lambda *args: args[4]),
