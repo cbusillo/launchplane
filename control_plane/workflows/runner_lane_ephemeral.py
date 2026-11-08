@@ -23,7 +23,6 @@ from control_plane.merge_train_github import MergeTrainGitHubError
 
 
 ADDON_RUNNER_LABEL_PREFIX = "lp-addon-"
-ADDON_RUNNER_JOB_NAMES = frozenset({"addon-tests", "addon-validation"})
 ADDON_RECIPE_ARTIFACT_PREFIX = "addon-runner-recipe-"
 ADDON_RECIPE_FILES = frozenset({"Dockerfile", "entrypoint.sh", "source-commit"})
 CONTAINER_TIMEOUT_SECONDS = 45 * 60
@@ -72,6 +71,7 @@ def read_addon_job(
     transport: BuildProvenanceTransport,
     request: AddonRunnerRequest,
     repository_id: int,
+    include_recipe: bool = True,
 ) -> dict[str, object]:
     root = f"/repos/{request.repository}/actions"
     run = transport.get_json(f"{root}/runs/{request.run_id}")
@@ -91,7 +91,6 @@ def read_addon_job(
         or run.get("event") not in {"push", "pull_request"}
         or job.get("id") != request.job_id
         or job.get("run_id") != request.run_id
-        or job.get("name") not in ADDON_RUNNER_JOB_NAMES
         or not isinstance(job.get("labels"), list)
         or request.label not in job["labels"]
     ):
@@ -106,7 +105,7 @@ def read_addon_job(
         "runner_id": job.get("runner_id"),
         "job_url": job.get("html_url"),
     }
-    if result["status"] != "queued":
+    if result["status"] != "queued" or not include_recipe:
         return result
     artifacts = transport.get_json(f"{root}/runs/{request.run_id}/artifacts?per_page=100")
     if not isinstance(artifacts, dict) or not isinstance(artifacts.get("artifacts"), list):
@@ -204,6 +203,8 @@ def run_ephemeral_addon_job(
             result["recipe_image"] = image
             _write_result(output, result)
             _docker(command, ["build", "--tag", image, str(context)], timeout=600)
+            result["container_creation_requested"] = True
+            _write_result(output, result)
             created = _docker(
                 command,
                 [
@@ -273,11 +274,13 @@ def run_ephemeral_addon_job(
             result.update(
                 job_status=observed.get("status", "unknown"),
                 job_conclusion=observed.get("conclusion", ""),
+                job_runner_id=observed.get("runner_id"),
             )
             if (
                 started.returncode == 0
                 and observed.get("status") == "completed"
                 and observed.get("conclusion") == "success"
+                and observed.get("runner_id") == result.get("runner_id")
             ):
                 result["status"] = "completed"
     finally:
@@ -393,6 +396,39 @@ def _cleanup_ephemeral_addon_job(
 ) -> None:
     errors: list[str] = []
     container_id = str(result.get("container_id", ""))
+    if not container_id and result.get("container_creation_requested"):
+        try:
+            recovered = _docker(
+                command,
+                [
+                    "container",
+                    "ls",
+                    "--all",
+                    "--no-trunc",
+                    "--quiet",
+                    "--filter",
+                    f"name=^/{request.name}$",
+                    "--filter",
+                    f"label=launchplane.ephemeral-addon={request.name}",
+                ],
+            ).stdout.strip()
+            if recovered:
+                if not re.fullmatch(r"[0-9a-f]{64}", recovered):
+                    raise ValueError("Original addon container identity is ambiguous.")
+                container_id = recovered
+                result["container_id"] = container_id
+                mounts = json.loads(
+                    _docker(
+                        command, ["inspect", "--format", "{{json .Mounts}}", container_id]
+                    ).stdout
+                )
+                result["volumes"] = tuple(
+                    str(mount["Name"]) for mount in mounts if mount.get("Type") == "volume"
+                )
+            else:
+                result["container_removed"] = True
+        except (OSError, ValueError, subprocess.SubprocessError):
+            errors.append("container_identity_unconfirmed")
     if container_id and not result.get("container_removed"):
         try:
             present = _docker(
@@ -443,7 +479,11 @@ def _cleanup_ephemeral_addon_job(
         try:
             if image != f"launchplane-addon-runner:{request.name}":
                 raise ValueError("Addon recipe image identity changed.")
-            _docker(command, ["image", "rm", str(image)])
+            image_query = ["image", "ls", "--quiet", "--filter", f"reference={image}"]
+            if _docker(command, image_query).stdout.strip():
+                _docker(command, ["image", "rm", str(image)])
+            if _docker(command, image_query).stdout.strip():
+                raise ValueError("Original addon recipe image remains.")
             result["recipe_image_removed"] = True
         except (OSError, ValueError, subprocess.SubprocessError):
             errors.append("recipe_image_cleanup_unconfirmed")

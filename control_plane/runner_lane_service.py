@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.client import HTTPException
 import logging
+from pathlib import Path
 import re
 from typing import Literal, Protocol
 
@@ -49,10 +50,14 @@ from control_plane.runner_lane_github import (
 )
 from control_plane.build_provenance import BuildProvenanceError, GitHubBuildProvenanceTransport
 from control_plane.workflows.runner_lane_ephemeral import (
-    ADDON_RUNNER_JOB_NAMES,
     ADDON_RUNNER_LABEL_PREFIX,
     AddonRunnerRequest,
     read_addon_job,
+)
+from control_plane.workflows.launchplane import (
+    github_api_request,
+    launchplane_github_token,
+    resolve_launchplane_github_token,
 )
 from control_plane.runtime_environments import (
     RuntimeEnvironmentRecordStore,
@@ -61,6 +66,7 @@ from control_plane.runtime_environments import (
 
 SERVICE_CONTEXT = "launchplane"
 RUNNER_LANE_SERVICE_ROUTE = "/v1/service/runner-lanes/operation"
+RUNNER_LANE_LIFECYCLE_WORKFLOW_PATH = ".github/workflows/runner-lane-registration.yml"
 _LOGGER = logging.getLogger(__name__)
 CredentialStage = Literal["identity", "repository_inventory", "token_mint"]
 
@@ -83,6 +89,8 @@ class RunnerLaneStore(secrets.SecretReadStore, RuntimeEnvironmentRecordStore, Pr
 
 class AddonRunnerDispatchStore(RunnerLaneStore, Protocol):
     def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+    def write_outbox_delivery_record(self, record: OutboxDeliveryRecord) -> None: ...
     def read_outbox_delivery_record(self, delivery_id: str) -> OutboxDeliveryRecord: ...
     def enqueue_outbox_delivery_with_idempotency(
         self, request: OutboxWithIdempotencyRequest
@@ -103,7 +111,7 @@ def runner_lifecycle_workflow_source(store: object) -> tuple[str, str]:
             continue
         if (rule.event_names and "workflow_dispatch" not in rule.event_names) or rule.environments:
             continue
-        prefix = f"{rule.repository}/.github/workflows/runner-lane-registration.yml@"
+        prefix = f"{rule.repository}/{RUNNER_LANE_LIFECYCLE_WORKFLOW_PATH}@"
         for workflow in rule.workflow_refs:
             ref = workflow.removeprefix(prefix)
             if workflow == ref or not re.fullmatch(r"refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*", ref):
@@ -120,7 +128,9 @@ def runner_lifecycle_workflow_source(store: object) -> tuple[str, str]:
     return sources.pop()
 
 
-def request_addon_runner_containers(store: AddonRunnerDispatchStore) -> tuple[str, ...]:
+def request_addon_runner_containers(
+    store: AddonRunnerDispatchStore, *, control_plane_root: Path
+) -> tuple[str, ...]:
     source_repository, source_ref = runner_lifecycle_workflow_source(store)
     repositories = {
         profile.repository for profile in store.list_product_profile_records() if profile.is_active
@@ -129,7 +139,9 @@ def request_addon_runner_containers(store: AddonRunnerDispatchStore) -> tuple[st
     for repository in sorted(repositories):
         try:
             dispatched.extend(
-                _request_repository_addon_runners(store, repository, source_repository, source_ref)
+                _request_repository_addon_runners(
+                    store, repository, source_repository, source_ref, control_plane_root
+                )
             )
         except (
             LookupError,
@@ -148,6 +160,7 @@ def _request_repository_addon_runners(
     repository: str,
     source_repository: str,
     source_ref: str,
+    control_plane_root: Path,
 ) -> tuple[str, ...]:
     dispatched: list[str] = []
     with runner_lifecycle_token(store, repository) as credential:
@@ -160,11 +173,18 @@ def _request_repository_addon_runners(
             for job in queue.jobs:
                 try:
                     delivery_id = _request_addon_runner(
-                        store, token, job, source_repository, source_ref
+                        store, token, job, source_repository, source_ref, control_plane_root
                     )
                     if delivery_id:
                         dispatched.append(delivery_id)
-                except (BuildProvenanceError, OSError, ValueError, RuntimeError) as error:
+                except (
+                    BuildProvenanceError,
+                    OSError,
+                    ValueError,
+                    RuntimeError,
+                    click.ClickException,
+                    SQLAlchemyError,
+                ) as error:
                     _LOGGER.warning(
                         "Addon runner job request unavailable (%s).", type(error).__name__
                     )
@@ -177,9 +197,8 @@ def _request_addon_runner(
     job: RunnerQueueWaitJob,
     source_repository: str,
     source_ref: str,
+    control_plane_root: Path,
 ) -> str:
-    if job.status != "queued" or job.job_name not in ADDON_RUNNER_JOB_NAMES:
-        return ""
     attempts = [
         match[1]
         for label in job.labels
@@ -195,14 +214,18 @@ def _request_addon_runner(
     )
     delivery = _addon_runner_delivery(request, source_repository, source_ref)
     try:
-        store.read_outbox_delivery_record(delivery.delivery_id)
+        existing = store.read_outbox_delivery_record(delivery.delivery_id)
+        observe_addon_launcher(store, existing, control_plane_root=control_plane_root)
         return ""
     except FileNotFoundError:
         pass
+    if job.status != "queued":
+        return ""
     observed = read_addon_job(
         transport=GitHubBuildProvenanceTransport(token=token),
         request=request,
         repository_id=token.repository_id,
+        include_recipe=False,
     )
     if observed.get("status") != "queued":
         return ""
@@ -210,6 +233,69 @@ def _request_addon_runner(
         OutboxWithIdempotencyRequest(delivery=delivery)
     )
     return stored.delivery_id
+
+
+def observe_addon_launcher(
+    store: AddonRunnerDispatchStore,
+    record: OutboxDeliveryRecord,
+    *,
+    control_plane_root: Path,
+) -> None:
+    if record.state not in {"delivered", "failed"} or not record.external_id.isdecimal():
+        return
+    repository = repository_full_name(str(record.payload["repository"]))
+    expected_title = record.payload["expected_run_title"]
+    with launchplane_github_token(
+        token_resolver=resolve_launchplane_github_token,
+        api_request=github_api_request,
+        control_plane_root=control_plane_root,
+        context_name=SERVICE_CONTEXT,
+        repository=repository,
+        purpose="workflow_dispatch",
+        retry_provider_errors=True,
+    ) as token:
+        if not token:
+            raise ValueError("Original launcher observation credentials are unavailable.")
+        run = github_api_request(
+            path=f"/repos/{repository}/actions/runs/{record.external_id}",
+            token=token,
+            method="GET",
+        )
+    if (
+        not isinstance(run, dict)
+        or run.get("id") != int(record.external_id)
+        or run.get("event") != "workflow_dispatch"
+        or run.get("display_title") != expected_title
+        or run.get("path") != RUNNER_LANE_LIFECYCLE_WORKFLOW_PATH
+        or run.get("head_branch") != record.payload["ref"]
+    ):
+        raise ValueError("Original addon launcher identity is unconfirmed.")
+    if run.get("status") != "completed":
+        return
+    success = run.get("conclusion") == "success"
+    state = "delivered" if success else "failed"
+    error_code = "" if success else "ephemeral_addon_launcher_failed"
+    if record.state == state and record.error_code == error_code:
+        return
+    store.write_outbox_delivery_record(
+        record.model_copy(
+            update={
+                "state": state,
+                "action": "addon_launcher_completed" if success else "addon_launcher_failed",
+                "error_code": error_code,
+                "updated_at": utc_now_timestamp(),
+                "payload": {
+                    **record.payload,
+                    "run_status": "completed",
+                    "run_conclusion": run.get("conclusion"),
+                },
+            }
+        )
+    )
+    if not success:
+        _LOGGER.warning(
+            "Addon launcher failed; reconcile original outbox delivery %s.", record.delivery_id
+        )
 
 
 def _addon_runner_delivery(
@@ -231,9 +317,11 @@ def _addon_runner_delivery(
         next_attempt_at=now,
         payload={
             "repository": source_repository,
-            "workflow_id": "runner-lane-registration.yml",
+            "workflow_id": RUNNER_LANE_LIFECYCLE_WORKFLOW_PATH.rsplit("/", 1)[-1],
             "ref": source_ref.removeprefix("refs/heads/"),
             "credential_context": SERVICE_CONTEXT,
+            "observe_timeout_seconds": 12,
+            "expected_run_title": f"Ephemeral addon {request.job_id}",
             "inputs": {
                 "operation": "ephemeral",
                 "repository": request.repository,

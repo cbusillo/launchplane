@@ -72,8 +72,8 @@ Runner Lane Lifecycle workflow. Production image builds remain GitHub-hosted.
 The product owns its container recipe and test commands. Before queuing the
 addon job, its workflow uploads `addon-runner-recipe-{run_attempt}` containing
 exactly `Dockerfile`, `entrypoint.sh`, and `source-commit` (the run's head SHA).
-The job is named `addon-tests` or `addon-validation` and requests `self-hosted`
-plus `lp-addon-{run_id}-{run_attempt}`. Fork runs, public repositories,
+The job requests `self-hosted` plus `lp-addon-{run_id}-{run_attempt}`; its name
+and commands belong to the product. Fork runs, public repositories,
 `pull_request_target`, old attempts, and mismatched recipe sources are refused.
 
 The existing outbox worker scans queued addon jobs every minute. It uses the
@@ -83,6 +83,18 @@ once per job through the existing outbox. Its dispatch source comes from the
 existing exact lifecycle authorization rule; no second source binding or grant
 is needed. Missing or ambiguous authority remains unavailable. Existing outbox
 reconciliation rules apply to dispatches whose provider effect is uncertain.
+Dispatch observation matches the original job's unique workflow run title.
+The scan verifies job/source identity; only the executor downloads the recipe.
+
+The existing outbox record also projects the original launcher's terminal
+failure, with its workflow link, into failed operations. It does not silently
+register a replacement. Inspect that original run and its cleanup receipt:
+after correcting the failure and confirming cleanup, use the existing failed-run
+recovery on that same workflow run. An uncertain cleanup must first reconcile
+the original receipt through its always-step or `--cleanup-only`. A successful
+recovery of that original run clears the outbox failure. The queued tenant job
+can still be waiting while its launcher is failed; the operations record is the
+failure signal, not a claim that the tenant test ran.
 
 The lifecycle executor builds the same-attempt recipe, creates one fresh
 container with private filesystem and Docker configuration, and supplies the
@@ -110,6 +122,11 @@ This implements the container choice recorded in
 Revisit the executor architecture when outside contributors gain push or PR
 rights, production image builds leave hosted GitHub, or tenant count outgrows
 the selected host. Host Docker-access housekeeping remains a separate track.
+The retained operations lane remains occupied until the addon job and cleanup
+finish, so its existing runner count bounds concurrency. The minute-based scan
+uses the existing installation's API budget. Observe actual queue waits and
+rate-limit evidence during delivery; do not infer spare capacity or expand the
+host/lane/App configuration from this recipe.
 
 Use the existing read-only inventory command before adding or controlling runner
 lanes:

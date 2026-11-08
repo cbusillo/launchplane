@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
+from pathlib import Path
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -15,6 +16,55 @@ from tests.test_runner_lane_service import installation_token
 
 
 class LifecycleWorkflowSourceTests(TestCase):
+    def test_launcher_failure_and_original_run_recovery_are_visible_without_redispatch(
+        self,
+    ) -> None:
+        request = AddonRunnerRequest(repository="example/repo", run_id=12, run_attempt=2, job_id=35)
+        delivery = service._addon_runner_delivery(request, "example/control", "refs/heads/main")
+        delivery = delivery.model_copy(
+            update={
+                "state": "delivered",
+                "action": "dispatched_workflow",
+                "external_id": "78",
+                "provider_operation_key": "original-dispatch-marker",
+            }
+        )
+        run = {
+            "id": 78,
+            "status": "completed",
+            "conclusion": "failure",
+            "event": "workflow_dispatch",
+            "display_title": delivery.payload["expected_run_title"],
+            "path": service.RUNNER_LANE_LIFECYCLE_WORKFLOW_PATH,
+            "head_branch": delivery.payload["ref"],
+        }
+        store = Mock()
+        with (
+            patch.object(
+                service,
+                "launchplane_github_token",
+                side_effect=lambda **_: nullcontext("synthetic-dispatch-token"),
+            ),
+            patch.object(service, "github_api_request", return_value=run) as api,
+        ):
+            with self.assertLogs(service.__name__, level="WARNING"):
+                service.observe_addon_launcher(store, delivery, control_plane_root=Path("."))
+            failed = store.write_outbox_delivery_record.call_args.args[0]
+            self.assertEqual(failed.state, "failed")
+            self.assertEqual(failed.external_id, delivery.external_id)
+            self.assertEqual(failed.provider_operation_key, delivery.provider_operation_key)
+            self.assertEqual(failed.payload["run_conclusion"], "failure")
+            store.write_outbox_delivery_record.reset_mock()
+            service.observe_addon_launcher(store, failed, control_plane_root=Path("."))
+            store.write_outbox_delivery_record.assert_not_called()
+            run["conclusion"] = "success"
+            service.observe_addon_launcher(store, failed, control_plane_root=Path("."))
+            recovered = store.write_outbox_delivery_record.call_args.args[0]
+            self.assertEqual(recovered.state, "delivered")
+            self.assertFalse(recovered.error_code)
+            self.assertTrue(all(call.kwargs["method"] == "GET" for call in api.call_args_list))
+        store.enqueue_outbox_delivery_with_idempotency.assert_not_called()
+
     def test_a_missing_recipe_does_not_block_another_job_and_existing_dispatch_is_reused(
         self,
     ) -> None:
@@ -68,8 +118,10 @@ class LifecycleWorkflowSourceTests(TestCase):
             patch.object(service, "read_addon_job", side_effect=read_job),
         ):
             with self.assertLogs(service.__name__, level="WARNING"):
-                first = service.request_addon_runner_containers(store)
-                second = service.request_addon_runner_containers(store)
+                first = service.request_addon_runner_containers(store, control_plane_root=Path("."))
+                second = service.request_addon_runner_containers(
+                    store, control_plane_root=Path(".")
+                )
         self.assertEqual(len(first), 1)
         self.assertEqual(second, ())
         self.assertEqual(len(deliveries), 1)

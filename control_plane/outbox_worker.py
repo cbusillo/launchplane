@@ -211,7 +211,7 @@ def run_outbox_worker_loop(
         ):
             last_addon_scan = time.monotonic()
             try:
-                request_addon_runner_containers(record_store)
+                request_addon_runner_containers(record_store, control_plane_root=control_plane_root)
             except (
                 LookupError,
                 OSError,

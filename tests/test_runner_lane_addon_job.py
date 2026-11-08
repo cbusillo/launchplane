@@ -75,7 +75,7 @@ class AddonJobReaderTests(unittest.TestCase):
         assert isinstance(recipe, dict)
         self.assertEqual(recipe["Dockerfile"], "FROM fixture")
 
-    def test_rejects_forks_public_repositories_old_attempts_build_jobs_and_wrong_routing(
+    def test_rejects_forks_public_repositories_old_attempts_and_wrong_routing(
         self,
     ) -> None:
         for target, field, replacement in (
@@ -84,7 +84,6 @@ class AddonJobReaderTests(unittest.TestCase):
             (self.workflow_run, "run_attempt", 1),
             (self.workflow_run, "event", "pull_request_target"),
             (self.job, "run_id", 99),
-            (self.job, "name", "build"),
             (self.job, "labels", ["self-hosted", "unrelated"]),
         ):
             with self.subTest(field=field, replacement=replacement):
@@ -93,6 +92,15 @@ class AddonJobReaderTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.read()
                 target[field] = previous
+
+    def test_queue_scan_verifies_source_without_downloading_the_recipe(self) -> None:
+        self.archive = b"not an artifact download"
+        self.job["name"] = "product-owned-addon-command"
+        result = read_addon_job(
+            transport=self, request=self.request, repository_id=56, include_recipe=False
+        )
+        self.assertEqual(result["status"], "queued")
+        self.assertNotIn("recipe", result)
 
     def test_rejects_wrong_digest_source_commit_and_archive_paths(self) -> None:
         for archive in (

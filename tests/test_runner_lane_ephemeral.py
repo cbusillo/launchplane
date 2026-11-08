@@ -25,6 +25,7 @@ class FakeClient:
     def __init__(self, request: AddonRunnerRequest) -> None:
         self.request = request
         self.started = False
+        self.job_runner_id = 71
         self.lanes: tuple[RunnerLaneRecord, ...] = ()
         self.retired: list[int] = []
 
@@ -32,6 +33,7 @@ class FakeClient:
         return {
             "status": "completed" if self.started else "queued",
             "conclusion": "success" if self.started else "",
+            "runner_id": self.job_runner_id if self.started else None,
             "source_commit": "a" * 40,
             "recipe": {
                 "Dockerfile": "FROM fixture",
@@ -108,12 +110,14 @@ class EphemeralAddonRunnerTests(unittest.TestCase):
         self.listener_exit = 0
         self.cancel = False
         self.container_present = False
+        self.malformed_create = False
 
     def command(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append((args, kwargs))
         if args[1] == "create":
             self.container_present = True
-            return subprocess.CompletedProcess(args, 0, self.container_id + "\n", "")
+            identity = "unexpected stdout" if self.malformed_create else self.container_id
+            return subprocess.CompletedProcess(args, 0, identity + "\n", "")
         if args[1] == "start":
             self.client.started = True
             if self.cancel:
@@ -176,6 +180,14 @@ class EphemeralAddonRunnerTests(unittest.TestCase):
         self.assertTrue(result["container_removed"])
         self.assertTrue(result["registration_removed"])
 
+    def test_success_on_another_runner_does_not_prove_this_container_executed_the_job(self) -> None:
+        self.client.job_runner_id = 99
+        result = self.execute()
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["job_runner_id"], self.client.job_runner_id)
+        self.assertTrue(result["container_removed"])
+        self.assertTrue(result["registration_removed"])
+
     def test_cancellation_removes_original_resources_before_propagating(self) -> None:
         self.cancel = True
         with self.assertRaises(InterruptedError):
@@ -213,6 +225,15 @@ class EphemeralAddonRunnerTests(unittest.TestCase):
         )
         self.assertFalse(result["container_removed"])
         self.assertEqual(result["status"], "failed")
+
+    def test_unknown_create_response_reconciles_its_original_owned_container(self) -> None:
+        self.malformed_create = True
+        with self.assertRaises(ValueError):
+            self.execute()
+        result = json.loads((self.output / "result.json").read_text())
+        self.assertTrue(result["container_removed"])
+        self.assertEqual(result["container_id"], self.container_id)
+        self.assertFalse(self.container_present)
 
 
 class NativeRunnerStreamTests(unittest.TestCase):

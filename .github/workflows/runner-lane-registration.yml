@@ -1,5 +1,6 @@
 ---
 name: Runner Lane Lifecycle
+run-name: ${{ inputs.operation == 'ephemeral' && format('Ephemeral addon {0}', inputs.job_id) || 'Runner Lane Lifecycle' }}
 
 "on":
   workflow_dispatch:
@@ -333,7 +334,7 @@ jobs:
 
       - name: Preserve ephemeral addon lifecycle evidence
         if: always() && inputs.operation == 'ephemeral'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ephemeral-addon-lifecycle-${{ inputs.job_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ephemeral-addon-${{ github.run_id }}-${{ github.run_attempt }}
