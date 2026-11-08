@@ -12,9 +12,8 @@ session gets a focused product page with that link, without operational data
 or controls. Other viewers see no link; release-page permissions are unchanged.
 `GET /v1/release-review/access` reuses the release page's profile-access check
 without compiling a checklist or calling the source-control provider.
-The current React context picker and product-config layout remain transitional.
-Do not refine those transitional layouts except to correct secret-safety
-regressions.
+See [ui-standards.md](ui-standards.md) for the product workspace model and UI
+review rubric.
 
 Current DB policy-administration activation uses the signed-in browser session
 directly; this is an administrator path, not Client operational authority.
@@ -105,66 +104,6 @@ recovery mutation, retry, release or clear control. See
 [service attention](operations.md) for the
 retained-operation read and its proof limits.
 
-## Representative Admin Journeys
-
-The clean-slate product model is grounded in recent Launchplane work rather than
-generic dashboard assumptions.
-
-### Recover A Product Safely
-
-In the rebuilt UI, an admin who discovers that a product profile or scoped
-workflow grant is missing must see which product record, provider target, runtime
-configuration, secret bindings, and grants are missing. The admin reviews a
-dry-run, applies only the missing authority through the service, and sees the
-product's next preview refresh and lifecycle evidence come back clean.
-
-### Diagnose A Public TLS Failure
-
-In the rebuilt UI, an admin who sees that a preview or stable environment is
-unreachable must receive an environment view that explains the bound domain,
-runtime placement, ingress termination, the party that manages TLS, certificate
-observation, provider/runtime identity, and the evidence behind the failure.
-Normal diagnosis must not require direct Dokploy, edge-proxy, DNS-provider, or
-database inspection.
-
-### Prove Preview Apply And Destroy
-
-The rebuilt UI must let an admin compare desired and actual previews,
-refresh one through a reviewed plan, verify health and runtime identity,
-destroy it, and confirm that no provider or Launchplane inventory remains
-orphaned. Apply, destroy, and report-only reconciliation are one understandable
-journey.
-Reviewed Odoo preview plans are service-issued, short-lived, and bound to their
-artifact and provider-routing evidence. If that evidence changes or the plan
-expires, the UI must present a stale-plan result and obtain a new plan rather
-than offering a force-apply control.
-
-The workspace's read-only recorded-preview list exposes bounded identity
-references only under the existing `preview.read` grant. Selecting a change
-reads the canonical preview history and redacted product reconciliation route,
-each under its own existing authorization. Latest and serving generation
-references stay separate; missing reference evidence is not replaced by a
-different historical generation. Generation health and runtime identity
-declarations are recorded evidence, not current provider/runtime verification.
-Held or failed cleanup remains visible beside an explicit unknown provider
-state. Activity supplies the next supported inspection; this view enables no
-refresh/destroy/reconciliation mutation. Deployed acceptance still requires
-the actual product records and authenticated consumer, not development fixtures.
-
-### Promote A Verified Release
-
-The rebuilt UI must show what artifact is in testing and production, why
-promotion is enabled or blocked, and how to run a browser-safe dry-run,
-dispatch the product-owned workflow, and follow promotion evidence without
-creating a release or mutating production during dry-run.
-
-### Change Runtime Settings Or Secrets
-
-The rebuilt UI must show expected runtime keys separately from managed-secret
-bindings and let an admin review missing/stale/disabled state, submit a
-dry-run, and apply the change without plaintext secret values remaining in the
-browser, response, logs, or activity record.
-
 ## Golden Paths And Anti-Goals
 
 The primary golden paths are:
@@ -186,37 +125,6 @@ The rebuilt product must not become:
 - a collection of buttons that only prepare requests or perform no operation
 - a source of inferred, fixture-backed, or reassuring placeholder state
 - a second authority for runtime configuration or provider topology
-
-## Information Architecture
-
-```text
-Launchplane
-  Product Ops
-    Products
-      Product workspace
-        Overview
-        Testing
-        Production
-        Previews
-        Runtime settings
-        Managed secrets
-        Promotions
-        Activity
-        Maintenance
-        Diagnostics
-  Delivery Governance
-    Changes
-    Client acceptance
-    Engineering evidence
-    Dependency health
-    Admission and landing
-```
-
-The product workspace is the primary object. Stable lanes and previews are
-visually distinct children of that product. Runtime settings and managed
-secrets are separate surfaces. Activity is an admin timeline. Diagnostics
-contains raw contexts, provider IDs, route paths, record IDs, and provider-only
-evidence that ordinary operation does not require.
 
 ## Action Taxonomy
 
@@ -275,6 +183,17 @@ Missing original proof is shown as a resource-retention hold, not missing status
 These warnings neither settle the operation nor establish safe disposal, and
 the recorded/observed mismatch remains visible until recovery actually completes.
 
+The workspace's read-only recorded-preview list exposes bounded identity
+references only under the existing `preview.read` grant. Selecting a change
+reads the canonical preview history and redacted product reconciliation route,
+each under its own existing authorization. Latest and serving generation
+references stay separate; missing reference evidence is not replaced by a
+different historical generation. Generation health and runtime identity
+declarations are recorded evidence, not current provider/runtime verification.
+Held or failed cleanup remains visible beside an explicit unknown provider
+state. Activity supplies the next supported inspection; this view enables no
+refresh/destroy/reconciliation mutation.
+
 Product Ops labels combined lane evidence (route records and runtime observations)
 separately from operational health. A product profile's edit date is labelled as
 a profile update, never presented as the age of its lanes' verification.
@@ -317,35 +236,6 @@ previews. Narrow layouts preserve the same hierarchy in one column: product
 identity, warnings, next action, lane state, and supporting evidence. Critical
 status, trust, timestamp, and action labels must not depend on hover or color
 alone.
-
-## Product Model
-
-The primary Launchplane UI model is:
-
-```text
-Product
-  - testing environment
-  - prod environment
-  - previews
-  - runtime settings
-  - secret bindings
-  - promotions
-  - activity
-  - maintenance
-```
-
-Product names are display names such as `SellYourOutboard`, `VeriReel`,
-`Odoo CM`, and `Odoo OPW`. Raw context strings are routing identifiers and
-should appear only as diagnostics or evidence metadata.
-
-For SellYourOutboard, the canonical product key is `sellyouroutboard`. Stable
-environments live under that product as `testing` and `prod`. Legacy names such
-as `sellyouroutboard-testing` are transition details and must not be the primary
-picker model.
-
-These names describe the current Launchplane UI model. Launchplane records remain the
-authority for live product keys, lanes, contexts, repositories, domains,
-targets, and bindings.
 
 ## API Contract
 

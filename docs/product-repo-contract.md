@@ -384,34 +384,8 @@ A product repo is approved when all of these are true:
 - Launchplane can verify the artifact provenance and reconcile a non-production
   event using its own records and credentials.
 
-## New Repo Checklist
-
-When creating a new website repo for Launchplane:
-
-- Build the app as a normal product repo first.
-- Add a health endpoint that returns enough non-secret version data for
-  Launchplane to verify the deployed artifact. New products should expose the
-  Launchplane runtime identity env payload from `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`
-  or the equivalent discrete env keys, then mark lanes as requiring runtime
-  identity after the echo is verified.
-- Publish immutable container images or artifacts from
-  `.github/workflows/build.yml`, with the build manifest described in
-  [artifact-provenance.md](artifact-provenance.md).
-- Use [native target allocation and record apply](operations.md#native-target-allocation)
-  to create the required product profile and target records without preview
-  caller grants. Keep its inputs in admin-owned state outside the product repository.
-- Use `generic-web` directly when the product is a stateless or mostly
-  stateless web app with standard preview/deploy behavior.
-- Use the Dokploy service deployment contract when the product is a simple bot
-  or worker service whose deployment can be represented as a single immutable
-  image, one Dokploy application per lane, Launchplane-managed runtime
-  settings/secrets, and an optional health endpoint.
-- Add a product driver only when the product has named extra obligations such as
-  database bootstrap, data migration, backup gates, restore/rollback behavior,
-  product smoke checks, or platform-specific post-deploy actions.
-- Keep Launchplane lifecycle config out of the product repo unless this document
-  or a driver-specific doc explicitly names a scoped bootstrap or rehearsal
-  exception.
+See [new-product-repo.md](new-product-repo.md) for the new product repository
+checklist.
 
 A testing reconcile reports `action: none, reason: build_workflow_missing` when
 GitHub returns 404 for Build runs and a complete, accessible Actions workflow
