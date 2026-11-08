@@ -469,24 +469,7 @@ def _walkthrough_preflight(
             if selection.identity.context != context:
                 raise ValueError("The product does not own this testing context.")
             parsed = urlsplit(selection.base_url)
-            if (
-                parsed.scheme != "https"
-                or not parsed.hostname
-                or parsed.username
-                or parsed.password
-                or parsed.path not in {"", "/"}
-                or parsed.query
-                or parsed.fragment
-            ):
-                raise ValueError("Testing sign-in requires its recorded HTTPS origin.")
-            if any(
-                lane.instance != "testing"
-                and (urlsplit(lane.base_url).hostname or "").rstrip(".")
-                == (parsed.hostname or "").rstrip(".")
-                for other_profile in store.list_product_profile_records()
-                for lane in other_profile.lanes
-            ):
-                raise ValueError("Testing origin aliases another lane.")
+            require_exclusive_odoo_signin_origin(store, selection.identity, selection.base_url)
     with checkpoint(WalkthroughPrerequisite.GENERATION, ()) as run:
         if run:
             generation = read_current_testing_generation(

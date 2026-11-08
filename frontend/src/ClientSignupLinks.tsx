@@ -3,12 +3,13 @@ import { useEffect, useState } from "react";
 import { mintClientSignin, readClientSigninUsers, type ClientSigninLookup, type ClientSigninUser } from "./api";
 import { safeExternalUrl } from "./url";
 
-export function ClientSignupLinks({ repository, pullRequest, generationId, instance, laneUrl }: {
+export function ClientSignupLinks({ repository, pullRequest, generationId, instance, laneUrl, onOpened }: {
   repository: string;
   pullRequest?: number;
   generationId: string;
   instance: "preview" | "testing";
   laneUrl: string;
+  onOpened?: () => void;
 }) {
   const [users, setUsers] = useState<ClientSigninUser[]>([]);
   const [runtimeBinding, setRuntimeBinding] = useState("");
@@ -22,6 +23,7 @@ export function ClientSignupLinks({ repository, pullRequest, generationId, insta
       const request = ++sequence;
       setUsers([]);
       setRuntimeBinding("");
+      setError("");
       void readClientSigninUsers({ repository, pull_request: pullRequest, generation_id: generationId, instance }, controller.signal)
         .then(response => {
           if (!controller.signal.aborted && request === sequence) {
@@ -45,6 +47,12 @@ export function ClientSignupLinks({ repository, pullRequest, generationId, insta
     setError("Sign-in is unavailable. Refresh the review.");
   };
   const signin = async (user: ClientSigninUser) => {
+    const destination = window.open("about:blank", "_blank");
+    if (!destination) {
+      unavailable();
+      return;
+    }
+    destination.opener = null;
     setBusy(true);
     setError("");
     try {
@@ -52,11 +60,14 @@ export function ClientSignupLinks({ repository, pullRequest, generationId, insta
       const lane = safeExternalUrl(laneUrl);
       const url = safeExternalUrl(response.sign_in_url);
       if (!lane || !url || url.protocol !== "https:" || url.origin !== lane.origin || url.pathname !== "/web/signup") {
+        destination.close();
         unavailable();
         return;
       }
-      window.location.assign(url.toString());
+      destination.location.replace(url.toString());
+      onOpened?.();
     } catch {
+      destination.close();
       unavailable();
     } finally {
       setBusy(false);

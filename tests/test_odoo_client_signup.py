@@ -10,20 +10,27 @@ import subprocess
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 from typing import Any
 
 from httpx2 import Response
 
 from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_FORBIDDEN_GROUPS
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecord,
+    DokployTargetStaffTestingHold,
+)
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy.odoo_client_signin import (
-    CLIENT_USER_XMLID_PREFIX,
+    CLIENT_USER_MANIFEST_KEY,
+    CLIENT_USER_DECLARATION_PROGRAM,
     CLIENT_SIGNIN_LIST_PROGRAM,
     CLIENT_SIGNIN_ODOO_PROGRAM,
     client_signin_command,
 )
+from control_plane.dokploy.odoo_shell import ODOO_SHELL_WRAPPER
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.odoo_client_signup import (
     ClientSigninLane,
@@ -45,6 +52,7 @@ from tests.http_app_test_support import (
 )
 from tests.test_product_review import _human, _profile, _operator_read_policy
 from tests.support.auth import StubVerifier, identity as workflow_identity
+import tests.test_preview_fixture as preview_support
 
 
 def runtime() -> RuntimeIdentity:
@@ -62,10 +70,9 @@ def runtime() -> RuntimeIdentity:
 class NativeClientListConnection:
     def __init__(self) -> None:
         self.database = sqlite3.connect(":memory:")
-        self.database.create_function(
-            "starts_with", 2, lambda value, prefix: value.startswith(prefix)
-        )
         self.database.executescript("""
+CREATE TABLE ir_module_module(name TEXT,state TEXT);
+INSERT INTO ir_module_module VALUES ('fixture','installed');
 CREATE TABLE res_users(id INTEGER PRIMARY KEY, partner_id INTEGER,login TEXT,password TEXT,active BOOLEAN);
 CREATE TABLE res_partner(id INTEGER PRIMARY KEY,name TEXT);
 CREATE TABLE ir_model_data(module TEXT,name TEXT,model TEXT,res_id INTEGER);
@@ -88,11 +95,7 @@ CREATE TABLE res_groups_implied_rel(gid INTEGER,hid INTEGER);
                 ),
             )
             if user_id != 5:
-                name = (
-                    CLIENT_USER_XMLID_PREFIX + str(user_id)
-                    if user_id != 10
-                    else "launchplaneXclientX10"
-                )
+                name = "user_" + str(user_id) if user_id != 10 else "launchplane_client_unrelated"
                 self.database.execute(
                     "INSERT INTO ir_model_data VALUES (?,?,?,?)",
                     ("fixture", name, "res.users", user_id),
@@ -125,11 +128,18 @@ CREATE TABLE res_groups_implied_rel(gid INTEGER,hid INTEGER);
     def execute(self, query: str, parameters: tuple[Any, ...] = ()) -> None:
         if query.startswith("SET LOCAL"):
             return
-        prefix, forbidden = parameters
-        statement = query.replace(
-            "=ANY(%s)", " IN (" + ",".join("?" for _ in forbidden) + ")"
-        ).replace("%s", "?")
-        self.rows = self.database.execute(statement, (prefix, *forbidden)).fetchall()
+        flattened: list[object] = []
+        statement = query
+        for value in parameters:
+            if isinstance(value, (tuple, list)):
+                statement = statement.replace(
+                    "=ANY(%s)", " IN (" + ",".join("?" for _ in value) + ")", 1
+                )
+                flattened.extend(value)
+            else:
+                statement = statement.replace("%s", "?", 1)
+                flattened.append(value)
+        self.rows = self.database.execute(statement, flattened).fetchall()
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         return self.rows
@@ -142,11 +152,102 @@ CREATE TABLE res_groups_implied_rel(gid INTEGER,hid INTEGER);
 
 
 class NativeClientSigninTests(TestCase):
-    def test_private_transport_checks_runner_identity_and_keeps_invitation_out_of_argv(
+    def setUp(self) -> None:
+        self.manifests: dict[str, object] = {
+            "fixture": {CLIENT_USER_MANIFEST_KEY: ["fixture.user_client"]},
+            "uninstalled": {CLIENT_USER_MANIFEST_KEY: ["uninstalled.user_client"]},
+        }
+        self.enterContext(patch("logging.disable"))
+        self.enterContext(
+            patch.dict(
+                sys.modules,
+                {
+                    "odoo.modules.module": SimpleNamespace(
+                        Manifest=SimpleNamespace(
+                            for_addon=lambda module, **_: self.manifests.get(module)
+                        ),
+                        initialize_sys_path=lambda: None,
+                    ),
+                    "odoo.tools": SimpleNamespace(config={}),
+                    "run_odoo_startup": SimpleNamespace(
+                        _load_settings=lambda _: SimpleNamespace(addons_path="/fixture")
+                    ),
+                },
+            )
+        )
+
+    def test_native_manifest_declaration_is_exact_optional_and_owned_by_installed_addon(
+        self,
+    ) -> None:
+        namespace: dict[str, Any] = {}
+        exec(CLIENT_USER_DECLARATION_PROGRAM, namespace)
+        read = namespace["declared_client_user_xmlids"]
+        self.assertEqual(read(["fixture"]), ["fixture.user_client"])
+        optional_metadata: tuple[dict[str, object], ...] = ({}, {CLIENT_USER_MANIFEST_KEY: []})
+        for metadata in optional_metadata:
+            self.manifests["fixture"] = metadata
+            self.assertEqual(read(["fixture"]), [])
+        for values in (
+            None,
+            "fixture.user_client",
+            ("fixture.user_client",),
+            [None],
+            ["fixture.*"],
+            ["foreign.user_client"],
+            ["fixture.user_client"] * 2,
+        ):
+            self.manifests["fixture"] = {CLIENT_USER_MANIFEST_KEY: values}
+            with self.subTest(values=values), self.assertRaises(RuntimeError):
+                read(["fixture"])
+        self.manifests.pop("fixture")
+        with self.assertRaises(RuntimeError):
+            read(["fixture"])
+
+    def test_private_shell_executes_native_program_and_returns_only_its_private_result(
+        self,
+    ) -> None:
+        env, user, partner = self.native_environment()
+        calls: list[list[str]] = []
+
+        def shell(command: list[str], **kwargs: Any) -> SimpleNamespace:
+            calls.append(command)
+            exec(kwargs["input"].decode(), {"env": env})
+            return SimpleNamespace(returncode=0)
+
+        startup = SimpleNamespace(
+            _load_settings=lambda _: object(),
+            _write_runtime_config=lambda _: None,
+            _build_odoo_shell_command=lambda _: ["odoo", "shell"],
+            _odoo_environment=lambda _: {},
+        )
+        request = {
+            "program": CLIENT_SIGNIN_ODOO_PROGRAM,
+            "failure_program": "env.cr.rollback()",
+            "fallback_result": {"status": "unverified"},
+            "database": "fixture",
+            "xmlid": "fixture.user_client",
+            "forbidden_groups": WALKTHROUGH_FORBIDDEN_GROUPS,
+        }
+        output = io.StringIO()
+        with (
+            patch.dict(sys.modules, {"run_odoo_startup": startup}),
+            patch.object(subprocess, "run", side_effect=shell),
+            patch("sys.stdin", io.StringIO(json.dumps(request))),
+            redirect_stdout(output),
+        ):
+            exec(ODOO_SHELL_WRAPPER, {})
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["token"], "fixture-invitation")
+        self.assertNotIn(result["token"], repr(calls))
+        self.assertEqual(len(calls), 1)
+        user.write.assert_not_called()
+        partner.signup_prepare.assert_called_once_with(signup_type="signup")
+
+    def test_private_transport_refuses_changed_or_ambiguous_runner(
         self,
     ) -> None:
         invitation = {
-            "xmlid": "fixture." + CLIENT_USER_XMLID_PREFIX + "example",
+            "xmlid": "fixture.user_client",
             "name": "Example Client",
             "token": "fixture-invitation",
         }
@@ -233,10 +334,12 @@ class NativeClientSigninTests(TestCase):
                             ),
                             invitation,
                         )
-                self.assertNotIn(invitation["token"], repr(calls))
 
     def test_native_read_lists_only_declared_active_passwordless_non_admin_users(self) -> None:
         connection = NativeClientListConnection()
+        self.manifests["fixture"] = {
+            CLIENT_USER_MANIFEST_KEY: [f"fixture.user_{i}" for i in range(1, 10) if i != 5]
+        }
         output = io.StringIO()
         with (
             patch.dict(sys.modules, {"psycopg2": SimpleNamespace(connect=lambda **_: connection)}),
@@ -254,7 +357,6 @@ class NativeClientSigninTests(TestCase):
                     json.dumps(
                         {
                             "database": "fixture",
-                            "xmlid_prefix": CLIENT_USER_XMLID_PREFIX,
                             "forbidden_groups": WALKTHROUGH_FORBIDDEN_GROUPS,
                         }
                     )
@@ -266,9 +368,53 @@ class NativeClientSigninTests(TestCase):
         self.assertTrue(connection.readonly)
         self.assertEqual(
             [user["xmlid"] for user in json.loads(output.getvalue())["users"]],
-            ["fixture." + CLIENT_USER_XMLID_PREFIX + "3"],
+            ["fixture.user_3"],
         )
         self.assertNotIn("fixture-password", output.getvalue())
+
+    def test_native_list_opt_out_and_unresolved_declaration_are_not_guessed(self) -> None:
+        for values in (None, [], ["fixture.missing"], ["fixture.user_3"]):
+            connection = NativeClientListConnection()
+            self.manifests["fixture"] = {} if values is None else {CLIENT_USER_MANIFEST_KEY: values}
+            if values == ["fixture.user_3"]:
+                connection.database.execute(
+                    "UPDATE ir_model_data SET model='res.partner' WHERE name='user_3'"
+                )
+                connection.database.commit()
+            output = io.StringIO()
+            with (
+                self.subTest(values=values),
+                patch.dict(
+                    sys.modules, {"psycopg2": SimpleNamespace(connect=lambda **_: connection)}
+                ),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "ODOO_DB_HOST": "fixture",
+                        "ODOO_DB_USER": "fixture",
+                        "ODOO_DB_PASSWORD": "fixture",
+                    },
+                ),
+                patch(
+                    "sys.stdin",
+                    io.StringIO(
+                        json.dumps(
+                            {
+                                "database": "fixture",
+                                "forbidden_groups": WALKTHROUGH_FORBIDDEN_GROUPS,
+                            }
+                        )
+                    ),
+                ),
+                redirect_stdout(output),
+            ):
+                if values:
+                    with self.assertRaises(RuntimeError):
+                        exec(CLIENT_SIGNIN_LIST_PROGRAM, {})
+                else:
+                    exec(CLIENT_SIGNIN_LIST_PROGRAM, {})
+                    self.assertEqual(json.loads(output.getvalue()), {"users": []})
+            self.assertTrue(connection.readonly)
 
     def test_native_mint_refuses_password_set_unrelated_inactive_used_and_admin_accounts(
         self,
@@ -280,25 +426,31 @@ class NativeClientSigninTests(TestCase):
             {"login_date": "used"},
             {"admin": True},
             {"shared_partner": True},
+            {"name": False},
             {"xmlid": "fixture.unrelated"},
+            {"undeclared": True},
+            {"unresolved": True},
         ):
             with self.subTest(changes=changes), TemporaryDirectory() as directory:
                 env, user, partner = self.native_environment(
                     **{key: value for key, value in changes.items() if key != "xmlid"}
                 )
                 request = {
-                    "xmlid": changes.get(
-                        "xmlid", "fixture." + CLIENT_USER_XMLID_PREFIX + "example"
-                    ),
-                    "xmlid_prefix": CLIENT_USER_XMLID_PREFIX,
+                    "xmlid": changes.get("xmlid", "fixture.user_client"),
                     "forbidden_groups": WALKTHROUGH_FORBIDDEN_GROUPS,
                     "result_file": str(Path(directory) / "result.json"),
                 }
+                if changes.get("undeclared"):
+                    self.manifests["fixture"] = {}
+                if changes.get("unresolved"):
+                    env.ref.return_value = False
+                    env.ref.side_effect = None
                 with self.assertRaises(RuntimeError), patch("logging.disable"):
                     exec(CLIENT_SIGNIN_ODOO_PROGRAM, {"env": env, "request": request})
                 partner._generate_signup_token.assert_not_called()
                 env.cr.commit.assert_not_called()
                 user.write.assert_not_called()
+                self.manifests["fixture"] = {CLIENT_USER_MANIFEST_KEY: ["fixture.user_client"]}
 
     def test_native_mint_uses_existing_partner_and_native_configured_validity_without_mail(
         self,
@@ -306,14 +458,13 @@ class NativeClientSigninTests(TestCase):
         with TemporaryDirectory() as directory, patch("logging.disable"):
             env, user, partner = self.native_environment()
             request = {
-                "xmlid": "fixture." + CLIENT_USER_XMLID_PREFIX + "example",
-                "xmlid_prefix": CLIENT_USER_XMLID_PREFIX,
+                "xmlid": "fixture.user_client",
                 "forbidden_groups": WALKTHROUGH_FORBIDDEN_GROUPS,
                 "result_file": str(Path(directory) / "result.json"),
             }
             exec(CLIENT_SIGNIN_ODOO_PROGRAM, {"env": env, "request": request})
             result = json.loads((Path(directory) / "result.json").read_text())
-            self.assertEqual(result["token"], partner._generate_signup_token.return_value)
+            self.assertEqual(result["token"], "fixture-invitation")
             partner._generate_signup_token.assert_called_once_with()
             env.cr.commit.assert_called_once()
             user.write.assert_not_called()
@@ -321,16 +472,36 @@ class NativeClientSigninTests(TestCase):
 
     @staticmethod
     def native_environment(**changes: Any) -> tuple[Mock, Mock, Mock]:
-        env, user, partner = Mock(), Mock(), Mock()
+        env, user, partner = MagicMock(), Mock(), Mock()
+        env.__getitem__.return_value.sudo.return_value.search.return_value.mapped.return_value = [
+            "fixture"
+        ]
         user._name = "res.users"
         user.id = changes.get("id", 7)
         user.active = changes.get("active", True)
         user.login_date = changes.get("login_date", False)
-        user.name = "Example Client"
+        user.name = changes.get("name", "Example Client")
+        user.with_context.return_value = user
         user.has_group.return_value = changes.get("admin", False)
         user.partner_id = partner
         partner.sudo.return_value = partner
-        partner.user_ids = [user, Mock()] if changes.get("shared_partner") else [user]
+        partner.user_ids = [user]
+        all_partner = Mock()
+        partner.with_context.return_value = all_partner
+        all_partner.user_ids = [user, Mock()] if changes.get("shared_partner") else [user]
+        all_partner.signup_prepare = partner.signup_prepare
+        all_partner._generate_signup_token = partner._generate_signup_token
+        partner.signup_type = False
+        partner.signup_prepare.side_effect = lambda **values: setattr(
+            partner, "signup_type", values["signup_type"]
+        )
+
+        def native_token() -> str:
+            if partner.signup_type != "signup":
+                raise RuntimeError("Native signup type is unprepared")
+            return "fixture-invitation"
+
+        partner._generate_signup_token.side_effect = native_token
         partner._generate_signup_token.return_value = "fixture-invitation"
         env.ref.side_effect = lambda xmlid, **_: user if xmlid.startswith("fixture.") else Mock()
         env.cr.fetchone.return_value = (changes.get("password", False),)
@@ -344,6 +515,14 @@ class ClientSigninServiceTests(TestCase):
         self.store.read_product_profile_record.return_value = self.profile
         self.store.list_product_profile_records.return_value = (self.profile,)
         self.store.list_preview_records.return_value = ()
+        self.store.list_dokploy_target_id_records.return_value = ()
+        self.store.list_physical_provider_target_records.return_value = ()
+        self.enterContext(
+            patch("control_plane.odoo_client_signup.published_testing_copy", return_value=None)
+        )
+        self.domain = self.enterContext(
+            patch("control_plane.odoo_client_signup.odoo_compose_has_domain", return_value=True)
+        )
         self.identity = _human(login="renamed-client", github_id=9001)
         self.selection = OdooRuntimeSelection(runtime(), "https://testing.example.invalid")
         self.connection = OdooRuntimeConnection(
@@ -397,7 +576,7 @@ class ClientSigninServiceTests(TestCase):
             identity=self.identity,
             lane=self.lane,
             reviewed_runtime_binding=binding,
-            xmlid="fixture." + CLIENT_USER_XMLID_PREFIX + "example",
+            xmlid="fixture.user_client",
         )
 
     def test_list_has_no_invitation_and_click_mints_for_the_exact_current_lane_without_store_writes(
@@ -406,7 +585,7 @@ class ClientSigninServiceTests(TestCase):
         self.native.return_value = {
             "users": [
                 {
-                    "xmlid": "fixture." + CLIENT_USER_XMLID_PREFIX + "example",
+                    "xmlid": "fixture.user_client",
                     "name": "Example Client",
                     "login": "client@example.invalid",
                 }
@@ -415,7 +594,7 @@ class ClientSigninServiceTests(TestCase):
         listed = self.users()
         self.assertNotIn("token", json.dumps(listed))
         self.native.return_value = {
-            "xmlid": "fixture." + CLIENT_USER_XMLID_PREFIX + "example",
+            "xmlid": "fixture.user_client",
             "name": "Example Client",
             "token": "fixture-invitation",
         }
@@ -432,6 +611,30 @@ class ClientSigninServiceTests(TestCase):
         self.native.assert_not_called()
         self.assertEqual(self.store.mock_calls, [])
 
+    def test_retired_profile_and_testing_target_alias_or_wrong_domain_refuse_before_native(
+        self,
+    ) -> None:
+        for failure in ("retired", "alias", "domain"):
+            with self.subTest(failure=failure):
+                if failure == "retired":
+                    self.profile = self.profile.model_copy(update={"lifecycle_state": "retired"})
+                elif failure == "alias":
+                    self.store.list_dokploy_target_id_records.return_value = (
+                        DokployTargetIdRecord(
+                            context="foreign",
+                            instance="prod",
+                            target_id="target",
+                            updated_at=self.profile.updated_at,
+                        ),
+                    )
+                else:
+                    self.domain.return_value = False
+                with self.assertRaises(ValueError):
+                    self.users()
+                self.native.assert_not_called()
+                self.profile = self.profile.model_copy(update={"lifecycle_state": "active"})
+                self.store.list_dokploy_target_id_records.return_value = ()
+
     def test_changed_runtime_and_wrong_binding_never_disclose_a_credential(self) -> None:
         with self.assertRaises(ValueError):
             self.mint("wrong-runtime")
@@ -439,7 +642,7 @@ class ClientSigninServiceTests(TestCase):
         self.native.return_value = {"users": []}
         binding = str(self.users()["runtime_binding"])
         self.native.return_value = {
-            "xmlid": "fixture." + CLIENT_USER_XMLID_PREFIX + "example",
+            "xmlid": "fixture.user_client",
             "name": "Example Client",
             "token": "fixture-invitation",
         }
@@ -469,7 +672,7 @@ class ClientSigninServiceTests(TestCase):
                 update={"owner": self.profile.owner.model_copy(update={"github_id": "999"})}
             )
             return {
-                "xmlid": "fixture." + CLIENT_USER_XMLID_PREFIX + "example",
+                "xmlid": "fixture.user_client",
                 "name": "Example Client",
                 "token": "fixture-invitation",
             }
@@ -477,6 +680,106 @@ class ClientSigninServiceTests(TestCase):
         self.native.side_effect = mint_result
         with self.assertRaises(PermissionError):
             self.mint(binding)
+
+
+class ClientSigninPreviewTests(TestCase):
+    def test_actual_preview_selection_guards_current_generation_owned_target_and_protected_use(
+        self,
+    ) -> None:
+        for failure in ("", "generation", "staff", "target"):
+            with (
+                self.subTest(failure=failure),
+                preview_support.PreviewFixtureLaneTests().preview() as (store, adapter, slot),
+            ):
+                profile = store.read_product_profile_record(adapter.product).model_copy(
+                    update={"owner": _profile().owner}
+                )
+                store.write_product_profile_record(profile)
+                selection = adapter.selection()
+                connection = OdooRuntimeConnection(
+                    selection=selection,
+                    evidence=OdooRuntimeEvidence(
+                        identity=selection.identity,
+                        target_id=preview_support.fixture_binding().target_id,
+                        target_name=selection.identity.instance,
+                        container_id="fixture",
+                        observed_at=profile.updated_at,
+                    ),
+                    host="fixture",
+                    token="fixture",
+                    server_id="fixture",
+                    app_name="fixture",
+                    credentials={"ODOO_DB_NAME": "fixture"},
+                )
+                lane = ClientSigninLane(
+                    profile.repository, 42, adapter.request.generation_id, "preview"
+                )
+                identity = _human(login="renamed-client", github_id=9001)
+                with (
+                    patch(
+                        "control_plane.preview_fixture.reads.connect_runtime",
+                        return_value=connection,
+                    ),
+                    patch(
+                        "control_plane.odoo_client_signup.client_signin_command",
+                        return_value={"users": []},
+                    ) as native,
+                ):
+                    listed = list_client_signin_users(
+                        store=store,
+                        root=adapter.root,
+                        profile=profile,
+                        identity=identity,
+                        lane=lane,
+                    )
+                    native.reset_mock()
+                    native.return_value = {
+                        "xmlid": "fixture.user_client",
+                        "name": "Example Client",
+                        "token": "fixture-invitation",
+                    }
+                    if failure == "generation":
+                        lane = replace(lane, generation_id="old-generation")
+                    elif failure == "staff":
+                        target = DokployTargetRecord(
+                            context=selection.identity.context,
+                            instance=slot,
+                            updated_at=profile.updated_at,
+                        )
+                        target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+                            reason="staff"
+                        )
+                        store.write_dokploy_target_record(target)
+                    elif failure == "target":
+                        store.write_dokploy_target_id_record(
+                            DokployTargetIdRecord(
+                                context="foreign",
+                                instance="prod",
+                                target_id=connection.evidence.target_id,
+                                updated_at=profile.updated_at,
+                            )
+                        )
+
+                    def mint() -> dict[str, str]:
+                        return mint_client_signin(
+                            store=store,
+                            root=adapter.root,
+                            profile=profile,
+                            identity=identity,
+                            lane=lane,
+                            xmlid="fixture.user_client",
+                            reviewed_runtime_binding=str(listed["runtime_binding"]),
+                        )
+
+                    if failure:
+                        with self.assertRaises(ValueError):
+                            mint()
+                        native.assert_not_called()
+                    else:
+                        self.assertEqual(
+                            urlsplit(mint()["sign_in_url"]).netloc,
+                            urlsplit(selection.base_url).netloc,
+                        )
 
 
 class ClientSigninHttpTests(IsolatedAsyncioTestCase):
@@ -528,7 +831,7 @@ class ClientSigninHttpTests(IsolatedAsyncioTestCase):
         }
         self.payload = {
             **self.lookup,
-            "xmlid": "fixture." + CLIENT_USER_XMLID_PREFIX + "example",
+            "xmlid": "fixture.user_client",
             "reviewed_runtime_binding": "a" * 64,
         }
 
@@ -603,3 +906,19 @@ class ClientSigninHttpTests(IsolatedAsyncioTestCase):
             response = await self.request(9001, method="POST")
         self.assertEqual(response.status_code, 409)
         self.assertNotIn("private-native-value", response.text)
+
+    async def test_retired_profile_does_not_hide_the_active_recorded_clients_profile(self) -> None:
+        retired = _profile().model_copy(
+            update={
+                "product": "a-retired-product",
+                "lifecycle_state": "retired",
+                "preview": _profile().preview.model_copy(update={"enabled": False}),
+            }
+        )
+        self.store.write_product_profile_record(retired)
+        with patch(
+            "control_plane.odoo_client_signup.list_client_signin_users",
+            return_value={"users": [], "runtime_binding": "a" * 64},
+        ) as read:
+            self.assertEqual((await self.request(9001)).status_code, 200)
+            self.assertEqual(read.call_args.kwargs["profile"].product, _profile().product)

@@ -4,7 +4,7 @@ from control_plane.dokploy.native_copy_stream import _read_remote
 from control_plane.dokploy.odoo_shell import ODOO_RUNNER_PROGRAM, ODOO_SHELL_WRAPPER
 
 
-CLIENT_USER_XMLID_PREFIX = "launchplane_client_"
+CLIENT_USER_MANIFEST_KEY = "launchplane_client_user_xmlids"
 
 
 def client_signin_command(
@@ -20,7 +20,6 @@ def client_signin_command(
             **payload,
             "program": CLIENT_SIGNIN_ODOO_PROGRAM,
             "probe": CLIENT_SIGNIN_LIST_PROGRAM,
-            "xmlid_prefix": CLIENT_USER_XMLID_PREFIX,
             "forbidden_groups": WALKTHROUGH_FORBIDDEN_GROUPS,
         },
         receive=frames.append,
@@ -64,16 +63,54 @@ except Exception:
 )
 
 
-CLIENT_SIGNIN_LIST_PROGRAM = r'''
-import json, os, sys, psycopg2
+CLIENT_USER_DECLARATION_PROGRAM = r"""
+import re
+from odoo.modules.module import Manifest
+def declared_client_user_xmlids(installed):
+    declared=[]
+    for module in installed:
+        manifest=Manifest.for_addon(module,display_warning=False)
+        if manifest is None:
+            raise RuntimeError('Installed addon manifest is unavailable')
+        values=manifest.get(__MANIFEST_KEY__,[])
+        if not isinstance(values,list):
+            raise RuntimeError('Client user declaration must be a list')
+        for xmlid in values:
+            if not isinstance(xmlid,str) or not re.fullmatch(r'[A-Za-z0-9_]+\.[A-Za-z0-9_]+',xmlid) or xmlid.split('.',1)[0]!=module or xmlid in declared:
+                raise RuntimeError('Client user declaration is unqualified')
+            declared.append(xmlid)
+    return declared
+""".replace("__MANIFEST_KEY__", repr(CLIENT_USER_MANIFEST_KEY))
+
+
+CLIENT_SIGNIN_LIST_PROGRAM = (
+    r"""
+import argparse, json, logging, os, sys, psycopg2
+logging.disable(logging.CRITICAL)
+sys.path.insert(0,'/volumes/scripts')
+import run_odoo_startup as startup
+from odoo.tools import config
+from odoo.modules.module import initialize_sys_path
+config['addons_path']=startup._load_settings(argparse.Namespace(config_path='')).addons_path
+initialize_sys_path()
+"""
+    + CLIENT_USER_DECLARATION_PROGRAM
+    + r'''
 spec=json.loads(sys.stdin.read())
 connection=psycopg2.connect(host=os.environ['ODOO_DB_HOST'],port=os.environ.get('ODOO_DB_PORT','5432'),
     dbname=spec['database'],user=os.environ['ODOO_DB_USER'],password=os.environ['ODOO_DB_PASSWORD'],connect_timeout=5)
 connection.set_session(readonly=True,autocommit=False)
-try:
-    with connection.cursor() as cursor:
-        cursor.execute("SET LOCAL statement_timeout='5s'")
-        cursor.execute("""
+def read_users(cursor):
+    cursor.execute("SELECT name FROM ir_module_module WHERE state='installed' ORDER BY name")
+    declared=declared_client_user_xmlids([row[0] for row in cursor.fetchall()])
+    if not declared:
+        return []
+    cursor.execute("""SELECT marker.module || '.' || marker.name
+FROM ir_model_data marker JOIN res_users account ON marker.model='res.users' AND account.id=marker.res_id
+WHERE marker.module || '.' || marker.name=ANY(%s)""",(declared,))
+    if {row[0] for row in cursor.fetchall()}!=set(declared):
+        raise RuntimeError('Declared native Client user is unresolved')
+    cursor.execute("""
 WITH RECURSIVE effective_groups(uid,gid) AS (
     SELECT uid,gid FROM res_groups_users_rel
     UNION
@@ -83,8 +120,9 @@ WITH RECURSIVE effective_groups(uid,gid) AS (
 SELECT marker.module || '.' || marker.name, partner.name, account.login
 FROM ir_model_data marker JOIN res_users account ON account.id=marker.res_id
 JOIN res_partner partner ON partner.id=account.partner_id
-WHERE marker.model='res.users' AND starts_with(marker.name,%s)
+WHERE marker.model='res.users' AND marker.module || '.' || marker.name=ANY(%s)
 AND account.id>2 AND account.active AND COALESCE(account.password,'')=''
+AND partner.name IS NOT NULL AND partner.name<>''
 AND NOT EXISTS (SELECT 1 FROM res_users sibling WHERE sibling.partner_id=account.partner_id AND sibling.id<>account.id)
 AND NOT EXISTS (SELECT 1 FROM res_users_log history WHERE history.create_uid=account.id)
 AND NOT EXISTS (
@@ -93,31 +131,45 @@ AND NOT EXISTS (
     WHERE membership.uid=account.id AND role.module || '.' || role.name=ANY(%s)
 )
 ORDER BY marker.module,marker.name
-""",(spec['xmlid_prefix'],spec['forbidden_groups']))
-        users=[{'xmlid':xmlid,'name':name,'login':login} for xmlid,name,login in cursor.fetchall()]
+""",(declared,spec['forbidden_groups']))
+    return [{'xmlid':xmlid,'name':name,'login':login} for xmlid,name,login in cursor.fetchall()]
+try:
+    with connection.cursor() as cursor:
+        cursor.execute("SET LOCAL statement_timeout='5s'")
+        users=read_users(cursor)
     print(json.dumps({'users':users}))
 finally:
     connection.rollback()
     connection.close()
 '''
+)
 
 
-CLIENT_SIGNIN_ODOO_PROGRAM = r"""
+CLIENT_SIGNIN_ODOO_PROGRAM = (
+    CLIENT_USER_DECLARATION_PROGRAM
+    + r"""
 import json, logging, os
 logging.disable(logging.CRITICAL)
 xmlid=request['xmlid']
-if not xmlid.split('.',1)[-1].startswith(request['xmlid_prefix']):
+installed=env['ir.module.module'].sudo().search([('state','=','installed')]).mapped('name')
+declared=declared_client_user_xmlids(installed)
+if xmlid not in declared:
     raise RuntimeError('Undeclared Client user')
+for candidate in declared:
+    record=env.ref(candidate,raise_if_not_found=False)
+    if not record or record._name!='res.users':
+        raise RuntimeError('Declared native Client user is unresolved')
 user=env.ref(xmlid,raise_if_not_found=False)
 if not user or user._name!='res.users' or user.id<=2:
     raise RuntimeError('Unavailable Client user')
 env.cr.execute("SELECT COALESCE(password,'') <> '' FROM res_users WHERE id=%s FOR UPDATE",(user.id,))
 if env.cr.fetchone()[0]:
     raise RuntimeError('Client password is already set')
+user=user.with_context(active_test=False)
 user.invalidate_recordset()
-if not user.active or user.login_date or any(user.has_group(group) for group in request['forbidden_groups'] if env.ref(group,raise_if_not_found=False)):
+if not user.active or not user.name or user.login_date or any(user.has_group(group) for group in request['forbidden_groups'] if env.ref(group,raise_if_not_found=False)):
     raise RuntimeError('Client user is ineligible')
-partner=user.partner_id.sudo()
+partner=user.partner_id.sudo().with_context(active_test=False)
 if len(partner.user_ids)!=1:
     raise RuntimeError('Ambiguous Client partner')
 partner.signup_prepare(signup_type='signup')
@@ -127,3 +179,4 @@ env.cr.commit()
 with os.fdopen(os.open(request['result_file'],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:
     json.dump({'xmlid':xmlid,'name':user.name,'token':token},stream)
 """
+)

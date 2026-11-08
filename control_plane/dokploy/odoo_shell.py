@@ -2,20 +2,20 @@ ODOO_RUNNER_PROGRAM = r"""
 from collections.abc import Callable
 from typing import Any
 
-def qualified_script_runner(spec: dict[str, Any], docker: Callable[..., bytes]) -> str:
+def qualified_script_runner(spec: dict[str, Any], docker: Callable[..., bytes], refused: Callable[[str], Exception] = RuntimeError) -> str:
     project=spec['project']
     ids=docker('ps','--filter','label=com.docker.compose.project='+project,
         '--filter','label=com.docker.compose.service=script-runner','--format','{{.ID}}').decode().split()
-    if len(ids)!=1: raise RuntimeError('Ambiguous testing runner')
+    if len(ids)!=1: raise refused('runner_unselected')
     runner=json.loads(docker('inspect',ids[0]))[0]
     env=dict(value.split('=',1) for value in runner['Config']['Env'] if '=' in value)
     observed=json.loads(env.get(spec['identity_key'],'{}'))
     expected=spec['identity']
     observed.pop('deployed_at',None); expected.pop('deployed_at',None)
     if observed!=expected or runner['Config']['Image']!=spec['image']:
-        raise RuntimeError('Testing runner identity changed')
+        raise refused('runner_changed')
     if env.get('PLATFORM_INSTANCE')!=('preview' if spec['identity']['environment_kind']=='preview' else spec['identity']['instance']) or env.get('ODOO_DB_HOST')!='database' or env.get('ODOO_DB_NAME')!=spec['database']:
-        raise RuntimeError('Testing runner database changed')
+        raise refused('runner_changed')
     return ids[0]
 """
 

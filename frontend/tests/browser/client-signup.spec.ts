@@ -12,7 +12,7 @@ test("only the Client sees eligible signup buttons and minting happens only on c
   let privateReads = 0;
   let mints = 0;
   const binding = "a".repeat(64);
-  const user = { xmlid: "fixture.launchplane_client_example", name: "Example Client", login: "client@example.invalid" };
+  const user = { xmlid: "fixture.user_client", name: "Example Client", login: "client@example.invalid" };
   const csrf = "fixture";
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: csrf, identity: { login: "example-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
   await page.route("**/v1/product-review?*", route => route.fulfill({ json: { ...review, viewer_is_owner: client, can_decide: client } }));
@@ -28,7 +28,7 @@ test("only the Client sees eligible signup buttons and minting happens only on c
     expect(route.request().headers()["x-csrf-token"]).toBe(csrf);
     return route.fulfill({ json: { name: user.name, sign_in_url: new URL("/web/signup?token=fictional", review.preview_url).toString() } });
   });
-  await page.route("https://site.preview.example.invalid/web/signup?*", route => route.fulfill({ contentType: "text/html", body: "<h1>Native signup</h1>" }));
+  await page.context().route("https://site.preview.example.invalid/web/signup?*", route => route.fulfill({ contentType: "text/html", body: "<h1>Native signup</h1>" }));
   const path = "/ui/owner-review?repository=example%2Fcontrol-plane&pull_request=308";
   await page.goto(path);
   const button = page.getByRole("button", { name: "Sign in as Example Client" });
@@ -49,7 +49,42 @@ test("only the Client sees eligible signup buttons and minting happens only on c
   eligible = true;
   await page.reload();
   await expect(button).toBeVisible();
+  const popup = page.waitForEvent("popup");
   await button.click();
-  await expect(page.getByRole("heading", { name: "Native signup" })).toBeVisible();
+  const nativePage = await popup;
+  await expect(nativePage.getByRole("heading", { name: "Native signup" })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: "I looked at this preview and it is right." })).toBeEnabled();
+  await nativePage.close();
   expect(mints).toBe(1);
+  const readsBeforeHistory = privateReads;
+  await page.goto(path + "&decision_id=historical-decision");
+  await expect(page.getByRole("link", { name: "View latest review" })).toBeVisible();
+  await expect(button).toHaveCount(0);
+  expect(privateReads).toBe(readsBeforeHistory);
+});
+
+test("a live hotfix review never offers testing-lane signup", async ({ page }) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=operator");
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("operator");
+  });
+  response.viewer_is_owner = true;
+  response.can_start_temporary_hotfix = false;
+  response.reviewing_temporary_hotfix = true;
+  response.live_site_url = "https://live.example.invalid/";
+  let reads = 0;
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "example-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.route("**/v1/product-review/sign-in?*", route => {
+    reads += 1;
+    return route.fulfill({ json: { users: [{ xmlid: "fixture.user_client", name: "Example Client", login: "client@example.invalid" }], runtime_binding: "a".repeat(64) } });
+  });
+  await page.goto("/ui/owner-review?product=example-site");
+  await expect(page.getByRole("link", { name: "Open the live site", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sign in as Example Client" })).toHaveCount(0);
+  expect(reads).toBe(0);
+  response.reviewing_temporary_hotfix = false;
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Sign in as Example Client" })).toBeVisible();
 });

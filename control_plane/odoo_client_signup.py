@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from pydantic import BaseModel, ConfigDict, SecretStr
 
@@ -9,6 +9,9 @@ from control_plane.contracts.preview_fixture import PreviewFixtureRequest
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
 from control_plane.dokploy.odoo_client_signin import client_signin_command
+from control_plane.disposable_lanes import require_lane_target_ownership
+from control_plane.testing_serving_copy import published_testing_copy
+from control_plane.workflows.odoo_preview_runtime import odoo_compose_has_domain
 from control_plane.odoo_runtime_reads import (
     OdooRuntimeConnection,
     require_exclusive_odoo_signin_origin,
@@ -52,6 +55,8 @@ def _connection(
     profile: LaunchplaneProductProfileRecord,
     identity: LaunchplaneIdentity,
     lane: ClientSigninLane,
+    *,
+    mutation: bool = False,
 ) -> OdooRuntimeConnection:
     if not viewer_is_product_owner(profile=profile, identity=identity):
         raise PermissionError("Client sign-in is unavailable.")
@@ -59,7 +64,7 @@ def _connection(
         lane.pull_request is not None
     ) != (lane.instance == "preview"):
         raise ValueError("The requested Client lane does not match this product.")
-    if profile.driver_id != "odoo":
+    if not profile.is_active or profile.driver_id != "odoo":
         raise ValueError("This product does not support native Odoo sign-in.")
     if lane.pull_request is not None:
         preview = resolve_serving_preview(
@@ -86,7 +91,7 @@ def _connection(
                 generation_id=lane.generation_id,
                 fixture="read-only-test-identity",
             ),
-        ).connect()
+        ).connect(mutation=mutation)
     elif lane.instance == "testing":
         selection = select_stable_runtime(store, profile, "testing")
         if selection.identity.artifact_id != lane.generation_id:
@@ -97,6 +102,34 @@ def _connection(
             control_plane_root=root,
             database_url=store.database_url,
         )
+        publication = published_testing_copy(
+            store, product=profile.product, context=selection.identity.context
+        )
+        if publication is not None:
+            if publication.plan.candidate.compose_id != connection.evidence.target_id:
+                raise ValueError("The published testing recipient changed.")
+        else:
+            require_lane_target_ownership(
+                (
+                    *store.list_dokploy_target_id_records(),
+                    *store.list_physical_provider_target_records(),
+                ),
+                context=selection.identity.context,
+                instance="testing",
+                target_id=connection.evidence.target_id,
+            )
+        hostname = urlsplit(selection.base_url).hostname
+        if not (
+            hostname == selection.route_host
+            if selection.route_host
+            else odoo_compose_has_domain(
+                host=connection.host,
+                token=connection.token,
+                compose_id=connection.evidence.target_id,
+                domain_host=hostname or "",
+            )
+        ):
+            raise ValueError("The origin does not belong to this testing target.")
     else:
         raise ValueError("Unsupported Client sign-in lane.")
     require_exclusive_odoo_signin_origin(
@@ -145,9 +178,8 @@ def _require_current(
     identity: LaunchplaneIdentity,
 ) -> None:
     assert_selection_current(store, connection.selection)
-    if not viewer_is_product_owner(
-        profile=store.read_product_profile_record(profile.product), identity=identity
-    ):
+    current = store.read_product_profile_record(profile.product)
+    if not current.is_active or not viewer_is_product_owner(profile=current, identity=identity):
         raise PermissionError("Client sign-in is unavailable.")
 
 
@@ -179,7 +211,7 @@ def mint_client_signin(
     reviewed_runtime_binding: str,
     xmlid: str,
 ) -> dict[str, str]:
-    connection = _connection(store, root, profile, identity, lane)
+    connection = _connection(store, root, profile, identity, lane, mutation=True)
     if not reviewed_runtime_binding or _binding(connection) != reviewed_runtime_binding:
         raise ValueError("The reviewed sign-in lane changed.")
     _require_current(store, connection, profile, identity)

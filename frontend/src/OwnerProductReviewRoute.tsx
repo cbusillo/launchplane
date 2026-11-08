@@ -272,7 +272,7 @@ function ProductReviewCard({
       </header>
       {review.pull_request_title ? <h3>{review.pull_request_title}</h3> : null}
       <div className="owner-review-links">
-        {review.viewer_is_owner && review.preview_is_current && !fixtureMode && previewUrl ? <ClientSignupLinks repository={review.repository} pullRequest={review.pull_request_number} generationId={review.preview_generation_id} instance="preview" laneUrl={review.preview_url} /> : null}
+        {review.viewer_is_owner && review.preview_is_current && !historical && !fixtureMode && previewUrl ? <ClientSignupLinks repository={review.repository} pullRequest={review.pull_request_number} generationId={review.preview_generation_id} instance="preview" laneUrl={review.preview_url} onOpened={() => setOpenedPreview(previewKey)} /> : null}
         {previewUrl ? (
           <a
             className="button button-primary owner-review-preview"

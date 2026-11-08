@@ -240,21 +240,6 @@ class ProductReviewDecisionStorageTests(unittest.TestCase):
 
 
 class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
-    async def test_anonymous_cannot_read_native_client_signup_links(self) -> None:
-        self._write_product()
-        response = await _asgi_request(
-            self._app(),
-            "POST",
-            "/v1/product-review/sign-in",
-            payload={
-                "repository": _REPOSITORY,
-                "pull_request": _PULL_REQUEST,
-                "generation_id": "generation",
-                "instance": "preview",
-            },
-        )
-        self.assertEqual(response.status_code, 401)
-
     def setUp(self) -> None:
         temporary_directory = TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)

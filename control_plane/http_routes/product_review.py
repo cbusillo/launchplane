@@ -209,14 +209,22 @@ def register_product_review_routes(
         identity: LaunchplaneIdentity,
         record_store: object,
         trace_id: str,
-    ) -> tuple[object, LaunchplaneProductProfileRecord]:
+    ) -> LaunchplaneProductProfileRecord:
         from control_plane.storage.postgres import PostgresRecordStore
 
         store = review_store(record_store, trace_id)
-        profile = visible_profile(
-            store=store, repository=envelope.repository, identity=identity, trace_id=trace_id
+        profile = next(
+            (
+                candidate
+                for candidate in product_profiles_for_repository(
+                    store=store, repository=envelope.repository
+                )
+                if candidate.is_active
+                and viewer_is_product_owner(profile=candidate, identity=identity)
+            ),
+            None,
         )
-        if not viewer_is_product_owner(profile=profile, identity=identity):
+        if profile is None:
             unavailable(trace_id)
         if (
             not isinstance(record_store, PostgresRecordStore)
@@ -229,7 +237,7 @@ def register_product_review_routes(
                 code="client_signup_unavailable",
                 message="Sign-in is unavailable for this lane.",
             )
-        return record_store, profile
+        return profile
 
     def signin_response(
         operation: Callable[[], dict[str, object] | dict[str, str]], trace_id: str
@@ -267,7 +275,7 @@ def register_product_review_routes(
             instance=instance,
         )
         trace_id = common.next_trace_id()
-        _store, profile = signin_inputs(envelope, identity, record_store, trace_id)
+        profile = signin_inputs(envelope, identity, record_store, trace_id)
         assert isinstance(record_store, PostgresRecordStore)
         root = dependencies.control_plane_root
         assert root is not None
@@ -293,7 +301,7 @@ def register_product_review_routes(
         from control_plane.storage.postgres import PostgresRecordStore
 
         trace_id = common.next_trace_id()
-        _store, profile = signin_inputs(envelope, identity, record_store, trace_id)
+        profile = signin_inputs(envelope, identity, record_store, trace_id)
         assert isinstance(record_store, PostgresRecordStore)
         root = dependencies.control_plane_root
         assert root is not None

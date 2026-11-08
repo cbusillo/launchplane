@@ -245,7 +245,9 @@ finally:
 )
 
 
-ACCOUNT_JOURNAL_READ_PROGRAM = r"""
+ACCOUNT_JOURNAL_READ_PROGRAM = (
+    ODOO_RUNNER_PROGRAM
+    + r"""
 import base64,json,re,sys,os,stat,time,subprocess
 from pathlib import Path
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
@@ -278,16 +280,8 @@ try:
         preview=identity['environment_kind']=='preview'
         if identity['instance'] in ('prod','production') or (preview and not (spec.get('read_only') and identity.get('preview_id') and identity.get('preview_generation_id'))) or (not preview and identity['instance']!='testing'):
             raise RuntimeError('Unsupported task target')
-        ids=docker('ps','--filter','label=com.docker.compose.project='+spec['project'],
-            '--filter','label=com.docker.compose.service=script-runner','--format','{{.ID}}').decode().split()
-        if len(ids)!=1: raise Refused('runner_unselected')
-        runner=json.loads(docker('inspect',ids[0]))[0]
-        environment=dict(value.split('=',1) for value in runner['Config']['Env'] if '=' in value)
-        observed=json.loads(environment.get(spec['identity_key'],'{}')); expected=spec['identity']
-        observed.pop('deployed_at',None); expected.pop('deployed_at',None)
-        if observed!=expected or runner['Config']['Image']!=spec['image'] or environment.get('PLATFORM_INSTANCE')!=('preview' if preview else 'testing') or environment.get('ODOO_DB_HOST')!='database' or environment.get('ODOO_DB_NAME')!=spec['database']:
-            raise Refused('runner_changed')
-        response=json.loads(docker('exec','-i',ids[0],'python3','-c',spec['probe'],data=json.dumps(spec).encode()))
+        runner=qualified_script_runner(spec,docker,Refused)
+        response=json.loads(docker('exec','-i',runner,'python3','-c',spec['probe'],data=json.dumps(spec).encode()))
         if not isinstance(response,dict) or set(response)!={'reason'} or response['reason'] not in __PROBE_READS__:
             raise RuntimeError('Invalid probe receipt')
         reason=response['reason']
@@ -300,7 +294,8 @@ except Exception:
     reason='unavailable'
 print(sys.argv[2]+json.dumps({'type':'complete','clear':reason=='clear','reason':reason}),flush=True)
 """.replace("__JOURNAL_DIRECTORY__", repr(WALKTHROUGH_JOURNAL_DIRECTORY)).replace(
-    "__PROBE_READS__", repr(tuple(read.value for read in _PROBE_READS))
+        "__PROBE_READS__", repr(tuple(read.value for read in _PROBE_READS))
+    )
 )
 
 

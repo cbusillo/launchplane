@@ -7,8 +7,12 @@ title: Client Review and Retired Acceptance History
 ### Native Odoo signup links
 
 The signed-in recorded Client can choose a tenant-declared Odoo user from the
-preview or testing review page. Only active seeded `res.users` external IDs
-named `launchplane_client_*` without a password or earlier sign-in are offered;
+preview or testing review page. The optional installed seed addon manifest key
+`launchplane_client_user_xmlids` is a plain list of exact canonical native
+`res.users` XMLIDs owned by that addon. Missing or empty metadata offers no user
+and never gates a deployment. Malformed or unresolved declarations refuse
+sign-in qualification. Only active declared users without a password or earlier
+sign-in are offered;
 Settings and other administrative roles are excluded. Tenant repositories own
 user seeds, names and groups. Launchplane creates no user or password.
 
@@ -27,7 +31,9 @@ Launchplane stores no invitation, secret, idempotency result or auth record.
 Ordinary review payloads, deploy evidence and GitHub projections contain none.
 The private response is uncacheable, and no credential URL enters the DOM before
 the click. The person chooses their own password on Odoo's native signup form.
-No email or Authentik setup is performed. Production is outside this first slice.
+Launchplane never writes user email/login fields (native security-notice mail
+can be triggered by those writes even with `no_reset_password`). No email or
+Authentik setup is performed. Production is outside this first slice.
 
 A native signup URL is a credential. Never capture its address, DOM, network
 payload or page in agent traces or screenshots. Before actual lane use, qualify
