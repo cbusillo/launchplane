@@ -451,21 +451,10 @@ remaining domain and storage removal is tracked in #2437.
     disposition preparation; its retirement and live acceptance boundaries
     remain on that issue.
 
-- Every Code local automation work-request routes (Every Code is retired; see
-  `DIRECTION.md`. These routes and the Every Code sections below remain only
-  until their readers move):
-  - `GET /v1/previews/readiness` (native FastAPI for bearer-token,
-    human-session, and Every Code worker-token callers)
-  - `GET /v1/every-code/work-requests` (native FastAPI for bearer-token,
-    human-session, and Every Code worker-token callers)
-  - `GET /v1/every-code/work-requests/{request_id}` (native FastAPI for
-    bearer-token, human-session, and Every Code worker-token callers)
-  - `GET /v1/every-code/pr-feedback` (native FastAPI for bearer-token,
-    human-session, and Every Code worker-token callers)
-  - `GET /v1/every-code/preview-gates` (native FastAPI for bearer-token,
-    human-session, and Every Code worker-token callers)
-  - `GET /v1/every-code/notification-attempts` (native FastAPI for
-    bearer-token, human-session, and Every Code worker-token callers)
+- Retained Every Code read routes are described with their authorization and
+  filters [below](#independent-local-admin-verification); Every Code is retired
+  under [DIRECTION.md](../DIRECTION.md#retired).
+- preview PR feedback notification attempt read:
   - `GET /v1/previews/pr-feedback/notification-attempts` (native FastAPI for
     bearer-token and human-session callers)
 - preview PR feedback notification policy route:
@@ -858,7 +847,9 @@ reusable-workflow identity.
 
 `GET /v1/authz-diagnostics/active-policy/health` is a separate read-only
 support contract. It requires a GitHub administrator, local administrator, or
-`local_operator` caller with `authz_policy_health.read`, reloads the exact active DB
+`local_operator` caller, or a terminal agent admitted by the
+[standing read role](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission).
+It requires `authz_policy_health.read`, reloads the exact active DB
 policy after preflight authorization, and reauthorizes against that record. The
 response contains active-record identity, revision, digest, schema version,
 bounded health reason codes, at most 100 lexically ordered managed-set summaries
@@ -868,11 +859,14 @@ workflows, or principal identifiers. Missing active state returns `503`, and
 multiple active records return `409`; the service never falls back to cached
 policy state for the response.
 
-`local_operator` callers with `authz_policy_effective_access.read` can likewise evaluate
+The same caller types with `authz_policy_effective_access.read` can evaluate
 one explicit principal through `POST /v1/authz-diagnostics/effective-access/evaluate`.
 Both the runtime policy and fresh active DB policy must allow the read. The
 evaluation reports a decision without impersonating that principal or granting
 its permissions to the caller.
+Supply explicit action, product, context and target scope, with one exact
+instance for instance scope. The response returns only that scope, the decision,
+a bounded reason and active policy provenance, without rule or selector details.
 
 `GET /v1/authz-diagnostics/activation-preflight/self` is the signed-in
 browser-human self-check for policy-administration authority. It rejects every
@@ -923,8 +917,10 @@ break-glass mechanism, or general policy editor.
 
 `POST /v1/authz-diagnostics/candidate-policy/preview` is a separate
 administrator-read contract protected by `authz_policy_candidate_preview.read`.
-It accepts one exact schema-v2 candidate authorization policy and at most 25
-explicit probes, reloads and reauthorizes against the single active DB policy,
+GitHub administrators and local administrators are eligible; Director-agent
+identities require the [standing read role](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission).
+It accepts one exact schema-v2 or schema-v3 candidate authorization policy and
+at most 25 explicit probes, reloads and reauthorizes against the single active DB policy,
 and evaluates both policies through the ordinary effective-access evaluator.
 The response contains immutable active-policy provenance, submitted and
 canonical evaluated-candidate digests, a normalization flag, bounded health and
@@ -935,6 +931,15 @@ principal identifiers, tokens, secrets, or topology. Same-origin browser calls
 verify CSRF without renewing the session or rotating its token, and the route
 performs no policy, session, denial-evidence, idempotency, outbox, provider,
 runtime, secret, durable-operation, or other persistence write.
+
+Schema v3 belongs to the retired ordinary-agent delegated-delivery design; do
+not build on it. Its candidate previews include `ordinary_agents` in structural rule
+counts and changed-collection reporting. Effective-access probes remain closed
+to the five established caller identity types, and ordinary rules do not enter
+administrator reachability, applying-administrator retention, strict-human
+evidence, or quorum. Managed reconciliation dry-runs may explicitly migrate v2
+to v3 while replacing one reviewed managed set and preserving every unrelated
+set. Schema-v3 apply remains fenced.
 
 `POST /v1/authz-diagnostics/repository-scope/read` is the independently
 grantable DB-backed repository-scope audit read. It requires
@@ -960,6 +965,8 @@ cap reports `source_truncated` and cannot produce complete coverage.
 Public handle derivation requires the canonical high-entropy managed-secret key
 ring; legacy passphrase-only compatibility configuration fails closed rather
 than exposing a known-plaintext verifier for the managed-secret root.
+Handles are stable only within `handle_generation`; regenerate the comparison
+after that marker changes rather than correlating old and new handles.
 
 `coverage.state=complete` requires exact set equality: every DB repository must
 match one submitted candidate, every candidate must exist in DB scope, and no
@@ -1164,7 +1171,10 @@ cancelled, include source links and freshness/provenance, and avoid provider-onl
 internals, local paths, or secrets. Detail fields and check summaries are bounded
 and redacted before they leave the read-model projection.
 
-The direct Every Code record reads are also native FastAPI routes. Work-request
+The retained Every Code GET paths are `/v1/every-code/work-requests`,
+`/v1/every-code/work-requests/{request_id}`, `/v1/every-code/pr-feedback`,
+`/v1/every-code/preview-gates` and `/v1/every-code/notification-attempts`.
+These direct record reads are native FastAPI routes. Work-request
 reads use `every_code_work_request.read`; PR-feedback reads use
 `every_code_pr_feedback.read`; preview-gate reads use
 `every_code_preview_gate.read`; Every Code notification-attempt reads use
@@ -1382,17 +1392,8 @@ Consumers use an authorized product-profile read and the existing scoped
 product/environment reads to inspect release inputs; this mapping does not read
 artifact manifests, release tuples, addon repositories, or addon pins.
 
-`GET /v1/agent/context` is a native FastAPI thin read-only aggregation endpoint
-for public-safe skill preflight. It requires `product_environment.read` for
-product/context `launchplane`, accepts an optional `repository` filter, and
-composes the existing repo-product mapping, preview
-readiness, and optional exact tenant-admission projections under named sections.
-Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
-writes no
-records, fetches no issue bodies, and must preserve the lower-level
-redaction/provenance rules.
-
-Full train Client qualification remains independent of this discovery hint.
+For `GET /v1/agent/context`, its authorization and section-level availability,
+see the [agent context contract](agent-context-boundary.md#read-context).
 `control_plane/client_release_repositories.py::client_release_profiles` starts
 from active product profiles, reads each Odoo stable lane's release tuple, and
 then reads its artifact manifest to match recorded addon sources. Its caller is
@@ -3006,99 +3007,16 @@ For reviewed reconciliation of provider-absent legacy preview history, see
 
 ### Admin read endpoints
 
-- `GET /v1/products` (native FastAPI for bearer-token and human-session
-  callers)
-- `GET /v1/products/{product}` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/products/{product}/activity` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/products/{product}/environments` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/products/{product}/environments/{environment}` (native FastAPI for
-  bearer-token and human-session callers)
-- `GET /v1/products/{product}/environments/{environment}/promotion-status`
-  (native FastAPI for bearer-token and human-session callers)
-- `GET /v1/products/{product}/environments/{environment}/promotion/workflow-deliveries/{delivery_id}`
-  (native FastAPI for bearer-token and human-session callers)
-- `GET /v1/previews/{preview_id}` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/previews/{preview_id}/history` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/inventory/{context}/{instance}` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/promotions/{record_id}` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/deployments/{record_id}` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/artifacts/protected` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/contexts/{context}/secrets` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/contexts/{context}/instances/{instance}/secrets` (native FastAPI
-  for bearer-token and human-session callers)
-- `GET /v1/secrets/{secret_id}` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/contexts/{context}/operations/recent` (native FastAPI for
-  bearer-token and human-session callers)
-- `GET /v1/product-profiles` (native FastAPI for bearer-token,
-  human-session, and Every Code worker-token callers)
-- `GET /v1/product-profiles/{product}` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/service/runtime` (native FastAPI for bearer-token and human-session
-  callers)
-- `GET /v1/service/odoo-workers/status` (native FastAPI for bearer-token and
-  human-session callers)
-- `POST /v1/service/odoo-workers/reconcile` (native FastAPI on the bearer/OIDC
-  write identity path with `launchplane_service.reconcile_odoo_workers`)
-- `GET /v1/service/verireel-workers/status` (native FastAPI for bearer-token and
-  human-session callers)
-- `POST /v1/service/verireel-workers/reconcile` (native FastAPI on the
-  bearer/OIDC write identity path with
-  `launchplane_service.reconcile_verireel_workers`)
-- `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}` (native
-  FastAPI for bearer-token and human-session callers)
-- `POST /v1/drivers/odoo/stable-bootstrap` (native FastAPI on the bearer/OIDC
-  write identity path with `odoo_stable_bootstrap.execute`)
-- `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}` (native
-  FastAPI for bearer-token and human-session callers)
-- `GET /v1/edge-endpoints/records` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/edge-endpoints/records/{endpoint_key}` (native FastAPI for
-  bearer-token and human-session callers)
-- `GET /v1/private-health-endpoints/records` (native FastAPI for bearer-token
-  and human-session callers)
-- `GET /v1/private-health-endpoints/records/{endpoint_key}` (native FastAPI for
-  bearer-token and human-session callers)
-- `GET /v1/ingress/canary-routes/records` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/ingress/canary-routes/records/{canary_key}` (native FastAPI for
-  bearer-token and human-session callers)
-- `GET /v1/route-bindings/records` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/route-bindings/records/current` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/ingress/route-audits/records` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/ingress/route-audits/records/{record_id}` (native FastAPI for
-  bearer-token and human-session callers)
-- `GET /v1/dokploy-targets/inspect` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/dokploy/inventory` (native FastAPI for bearer-token and
-  human-session callers)
-- `GET /v1/previews/readiness` (native FastAPI for bearer-token,
-  human-session, and Every Code worker-token callers)
-- `GET /v1/every-code/work-requests` (native FastAPI for bearer-token,
-  human-session, and Every Code worker-token callers)
-- `GET /v1/every-code/work-requests/{request_id}` (native FastAPI for
-  bearer-token, human-session, and Every Code worker-token callers)
-- `GET /v1/every-code/pr-feedback` (native FastAPI for bearer-token,
-  human-session, and Every Code worker-token callers)
-- `GET /v1/every-code/preview-gates` (native FastAPI for bearer-token,
-  human-session, and Every Code worker-token callers)
-- `GET /v1/every-code/notification-attempts` (native FastAPI for bearer-token,
-  human-session, and Every Code worker-token callers)
-- `GET /v1/previews/pr-feedback/notification-attempts` (native FastAPI for
-  bearer-token and human-session callers)
+The [route inventory](#current-implementation-status) lists current read routes;
+export OpenAPI with `uv run launchplane service export-openapi` for the current
+schema. Service worker reconciliation writes retain their separate actions:
+
+- `POST /v1/service/odoo-workers/reconcile` uses the bearer/OIDC write identity
+  path with `launchplane_service.reconcile_odoo_workers`.
+- `POST /v1/service/verireel-workers/reconcile` uses the bearer/OIDC write
+  identity path with `launchplane_service.reconcile_verireel_workers`.
+- `POST /v1/drivers/odoo/stable-bootstrap` uses the bearer/OIDC write identity
+  path with `odoo_stable_bootstrap.execute`.  bearer-token and human-session callers)
 
 These admin reads use the same Launchplane authn/authz boundary as evidence
 ingress. The intent is to give admins a minimal typed read surface for the
@@ -3776,15 +3694,8 @@ required technical checks and current source-control facts. Optional legacy path
 and categories remain readable in old stored results, but current reads do not
 consult the retired evidence stores.
 
-`GET /v1/agent/context` may include the same evaluation as a named
-`tenant_admission` section when the caller supplies every exact candidate field
-and base branch. Ordinary repository-only agent context requests remain
-compatible and omit that section. Incomplete candidate input returns HTTP 400;
-tenant-admission authorization, storage, stale-head, or GitHub failures are
-reported on that section without dropping unrelated read-model sections. The
-agent endpoint never gains maintenance-policy, reconciliation, controller, or
-merge write authority.
-
+The [agent context contract](agent-context-boundary.md#read-context) owns the
+optional `tenant_admission` projection and its partial-failure behavior.
 `POST /v1/tenant-admission/status/reconcile` accepts a strict schema-v1 envelope
 containing that candidate. It is bearer-only, rejects terminal-agent identities,
 requires `tenant_admission.reconcile` authorization for the candidate
