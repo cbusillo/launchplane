@@ -3,7 +3,6 @@ import json
 import os
 import re
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI
@@ -12,6 +11,37 @@ from starlette.types import Message, Receive, Scope, Send
 
 from control_plane.contracts.prepared_public_site import PreparedPublicSite
 from control_plane.prepared_public_site import prepared_public_app, verify_snapshot
+
+
+ACTIVE_PAUSE_FILE = "active.json"
+
+
+def bundle_name(pause_id: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,160}", pause_id) is None:
+        raise ValueError("prepared serving requires its original pause identity")
+    return hashlib.sha256(pause_id.encode()).hexdigest() + ".json"
+
+
+def prepared_bundle_text(site: PreparedPublicSite, pause_id: str) -> str:
+    return json.dumps(
+        {"pause_id": pause_id, "site": site.model_dump(mode="json", exclude_defaults=True)}
+    )
+
+
+def parse_prepared_bundle(text: str, pause_id: str) -> PreparedPublicSite:
+    value = json.loads(text)
+    if value["pause_id"] != pause_id:
+        raise ValueError("prepared bundle belongs to another pause")
+    site = PreparedPublicSite.model_validate(value["site"])
+    verify_snapshot(site)
+    return site
+
+
+def parse_active_pause(text: str) -> str:
+    value = json.loads(text)
+    if not isinstance(value, str) or not value:
+        raise ValueError("prepared publication has no original pause identity")
+    return value
 
 
 class PreparedSiteDirectory:
@@ -25,107 +55,19 @@ class PreparedSiteDirectory:
         self.directory = directory
 
     def path(self, pause_id: str) -> Path:
-        if re.fullmatch(r"[A-Za-z0-9_-]{1,160}", pause_id) is None:
-            raise ValueError("prepared serving requires its original pause identity")
-        return self.directory / (hashlib.sha256(pause_id.encode()).hexdigest() + ".json")
+        return self.directory / bundle_name(pause_id)
 
     def load(self, pause_id: str) -> PreparedPublicSite:
         path = self.path(pause_id)
         if path.is_symlink():
             raise ValueError("prepared bundle cannot be a symlink")
-        value = json.loads(path.read_text())
-        if value["pause_id"] != pause_id:
-            raise ValueError("prepared bundle belongs to another pause")
-        site = PreparedPublicSite.model_validate(value["site"])
-        verify_snapshot(site)
-        return site
+        return parse_prepared_bundle(path.read_text(), pause_id)
 
     def active_pause(self) -> str:
-        path = self.directory / "active.json"
+        path = self.directory / ACTIVE_PAUSE_FILE
         if path.is_symlink():
             raise ValueError("prepared publication cannot be a symlink")
-        value = json.loads(path.read_text())
-        if not isinstance(value, str) or not value:
-            raise ValueError("prepared publication has no original pause identity")
-        return value
-
-    def publish(self, site: PreparedPublicSite, pause_id: str) -> None:
-        verify_snapshot(site)
-        path = self.path(pause_id)
-        self._publish(
-            path,
-            json.dumps(
-                {"pause_id": pause_id, "site": site.model_dump(mode="json", exclude_defaults=True)}
-            ),
-            replace=False,
-        )
-        if self.load(pause_id) != site:
-            raise ValueError("prepared bundle differs from its immutable pause")
-        self._publish(self.directory / "active.json", json.dumps(pause_id), replace=True)
-        if self.active_pause() != pause_id:
-            raise ValueError("prepared publication readback differs")
-
-    def prune(
-        self,
-        reconstructable: dict[str, PreparedPublicSite],
-        *,
-        protected: set[str],
-        serving_prepared: bool,
-    ) -> None:
-        try:
-            active = self.active_pause()
-        except FileNotFoundError:
-            active = ""
-        if serving_prepared:
-            protected = protected | {active}
-        for pause_id, site in reconstructable.items():
-            if pause_id in protected:
-                continue
-            path = self.path(pause_id)
-            try:
-                if self.load(pause_id) != site:
-                    raise ValueError("prepared retention lacks its exact durable reconstruction")
-            except FileNotFoundError:
-                continue
-            if pause_id == active:
-                publication = self.directory / "active.json"
-                if self.active_pause() != pause_id or serving_prepared:
-                    raise ValueError("prepared publication changed during retention")
-                publication.unlink()
-            path.unlink()
-        descriptor = os.open(self.directory, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-
-    def _publish(self, path: Path, payload: str, *, replace: bool) -> None:
-        if path.is_symlink():
-            raise ValueError("prepared publication cannot replace a symlink")
-        temporary: str | None = None
-        try:
-            with NamedTemporaryFile(mode="w", dir=self.directory, delete=False) as stream:
-                temporary = stream.name
-                os.fchmod(stream.fileno(), 0o644)
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            if replace:
-                os.replace(temporary, path)
-                temporary = None
-            else:
-                try:
-                    os.link(temporary, path)
-                except FileExistsError:
-                    return
-            descriptor = os.open(self.directory, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        finally:
-            if temporary is not None:
-                Path(temporary).unlink(missing_ok=True)
+        return parse_active_pause(path.read_text())
 
 
 class PreparedDirectoryServing:

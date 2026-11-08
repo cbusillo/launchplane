@@ -1,19 +1,17 @@
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 import base64
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 import json
 import logging
 import hashlib
-import os
 from pathlib import Path
 import secrets
 import time
 from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
 
-import yaml
 
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverLane, GenericWebCutoverPlan
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -39,11 +37,8 @@ from control_plane.contracts.prepared_public_site import (
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.dokploy import api, post_deploy
 from control_plane.dokploy.cutover_execution import require_cutover_execution
-from control_plane.dokploy.cutover_host_state import (
-    CutoverHostState,
-    verify_shared_watched_directory,
-    writer_service,
-)
+from control_plane.dokploy.cutover_host_files import ProductHostFileRoute, ProductHostPreparedSites
+from control_plane.dokploy.cutover_host_state import CutoverHostState, writer_service
 from control_plane.dokploy.cutover_probes import CutoverProbes, PrivateHealthFailed
 from control_plane.dokploy.cutover_transport import CutoverHostTransport, CutoverCommandFailed
 from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
@@ -55,7 +50,6 @@ from control_plane.dokploy.cutover_restore_probe import (
 )
 from control_plane.dokploy.generic_web_cutover import WebSlotDriver
 from control_plane.dokploy.odoo_cutover import OdooSlotDriver
-from control_plane.dokploy.prepared_host import PreparedSiteDirectory
 from control_plane.dokploy.prepared_server import require_prepared_server
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.dokploy.service_cutover import OdooHostCapabilities
@@ -81,7 +75,6 @@ from control_plane.dokploy.slot_writers import (
 )
 from control_plane.dokploy.source import read_dokploy_config
 from control_plane.dokploy.traefik_cutover import (
-    TraefikFileRoute,
     TraefikRouteTarget,
     route_payload,
 )
@@ -229,19 +222,9 @@ def readiness_container_state(transport: CutoverHostTransport, container: str) -
         return {"status": "unavailable"}
 
 
-class GuardedFileRoute(TraefikFileRoute):
-    def __init__(self, target: TraefikRouteTarget, guard: Callable[[], None]) -> None:
-        super().__init__(target)
-        self.guard = guard
-
-    def publish(self, backend: str, *, expected: tuple[str, ...]) -> str:
-        self.guard()
-        return super().publish(backend, expected=expected)
-
-
 class DokployCutoverHost:
     def __init__(self) -> None:
-        self.routes: dict[str, TraefikFileRoute] = {}
+        self.routes: dict[str, ProductHostFileRoute] = {}
 
     def odoo(
         self, plan: OdooCutoverPlan, lane: OdooCutoverLane, store: object, root: Path
@@ -254,7 +237,7 @@ class DokployCutoverHost:
     def web(self, plan: GenericWebCutoverPlan, store: object, root: Path) -> WebSlotDriver:
         raise ValueError("generic-web installed host capability is not qualified")
 
-    def route(self, lane: OdooCutoverLane | GenericWebCutoverLane) -> TraefikFileRoute:
+    def route(self, lane: OdooCutoverLane | GenericWebCutoverLane) -> ProductHostFileRoute:
         route = self.routes.get(lane.route_id)
         if route is None or route.target.host != lane.host:
             raise ValueError("cutover route has no bound installed host")
@@ -293,20 +276,15 @@ class BoundOdooCutoverHost:
             },
         )
         self.admitted = False
-        self.route = GuardedFileRoute(
+        self.route = ProductHostFileRoute(
             TraefikRouteTarget(
                 route_id=plan.route_id, host=plan.host, **self.runtime.route.model_dump()
             ),
-            self.guard,
+            reader=self.transport.read,
+            execute=self.transport,
+            lock_directory=self.runtime.authority_directory,
+            guard=self.guard,
         )
-        prepared_root = os.environ.get("LAUNCHPLANE_PREPARED_PUBLIC_ROOT", "")
-        if (
-            not prepared_root
-            or not Path(prepared_root).is_absolute()
-            or not Path(prepared_root).is_dir()
-        ):
-            raise ValueError("cutover host requires its dedicated prepared-public volume")
-        self.prepared_path = Path(prepared_root) / plan.route_id
         targets = self.initial_targets()
         self.native_writer_capability = NativeCronWriterCapabilities(
             plan,
@@ -569,10 +547,10 @@ class BoundOdooCutoverHost:
             and self.runtime.public_origin != "https://" + plan.host
         ):
             raise ValueError("live cutover requires its public HTTPS origin")
-        verify_shared_watched_directory(self.route.target.route_file, self.transport.read)
+        self.route.verify_watch()
         observed = self.route.observed_target()
         targets = (plan.old.private_url, plan.new.private_url, self.lane.prepared_origin)
-        owned = yaml.safe_load(self.route.target.route_file.read_text())
+        owned = self.route.owned_document()
         if observed not in targets or owned not in [
             json.loads(json.dumps(route_payload(self.route.target, target))) for target in targets
         ]:
@@ -667,6 +645,7 @@ class BoundOdooCutoverHost:
         if plan != self.plan:
             raise ValueError("host execution crossed its original plan")
         self.guard()
+        self.route.fence_earlier_commands()
         self.state.admit_execution(recovery=self.record() is not None)
         self.admitted = True
         retained = self.state.authority("retained-assets")
@@ -726,7 +705,7 @@ class BoundOdooCutoverHost:
             yield
             try:
                 self.prune_prepared()
-            except (OSError, ValueError, KeyError):
+            except (OSError, ValueError, KeyError, RuntimeError):
                 logging.getLogger(__name__).warning("Prepared bundle retention remains incomplete.")
         finally:
             self.admitted = False
@@ -824,8 +803,14 @@ class BoundOdooCutoverHost:
         self.probes.private_health(plan.old)
         return site
 
-    def prepared_store(self) -> PreparedSiteDirectory:
-        return PreparedSiteDirectory(self.prepared_path)
+    def prepared_store(self) -> ProductHostPreparedSites:
+        return ProductHostPreparedSites(
+            reader=self.transport.read,
+            execute=self.transport,
+            volume=self.runtime.prepared_volume,
+            site=self.plan.route_id,
+            lock_directory=self.runtime.authority_directory,
+        )
 
     def prepared_server(self, *, require_running: bool = True) -> None:
         require_prepared_server(self.runtime, self.transport.read, require_running=require_running)
@@ -842,7 +827,6 @@ class BoundOdooCutoverHost:
             or site.plan.binding != self.plan.old.binding
         ):
             raise ValueError("prepared bundle crossed its original pause")
-        self.prepared_path.mkdir(mode=0o755, parents=False, exist_ok=True)
         self.prepared_store().publish(site, pause_id)
         for resource in site.resources:
             observed = self.probes.private_resource(self.lane.prepared_origin, resource.path)
@@ -879,7 +863,7 @@ class BoundOdooCutoverHost:
             directory.active_pause() == pause_id
             and directory.load(pause_id) == record.public_site
             and self.route.observed_target() == self.lane.prepared_origin
-            and yaml.safe_load(self.route.target.route_file.read_text())
+            and self.route.owned_document()
             == json.loads(json.dumps(route_payload(self.route.target, self.lane.prepared_origin)))
         )
 

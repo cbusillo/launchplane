@@ -4,14 +4,23 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import json
+
+from control_plane.contracts.prepared_public_site import PreparedPublicSite
 from control_plane.dokploy.prepared_host import (
     PreparedSiteDirectory,
+    prepared_bundle_text,
     prepared_directory_app,
     prepared_service_app,
 )
 from control_plane.prepared_public_site import prepare_public_site, snapshot_digest
 from tests.support.http import lifespan_client, request
 from tests.support.prepared_public_fixture import WebsiteFixture
+
+
+def write_published(directory: Path, site: PreparedPublicSite, pause_id: str) -> None:
+    PreparedSiteDirectory(directory).path(pause_id).write_text(prepared_bundle_text(site, pause_id))
+    (directory / "active.json").write_text(json.dumps(pause_id))
 
 
 class PreparedHostTests(unittest.IsolatedAsyncioTestCase):
@@ -26,8 +35,7 @@ class PreparedHostTests(unittest.IsolatedAsyncioTestCase):
         self.directory.mkdir()
 
     async def test_restart_serves_persisted_bytes_and_keeps_submissions_paused(self) -> None:
-        publisher = PreparedSiteDirectory(self.directory)
-        publisher.publish(self.site, "original-operation")
+        write_published(self.directory, self.site, "original-operation")
         restarted = PreparedSiteDirectory(self.directory)
         self.assertEqual(restarted.load("original-operation"), self.site)
         async with lifespan_client(prepared_directory_app(self.directory)) as client:
@@ -41,17 +49,9 @@ class PreparedHostTests(unittest.IsolatedAsyncioTestCase):
             response = await request(client, "POST", "/contact", raw_body=b"inert submission")
             self.assertEqual(response.status_code, 423)
 
-    async def test_lost_publication_reply_replays_exact_bundle_and_corruption_fails_closed(
-        self,
-    ) -> None:
-        publisher = PreparedSiteDirectory(self.directory)
-        publisher.publish(self.site, "original-operation")
-        publisher.publish(self.site, "original-operation")
-        foreign = self.site.model_copy(update={"content_digest": "unverified"})
-        with self.assertRaises(ValueError):
-            publisher.publish(foreign, "original-operation")
-        self.assertEqual(publisher.load("original-operation"), self.site)
-        publisher.path("original-operation").write_text("{}")
+    async def test_corrupt_bundle_fails_closed(self) -> None:
+        write_published(self.directory, self.site, "original-operation")
+        PreparedSiteDirectory(self.directory).path("original-operation").write_text("{}")
         async with lifespan_client(prepared_directory_app(self.directory)) as client:
             response = await request(client, "GET", "/")
             self.assertEqual(response.status_code, 503)
@@ -67,7 +67,7 @@ class PreparedHostTests(unittest.IsolatedAsyncioTestCase):
         site = site.model_copy(update={"content_digest": snapshot_digest(site)})
         lane = self.directory / "lane"
         lane.mkdir()
-        PreparedSiteDirectory(lane).publish(site, "original-operation")
+        write_published(lane, site, "original-operation")
         with patch.dict("os.environ", {"LAUNCHPLANE_PREPARED_PUBLIC_ROOT": str(self.directory)}):
             app = prepared_service_app()
         async with lifespan_client(app) as client:
@@ -77,27 +77,3 @@ class PreparedHostTests(unittest.IsolatedAsyncioTestCase):
             foreign = await request(client, "GET", "/", headers={"Host": "foreign.invalid"})
             self.assertEqual(foreign.status_code, 503)
             self.assertNotIn("x-launchplane-public-copy", foreign.headers)
-
-    async def test_retention_requires_durable_reconstruction_and_preserves_held_publication(
-        self,
-    ) -> None:
-        publisher = PreparedSiteDirectory(self.directory)
-        publisher.publish(self.site, "old-terminal")
-        publisher.publish(self.site, "held")
-        known = {"old-terminal": self.site, "held": self.site}
-        publisher.prune(known, protected={"held"}, serving_prepared=True)
-        self.assertFalse(publisher.path("old-terminal").exists())
-        self.assertEqual(publisher.load("held"), self.site)
-        self.assertEqual(publisher.active_pause(), "held")
-        publisher.prune(known, protected={"held"}, serving_prepared=False)
-        self.assertEqual(publisher.load("held"), self.site)
-        corrupted = self.site.model_copy(update={"content_digest": "foreign"})
-        with self.assertRaises(ValueError):
-            publisher.prune({"held": corrupted}, protected=set(), serving_prepared=False)
-        self.assertEqual(publisher.load("held"), self.site)
-        publisher.prune(known, protected=set(), serving_prepared=False)
-        self.assertFalse(publisher.path("held").exists())
-        with self.assertRaises(FileNotFoundError):
-            publisher.active_pause()
-        publisher.publish(self.site, "held")
-        self.assertEqual(publisher.load("held"), self.site)

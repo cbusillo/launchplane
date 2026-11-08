@@ -247,25 +247,3 @@ class CutoverHostTransportTests(unittest.TestCase):
                 host="https://provider.invalid", token="inert", path="/api/compose.one"
             )
             dispatch.assert_called_once()
-
-    def test_local_route_publication_rechecks_its_bound_lane_guard(self) -> None:
-        from control_plane.dokploy.cutover_host import GuardedFileRoute
-        from control_plane.dokploy.traefik_cutover import TraefikFileRoute, TraefikRouteTarget
-
-        with TemporaryDirectory() as temporary:
-            target = TraefikRouteTarget(
-                route_id="fixture",
-                host="fixture.invalid",
-                route_file=Path(temporary) / "route.yaml",
-                api_url="http://proxy.invalid",
-                entrypoints=("web",),
-                tls=False,
-            )
-            guard = Mock(side_effect=ValueError("bound lane authority changed"))
-            route = GuardedFileRoute(target, guard)
-            with (
-                patch.object(TraefikFileRoute, "publish") as publish,
-                self.assertRaises(ValueError),
-            ):
-                route.publish("http://candidate.invalid", expected=("http://serving.invalid",))
-            publish.assert_not_called()

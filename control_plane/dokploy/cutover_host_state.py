@@ -1,6 +1,4 @@
-import hashlib
 import json
-from pathlib import Path
 from typing import Any
 
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooSlot
@@ -128,22 +126,3 @@ class CutoverHostState:
 
     def addresses(self, slot: OdooSlot, writer: WriterTarget) -> set[str]:
         return set(self.address_history.get(slot.slot_id + ":" + writer_service(writer), ()))
-
-
-def verify_shared_watched_directory(route_file: Path, reader: ContainerCommand) -> None:
-    program = "import hashlib,json,sys; from pathlib import Path; spec=json.load(sys.stdin); path=Path(spec['path']); metadata=path.stat(); print(json.dumps({'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),'device':metadata.st_dev,'inode':metadata.st_ino,'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}))"
-    try:
-        metadata = route_file.stat()
-        expected = {
-            "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
-            "device": metadata.st_dev,
-            "inode": metadata.st_ino,
-            "sha256": hashlib.sha256(route_file.read_bytes()).hexdigest(),
-        }
-    except OSError as error:
-        raise ValueError(
-            "cutover host cannot prove its co-located watched-directory mount"
-        ) from error
-    observed = json.loads(reader(("python3", "-c", program), json.dumps({"path": str(route_file)})))
-    if observed != expected:
-        raise ValueError("API/worker route mount does not share the admitted provider filesystem")

@@ -138,7 +138,6 @@ class CutoverHostDiscoveryTests(unittest.TestCase):
                 entrypoints=("web",),
                 tls=False,
             )
-            route_file.write_text(json.dumps(route_payload(target, plan.old.private_url)))
             runtime = SimpleNamespace(
                 public_origin="http://" + plan.host, private_network="private", data_volume="data"
             )
@@ -172,7 +171,14 @@ class CutoverHostDiscoveryTests(unittest.TestCase):
                         production_use="prelaunch"
                     )
                 ),
-                route=SimpleNamespace(target=target, observed_target=lambda: plan.old.private_url),
+                route=SimpleNamespace(
+                    target=target,
+                    observed_target=lambda: plan.old.private_url,
+                    verify_watch=Mock(),
+                    owned_document=lambda: json.loads(
+                        json.dumps(route_payload(target, plan.old.private_url))
+                    ),
+                ),
                 record=lambda: None,
                 writers=SimpleNamespace(
                     targets=tuple(
@@ -196,11 +202,8 @@ class CutoverHostDiscoveryTests(unittest.TestCase):
                 capabilities=Mock(return_value="bound-capabilities"),
             )
             bound.preflight = lambda current: BoundOdooCutoverHost.preflight(bound, current)
-            with (
-                patch(
-                    "control_plane.dokploy.cutover_host.BoundOdooCutoverHost", return_value=bound
-                ),
-                patch("control_plane.dokploy.cutover_host.verify_shared_watched_directory"),
+            with patch(
+                "control_plane.dokploy.cutover_host.BoundOdooCutoverHost", return_value=bound
             ):
                 result = DokployCutoverHost().odoo(
                     plan,

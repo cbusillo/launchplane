@@ -60,13 +60,15 @@ records. The legacy empty install pass is never called on this path.
 
 `TraefikFileRoute` publishes one YAML route file with an atomic rename and
 reads the actual router/service from Traefik's API, followed by the provider's
-independent public identity probe. The watched directory must be mounted, not
-the individual renamed file. The publisher rejects duplicate host routers,
-foreign targets and missing applied evidence. An asynchronous apply can return
-an uncertain result after a bounded applied-readback deadline; the persisted
-controller reads authority before retrying. A file containing other routes or
-services is refused rather than overwritten. Applied and public health evidence
-records the observed endpoint and runtime, including a fresh switch-back probe.
+independent public identity probe. The installed host runs both on the product
+host; see [Installed Dokploy host](#installed-dokploy-host). The watched
+directory must be mounted, not the individual renamed file. The publisher
+rejects duplicate host routers, foreign targets and missing applied evidence.
+An asynchronous apply can return an uncertain result after a bounded
+applied-readback deadline; the persisted controller reads authority before
+retrying. A file containing other routes or services is refused rather than
+overwritten. Applied and public health evidence records the observed endpoint
+and runtime, including a fresh switch-back probe.
 See [Traefik's file-provider documentation](https://doc.traefik.io/traefik/v3.3/providers/file/).
 
 ## Compatible and database-changing paths
@@ -415,22 +417,38 @@ authorization and backup checkpoint at each dispatch. A lost terminal completion
 holds the original operation; it does not become a successful deployment result.
 The worker image needs neither a Docker CLI nor a Docker socket.
 
-Route publication remains synchronous and local. API, worker and registered
-provider host must share the same Linux host and the exact watched-file mount.
-A read-only boot identity, inode, device and content comparison proves that
-placement before admission. The initial file must already name the serving slot,
-and applied Traefik authority must agree with its single exact route. Missing
-mounts or file permissions are activation prerequisites, not a reason to use a
-provider-side route write. Changing live ingress access remains a Director stop
+Route publication and prepared serving run on the registered product host
+through that same transport; Launchplane is not co-located with any product.
+The lane's `route_file` names the route document in the product host's watched
+directory. Preflight proves on that host that the running `dokploy-traefik`
+container bind-mounts exactly that directory read-write, that its static file
+provider watches the mounted destination, and that host and container see the
+same directory device and inode. Publication takes a host lock in the authority
+directory, rechecks that mount, and replaces the file only when its current
+bytes and the lane's host generation both still match what the worker read,
+then advances that generation. Pause activation and retention share the same
+lane lock and generation, and reads take the same lock. Every cutover, rollback
+and recovery run advances the generation when it enters its exclusive section,
+before any other host effect, so a command an earlier run dispatched and lost
+can never apply after a later run observes or settles the lane.
+Applied readback reads Traefik's API from inside that container. The
+initial file must already name the serving slot, and applied Traefik authority
+must agree with its single exact route. Missing mounts or file permissions are
+activation prerequisites. Changing live ingress access remains a Director stop
 boundary.
 
-The service Compose mounts a dedicated prepared-public volume into API and Odoo
-workers at `/app/prepared-public`. The `LAUNCHPLANE_PREPARED_PUBLIC_ROOT` bootstrap
-setting names that mount. It contains only already-public immutable bundles and
-an atomic active-pause pointer, not runtime records or credentials. Staging
-reads back every resource, its digest and original pause ID through the retained
-server before publishing the route. Another process can serve the persisted
-bundle after the worker exits; missing or corrupt bundles return unavailable.
+The lane's dedicated prepared-public volume lives on the product host's Docker
+daemon, beside the retained server that reads it. Equal volume names on another
+daemon never share these bytes. The host stages each immutable bundle into that
+volume's local mountpoint under the lane's route ID, never replacing an
+existing bundle, then atomically replaces the active-pause pointer after
+checking that its bundle is still staged. It contains
+only already-public immutable bundles and that pointer, not runtime records or
+credentials. Staging reads back every resource, its digest and original pause
+ID through the retained server before publishing the route. Another process can
+serve the persisted bundle after the worker exits or is replaced; missing or
+corrupt bundles return unavailable. Retention deletes a terminal bundle only
+while its bytes still match the reconstruction the worker verified.
 
 `prepared-public.compose.yml` is the separate retained server definition. Supply
 its explicit image, container, volume and private network from the lane record.
