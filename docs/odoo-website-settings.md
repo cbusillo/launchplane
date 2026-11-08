@@ -93,21 +93,16 @@ An accepted rollback restores that baseline even when it had no configured
 settings and the artifact is unchanged. Manual same-artifact recovery continues
 to reuse its verified applied snapshot.
 For configured website snapshots, subsequent review compares
-against production's applied settings. A failed maintenance retains its exact attempted snapshot as unverified, outside the production checklist; the existing maintenance or durable operation retry must verify it before a new release review.
+against production's applied settings. Failed maintenance retains its exact
+attempted snapshot as unverified, outside the production checklist; the existing
+maintenance or durable operation retry must verify it before a new release review.
 
 The stopped-web stable-target replacement driver supports native application.
-Two-slot lanes use the service's admitted host factory and native maintenance,
-settings and writer adapters described in
-[the cutover binding contract](generic-web-two-slot-releases.md). The installed
-host must provide startup preflight and recreation in both slots; missing
-capabilities refuse before candidate effects. The same writer inventory flows
-through fencing, settings verification and handoff. A rollback factory refusal
-records a failed rollback before any provider effect, preserving its failure
-receipt instead of leaving it pending. Installed-package import or construction
-errors report an unavailable host capability without exposing package details.
-Source assembly does not
-prove installation, lane activation or visitor behavior; #3268 retains that
-qualification. Never change a live product's driver to bypass the refusal.
+For two-slot lanes, use the native maintenance, settings, writer and startup
+contract in [Odoo two-slot releases](odoo-two-slot-releases.md#typed-website-settings).
+A rollback factory refusal records a failed rollback before provider effects;
+unavailable installed-host imports or construction expose no package details.
+Never change a live product's driver to bypass a capability refusal.
 
 The devkit consumer runs on data workflows and every web startup, clearing
 every copied website's native GA key and disabling
@@ -143,14 +138,5 @@ are an application contract, not proof of Client consent acceptance, personal-
 data exclusion from events, provider event delivery or real visitors. The
 product's analytics issue owns those checks and the real Measurement ID.
 
-Startup preflight checks each observed Compose service's literal image against
-the slot's immutable image and requires the authoritative `.env` last in its
-`env_file` list, without an explicit payload override. An interpolated/mutable
-image or a later env-file override refuses before writes; install the admitted
-immutable definition before qualification. Recreation always reads the new
-container identities, even after a lost reply. An unavailable identity readback keeps the release held. A later unique
-Compose readback recovers the inventory before retrying; zero or multiple
-containers remain uncertain and require the installed host's recovery procedure.
-The host transport must qualify interruption/convergence and fresh inventory
-reconstruction on restart before activation (#3268). Source support does not
-supply a live admin repair path or treat removed IDs as a successful receipt.
+Interrupted recreation and inventory readback follow the
+[startup recovery contract](odoo-two-slot-releases.md#interrupted-startup-recovery).

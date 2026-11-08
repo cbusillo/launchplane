@@ -29,7 +29,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
   for simple image-backed services deployed through Dokploy applications.
 - [prepared-public-serving.md](prepared-public-serving.md) — isolated prepared
   public pages/assets, writer fence/drain and measured pause capability for
-  database-changing releases; production integration remains separately tracked.
+  database-changing releases.
 - [generic-web-two-slot-releases.md](generic-web-two-slot-releases.md) — compatible application/Compose cutover, common traffic checks and isolated recovery proof.
 - [odoo-two-slot-releases.md](odoo-two-slot-releases.md) — exact-artifact Odoo
   cutover, private readiness, atomic traffic authority and restart records.

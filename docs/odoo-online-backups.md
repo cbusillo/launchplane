@@ -57,9 +57,6 @@ this capture neither permits live restore nor proves an image-only rollback.
 
 Independent infrastructure/PBS protection and release admission remain owned by
 [the production backup provider contract](production-backup-provider.md).
-Metadata invocation/policy and host activation stay on
-[launchplane#3242](https://github.com/cbusillo/launchplane/issues/3242) and
-[launchplane#3248](https://github.com/cbusillo/launchplane/pull/3248).
 Logical capture and its attachment proof do not replace either PBS or restore
 verification, change destinations/encryption, or authorize production writes.
 

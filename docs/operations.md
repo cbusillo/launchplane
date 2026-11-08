@@ -3353,17 +3353,9 @@ alone is not proof that an existing testing copy has been repaired.
   tenant repositories do not need direct access to Launchplane self-hosted
   runners; privileged provider mutations still execute inside the deployed
   Launchplane service.
-- `POST /v1/drivers/odoo/prod-rollback` rolls a prod-named Odoo lane back to
-  the artifact of the newest passing prod deployment whose artifact differs from
-  the lane's latest deployment, read from deployment history (newest first). It
-  refuses with `rollback_target_missing` when there is none. An explicit
-  `rollback.artifact_id` still overrides the default. The driver owns
-  rollback intent and promotion-record annotation, but the provider mutation runs
-  through the stable target replacement executor so deploy, runtime identity,
-  Odoo post-deploy maintenance, canonical/logo verification, deployment, and
-  release-tuple evidence stay on the canonical stable path. After the delegated
-  replacement passes, rollback refreshes prod inventory with rollback provenance
-  and annotates the current prod promotion record.
+- `POST /v1/drivers/odoo/prod-rollback` uses the
+  [Odoo stable executor](driver-descriptors.md) and the target-selection rule
+  described in the [admin release panel](#odoo-admin-release-panel).
 - `POST /v1/drivers/odoo/prod-backup-gate` captures the DB and filestore backup
   evidence required before Odoo prod promotion. See
   [online Odoo recovery tuples](odoo-online-backups.md) for the capture,
@@ -3893,7 +3885,8 @@ through these routes.
 - **Roll back** shows the artifact the rollback will redeploy, asks for a reason
   and confirmation, and queues it with `POST /v1/odoo-prod-rollbacks`. The route
   resolves the target once, before any effect: the explicit `artifact_id`, or
-  the previous passing prod deployment's artifact. It refuses with
+  the newest passing prod deployment's artifact that differs from the lane's
+  latest deployment. It refuses with
   `rollback_target_missing` when there is none. The target is stored on the
   operation and shown while it runs; the worker redeploys exactly that target
   and never re-resolves it.
@@ -3938,15 +3931,10 @@ with `lane_busy` too. The panel calls neither synchronous route.
   Stable replacement evidence records the value as `artifact_odoo_version`. Older
   manifests without it keep the environment's value, except clean-snapshot
   previews, which require a versioned manifest and qualified matching capture.
-- With no explicit artifact id, the Odoo prod rollback driver redeploys the
-  artifact of the previous passing prod deployment: the newest passing one whose
-  artifact differs from the lane's latest deployment. It writes rollback
-  evidence with a `deployment:<record_id>` source marker and fails closed when
-  no such deployment or its artifact manifest is missing. The prod environment
-  page shows that artifact before the admin confirms.
-- To choose another DB-backed artifact, pass it explicitly. The driver reads the
-  artifact manifest directly from Launchplane records and writes rollback
-  evidence with an `artifact:<artifact_id>` source marker.
+- The [admin release panel](#odoo-admin-release-panel) owns target selection.
+  Rollback requires the selected artifact's DB-backed manifest. Evidence uses a
+  `deployment:<record_id>` source marker for the previous passing deployment,
+  or `artifact:<artifact_id>` for an explicit target.
 - Rollback changes the image only; it re-runs post-deploy on a database the
   newer modules may already have upgraded. Restoring data is a separate stop-
   boundary action, so drill rollback with a release that has no schema change.
@@ -4651,18 +4639,6 @@ Launchplane treats product PRs as preview anchors. Companion, infra, and tooling
 repos should remain source inputs only unless a product explicitly maps them to
 a preview context.
 
-## Launchplane Boundary
-
-- GitHub remains the engineering workflow surface: issues, branches, pull
-  requests, labels, checks, PR comments, releases, and CI execution.
-- `launchplane` owns the durable operational truth behind those
-  workflows: artifacts, release tuples, previews, deployments, promotions,
-  backup gates, and inventory.
-- Launchplane should converge on a separate long-running service boundary even while
-  the first implementation still lives inside this repo.
-- The stable Launchplane contract should be service ingress plus Launchplane-owned
-  drivers, not repo-local shell wrappers around file writes.
-
 ## Product Retirement
 
 Use the signed-in admin **Retire product** card for a non-live generic-web
@@ -4670,12 +4646,6 @@ product with one testing lane. It reviews previews and the testing application
 as one operation. [Product retirement](product-retirement.md) owns the review,
 execution, recovery, and retained-history contract. Standalone preview cleanup
 keeps its existing authorization.
-
-The existing protected **Product Retirement** workflow and bearer API remain
-available for their exact lane-scoped tracked or no-target requests. They do
-not acquire product-wide preview teardown authority. The wrapper stays pinned
-to its existing worker until its owning task activates a replacement; this card
-needs no wrapper or access-policy change.
 
 ## Detached Application Retirement
 
@@ -4691,80 +4661,8 @@ issue comments or local CLI fallbacks.
 
 ## Privileged-Operation Canary
 
-Use `/ui/engineering/privileged-operations` for the governed browser-human
-plan, read, cancel, approve, and revoke flow. Planning and cancellation remain
-same-origin/fetch-metadata/single-use-CSRF browser writes; approval may execute
-immediately because the supervised worker can claim the record as soon as it is
-approved. Revocation works only before that claim. The UI never exposes execute;
-the DB-backed worker reauthorizes the immutable approver against the exact rule
-before terminal work.
-
-Compose runs that loop as `launchplane-privileged-operation-workers` using the
-same image as the API service. Its startup surface accepts only process settings
-for polling, batch limit, error backoff, and consecutive-error threshold; it
-does not accept operation IDs, plan digests, targets, or execution payloads.
-Production compose must pass the exact immutable deployed
-`DOCKER_IMAGE_REFERENCE` into the worker. A mutable local tag is normalized to
-an empty heartbeat image and can never satisfy runtime proof.
-
-Before any canary-rule activation, prove the privileged-operation worker
-container is running the expected image and has persisted one fresh successful
-DB-backed poll heartbeat. Dispatch the protected `Dokploy Target
-Inspect` workflow with the deployed target identity, exact service
-`launchplane-privileged-operation-workers`, and event
-`privileged_operation_worker_poll_succeeded`, plus the exact immutable image
-reference retained from the deployment as `expected_image`. Retain its redacted
-artifact for both success and failure diagnosis, but treat it as activation
-evidence only when `runtime_evidence.proof_ready` is true. The artifact contains
-image/state identity, exact image-match state, bounded heartbeat freshness and
-identity status, and diagnostic structured-event counts, not raw logs, worker
-identity digests, hostnames, or container config. Proof requires a fresh
-matching heartbeat whose internally hashed runtime hostname matches Dokploy's
-provider-observed Docker-assigned hostname and whose immutable image equals the
-provider-observed and admin-supplied image. The provider hostname must be a
-hexadecimal prefix of the selected container ID; a custom hostname blocks proof.
-Missing, stale, future-dated, identity-mismatched, or image-mismatched
-heartbeats block activation. Other fresh worker rows are diagnostic and cannot
-substitute for the selected container identity.
-The allow-listed `privileged_operation_worker_started` and
-`privileged_operation_worker_store_build_started` events may be queried for
-diagnostic localization, but they are not activation-proof authority. Runtime
-evidence includes bounded JSON/non-JSON counts and a fixed provider-error code
-for diagnosis, never line content. Provider log errors and unavailable log reads
-remain diagnostic and do not block a valid DB heartbeat. Target lookup, service
-selection, container configuration/identity, and image identity failures remain
-hard failures.
-
-The privileged-operation worker retains bounded expiry maintenance for legacy
-delivery ciphertext because managed-secret key retirement still accounts for
-that ciphertext. The ordinary enrollment recovery and execution workers are
-removed; remaining storage cleanup is tracked in #2437.
-
-Because runtime compatibility accepts only the checked-in Alembic head, a code
-rollback across this migration also requires the matching schema downgrade;
-deploying the previous image alone fails closed instead of running against an
-unknown heartbeat schema.
-Activate only
-`privileged_secret_operation.plan`, `privileged_secret_operation.read`, and
-`privileged_secret_operation.cancel` first. Add
-`privileged_secret_operation.approve` and `privileged_secret_operation.revoke`
-only after exact plan review. Keep `privileged_operation_summary.read`
-ungranted. Approval authority must remain active through the worker's terminal
-reauthorization. After terminal verification, or after any post-activation
-worker stop, revoke every canary rule and read the active policy back before
-continuing.
-
-Do not add a policy rule merely to exercise the routes. Any activation remains
-a separately Director-approved DB-native administration event by a GitHub human
-that already holds `authz_policy_grant.write`. If that authority does not exist,
-remain blocked under the authorization redesign; do not use a local-admin
-bearer, workflow, GitHub secret, or borrowed identity. Keep #2204 open until
-the actual migration, rollback, read-back, and soak are complete, and keep #2177
-open until its handoff criteria are complete.
-
-**Preserved history:** the Phase 1 read-only UI description applied before the
-Phase 2 worker deployment and is not current operating guidance. See
-`docs/privileged-operations.md`.
+Use the [privileged-operation contract](privileged-operations.md#authorization)
+for staged policy activation, worker runtime proof and revocation.
 
 ## GitHub delivery identity
 

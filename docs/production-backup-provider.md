@@ -105,10 +105,8 @@ its lease, commits the result, and claims no next capture. Compose allows 125
 minutes for that drain, covering the request's two-hour maximum and completion.
 Planned self-deployment now drains release effects before replacement through the
 [durable service admission fence](release-review.md#a-control-plane-replacement-drains-release-effects-first).
-The Compose grace remains protection for ordinary shutdown. Roll out new shutdown
-behavior while no capture is running: existing containers retain their old
-stop timeout until replaced. A forced kill or host loss still produces
-`backup_effect_outcome_unknown`; the status read explains that the release is
+The Compose grace remains protection for ordinary shutdown. A forced kill or
+host loss produces `backup_effect_outcome_unknown`; the status read explains that the release is
 stopped and the capture is not automatically retried. [Release review](release-review.md)
 owns supported continuation and reconciliation of the original accepted run.
 
@@ -348,8 +346,8 @@ backup status `pending` with `required=true`; a successful dry run never provide
 production backup proof. Live calls cannot use dry-run evidence to bypass the
 gate.
 
-Roll out the new reusable workflow revision and explicitly grant its caller
-`production_backup_gate.execute` for the exact production scope. Release-review
+Existing workflow callers require `production_backup_gate.execute` for the
+exact production scope. Release-review
 reads use an existing promotion grant covering both testing and prod in the
 lane's context, or `product_profile.read` for the product in the Launchplane
 context. Generic-web's workflow also uses that product-profile read capability
@@ -358,11 +356,9 @@ created by deployment. Older workflow pins or missing policies/evidence fail
 closed; enforcement applies to every Odoo and generic-web testing-to-production
 promotion, including products awaiting their own activation.
 
-Deploy the worker and API together, and confirm the worker runs the new revision
-before granting or using shared capture. An old worker cannot read schema-v3
-operations and must never receive them. Do not run the legacy and shared backup
-flows for the same guest during migration; the shared source lock does not
-control legacy host commands.
+Workers that cannot read schema-v3 operations must never receive them. Do not
+run legacy and shared backup flows for the same guest; the shared source lock
+does not control legacy host commands.
 
 ## Reusing stored worker credentials and checking without capture
 

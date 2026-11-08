@@ -29,10 +29,8 @@ Unknown evidence also
 marks `module_plan_complete=false`: consumers must refuse to execute an
 incomplete plan, rather than guessing modules or upgrading everything.
 Classification does not waive any backup, Client-acceptance, credential or
-traffic gate. This component neither deploys nor changes the current maintenance
-executor. The targeted consumer and safe registry startup belong to
-[odoo-devkit#198](https://github.com/cbusillo/odoo-devkit/issues/198); cutover
-consumption belongs to [#3266](https://github.com/cbusillo/launchplane/issues/3266).
+traffic gate. [Odoo two-slot releases](odoo-two-slot-releases.md) consume this
+classification before maintenance and traffic switching.
 Generic-web's existing artifact does not supply these declarations; its separate
 cutover work must retain a conservative result until it has verified proof.
 
