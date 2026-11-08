@@ -409,10 +409,13 @@ class RunnerLifecycleRouteTests(unittest.IsolatedAsyncioTestCase):
                 ("inventory", 503),
                 ("registration_token", 403),
                 ("retire", 403),
+                ("addon_job", 403),
             ):
                 payload: dict[str, object] = {"repository": "example/repo", "operation": operation}
                 if operation == "retire":
                     payload["runner_id"] = 456
+                if operation == "addon_job":
+                    payload.update(run_id=12, run_attempt=2, job_id=34)
                 response = await http_request(
                     app, "POST", RUNNER_LANE_SERVICE_ROUTE, payload=payload
                 )
