@@ -56,6 +56,22 @@ def read_owned(path):
     except FileNotFoundError: return None
 def sha256(content):
     return 'absent' if content is None else hashlib.sha256(content.encode()).hexdigest()
+def read_generation(path):
+    path=Path(path)
+    if path.is_symlink(): raise ValueError('host generation cannot be a symlink')
+    try: value=json.loads(path.read_text())
+    except FileNotFoundError: return 0
+    if type(value) is not int or value<0: raise ValueError('host generation is malformed')
+    return value
+def advance_generation(path,expected):
+    path=Path(path)
+    if read_generation(path)!=expected: return False
+    temporary=write_temporary(path.parent,json.dumps(expected+1),'.generation-','.pending')
+    try: os.replace(temporary,path)
+    except BaseException:
+        os.unlink(temporary); raise
+    sync_directory(path.parent)
+    return True
 """
 
 ROUTE_HOST_PROGRAM = (
@@ -78,12 +94,13 @@ if spec['mode']=='watch':
     destination=watched_destination()
     print(json.dumps({'destination':destination,'static':docker('exec',spec['proxy'],'cat',spec['static'])}))
 elif spec['mode']=='read':
+    generation=read_generation(spec['generation'])
     content=read_owned(route)
-    print(json.dumps({'present':content is not None,'content':content or ''}))
+    print(json.dumps({'present':content is not None,'content':content or '','generation':generation}))
 elif spec['mode']=='publish':
     hold_lock(spec['lock'])
     watched_destination()
-    if sha256(read_owned(route))!=spec['expected_sha256']:
+    if sha256(read_owned(route))!=spec['expected_sha256'] or not advance_generation(spec['generation'],spec['expected_generation']):
         print(json.dumps({'outcome':'predecessor_changed'}))
     else:
         temporary=write_temporary(directory,spec['content'],'.cutover-','.pending')
@@ -117,8 +134,9 @@ def owned_name(name):
     return name
 directory=site_directory()
 if spec['mode']=='read':
+    generation=read_generation(spec['generation'])
     content=read_owned(directory/owned_name(spec['name'])) if directory.is_dir() else None
-    print(json.dumps({'present':content is not None,'content':content or ''}))
+    print(json.dumps({'present':content is not None,'content':content or '','generation':generation}))
 elif spec['mode']=='stage':
     hold_lock(spec['lock'])
     directory.mkdir(mode=0o755,exist_ok=True); os.chmod(directory,0o755)
@@ -134,6 +152,7 @@ elif spec['mode']=='activate':
     hold_lock(spec['lock'])
     path=directory/'active.json'
     if not directory.is_dir() or path.is_symlink(): raise ValueError('prepared publication is unavailable')
+    if not advance_generation(spec['generation'],spec['expected_generation']): raise ValueError('prepared publication changed after admission')
     temporary=write_temporary(directory,spec['content'],'.active-','.pending')
     try: os.replace(temporary,path)
     except BaseException:
@@ -142,7 +161,9 @@ elif spec['mode']=='activate':
     print(json.dumps({'content':read_owned(path)}))
 elif spec['mode']=='prune':
     hold_lock(spec['lock'])
+    if read_generation(spec['generation'])!=spec['expected_generation']: raise ValueError('prepared publication changed during retention')
     if spec['deactivate'] is not None:
+        advance_generation(spec['generation'],spec['expected_generation'])
         if read_owned(directory/'active.json')!=spec['deactivate']: raise ValueError('prepared publication changed during retention')
         (directory/'active.json').unlink()
     for item in spec['remove']:
@@ -182,13 +203,16 @@ class ProductHostFileRoute(TraefikFileRoute):
     ) -> None:
         super().__init__(target)
         self.reader, self.execute, self.guard = reader, execute, guard
-        self.lock = f"{lock_directory.rstrip('/')}/{target.route_id}.route.lock"
+        authority = f"{lock_directory.rstrip('/')}/{target.route_id}.route"
+        self.lock, self.generation = authority + ".lock", authority + ".generation"
+        self.admitted: tuple[str, int] | None = None
 
-    def _request(self, mode: str, **values: str) -> dict[str, Any]:
+    def _request(self, mode: str, **values: object) -> dict[str, Any]:
         return {
             "mode": mode,
             "route_file": str(self.target.route_file),
             "proxy": MANAGED_PROXY_CONTAINER,
+            "generation": self.generation,
             **values,
         }
 
@@ -219,9 +243,12 @@ class ProductHostFileRoute(TraefikFileRoute):
         frame = run_host_program(self.reader, ROUTE_HOST_PROGRAM, self._request("read"))
         if frame["present"] is not True:
             raise FileNotFoundError("product-host route file is absent")
-        return str(frame["content"])
+        self.admitted = (str(frame["content"]), int(frame["generation"]))
+        return self.admitted[0]
 
     def _replace_owned(self, payload: str, predecessor: str) -> None:
+        if self.admitted is None or self.admitted[0] != predecessor:
+            raise ValueError("route authority changed; refusing a stale traffic switch")
         frame = run_host_program(
             self.execute,
             ROUTE_HOST_PROGRAM,
@@ -229,6 +256,7 @@ class ProductHostFileRoute(TraefikFileRoute):
                 "publish",
                 lock=self.lock,
                 expected_sha256=content_sha256(predecessor),
+                expected_generation=self.admitted[1],
                 content=payload,
             ),
         )
@@ -271,7 +299,8 @@ class ProductHostPreparedSites:
     ) -> None:
         self.reader, self.execute = reader, execute
         self.volume, self.site = volume, site
-        self.lock = f"{lock_directory.rstrip('/')}/{site}.prepared.lock"
+        authority = f"{lock_directory.rstrip('/')}/{site}.prepared"
+        self.lock, self.generation = authority + ".lock", authority + ".generation"
 
     def _run(self, command: ContainerCommand, mode: str, **values: object) -> dict[str, Any]:
         request = {
@@ -279,12 +308,16 @@ class ProductHostPreparedSites:
             "volume": self.volume,
             "site": self.site,
             "lock": self.lock,
+            "generation": self.generation,
             **values,
         }
         return run_host_program(command, PREPARED_HOST_PROGRAM, request)
 
+    def _read_frame(self, name: str) -> dict[str, Any]:
+        return self._run(self.reader, "read", name=name)
+
     def _read(self, name: str) -> str:
-        frame = self._run(self.reader, "read", name=name)
+        frame = self._read_frame(name)
         if frame["present"] is not True:
             raise FileNotFoundError("prepared file is absent on its product host")
         return str(frame["content"])
@@ -297,6 +330,7 @@ class ProductHostPreparedSites:
 
     def publish(self, site: PreparedPublicSite, pause_id: str) -> None:
         verify_snapshot(site)
+        generation = int(self._read_frame(ACTIVE_PAUSE_FILE)["generation"])
         staged = self._run(
             self.execute,
             "stage",
@@ -305,7 +339,9 @@ class ProductHostPreparedSites:
         )
         if parse_prepared_bundle(str(staged["content"]), pause_id) != site:
             raise ValueError("prepared bundle differs from its immutable pause")
-        activated = self._run(self.execute, "activate", content=json.dumps(pause_id))
+        activated = self._run(
+            self.execute, "activate", content=json.dumps(pause_id), expected_generation=generation
+        )
         if parse_active_pause(str(activated["content"])) != pause_id:
             raise ValueError("prepared publication readback differs")
 
@@ -316,10 +352,9 @@ class ProductHostPreparedSites:
         protected: set[str],
         serving_prepared: bool,
     ) -> None:
-        try:
-            active = self.active_pause()
-        except FileNotFoundError:
-            active = ""
+        publication = self._read_frame(ACTIVE_PAUSE_FILE)
+        generation = int(publication["generation"])
+        active = parse_active_pause(publication["content"]) if publication["present"] else ""
         if serving_prepared:
             protected = protected | {active}
         removals: list[dict[str, str]] = []
@@ -337,4 +372,10 @@ class ProductHostPreparedSites:
                 deactivate = json.dumps(pause_id)
             removals.append({"name": bundle_name(pause_id), "sha256": content_sha256(stored)})
         if removals:
-            self._run(self.execute, "prune", remove=removals, deactivate=deactivate)
+            self._run(
+                self.execute,
+                "prune",
+                remove=removals,
+                deactivate=deactivate,
+                expected_generation=generation,
+            )

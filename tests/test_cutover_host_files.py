@@ -34,7 +34,7 @@ class ProductHostRouteTests(unittest.TestCase):
             api_url="http://127.0.0.1:8080",
             tls=False,
         )
-        self.host.route_file.write_text(json.dumps(route_payload(self.target, OLD)))
+        self.host.route_file.write_text(json.dumps(route_payload(self.target, OLD), sort_keys=True))
         self.guard = Mock()
         self.route = ProductHostFileRoute(
             self.target,
@@ -67,6 +67,24 @@ class ProductHostRouteTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stale traffic switch"):
             self.route._replace_owned(json.dumps(route_payload(self.target, NEW)), admitted)
         self.assertEqual(self.host.route_file.read_bytes(), changed)
+
+    def test_delayed_switch_cannot_apply_after_the_route_returns_to_its_bytes(self) -> None:
+        delayed = ProductHostFileRoute(
+            self.target,
+            reader=self.host.read,
+            execute=self.host.execute,
+            lock_directory=str(self.host.authority),
+            guard=Mock(),
+        )
+        admitted = delayed._read_owned()
+        self.route.publish(NEW, expected=(OLD,))
+        self.route.publish(OLD, expected=(NEW,))
+        self.assertEqual(self.host.route_file.read_text(), admitted)
+        with self.assertRaisesRegex(ValueError, "stale traffic switch"):
+            delayed._replace_owned(
+                json.dumps(route_payload(self.target, "http://obsolete:8069")), admitted
+            )
+        self.assertEqual(self.route.observed_target(), OLD)
 
     def test_watch_proof_refuses_a_directory_the_proxy_does_not_watch(self) -> None:
         proxy = self.host.state["containers"]["dokploy-traefik"]
@@ -130,6 +148,29 @@ class ProductHostPreparedSitesTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             sites.publish(foreign, "original-operation")
         self.assertEqual(original.read_bytes(), before)
+
+    async def test_delayed_activation_and_retention_cannot_change_a_newer_pause(self) -> None:
+        sites = self.sites()
+        sites.publish(self.site, "original-operation")
+        admitted_generation = int(sites._read_frame("active.json")["generation"])
+        sites.publish(self.site, "rollback-operation")
+        with self.assertRaises(Exception):
+            sites._run(
+                sites.execute,
+                "activate",
+                content=json.dumps("original-operation"),
+                expected_generation=admitted_generation,
+            )
+        with self.assertRaises(Exception):
+            sites._run(
+                sites.execute,
+                "prune",
+                remove=[],
+                deactivate=None,
+                expected_generation=admitted_generation,
+            )
+        self.assertEqual(sites.active_pause(), "rollback-operation")
+        self.assertEqual(sites.load("original-operation"), self.site)
 
     async def test_volume_outside_the_product_daemon_root_is_refused(self) -> None:
         self.host.state["volumes"][self.host.volume]["Mountpoint"] = str(self.host.authority)
