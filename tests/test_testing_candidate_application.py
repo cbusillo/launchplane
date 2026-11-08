@@ -52,6 +52,8 @@ from tests.test_dokploy_compose_environment import (
 
 
 class CandidateApplicationTests(unittest.TestCase):
+    candidate_build = False
+
     def setUp(self) -> None:
         self.fixture = allocation_tests.TestingCandidateTests()
         self.fixture.setUp()
@@ -100,75 +102,52 @@ class CandidateApplicationTests(unittest.TestCase):
                 repository=self.profile.image.repository, digest="sha256:" + "a" * 64
             ),
         )
-        self.store.write_artifact_manifest(self.artifact)
+        if self.candidate_build:
+            from control_plane.contracts.artifact_identity import ArtifactSourceBuild
+
+            self.artifact = self.artifact.model_copy(
+                update={
+                    "artifact_id": f"artifact-{self.fixture.context}-run-7-1",
+                    "source_build": ArtifactSourceBuild(
+                        repository=self.profile.repository,
+                        repository_id="101",
+                        workflow_path=".github/workflows/build.yml",
+                        event="pull_request",
+                        purpose="preview",
+                        pull_request_number=9,
+                        run_id=7,
+                        run_attempt=1,
+                        github_artifact_id=70,
+                        manifest_artifact_id="producer-candidate",
+                    ),
+                }
+            )
+        else:
+            self.store.write_artifact_manifest(self.artifact)
         self.fixture.before = self.fixture.authority()
         self.credentials = self.store.list_secret_records(
             context_name=self.fixture.context, instance_name="testing"
         )
 
-    def test_native_worker_uses_retained_candidate_manifest_and_refuses_provenance_drift(
+    def test_candidate_admission_refuses_provenance_drift_and_runtime_uses_admitted_manifest(
         self,
     ) -> None:
         from control_plane import testing_rebuild_service as worker
         from control_plane.build_provenance import BuildProvenanceError, VerifiedBuildArtifact
-        from control_plane.contracts.artifact_identity import ArtifactSourceBuild
         from control_plane.contracts.odoo_stable_target_replacement_operation import (
             OdooStableTargetReplacementOperationRecord,
         )
         from control_plane.contracts.odoo_stable_target_replacement import (
             OdooStableTargetReplacementApplyRequest,
         )
-        from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
-        from tests.test_migrated_testing_source import MigratedTestingRequestTests
 
-        self.artifact = self.artifact.model_copy(
-            update={
-                "artifact_id": f"artifact-{self.fixture.context}-run-7-1",
-                "source_build": ArtifactSourceBuild(
-                    repository=self.profile.repository,
-                    repository_id="101",
-                    workflow_path=".github/workflows/build.yml",
-                    event="pull_request",
-                    purpose="preview",
-                    pull_request_number=9,
-                    run_id=7,
-                    run_attempt=1,
-                    github_artifact_id=70,
-                    manifest_artifact_id="producer-candidate",
-                ),
-            }
-        )
-        self.profile = self.profile.model_copy(
-            update={
-                "lanes": tuple(
-                    lane.model_copy(
-                        update={
-                            "odoo_testing_drill_storage": OdooTestingDrillStorageBudget(
-                                database_bytes=1024,
-                                filestore_bytes=1024,
-                                staging_bytes=1024,
-                                reserve_bytes=1024,
-                            )
-                        }
-                    )
-                    if lane.instance == "testing"
-                    else lane
-                    for lane in self.profile.lanes
-                )
-            }
-        )
-        self.store.write_product_profile_record(self.profile)
-        self.fixture.before = self.fixture.authority()
-        original = MigratedTestingRequestTests().request().migrated_source
-        assert original is not None
-        migrated = original.model_copy(
-            update={
-                "product": self.fixture.product,
-                "context": self.fixture.context,
-                "target_image": self.artifact.image.digest,
-            }
-        )
-        allocation = self.allocate("migrated", migrated)
+        self.doCleanups()
+        self.candidate_build = True
+        self.setUp()
+        self.execution("migrated")
+        allocation = self.allocation
+        migrated = self.compiled.plan.native_source
+        assert isinstance(migrated, MigratedOdooTestingSource)
         operation = OdooStableTargetReplacementOperationRecord(
             operation_id=allocation.operation_id,
             product=allocation.product,
@@ -221,7 +200,6 @@ class CandidateApplicationTests(unittest.TestCase):
             )
             with self.assertRaises(worker.NativeTestingRebuildAdmissionChanged):
                 execution.require_candidate_build()
-            self.assertEqual(execution.current_candidate_inputs(allocation).plan, inputs.plan)
             verify.side_effect = None
             changed = self.artifact.model_copy(
                 update={
@@ -231,10 +209,6 @@ class CandidateApplicationTests(unittest.TestCase):
             verify.return_value = VerifiedBuildArtifact(manifest=changed)
             with self.assertRaises(worker.NativeTestingRebuildAdmissionChanged):
                 execution.require_candidate_build()
-            verify.side_effect = AssertionError(
-                "Retained preparation must not rediscover the PR build"
-            )
-            self.assertEqual(execution.current_candidate_inputs(allocation).plan, inputs.plan)
             with self.assertRaises(ValueError):
                 execution.build_plan(
                     allocation, inputs.plan.model_copy(update={"artifact": changed})
@@ -291,6 +265,7 @@ class CandidateApplicationTests(unittest.TestCase):
             artifact_id=self.artifact.artifact_id,
             source=source,
             migrated_source=migrated_source,
+            admitted_artifact=self.artifact if self.candidate_build else None,
         )
 
     def test_migrated_pair_binds_candidate_image_and_receipt_before_restore(self) -> None:
@@ -665,8 +640,71 @@ class CandidateApplicationTests(unittest.TestCase):
         self.fixture.assert_serving_unchanged()
 
     def execution(self, source: CandidateSource = "empty") -> None:
-        self.allocation = self.allocate(source)
-        self.compiled = self.inputs(self.allocation, source)
+        migrated = None
+        if source == "migrated":
+            from tests.test_migrated_testing_source import MigratedTestingRequestTests
+            from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+            from control_plane.odoo_testing_restore import generation_binding
+
+            self.enterContext(
+                patch(
+                    "control_plane.odoo_testing_native_source.remove_completed_native_capture_cache"
+                )
+            )
+
+            original = MigratedTestingRequestTests().request().migrated_source
+            assert original is not None
+            migrated = original.model_copy(
+                update={
+                    "product": self.fixture.product,
+                    "context": self.fixture.context,
+                    "target_image": self.artifact.image.digest,
+                }
+            )
+            self.profile = self.profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(
+                            update={
+                                "odoo_testing_drill_storage": OdooTestingDrillStorageBudget(
+                                    database_bytes=1024,
+                                    filestore_bytes=1024,
+                                    staging_bytes=1024,
+                                    reserve_bytes=1024,
+                                )
+                            }
+                        )
+                        if lane.instance == "testing"
+                        else lane
+                        for lane in self.profile.lanes
+                    )
+                }
+            )
+            self.store.write_product_profile_record(self.profile)
+            self.fixture.before = self.fixture.authority()
+        self.allocation = self.allocate(source, migrated)
+        self.compiled = self.inputs(self.allocation, source, migrated)
+        if migrated is not None:
+            recorded = self.allocation.model_copy(
+                update={"application": TestingCandidateApplication(plan=self.compiled.plan)}
+            )
+            self.store.compare_and_write_testing_candidate(self.allocation, recorded)
+            self.allocation = recorded
+            assert self.compiled.plan.generation is not None
+            self.store.write_native_testing_copy_capture(
+                NativeTestingCopyCapture(
+                    product=migrated.product,
+                    context=migrated.context,
+                    generation_binding_sha256=generation_binding(self.compiled.plan.generation),
+                    source_binding_sha256=migrated.binding_sha256,
+                    capture_id="f" * 32,
+                    database=migrated.database,
+                    filestore=migrated.filestore,
+                    captured_at=datetime.now(UTC).isoformat(),
+                    source_observation=migrated,
+                ),
+                candidate_namespace=recorded.namespace,
+            )
         self.provider_state: dict[str, Any] = {
             "composeId": self.allocation.compose_id,
             "environmentId": self.allocation.environment_id,

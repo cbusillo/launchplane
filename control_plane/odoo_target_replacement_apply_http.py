@@ -343,17 +343,6 @@ def _validate_target_replacement_apply_artifact_authority(
             manifest = operation_store.read_artifact_manifest(artifact_id)
         except FileNotFoundError as error:
             raise ValueError("Odoo target replacement artifact manifest was not found.") from error
-    if (
-        manifest.source_build is not None
-        and manifest.source_build.purpose == "preview"
-        and (
-            replacement_request.instance != "testing"
-            or replacement_request.strategy != "replace-and-cutover"
-            or replacement_request.data_source_mode != "migrated_restore"
-            or replacement_request.migrated_source is None
-        )
-    ):
-        raise ValueError("A PR candidate requires its exact migrated native testing pair.")
     if not artifact_manifest_matches_image_repository(
         manifest,
         expected_repository=profile.image.repository,

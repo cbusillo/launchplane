@@ -944,9 +944,9 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                 self.store, profile, lane, artifact_id="artifact-cm-run-10-1", source_git_ref=OLDER
             )
 
-    def test_native_candidate_inventory_does_not_report_prior_release_as_already_deployed(
-        self,
-    ) -> None:
+    def serving_candidate(
+        self, status: Literal["pass", "reconciliation_required", "fail"] = "pass"
+    ) -> str:
         from tests.test_migrated_testing_source import MigratedTestingRequestTests
 
         self._running_release(20, DEPLOYABLE)
@@ -988,13 +988,106 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                     ),
                 ),
                 testing_candidate_manifest=candidate,
-                status="pass",
-                phase="completed",
+                status=status,
+                phase="post_deploy"
+                if status == "reconciliation_required"
+                else "completed"
+                if status == "pass"
+                else "failed",
                 created_at="2026-09-30T12:00:00Z",
                 updated_at="2026-09-30T12:00:00Z",
-                finished_at="2026-09-30T12:00:00Z",
+                finished_at="" if status == "reconciliation_required" else "2026-09-30T12:00:00Z",
+                error_message="Fixture retirement held" if status != "pass" else "",
+                error_code="fixture_retirement_held" if status != "pass" else "",
             )
         )
+        from control_plane.contracts.testing_candidate import (
+            TestingCandidateAllocation,
+            testing_candidate_namespace,
+        )
+        from control_plane.contracts.testing_candidate_application import (
+            TestingCandidateApplication,
+            TestingCandidateApplicationPlan,
+        )
+        from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+        from tests.test_odoo_testing_restore import generation
+
+        namespace = testing_candidate_namespace("site", "cm", "candidate-operation")
+        source = migrated.model_copy(
+            update={"product": "site", "context": "cm", "target_image": candidate.image.digest}
+        )
+        identity = RuntimeIdentity(
+            product="site",
+            context="cm",
+            instance="testing",
+            deployment_record_id="candidate-deployment",
+            artifact_id=candidate_id,
+            source_git_ref=PR_HEAD,
+            image_digest=candidate.image.digest,
+            image_reference=f"{IMAGE_REPOSITORY}@{candidate.image.digest}",
+        )
+        plan = TestingCandidateApplicationPlan(
+            product="site",
+            context="cm",
+            operation_id="candidate-operation",
+            namespace=namespace,
+            target_id="candidate-compose",
+            base_url="https://testing.example.invalid",
+            artifact=candidate,
+            runtime_identity=identity,
+            source="migrated",
+            native_source=source,
+            generation=generation().model_copy(
+                update={
+                    "product": "site",
+                    "context": "cm",
+                    "operation_id": "candidate-operation",
+                    "namespace": namespace,
+                    "target_id": "candidate-compose",
+                    "domain_host": "testing.example.invalid",
+                    "source_mode": "container-export",
+                    "source_binding_sha256": source.binding_sha256,
+                    "migrated_source": source,
+                    "drill_storage_budget": OdooTestingDrillStorageBudget(
+                        database_bytes=1024,
+                        filestore_bytes=1024,
+                        staging_bytes=1024,
+                        reserve_bytes=1024,
+                    ),
+                }
+            ),
+            authority_sha256="b" * 64,
+            credential_bindings_sha256="c" * 64,
+        )
+        allocation = TestingCandidateAllocation(
+            namespace=namespace,
+            product="site",
+            context="cm",
+            operation_id="candidate-operation",
+            intent_sha256="d" * 64,
+            serving_target_id="old-target",
+            server_id="server",
+            project_id="project",
+            environment_id="environment",
+            compose_id="candidate-compose",
+            resources_binding_sha256="b" * 64,
+            application=TestingCandidateApplication(plan=plan),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.store.write_provider_target_record(
+            ProviderTargetRecord(
+                context="cm",
+                instance="testing",
+                provider_id="dokploy",
+                target_category="compose",
+                target_id=allocation.serving_target_id,
+                display_name="old-testing",
+                provider_target_type="compose",
+                source_label="fixture",
+                updated_at=allocation.created_at.isoformat(),
+            )
+        )
+        self.store.compare_and_write_testing_candidate(None, allocation)
         self.store.write_environment_inventory(
             EnvironmentInventory(
                 context="cm",
@@ -1002,23 +1095,21 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                 updated_at="2026-09-30T12:00:00Z",
                 source_git_ref=PR_HEAD,
                 deployment_record_id="candidate-deployment",
-                runtime_identity=RuntimeIdentity(
-                    product="site",
-                    context="cm",
-                    instance="testing",
-                    deployment_record_id="candidate-deployment",
-                    artifact_id=candidate_id,
-                    source_git_ref=PR_HEAD,
-                    image_reference=f"{IMAGE_REPOSITORY}@{_digest(PR_HEAD)}",
-                ),
+                runtime_identity=identity,
                 deploy=DeploymentEvidence(
                     deploy_mode="testing-rebuild",
-                    target_name="candidate",
+                    target_name=namespace,
                     target_type="compose",
                     status="pass",
                 ),
             )
         )
+        return candidate_id
+
+    def test_native_candidate_inventory_does_not_report_prior_release_as_already_deployed(
+        self,
+    ) -> None:
+        candidate_id = self.serving_candidate()
         profile = self.store.read_product_profile_record("site")
         plan, verified = _plan_testing_target(
             record_store=self.store,
@@ -1045,6 +1136,72 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.assertIsNotNone(verified)
         assert verified is not None
         self.assertEqual(verified.manifest.source_commit, NEWEST)
+
+    def test_explicit_release_selection_keeps_release_baseline_while_candidate_serves(self) -> None:
+        from control_plane.product_reconcile import (
+            latest_verified_testing_release,
+            verified_testing_rebuild_artifact,
+        )
+
+        statuses: tuple[Literal["pass", "reconciliation_required", "fail"], ...] = (
+            "pass",
+            "reconciliation_required",
+            "fail",
+        )
+        for status in statuses:
+            with self.subTest(status=status):
+                self.doCleanups()
+                self.setUp()
+                self.serving_candidate(status)
+                profile = self.store.read_product_profile_record("site")
+                lane = next(item for item in profile.lanes if item.instance == "testing")
+                with patch.object(
+                    self.store,
+                    "list_odoo_stable_target_replacement_operation_records",
+                    side_effect=AssertionError("Do not enumerate operation history"),
+                ):
+                    selected = latest_verified_testing_release(self.store, profile, lane)
+                    self.assertEqual(selected.manifest.source_commit, DEPLOYABLE)
+                    held, _ = _plan_testing_target(
+                        record_store=self.store,
+                        profile=profile,
+                        repository_id=REPOSITORY_ID,
+                        transport=self.github,
+                    )
+                    self.assertEqual((held["current_pull_request_number"], held["held"]), (5, True))
+        self.github.add_run(10, OLDER)
+        with self.assertRaises(BuildProvenanceError):
+            verified_testing_rebuild_artifact(
+                self.store, profile, lane, artifact_id="artifact-cm-run-10-1", source_git_ref=OLDER
+            )
+        self.github.add_run(40, NEWEST)
+        self.assertEqual(
+            latest_verified_testing_release(self.store, profile, lane).manifest.source_commit,
+            NEWEST,
+        )
+        self.github.runs.pop(20)
+        for explicit in (False, True):
+            plan, verified = _plan_testing_target(
+                record_store=self.store,
+                profile=profile,
+                repository_id=REPOSITORY_ID,
+                transport=self.github,
+                for_rebuild=explicit,
+            )
+            self.assertEqual(plan["reason"], "incomplete_build_runs")
+            self.assertIsNone(verified)
+        self.github.add_run(20, DEPLOYABLE)
+        self.github.first_parents[NEWEST] = OLDER
+        for explicit in (False, True):
+            plan, verified = _plan_testing_target(
+                record_store=self.store,
+                profile=profile,
+                repository_id=REPOSITORY_ID,
+                transport=self.github,
+                for_rebuild=explicit,
+            )
+            self.assertEqual(plan["reason"], "incomplete_commit_history")
+            self.assertIsNone(verified)
 
     def test_stale_success_filter_does_not_hide_the_newest_successful_build(self) -> None:
         self._running_release(10, OLDER)

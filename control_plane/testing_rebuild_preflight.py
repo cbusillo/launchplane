@@ -241,6 +241,13 @@ def inspect_testing_rebuild(
         idempotency_key="read-only",
         request_fingerprint="read-only",
         request=apply,
+        testing_candidate_manifest=(
+            verified_build.manifest
+            if isinstance(verified_build, VerifiedBuildArtifact)
+            and verified_build.manifest.source_build is not None
+            and verified_build.manifest.source_build.purpose == "preview"
+            else None
+        ),
         created_at=now,
         updated_at=now,
     )

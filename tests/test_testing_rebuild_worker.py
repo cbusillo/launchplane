@@ -19,6 +19,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.odoo_testing_source import MigratedOdooTestingSource
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.testing_rebuild import (
     REBUILD_SCOPE,
@@ -63,7 +64,9 @@ from control_plane.testing_publication_storage import (
     read_snapshot,
     read_publication,
     publish as publication_write,
+    prepare_publication,
 )
+from tests import test_testing_candidate_application as application_tests
 from tests import test_testing_publication as publication_tests
 from tests import test_testing_route as route_tests
 from tests.test_testing_rebuild_service import exercise_published_copy_maintenance
@@ -112,11 +115,22 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, [])
 
     database_url = ""
+    migrated_candidate = False
 
     def setUp(self) -> None:
         self.fixture = publication_tests.TestingPublicationTests()
         self.fixture.database_url = self.database_url
-        self.fixture.setUp()
+        with (
+            patch.object(
+                application_tests.CandidateApplicationTests,
+                "candidate_build",
+                self.migrated_candidate,
+            ),
+            patch.object(
+                self.fixture, "source_mode", "migrated" if self.migrated_candidate else "empty"
+            ),
+        ):
+            self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.store, self.root = self.fixture.store, self.fixture.fixture.root
         # The storage fixture begins with a stranded legacy queue item. These
@@ -147,6 +161,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
             artifact_id="old-build",
             source_git_ref="old-source",
         )
+        migrated = self.app.plan.native_source if self.migrated_candidate else None
+        assert migrated is None or isinstance(migrated, MigratedOdooTestingSource)
         self.operation = OdooStableTargetReplacementOperationRecord(
             operation_id=candidate.operation_id,
             product=candidate.product,
@@ -159,11 +175,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 product=candidate.product,
                 instance="testing",
                 strategy="replace-and-cutover",
-                data_source_mode="empty",
-                allow_empty_data=True,
+                data_source_mode="migrated_restore" if self.migrated_candidate else "empty",
+                allow_empty_data=not self.migrated_candidate,
+                migrated_source=migrated,
                 artifact_id=self.fixture.fixture.artifact.artifact_id,
                 source_git_ref=self.fixture.fixture.artifact.source_commit,
             ),
+            testing_candidate_manifest=self.app.plan.artifact if self.migrated_candidate else None,
             created_at=datetime.now(UTC).isoformat(),
             updated_at=datetime.now(UTC).isoformat(),
         )
@@ -536,6 +554,85 @@ class NativeTestingWorkerTests(unittest.TestCase):
             authorize=self.authorize,
             lease_owner="native-worker-fixture",
         )
+
+    def test_retained_pr_candidate_runs_and_recovers_planned_publication_without_rediscovery(
+        self,
+    ) -> None:
+        from control_plane.build_provenance import BuildProvenanceError
+
+        for stage in ("unprepared", "prepared", "planned"):
+            with self.subTest(stage=stage):
+                self.doCleanups()
+                fixture = self
+                fixture.migrated_candidate = True
+                fixture.setUp()
+                candidate = fixture.fixture.candidate
+                assert candidate.application is not None
+                original = fixture.operation
+                if stage == "unprepared":
+                    with (
+                        patch.object(fixture.store, "read_testing_candidate", return_value=None),
+                        patch(
+                            "control_plane.product_reconcile.verified_testing_rebuild_artifact",
+                            side_effect=BuildProvenanceError(
+                                "PR head moved", code="pull_request_head_mismatch"
+                            ),
+                        ) as verify,
+                    ):
+                        refused = fixture.execute()
+                    self.assertEqual(refused.error_code, "testing_rebuild_admission_changed")
+                    verify.assert_called_once()
+                    self.assertEqual(fixture.effects, [])
+                    continue
+                if stage == "planned":
+                    prepare = prepare_publication
+
+                    def lose_reply(*args: Any, **kwargs: Any) -> Any:
+                        prepare(*args, **kwargs)
+                        raise NativeSourceUnavailable("Fixture lost planned-publication reply")
+
+                    with patch.object(service, "prepare_publication", side_effect=lose_reply):
+                        with self.assertRaises(service.NativeTestingRebuildPending):
+                            fixture.execute()
+                    publication = read_publication(
+                        fixture.store,
+                        canonical_json_sha256(
+                            {
+                                "product": original.product,
+                                "context": original.context,
+                                "operation": original.operation_id,
+                            }
+                        ),
+                    )
+                    assert publication is not None
+                    self.assertEqual(publication.state, "planned")
+                read_manifest = fixture.store.read_artifact_manifest
+
+                def release_only(artifact_id: str) -> Any:
+                    self.assertNotEqual(artifact_id, original.request.artifact_id)
+                    return read_manifest(artifact_id)
+
+                with (
+                    patch(
+                        "control_plane.product_reconcile.verified_testing_rebuild_artifact",
+                        side_effect=BuildProvenanceError(
+                            "PR head moved", code="pull_request_head_mismatch"
+                        ),
+                    ) as rediscover,
+                    patch.object(fixture.store, "read_artifact_manifest", side_effect=release_only),
+                ):
+                    result = fixture.execute()
+                rediscover.assert_not_called()
+                self.assertEqual(result.deploy_status, "pass")
+                self.assertEqual(fixture.operation, original)
+                current = fixture.store.read_testing_candidate(candidate.namespace)
+                assert current is not None and current.application is not None
+                self.assertEqual(current.operation_id, original.operation_id)
+                self.assertEqual(current.application.plan, candidate.application.plan)
+                self.assertEqual(
+                    fixture.current().inventory.runtime_identity,
+                    candidate.application.plan.runtime_identity,
+                )
 
     def admit_unavailable(
         self,

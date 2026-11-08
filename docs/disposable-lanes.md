@@ -2779,6 +2779,11 @@ build cannot substitute another candidate. Use, needed-copy, separation, origina
 data, Client and backup protections remain independent. Ordinary preview source
 major matching and production release eligibility are unchanged.
 
+Automatic release reconciliation still holds behind a serving PR candidate until
+source history proves forward movement. An explicit rebuild can select the newest
+verified release independently; selection retains the recorded release baseline
+for complete run/history checks and refuses an older requested release.
+
 Once the normal worker has recorded its private candidate application, the
 original authenticated testing caller uploads one part at a time to
 `wss://SERVICE/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source/{part}`
