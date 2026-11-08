@@ -42,7 +42,7 @@ def require_connection_isolation_lane(
             product=product,
             context=context,
             instance=instance,
-            usage=protection.usage,
+            usage=protection.current_usage(),
             require_unused=False,
         )
         or protection.data == "only_copy"

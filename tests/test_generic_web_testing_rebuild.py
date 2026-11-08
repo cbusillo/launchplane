@@ -947,7 +947,24 @@ class GenericWebTestingRebuildHttpTests(
             f"/v1/products/{profile.product}/testing-rebuild/inputs",
             headers=self.human_headers,
         )
-        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.status_code, 200, refused.text)
+        self.assertEqual(refused.json()["status"], "pending")
+        self.assertTrue(refused.json()["steps"])
+        self.assertTrue(refused.json()["restore_applicable"])
+        blocked = await request(
+            self.app,
+            "POST",
+            f"/v1/products/{profile.product}/testing-rebuild",
+            headers={**self.human_headers, "Idempotency-Key": "mounted-state-refused"},
+            payload={
+                "data_source_mode": "empty",
+                "artifact_id": self.image,
+                "source_git_ref": response.json()["source_git_ref"],
+                "reason": "Rebuild testing",
+            },
+        )
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertTrue(refused.json()["blockers"])
         self.assertEqual(
             self.store.list_odoo_stable_target_replacement_operation_records(), operations
         )

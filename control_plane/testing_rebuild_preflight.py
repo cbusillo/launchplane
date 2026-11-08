@@ -27,6 +27,7 @@ from control_plane.odoo_target_replacement_apply_http import (
 )
 from control_plane.testing_rebuild_driver import (
     resolve_testing_rebuild_driver,
+    TestingRebuildDriver,
     TESTING_REBUILD_EXECUTION_UNAVAILABLE,
     TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE,
     testing_rebuild_build_identity,
@@ -50,6 +51,13 @@ from control_plane.testing_rebuild_service import (
 from control_plane.workflows.ship import utc_now_timestamp
 
 
+class TestingRebuildBlocker(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    message: str
+
+
 class TestingRebuildPreflight(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -67,6 +75,15 @@ class TestingRebuildPreflight(BaseModel):
     source_git_ref: str
     data_source_mode: Literal["empty", "production_restore", "upstream_restore", "migrated_restore"]
     observed_at: str
+    blockers: tuple[TestingRebuildBlocker, ...] = ()
+    steps: tuple[str, ...] = (
+        "prepare_independent_copy",
+        "verify_source_and_isolation",
+        "verify_private_health_and_identity",
+        "publish_same_address",
+        "verify_public_health_and_identity",
+        "retire_predecessor_runtime",
+    )
     # This is admission evidence. The worker still proves the actual independent
     # candidate's isolation, credentials, restore, health and cutover before use.
     candidate_verification: Literal["pending"] = "pending"
@@ -120,6 +137,9 @@ def admit_current_testing_rebuild(
         root=root, store=store, request=request, actor=actor, verified_build=verified_build
     )
     if inspection.status != "pass":
+        if inspection.blockers:
+            blocker = inspection.blockers[0]
+            raise TestingRebuildRefused(blocker.code, blocker.message)
         raise TestingRebuildRefused(TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE, inspection.message)
     if isinstance(verified, VerifiedBuildArtifact):
         try:
@@ -168,6 +188,16 @@ def inspect_testing_rebuild(
             raise TestingRebuildRefused(
                 "testing_rebuild_inputs_unverified", "The selected build differs from its product."
             )
+    if apply.data_source_mode not in {
+        "empty",
+        "production_restore",
+        "upstream_restore",
+        "migrated_restore",
+    }:
+        raise TestingRebuildRefused(
+            "testing_rebuild_inputs_unverified",
+            "A native rebuild requires its explicit testing source.",
+        )
     if apply.migrated_source is not None:
         manifest = (
             verified_build.manifest
@@ -196,8 +226,44 @@ def inspect_testing_rebuild(
         created_at=now,
         updated_at=now,
     )
+    inspection = TestingRebuildPreflight(
+        product=apply.product,
+        context=lane.context,
+        base_url=lane.base_url,
+        artifact_id=apply.artifact_id,
+        source_git_ref=apply.source_git_ref,
+        data_source_mode=apply.data_source_mode,
+        observed_at=now,
+        restore_applicable=driver.state.kind != "none" if driver.state is not None else None,
+    )
+    try:
+        return _inspect_execution(root, store, operation, driver, inspection, actor)
+    except TestingRebuildRefused as error:
+        return inspection.model_copy(
+            update={
+                "status": "pending",
+                "message": str(error),
+                "blockers": (TestingRebuildBlocker(code=error.code, message=str(error)),),
+            }
+        )
+
+
+def _inspect_execution(
+    root: Path,
+    store: PostgresRecordStore,
+    operation: OdooStableTargetReplacementOperationRecord,
+    driver: TestingRebuildDriver,
+    inspection: TestingRebuildPreflight,
+    actor: str,
+) -> TestingRebuildPreflight:
+    apply = operation.request
+    lane = driver.lane
     try:
         intent = capture_rebuild_intent(root, store, operation)
+        if isinstance(intent, GenericWebTestingRebuildIntent):
+            from control_plane.testing_rebuild_application_state import rebuild_address
+
+            inspection.base_url = rebuild_address(intent)
         check_testing_rebuild_protection(root, store, operation, intent, actor=actor)
         generic_execution = (
             isinstance(intent, GenericWebTestingRebuildIntent)
@@ -233,20 +299,11 @@ def inspect_testing_rebuild(
             "The retained testing inputs could not be verified.",
         ) from error
     if isinstance(intent, GenericWebTestingRebuildIntent):
-        from control_plane.testing_rebuild_application_state import rebuild_address
-
-        return TestingRebuildPreflight(
-            status="pass" if generic_execution else "pending",
-            message="" if generic_execution else TESTING_REBUILD_EXECUTION_UNAVAILABLE,
-            product=apply.product,
-            context=lane.context,
-            base_url=rebuild_address(intent),
-            artifact_id=apply.artifact_id,
-            source_git_ref=apply.source_git_ref,
-            data_source_mode="empty",
-            observed_at=now,
-            restore_applicable=intent.state.kind != "none",
-        )
+        if not generic_execution:
+            raise TestingRebuildRefused(
+                TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE, TESTING_REBUILD_EXECUTION_UNAVAILABLE
+            )
+        return inspection
     if apply.data_source_mode != "empty":
         try:
             snapshot_storage_budget(intent.profile, lane.context)
@@ -299,20 +356,4 @@ def inspect_testing_rebuild(
             "testing_restore_source_unconfigured",
             "The selected testing restore source is not configured or available.",
         ) from error
-    # Configuration is not a completed or healthy copy. The worker verifies the
-    # real source and independent candidate before exposing it at the address.
-    assert apply.data_source_mode in {
-        "empty",
-        "production_restore",
-        "upstream_restore",
-        "migrated_restore",
-    }
-    return TestingRebuildPreflight(
-        product=apply.product,
-        context=lane.context,
-        base_url=lane.base_url,
-        artifact_id=apply.artifact_id,
-        source_git_ref=apply.source_git_ref,
-        data_source_mode=apply.data_source_mode,
-        observed_at=now,
-    )
+    return inspection

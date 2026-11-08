@@ -398,7 +398,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.preview_resources = self.enterContext(
-            patch("control_plane.odoo_preview_resources.require_existing_preview_resources")
+            patch(
+                "control_plane.odoo_preview_resources.require_existing_preview_resources",
+                return_value="a" * 64,
+            )
         )
         self.preview_resource_binding = self.enterContext(
             patch("control_plane.odoo_preview_resources.require_preview_resource_binding")
@@ -2048,6 +2051,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 ),
             )
 
+        self.assertEqual(
+            result.resource_provenance["binding_sha256"], self.preview_resources.return_value
+        )
+        self.assertEqual(result.resource_provenance["recipient_state"], "unstarted")
+        self.assertTrue(result.resource_provenance["qualified_at"])
         if fail_preparation:
             self.assertEqual(result.status, "fail")
             delete_compose.assert_not_called()
@@ -2830,7 +2838,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_preview_runtime.memory_capacity.require_preview_host_memory_capacity"
             ),
-            patch("control_plane.odoo_preview_resources.require_existing_preview_resources"),
+            patch(
+                "control_plane.odoo_preview_resources.require_existing_preview_resources",
+                return_value="b" * 64,
+            ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_api.update_dokploy_target_env",
             ) as update_env,

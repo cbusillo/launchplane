@@ -1,6 +1,7 @@
 """The native testing rebuild inside the existing durable replacement action."""
 
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 
 from collections.abc import Callable, Iterator
@@ -112,7 +113,7 @@ from control_plane.testing_route_effects import (
 )
 from control_plane.testing_address_storage import effective_testing_route
 from control_plane.lane_usage import evaluate_lane_usage
-from control_plane.odoo_testing_usage import read_odoo_testing_usage
+from control_plane.odoo_testing_usage import OdooTestingUsage, read_odoo_testing_usage
 from control_plane.provider_operations import (
     DurableProviderMutationAdapter,
     ProviderEvidenceLease,
@@ -689,8 +690,8 @@ def check_testing_rebuild_protection(
                 "Testing must be separated from its shared production resources before rebuilding.",
             )
     if isinstance(intent, GenericWebTestingRebuildIntent):
-        if safety is not None and safety.usage == "in_use":
-            raise TestingRebuildRefused("testing_in_use", "Someone is using this testing lane.")
+        if safety is not None and safety.current_usage() == "in_use":
+            raise _testing_use_refusal(safety)
         return
     usage = read_odoo_testing_usage(
         target=intent.before.target,
@@ -698,7 +699,9 @@ def check_testing_rebuild_protection(
         control_plane_root=root,
         database_url=store.database_url,
     )
-    reported_usage = "in_use" if safety is not None and safety.usage == "in_use" else usage.usage
+    reported_usage = (
+        "in_use" if safety is not None and safety.current_usage() == "in_use" else usage.usage
+    )
     decision = evaluate_lane_usage(
         store,
         profile=intent.profile,
@@ -714,7 +717,35 @@ def check_testing_rebuild_protection(
         ),
     )
     if decision.protected:
-        raise TestingRebuildRefused("testing_in_use", "Someone is using this testing lane.")
+        raise _testing_use_refusal(safety, usage)
+
+
+def _testing_use_refusal(
+    safety: DisposableLaneSafety | None, usage: OdooTestingUsage | None = None
+) -> TestingRebuildRefused:
+    actors: set[str] = set()
+    since: list[datetime] = []
+    expiry: list[datetime] = []
+    if safety is not None and safety.current_usage() == "in_use":
+        if safety.usage_actor:
+            actors.add(safety.usage_actor)
+        if safety.usage_since is not None:
+            since.append(safety.usage_since)
+        if safety.usage_valid_until is not None:
+            expiry.append(safety.usage_valid_until)
+    if usage is not None and usage.usage == "in_use":
+        actors.update(usage.actors)
+        if usage.since is not None:
+            since.append(usage.since)
+        if usage.valid_until is not None:
+            expiry.append(usage.valid_until)
+    return TestingRebuildRefused(
+        "testing_in_use",
+        f"Testing use recorded for {', '.join(sorted(actors)) or 'unknown actor'}; "
+        f"since {min(since).isoformat() if since else 'unknown'}; "
+        f"usage evidence expires {min(expiry).isoformat() if expiry else 'unknown'}. "
+        "Execution requires a fresh use check; data and resource protections remain independent.",
+    )
 
 
 class NativeTestingRebuildAdapter:
@@ -1266,7 +1297,9 @@ class NativeTestingRebuildExecution:
                 database_url=self.store.database_url,
             )
             reported_usage = (
-                "in_use" if safety is not None and safety.usage == "in_use" else usage.usage
+                "in_use"
+                if safety is not None and safety.current_usage() == "in_use"
+                else usage.usage
             )
             decision = evaluate_lane_usage(
                 self.store,

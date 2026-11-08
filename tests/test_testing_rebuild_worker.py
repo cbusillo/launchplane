@@ -70,6 +70,47 @@ from tests.test_testing_rebuild_service import exercise_published_copy_maintenan
 
 
 class NativeTestingWorkerTests(unittest.TestCase):
+    def test_expired_bounded_use_rechecks_native_use_without_expiring_copy_or_isolation(
+        self,
+    ) -> None:
+        from datetime import timedelta
+        from tests.support.disposable_lanes import record_safety
+
+        now = datetime.now(UTC)
+        for facts, expected in (
+            ({}, ""),
+            ({"data": "only_copy"}, "testing_needed_copy"),
+            ({"production_resources": "shared"}, "testing_production_resources_shared"),
+        ):
+            with self.subTest(facts=facts):
+                record_safety(
+                    self.store,
+                    self.operation.product,
+                    self.operation.context,
+                    "testing",
+                    usage="in_use",
+                    usage_actor="odoo-user:42",
+                    usage_since=now - timedelta(minutes=10),
+                    observed_at=now - timedelta(minutes=5),
+                    usage_valid_until=now - timedelta(seconds=1),
+                    expires_at=now + timedelta(minutes=1),
+                    **facts,
+                )
+                with patch.object(
+                    service, "read_odoo_testing_usage", return_value=OdooTestingUsage("unused")
+                ):
+                    if expected:
+                        with self.assertRaises(service.TestingRebuildRefused) as refused:
+                            service.check_testing_rebuild_protection(
+                                self.root, self.store, self.operation, self.intent
+                            )
+                        self.assertEqual(refused.exception.code, expected)
+                    else:
+                        service.check_testing_rebuild_protection(
+                            self.root, self.store, self.operation, self.intent
+                        )
+        self.assertEqual(self.effects, [])
+
     database_url = ""
 
     def setUp(self) -> None:

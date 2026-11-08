@@ -114,7 +114,7 @@ def qualify_application_staging_lift(
             product=request.product,
             context=request.context,
             instance=request.instance,
-            usage=evidence.usage,
+            usage=evidence.current_usage(),
             require_unused=False,
         )
         or evidence.data == "only_copy"

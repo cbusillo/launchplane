@@ -687,7 +687,7 @@ def require_activation_hold_lift(
     else:
         adapter.require_unchanged(record)
     protection = store.read_disposable_lane_safety(record.product, record.context, "testing")
-    if protection and protection.usage == "in_use":
+    if protection and protection.current_usage() == "in_use":
         raise TestingActivationRefusal("Known staff use protects the testing recipient.")
     target = store.read_dokploy_target_record(context_name=record.context, instance_name="testing")
     if target.policies.staff_testing_hold not in (
@@ -752,7 +752,7 @@ def build_activation(
             "An absent, foreign or unacknowledged staff hold is protected."
         )
     protection = store.read_disposable_lane_safety(product, request.context, "testing")
-    if protection and protection.usage == "in_use":
+    if protection and protection.current_usage() == "in_use":
         raise TestingActivationRefusal("Known staff use protects the old testing recipient.")
     resources, receipt_id = preparation_resources(store, product, request, scope)
     binding, old_key = preparation_binding(store, product, request.context, actor, root)
@@ -937,7 +937,7 @@ class TestingActivationAdapter:
             protection = self.store.read_disposable_lane_safety(
                 record.product, record.context, "testing"
             )
-            if protection is not None and protection.usage == "in_use":
+            if protection is not None and protection.current_usage() == "in_use":
                 raise TestingActivationRefusal("Known staff use protects the retained recipient.")
         if configuration_digest(
             self.store, self.product, record.context, version=record.configuration_version

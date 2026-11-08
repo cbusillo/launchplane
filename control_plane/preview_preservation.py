@@ -349,7 +349,7 @@ def require_preview_preservation_admission(
         profile.product, issued_plan.context, issued_plan.preview_slug
     )
     if report is not None and (
-        report.usage == "in_use"
+        report.current_usage() == "in_use"
         or report.data == "only_copy"
         and not authority.serving_recipient
         or report.production_resources in {"shared", "separation_ready"}
