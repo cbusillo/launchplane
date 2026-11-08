@@ -6751,11 +6751,6 @@ def create_launchplane_fastapi_app(
                     profile=product_profile,
                     issued_plan=preview_plan,
                     references=inputs_request,
-                    operation_record_id=build_launchplane_mutation_reservation_id(
-                        scope=idempotency_scope(identity),
-                        route_path=_ODOO_PREVIEW_APPLY_ROUTE,
-                        idempotency_key=plan_id,
-                    ),
                     control_plane_root=resolved_control_plane_root,
                 )
             except (DisposableLaneSafetyUnknown, FileNotFoundError, ValueError) as error:
@@ -6948,7 +6943,7 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
         )
 
-        preview_binding = ""
+        preview_binding: str | None = ""
 
         def preview_checkpoint() -> None:
             nonlocal preview_binding

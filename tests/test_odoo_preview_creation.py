@@ -502,7 +502,6 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     plan = self.plan()
                 self.assertEqual(plan.status, "ready")
-                self.assertTrue(plan.steps)
                 prepare.assert_not_called()
                 native.assert_not_called()
         self.assertEqual(self.mutations, mutations)

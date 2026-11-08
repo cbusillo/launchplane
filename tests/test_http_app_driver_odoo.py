@@ -720,7 +720,6 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202)
         result = response.json()["result"]
         self.assertEqual(result["status"], "ready")
-        self.assertTrue(result["steps"])
         self.assertEqual(result["runtime_plan"]["target"]["target_id"], "compose-cm-pr-42")
         self.assertEqual(result["dry_run_plan"]["compose_ref"], "compose-cm-pr-42")
         self.assertEqual(result["dry_run_plan"]["operation"], "destroy")

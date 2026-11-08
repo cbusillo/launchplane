@@ -239,8 +239,11 @@ class OdooPreviewApplyInputsResult(BaseModel):
     runtime_plan: OdooPreviewRuntimePlan
     dry_run_plan: OdooPreviewDokployDryRunPlan
     plan_provenance: OdooPreviewApplyPlanProvenance | None = None
-    blockers: tuple[OdooPreviewDokployDryRunBlocker, ...] = ()
-    steps: tuple[OdooPreviewDokployOperationName, ...] = ()
+    blockers: tuple[OdooPreviewDokployDryRunBlocker, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     # Template-lane integration credentials the preview receives blank because no
     # key-safety rule allows them on previews. Key names only, never values.
     omitted_integration_credential_keys: tuple[str, ...] = ()
@@ -259,7 +262,6 @@ class OdooPreviewApplyInputsResult(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_result(self) -> "OdooPreviewApplyInputsResult":
-        self.steps = tuple(operation.name for operation in self.dry_run_plan.operations)
         self.omitted_integration_credential_keys = tuple(
             sorted(set(self.omitted_integration_credential_keys))
         )
@@ -295,7 +297,7 @@ class OdooPreviewApplyInputsResult(BaseModel):
 
 
 def odoo_preview_apply_plan_sha256(result: OdooPreviewApplyInputsResult) -> str:
-    payload = result.model_dump(mode="json", exclude={"plan_provenance", "steps", "blockers"})
+    payload = result.model_dump(mode="json", exclude={"plan_provenance"})
     return nonvalidating_compact_sorted_json_sha256(payload)
 
 

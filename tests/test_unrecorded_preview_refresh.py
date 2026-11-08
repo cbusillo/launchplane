@@ -45,6 +45,16 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
 
         candidate = _issued_plan(self.request)
         with patch.object(preview_http, "_build_odoo_preview_apply_inputs", return_value=candidate):
+            blocked = await self.fixture.post(
+                "/v1/drivers/odoo/preview-apply-inputs",
+                {
+                    "product": self.profile.product,
+                    "inputs": candidate.plan_request.model_dump(mode="json"),
+                },
+                "ordinary-unrecorded-plan",
+            )
+            self.assertEqual(blocked.status_code, 202, blocked.text)
+            self.assertEqual(blocked.json()["result"]["status"], "blocked")
             response = await self.fixture.post(
                 "/v1/drivers/odoo/preview-apply-inputs",
                 {
@@ -57,7 +67,7 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202, response.text)
         planned = response.json()["result"]
         self.assertEqual(planned["status"], "ready")
-        self.assertFalse(planned["blockers"])
+        self.assertNotIn("blockers", planned)
         self.fixture.plan_id = planned["plan_provenance"]["plan_id"]
         with patch(
             "control_plane.http_app.execute_odoo_preview_apply_result",

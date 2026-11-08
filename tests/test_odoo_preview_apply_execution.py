@@ -144,13 +144,14 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
 
         request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
         original = _issued_plan(request).model_dump(mode="json")
-        original.pop("blockers")
-        original.pop("steps")
+        original.pop("blockers", None)
+        original.pop("steps", None)
         provenance = cast(dict[str, object], original["plan_provenance"])
         provenance["plan_sha256"] = nonvalidating_compact_sorted_json_sha256(
             {key: value for key, value in original.items() if key != "plan_provenance"}
         )
         retained = OdooPreviewApplyInputsResult.model_validate(original)
+        self.assertEqual(retained.model_dump(mode="json"), original)
         validated = validate_odoo_preview_issued_plan(
             plan_id=_PLAN_ID, issued_plan=retained, request=request
         )
@@ -1282,7 +1283,7 @@ class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.plan("conditional-" + next(iter(facts)))
                 self.assertEqual(result["status"], "blocked")
                 self.assertTrue(result["blockers"])
-                self.assertTrue(result["steps"])
+                self.assertTrue(cast(dict[str, object], result["dry_run_plan"])["operations"])
                 self.assertIsNone(result["plan_provenance"])
                 self.assertEqual(
                     self.fixture.store.read_disposable_lane_safety(
@@ -1320,7 +1321,6 @@ class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
         result = await self.plan("held-preview")
         self.assertEqual(result["status"], "blocked")
         self.assertTrue(result["blockers"])
-        self.assertTrue(result["steps"])
         await self.assert_apply_blocker_matches(result)
 
     async def test_routing_blocker_is_retained_without_running_safety_admission(self) -> None:
@@ -1488,8 +1488,7 @@ class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
             session.commit()
         result = await self.plan("first-service-creation")
         self.assertEqual(result["status"], "ready")
-        self.assertFalse(result["blockers"])
-        self.assertTrue(result["steps"])
+        self.assertNotIn("blockers", result)
         self.assertEqual(self.fixture.store.list_preview_records(), ())
         self.assertIsNone(
             self.fixture.store.read_disposable_lane_safety(
@@ -1544,7 +1543,6 @@ class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
         result = await self.plan("production-alias")
         self.assertEqual(result["status"], "blocked")
         self.assertTrue(result["blockers"])
-        self.assertTrue(result["steps"])
         from control_plane.disposable_lanes import (
             DisposableLaneSafetyUnknown,
             require_disposable_preview_operation,

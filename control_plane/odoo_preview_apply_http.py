@@ -200,15 +200,26 @@ def require_director_odoo_preview_admission(
     profile: LaunchplaneProductProfileRecord,
     issued_plan: OdooPreviewApplyInputsResult,
     references: _OdooPreviewOperationEnvelope,
-    operation_record_id: str,
+    operation_record_id: str = "",
     control_plane_root: Path,
     captured_schedule_binding: dict[str, object] | None = None,
-) -> str:
+) -> str | None:
     from control_plane.storage.postgres import PostgresRecordStore
 
     if references.preserve_original_reservation_id:
-        from control_plane.preview_preservation import require_preview_preservation_admission
+        from control_plane.preview_preservation import (
+            require_preview_preservation_admission,
+            require_preview_preservation_plan,
+        )
 
+        if not operation_record_id:
+            require_preview_preservation_plan(
+                store=cast(PostgresRecordStore, store),
+                profile=profile,
+                issued_plan=issued_plan,
+                original_reservation_id=references.preserve_original_reservation_id,
+            )
+            return None
         return require_preview_preservation_admission(
             store=cast(PostgresRecordStore, store),
             profile=profile,

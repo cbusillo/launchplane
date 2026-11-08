@@ -1031,6 +1031,15 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
             )
         self.assertEqual(blocked.status_code, 202, blocked.text)
         self.assertEqual(blocked.json()["result"]["status"], "blocked")
+        from control_plane.disposable_lanes import require_disposable_preview_operation
+
+        with self.assertRaises(ValueError) as protection:
+            require_disposable_preview_operation(
+                self.store, profile=self.profile, issued_plan=self.issued
+            )
+        self.assertEqual(
+            blocked.json()["result"]["blockers"][0]["message"], str(protection.exception)
+        )
         self.assertEqual(planned.status_code, 202, planned.text)
         self.assertEqual(planned.json()["result"]["status"], "ready")
         self.assertEqual(self.store.read_original_mutation_intent(self.original), before)
@@ -1521,9 +1530,91 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         self.assertEqual(self.authority().server_id, binding["lookup_id"])
         self.assertEqual(self.store.read_original_mutation_intent(self.original), retained)
 
+    def plan_preservation(self, key: str = "preservation-plan") -> dict[str, Any]:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        before = self.store.read_original_mutation_intent(self.original)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        with (
+            patch(
+                "control_plane.http_app.build_odoo_preview_apply_inputs_result",
+                return_value=self.issued.model_dump(mode="json"),
+            ),
+            patch("control_plane.http_app.prepare_odoo_preview_apply_operation") as prepare,
+            patch("control_plane.preview_preservation.run_preview_preservation") as preserve,
+            patch(
+                "control_plane.preview_preservation.read_preview_preservation_authority",
+                side_effect=AssertionError("Planning must not construct execution authority"),
+            ),
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    "/v1/drivers/odoo/preview-apply-inputs",
+                    payload={
+                        "product": self.profile.product,
+                        "inputs": self.issued.plan_request.model_dump(mode="json"),
+                        "preserve_original_reservation_id": self.original.record_id,
+                    },
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": key,
+                    },
+                )
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(self.store.read_original_mutation_intent(self.original), before)
+        prepare.assert_not_called()
+        preserve.assert_not_called()
+        return cast(dict[str, Any], response.json()["result"])
+
+    def test_preservation_plan_defers_only_absent_future_execution_proof(self) -> None:
+        self.no_snapshot_original(None)
+        self.complete_original()
+        planned = self.plan_preservation()
+        self.assertEqual(planned["status"], "ready")
+        self.assertTrue(planned["plan_provenance"])
+        with self.assertRaises(ValueError):
+            self.admit()
+
+    def assert_plan_refuses_original_binding(self, binding: dict[str, object]) -> None:
+        self.no_snapshot_original(binding)
+        self.complete_original()
+        with self.assertRaises(ValueError) as refusal:
+            self.admit()
+        blocked = self.plan_preservation()
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["blockers"][0]["message"], str(refusal.exception))
+
+    def test_plan_refuses_original_non_server_binding(self) -> None:
+        self.assert_plan_refuses_original_binding(
+            {**self.server_binding(), "schedule_type": "dokploy-server"}
+        )
+
+    def test_plan_refuses_original_mismatched_server_binding(self) -> None:
+        self.assert_plan_refuses_original_binding(
+            {**self.server_binding(), "app_name": "another-preview"}
+        )
+
     def test_no_snapshot_original_uses_captured_then_persisted_preserving_binding(self) -> None:
         self.no_snapshot_original(None)
         self.complete_original()
+        from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsResult
+
+        planned = self.plan_preservation()
+        self.assertEqual(planned["status"], "ready")
+        self.issued = OdooPreviewApplyInputsResult.model_validate(planned)
         binding = self.server_binding()
         execute = Mock(return_value={"status": "fail", "provider_effect_attempted": True})
         operation = prepare_odoo_preview_apply_operation(
@@ -1780,6 +1871,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
     def test_protected_custody_stays_held_even_with_completed_original(self) -> None:
         from tests.support.disposable_lanes import record_safety
 
+        self.no_snapshot_original(None)
         self.complete_original()
         for facts in (
             {"usage": "in_use"},
@@ -1794,8 +1886,18 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                     self.issued.preview_slug,
                     **facts,
                 )
-                with self.assertRaises(ValueError):
-                    self.admit()
+                with self.assertRaises(ValueError) as refusal:
+                    require_preview_preservation_admission(
+                        store=self.store,
+                        profile=self.profile,
+                        issued_plan=self.issued,
+                        original_reservation_id=self.original.record_id,
+                        operation_record_id="future-preservation",
+                        captured_schedule_binding=self.server_binding(),
+                    )
+                blocked = self.plan_preservation("protected-" + next(iter(facts)))
+                self.assertEqual(blocked["status"], "blocked")
+                self.assertEqual(blocked["blockers"][0]["message"], str(refusal.exception))
 
     def adapter(self) -> Any:
         return prepare_odoo_preview_apply_operation(

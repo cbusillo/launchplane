@@ -146,6 +146,29 @@ class PreviewRetirementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.status, "completed")
 
+    def test_reviewed_retirement_digest_survives_legacy_plan_round_trip(self) -> None:
+        from copy import deepcopy
+        from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+
+        self.retire()
+        current = self.retirement_digest()
+        self.assertTrue(current)
+
+        def legacy_digest(payload: dict[str, object]) -> str:
+            retained = deepcopy(payload)
+            original = retained["original"]
+            assert isinstance(original, dict)
+            original.pop("steps", None)
+            original.pop("blockers", None)
+            return nonvalidating_compact_sorted_json_sha256(retained)
+
+        with patch(
+            "control_plane.preview_retirement.nonvalidating_compact_sorted_json_sha256",
+            side_effect=legacy_digest,
+        ):
+            reviewed = self.retirement_digest()
+        self.assertEqual(current, reviewed)
+
     def test_completed_native_retirement_supersedes_old_failure_without_rewriting_it(self) -> None:
         self.assertTrue(_preview_refresh_warnings(self.store, self.profile))
         self.retire()
