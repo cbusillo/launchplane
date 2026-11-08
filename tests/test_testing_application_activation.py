@@ -58,12 +58,12 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
         ]
         self.assertEqual(*programs)
 
-    @patch(
-        "control_plane.runtime_platform_credentials.PLATFORM_CREDENTIAL_KEYS",
-        frozenset({"FIXTURE_A", "FIXTURE_B", "FIXTURE_C"}),
-    )
-    def test_program_provenance_accepts_only_key_order_permutations(self) -> None:
-        from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
+    def test_program_provenance_accepts_only_known_key_sets_and_orders(self) -> None:
+        from control_plane.runtime_platform_credentials import (
+            PLATFORM_CREDENTIAL_KEYS,
+            LEGACY_HOST_PROGRAM_CREDENTIAL_KEYS,
+        )
+        from control_plane.npmplus import NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY
         from control_plane.testing_application_capabilities import (
             capability_program_matches,
             retained_application_capability_program,
@@ -73,11 +73,12 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
         line = next(
             row for row in current.splitlines() if row.startswith("PLATFORM_CREDENTIAL_KEYS=")
         )
+        for historical in self.credential_programs(current):
+            with self.subTest(historical=historical == current):
+                self.assertTrue(capability_program_matches(historical, current))
         keys = sorted(PLATFORM_CREDENTIAL_KEYS, reverse=True)
         historical_line = "PLATFORM_CREDENTIAL_KEYS=frozenset({" + ", ".join(map(repr, keys)) + "})"
         historical = current.replace(line, historical_line, 1)
-        self.assertTrue(capability_program_matches(historical, current))
-        self.assertTrue(capability_program_matches(current, current))
         replaced = ["X" * len(keys[0]), *keys[1:]]
         duplicated = [keys[1], *keys[1:]]
         foreign = [
@@ -91,12 +92,42 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
                 historical_line, "PLATFORM_CREDENTIAL_KEYS=frozenset(" + repr(keys) + ")"
             ),
         ]
-        for altered in (replaced, duplicated):
+        prior = LEGACY_HOST_PROGRAM_CREDENTIAL_KEYS
+        for altered in (
+            replaced,
+            duplicated,
+            sorted(PLATFORM_CREDENTIAL_KEYS - {NPMPLUS_IDENTITY_ENV_KEY}),
+            sorted(PLATFORM_CREDENTIAL_KEYS - {NPMPLUS_SECRET_ENV_KEY}),
+            sorted(prior - {next(iter(prior))}),
+            [*sorted(prior), next(iter(prior))],
+            [*sorted(prior), "FOREIGN_CREDENTIAL"],
+        ):
             changed = "PLATFORM_CREDENTIAL_KEYS=frozenset({" + ", ".join(map(repr, altered)) + "})"
             foreign.append(historical.replace(historical_line, changed))
         for observed in foreign:
             with self.subTest(observed=type(observed).__name__):
                 self.assertFalse(capability_program_matches(observed, current))
+
+    def credential_programs(self, program: str) -> tuple[str, ...]:
+        from control_plane.runtime_platform_credentials import (
+            PLATFORM_CREDENTIAL_KEYS,
+            LEGACY_HOST_PROGRAM_CREDENTIAL_KEYS,
+        )
+
+        line = next(
+            row for row in program.splitlines() if row.startswith("PLATFORM_CREDENTIAL_KEYS=")
+        )
+        return tuple(
+            program.replace(
+                line,
+                "PLATFORM_CREDENTIAL_KEYS=frozenset({"
+                + ", ".join(map(repr, sorted(keys, reverse=reverse)))
+                + "})",
+                1,
+            )
+            for keys in (PLATFORM_CREDENTIAL_KEYS, LEGACY_HOST_PROGRAM_CREDENTIAL_KEYS)
+            for reverse in (False, True)
+        )
 
     def test_previous_stricter_program_is_recognized_without_partial_proof_edits(self) -> None:
         from control_plane.testing_application_capabilities import (
@@ -111,17 +142,19 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
 
         current = retained_application_capability_program(self.spec)
         historical = current.replace(CAPABILITY_FAILURE_REPORT, LEGACY_CAPABILITY_FAILURE_REPORT, 1)
-        self.assertTrue(capability_program_matches(historical, current))
+        for program in self.credential_programs(historical):
+            self.assertTrue(capability_program_matches(program, current))
         for fragment in (
             PREPARED_CONTAINER_CAPABILITY_PROGRAM,
             PREPARED_CONTAINER_LOOKUP,
             PREPARED_CONTAINER_READBACK,
         ):
             historical = historical.replace(fragment, "", 1)
-            self.assertEqual(
-                capability_program_matches(historical, current),
-                fragment == PREPARED_CONTAINER_READBACK,
-            )
+            for program in self.credential_programs(historical):
+                self.assertEqual(
+                    capability_program_matches(program, current),
+                    fragment == PREPARED_CONTAINER_READBACK,
+                )
         changed = deepcopy(self.spec)
         changed["application_id"] = "foreign-target"
         self.assertFalse(
@@ -137,33 +170,49 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
     def test_historical_host_program_keeps_terminal_and_provenance_guards(self) -> None:
         from pathlib import Path
 
-        from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
         from control_plane.testing_application_capabilities import (
             capability_program_matches,
             retained_application_capability_program,
+            PREPARED_CONTAINER_CAPABILITY_PROGRAM,
+            PREPARED_CONTAINER_LOOKUP,
+            PREPARED_CONTAINER_READBACK,
+            CAPABILITY_FAILURE_REPORT,
+            LEGACY_CAPABILITY_FAILURE_REPORT,
         )
         from control_plane.testing_application_host import run_application_host_program
 
         current = retained_application_capability_program(self.spec)
-        line = next(
-            row for row in current.splitlines() if row.startswith("PLATFORM_CREDENTIAL_KEYS=")
-        )
-        historical = current.replace(
-            line,
-            "PLATFORM_CREDENTIAL_KEYS=frozenset({"
-            + ", ".join(map(repr, sorted(PLATFORM_CREDENTIAL_KEYS, reverse=True)))
-            + "})",
-        )
+        historical = self.credential_programs(current)[-1]
         original = {"scheduleId": "original", "script": historical, "enabled": False}
         readback = {**original, "scheduleId": "readback"}
         changed = historical.replace("set -euo pipefail", "set -euO pipefail", 1)
-        for program, previous in (
-            (original, readback),
-            ({**original, "enabled": True}, readback),
-            ({**original, "script": changed}, readback),
-            (original, {**readback, "enabled": True}),
-            (original, {**readback, "script": changed}),
+        legacy = current.replace(CAPABILITY_FAILURE_REPORT, LEGACY_CAPABILITY_FAILURE_REPORT, 1)
+        unprepared = legacy
+        for fragment in (
+            PREPARED_CONTAINER_CAPABILITY_PROGRAM,
+            PREPARED_CONTAINER_LOOKUP,
+            PREPARED_CONTAINER_READBACK,
         ):
+            unprepared = unprepared.replace(fragment, "", 1)
+        cases = [
+            (
+                {**original, "script": program},
+                {**readback, "script": previous},
+                True,
+            )
+            for shape in (current, legacy, unprepared)
+            for program in self.credential_programs(shape)[::2]
+            for previous in self.credential_programs(shape)[::2]
+        ]
+        cases.extend(
+            (
+                ({**original, "enabled": True}, readback, False),
+                ({**original, "script": changed}, readback, False),
+                (original, {**readback, "enabled": True}, False),
+                (original, {**readback, "script": changed}, False),
+            )
+        )
+        for program, previous, accepted in cases:
             with (
                 self.subTest(program=program["enabled"]),
                 patch(
@@ -201,7 +250,7 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
                     before_effect=Mock(),
                     script_matches=capability_program_matches,
                 )
-                if program == original and previous == readback:
+                if accepted:
                     run()
                     self.assertEqual(terminal.call_count, 2)
                     self.assertEqual(
@@ -436,9 +485,16 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
             self.observe()
 
     def test_inherited_platform_key_in_captured_original_task_refuses(self) -> None:
-        self.task["Spec"]["ContainerSpec"]["Env"].append("DOKPLOY_TOKEN=retained-admin-capability")
-        with self.assertRaises(SystemExit):
-            self.observe()
+        from control_plane.npmplus import NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY
+
+        environment = self.task["Spec"]["ContainerSpec"]["Env"]
+        original = list(environment)
+        for key in ("DOKPLOY_TOKEN", NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY):
+            with self.subTest(key=key):
+                environment[:] = [*original, key + "=retained-admin-capability"]
+                with self.assertRaises(SystemExit):
+                    self.observe()
+                self.assertNotIn("retained-admin-capability", self.last_program_output)
 
     def test_current_clean_task_cannot_substitute_an_unrelated_deployment(self) -> None:
         self.spec["deployments"] = {

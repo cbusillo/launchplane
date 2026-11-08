@@ -72,7 +72,9 @@ def _service_env(store: PostgresRecordStore) -> dict[str, object]:
 
 class ServiceRuntimeSettingTests(unittest.TestCase):
     def test_npmplus_endpoint_is_reviewed_nonsecret_configuration(self) -> None:
-        key = "LAUNCHPLANE_NPMPLUS_BASE_URL"
+        from control_plane.npmplus import NPMPLUS_BASE_URL_ENV_KEY
+
+        key = NPMPLUS_BASE_URL_ENV_KEY
         setting = ServiceRuntimeSettingRequest(
             key=key, value="https://edge.example.test", reason="Record the existing endpoint."
         )

@@ -28,7 +28,7 @@ from tests.test_outbound_http import _FakeConnection, _FakeResponse, _resolver_f
 
 
 class TestingPrivateHealthTests(PrivateIngressFixture):
-    def test_credential_rotation_or_disable_during_probe_refuses_success(self) -> None:
+    def test_probe_accepts_unchanged_credentials_and_refuses_rotation_or_disable(self) -> None:
         import os
         from control_plane import secrets
         from control_plane.npmplus import (
@@ -41,6 +41,11 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         )
 
         self.create()
+        self.enterContext(
+            patch(
+                "socket.create_connection", side_effect=AssertionError("Unexpected network access.")
+            )
+        )
         with patch.dict(
             os.environ, {secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "fixture-health-key"}
         ):
@@ -64,8 +69,9 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                 "control_plane.testing_private_health.build_npmplus_ingress_client_from_records",
                 side_effect=build_npmplus_ingress_client_from_records,
             ):
-                for change in (NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY, "disabled"):
+                for change in (None, NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY, "disabled"):
                     with self.subTest(change=change):
+                        self.transport.reset_mock()
                         for key in (NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY):
                             secrets.write_secret_value(
                                 record_store=self.store,
@@ -87,7 +93,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                                 self.store.write_secret_binding(
                                     binding.model_copy(update={"status": "disabled"})
                                 )
-                            else:
+                            elif change is not None:
                                 secrets.write_secret_value(
                                     record_store=self.store,
                                     scope="context",
@@ -100,8 +106,12 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                             return PublicHttpResponse(200, self.endpoint.url, 0, (), b"healthy")
 
                         self.transport.side_effect = change_credential
-                        with self.assertRaises(PublicHttpDestinationError):
-                            self.fetch()
+                        if change is None:
+                            self.assertEqual(self.fetch().status_code, 200)
+                        else:
+                            with self.assertRaises(PublicHttpDestinationError):
+                                self.fetch()
+                        self.transport.assert_called_once()
 
     def setUp(self) -> None:
         super().setUp()

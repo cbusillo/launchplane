@@ -18,7 +18,7 @@ import click
 
 from control_plane.npmplus import NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY
 
-PLATFORM_CREDENTIAL_KEYS = frozenset(
+LEGACY_HOST_PROGRAM_CREDENTIAL_KEYS = frozenset(
     (
         "GITHUB_TOKEN",
         "GH_TOKEN",
@@ -36,9 +36,10 @@ PLATFORM_CREDENTIAL_KEYS = frozenset(
         "LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN",
         "LAUNCHPLANE_MASTER_ENCRYPTION_KEY",
         "LAUNCHPLANE_SECRET_KEYS_JSON",
-        NPMPLUS_IDENTITY_ENV_KEY,
-        NPMPLUS_SECRET_ENV_KEY,
     )
+)
+PLATFORM_CREDENTIAL_KEYS = LEGACY_HOST_PROGRAM_CREDENTIAL_KEYS | frozenset(
+    (NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY)
 )
 
 # Refusal favors precision over the looser redaction pattern in
