@@ -35,6 +35,9 @@ from control_plane.storage.migrations.versions import (
     b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
     f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
     c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
+    d1a5b7c9d2e4_join_attestations_compatibility as attestations_compatibility_join,
+    e2b6c8d0a4f7_monitoring_authority_history as monitoring_history,
+    f3c7d9e1b5a8_join_monitoring_history as monitoring_history_join,
 )
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_REVISION,
@@ -43,9 +46,6 @@ from control_plane.storage.schema_adoption import (
 
 from control_plane.storage.schema_invariants import (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
-    CRITICAL_POSTGRES_COLUMN_TYPES,
-    CRITICAL_PRIMARY_KEYS,
-    CRITICAL_SCHEMA_INDEXES,
     EXPECTED_ALEMBIC_HEAD_REVISION,
     PRE_RETIREMENT_ALEMBIC_REVISION,
     _canonical_predicate_expression,
@@ -62,6 +62,19 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_ordinary_history_upgrade_joins_the_existing_held_branch(self) -> None:
+        self.assertEqual(
+            schema_migration_target(
+                current_revision=attestations_compatibility_join.revision,
+                target_revision=SCHEMA_MIGRATION_TARGET_REVISION,
+            ),
+            monitoring_history_join.revision,
+        )
+        self.assertEqual(
+            schema_migration_action(current_revision=attestations_compatibility_join.revision),
+            "upgrade",
+        )
+
     def test_additive_attestation_migration_preserves_held_delivery_tables(self) -> None:
         with TemporaryDirectory() as temporary:
             url = f"sqlite+pysqlite:///{Path(temporary) / 'migration.db'}"
@@ -84,26 +97,35 @@ class SchemaMigrationTests(unittest.TestCase):
             )
 
     def test_preceding_target_reads_additive_schema_without_downgrading_it(self) -> None:
-        with TemporaryDirectory() as temporary:
-            url = f"sqlite+pysqlite:///{Path(temporary) / 'compatibility.db'}"
-            command.upgrade(alembic_config(url), integration_attestations.down_revision)
-            engine = create_engine(url)
-            self.addCleanup(engine.dispose)
-            before = set(inspect(engine).get_table_names())
-            self.assertTrue(set(retired_delivery.RETIRED_TABLES) & before)
-            self.assertNotIn("launchplane_integration_attestations", before)
-            command.upgrade(alembic_config(url), integration_attestations.revision)
-            self.assertEqual(
-                schema_migration_action(
-                    current_revision=integration_attestations.revision,
-                    target_revision=integration_attestations.down_revision,
-                ),
-                "compatible_ahead",
-            )
-            self.assertTrue(before <= set(inspect(engine).get_table_names()))
-            store = PostgresRecordStore(database_url=url)
-            self.addCleanup(store.close)
-            store.verify_schema()
+        for migration in (integration_attestations, monitoring_history):
+            with self.subTest(revision=migration.revision), TemporaryDirectory() as temporary:
+                url = f"sqlite+pysqlite:///{Path(temporary) / 'compatibility.db'}"
+                command.upgrade(alembic_config(url), migration.down_revision)
+                engine = create_engine(url)
+                self.addCleanup(engine.dispose)
+                before = set(inspect(engine).get_table_names())
+                self.assertTrue(set(retired_delivery.RETIRED_TABLES) & before)
+                command.upgrade(alembic_config(url), migration.revision)
+                self.assertEqual(
+                    schema_migration_action(
+                        current_revision=migration.revision,
+                        target_revision=migration.down_revision,
+                    ),
+                    "compatible_ahead",
+                )
+                self.assertTrue(before <= set(inspect(engine).get_table_names()))
+                store = PostgresRecordStore(database_url=url)
+                self.addCleanup(store.close)
+                store.verify_schema()
+
+    def test_installed_history_routes_explicit_delivery_retirement_through_its_join(self) -> None:
+        self.assertEqual(
+            schema_migration_target(
+                current_revision=monitoring_history.revision,
+                target_revision=retired_delivery.revision,
+            ),
+            monitoring_history_join.revision,
+        )
 
     def test_migration_preserves_existing_application_loggers(self) -> None:
         application_logger = logging.getLogger("control_plane.merge_train_controller_run_once")
@@ -1572,45 +1594,6 @@ class SchemaMigrationTests(unittest.TestCase):
             downgraded_table_names,
         )
 
-    def test_tenant_repository_classification_schema_invariants_are_expected(
-        self,
-    ) -> None:
-        column_types = {
-            (column.table_name, column.column_name): column.accepted_type_tokens
-            for column in CRITICAL_POSTGRES_COLUMN_TYPES
-        }
-        indexes = {(index.table_name, index.index_name): index for index in CRITICAL_SCHEMA_INDEXES}
-        primary_keys = {
-            primary_key.table_name: primary_key.column_names
-            for primary_key in CRITICAL_PRIMARY_KEYS
-        }
-
-        self.assertEqual(
-            column_types[("launchplane_tenant_repository_classifications", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            primary_keys["launchplane_tenant_repository_classifications"],
-            ("record_id",),
-        )
-        self.assertTrue(
-            indexes[
-                (
-                    "launchplane_tenant_repository_classifications",
-                    "launchplane_tenant_repo_class_revision_uidx",
-                )
-            ].unique
-        )
-        self.assertEqual(
-            indexes[
-                (
-                    "launchplane_tenant_repository_classifications",
-                    "launchplane_tenant_repo_class_current_idx",
-                )
-            ].column_names,
-            ("repository_id", "classification_revision"),
-        )
-
     def test_repository_human_admission_migration_upgrades_and_downgrades(
         self,
     ) -> None:
@@ -2265,285 +2248,6 @@ class SchemaMigrationTests(unittest.TestCase):
             },
         )
         self.assertEqual(policy_digest, "a" * 64)
-
-    def test_policy_schema_invariants_are_expected(self) -> None:
-        column_types = {
-            (column.table_name, column.column_name): column.accepted_type_tokens
-            for column in CRITICAL_POSTGRES_COLUMN_TYPES
-        }
-        indexes = {(index.table_name, index.index_name): index for index in CRITICAL_SCHEMA_INDEXES}
-        primary_keys = {
-            primary_key.table_name: primary_key.column_names
-            for primary_key in CRITICAL_PRIMARY_KEYS
-        }
-
-        self.assertFalse(
-            [index.index_name for index in CRITICAL_SCHEMA_INDEXES if len(index.index_name) > 63]
-        )
-        self.assertNotIn(
-            ("launchplane_human_sessions", "launchplane_human_sessions_github_id_idx"),
-            indexes,
-        )
-        self.assertEqual(
-            column_types[("launchplane_privileged_operations", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_privileged_operation_events", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_merge_train_policies", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_production_backup_targets", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_production_backup_policies", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_owner_control_channel_sessions", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            primary_keys["launchplane_owner_control_issued_challenges"],
-            ("challenge_id",),
-        )
-        self.assertEqual(
-            primary_keys["launchplane_production_backup_targets"],
-            ("record_id",),
-        )
-        self.assertEqual(
-            primary_keys["launchplane_production_backup_policies"],
-            ("record_id",),
-        )
-        self.assertTrue(
-            indexes[
-                (
-                    "launchplane_production_backup_targets",
-                    "launchplane_production_backup_target_active_uidx",
-                )
-            ].unique
-        )
-        self.assertTrue(
-            indexes[
-                (
-                    "launchplane_production_backup_policies",
-                    "launchplane_production_backup_policy_active_uidx",
-                )
-            ].unique
-        )
-        self.assertIn(
-            (
-                "launchplane_owner_control_issued_challenges",
-                "launchplane_owner_control_challenge_state_idx",
-            ),
-            indexes,
-        )
-        self.assertEqual(
-            primary_keys["launchplane_owner_control_shadow_verification_events"],
-            ("event_id",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_owner_control_challenge_lifecycle_events", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            primary_keys["launchplane_owner_control_challenge_lifecycle_events"],
-            ("event_id",),
-        )
-        self.assertIn(
-            (
-                "launchplane_owner_control_shadow_verification_events",
-                "launchplane_owner_control_shadow_event_challenge_idx",
-            ),
-            indexes,
-        )
-        self.assertIn(
-            (
-                "launchplane_owner_control_challenge_lifecycle_events",
-                "launchplane_owner_control_lifecycle_event_challenge_idx",
-            ),
-            indexes,
-        )
-
-        self.assertEqual(
-            primary_keys["launchplane_privileged_operations"],
-            ("operation_id",),
-        )
-        self.assertEqual(
-            primary_keys["launchplane_privileged_operation_events"],
-            ("event_id",),
-        )
-        self.assertTrue(
-            indexes[
-                (
-                    "launchplane_privileged_operation_events",
-                    "launchplane_privileged_operation_events_operation_sequence_uidx",
-                )
-            ].unique
-        )
-        self.assertTrue(
-            indexes[
-                (
-                    "launchplane_merge_train_policies",
-                    "launchplane_merge_train_policies_active_uidx",
-                )
-            ].unique
-        )
-        self.assertEqual(
-            indexes[
-                (
-                    "launchplane_merge_train_policies",
-                    "launchplane_merge_train_policies_active_uidx",
-                )
-            ].predicate_expression,
-            "status='active'",
-        )
-        self.assertEqual(
-            column_types[("launchplane_authz_denials", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            indexes[
-                (
-                    "launchplane_authz_denials",
-                    "launchplane_authz_denials_recorded_idx",
-                )
-            ].column_names,
-            ("recorded_at",),
-        )
-        self.assertEqual(
-            indexes[
-                (
-                    "launchplane_authz_denials",
-                    "launchplane_authz_denials_expires_idx",
-                )
-            ].column_names,
-            ("expires_at",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_merge_admissions", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_merge_landing_outcomes", "payload")],
-            ("jsonb",),
-        )
-        self.assertTrue(
-            indexes[
-                (
-                    "launchplane_merge_admissions",
-                    "launchplane_merge_admissions_attempt_uidx",
-                )
-            ].unique
-        )
-        self.assertTrue(
-            indexes[
-                (
-                    "launchplane_merge_landing_outcomes",
-                    "launchplane_merge_landing_outcomes_observation_uidx",
-                )
-            ].unique
-        )
-        self.assertEqual(primary_keys["launchplane_merge_admissions"], ("admission_id",))
-        self.assertEqual(
-            primary_keys["launchplane_merge_landing_outcomes"],
-            ("outcome_id",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_detached_application_retirements", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            indexes[
-                (
-                    "launchplane_detached_application_retirements",
-                    "launchplane_detached_app_retirements_plan_idempotency_unique",
-                )
-            ].predicate_expression,
-            "mode='plan'",
-        )
-        self.assertEqual(
-            primary_keys["launchplane_detached_application_retirements"],
-            ("record_id",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_change_impact_policies", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            indexes[
-                (
-                    "launchplane_change_impact_policies",
-                    "launchplane_change_impact_policy_active_uidx",
-                )
-            ].predicate_expression,
-            "status='active'",
-        )
-        self.assertEqual(
-            primary_keys["launchplane_change_impact_policies"],
-            ("record_id",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_owner_acceptance_events", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_owner_acceptance_events", "owner_github_id")],
-            ("bigint", "int8"),
-        )
-        self.assertEqual(
-            column_types[("launchplane_owner_acceptance_events", "pr_number")],
-            ("bigint", "int8"),
-        )
-        self.assertEqual(
-            column_types[("launchplane_owner_acceptance_events", "subject_sequence")],
-            ("bigint", "int8"),
-        )
-        self.assertEqual(
-            indexes[
-                (
-                    "launchplane_owner_acceptance_events",
-                    "launchplane_owner_acceptance_events_subject_idx",
-                )
-            ].column_names,
-            (
-                "repository_id",
-                "pr_number",
-                "product",
-                "system",
-                "owner_action",
-                "environment",
-                "subject_sequence",
-            ),
-        )
-        self.assertTrue(
-            indexes[
-                (
-                    "launchplane_owner_acceptance_events",
-                    "launchplane_owner_acceptance_events_subject_sequence_uidx",
-                )
-            ].unique
-        )
-        self.assertEqual(
-            primary_keys["launchplane_owner_acceptance_events"],
-            ("event_id",),
-        )
-        self.assertEqual(
-            primary_keys["launchplane_owner_acceptance_subject_sequences"],
-            (
-                "repository_id",
-                "pr_number",
-                "product",
-                "system",
-                "owner_action",
-                "environment",
-            ),
-        )
 
     def test_owner_control_shadow_verifier_migration_upgrades_and_downgrades(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

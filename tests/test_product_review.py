@@ -2,7 +2,7 @@ from tests.support.auth import scoped_agent_test
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from fastapi import FastAPI
 from httpx2 import Response
@@ -12,7 +12,8 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_review_status import OwnerReviewStatusPublisher
-from control_plane.release_review import PullRequestNotes
+from control_plane.product_review import require_product_review_store, resolve_serving_preview
+from control_plane.release_review import PullRequestNotes, UNREAD_PULL_REQUEST_NOTES
 from control_plane.client_test_notes import client_test_notes
 from control_plane.service_auth import (
     BearerIdentityConfig,
@@ -248,7 +249,10 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             title="Update the repair price",
             client_test_notes="Check the repair price.",
             client_test_notes_error="",
+            head_sha=_preview_generation_read_record().anchor_summary.head_sha,
+            state="open",
         )
+        self.notes_reader = Mock(side_effect=lambda *_: self.pull_request_notes)
         self.session_manager = HumanSessionManager(
             config=_github_oauth_config(),
             session_store=InMemoryHumanSessionStore(),
@@ -269,7 +273,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: self.store,
             human_session_manager=self.session_manager,
             owner_review_status_publisher=self.publisher,
-            product_review_notes_reader=lambda *_: self.pull_request_notes,
+            product_review_notes_reader=self.notes_reader,
         )
 
     async def _get(self, app: FastAPI, human: GitHubHumanIdentity) -> Response:
@@ -286,7 +290,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         human: GitHubHumanIdentity,
         *,
         decision: str,
-        reason: str = "",
+        reason: str | None = None,
         reviewed: dict[str, str] | None = None,
     ) -> Response:
         session = self.session_manager.issue(human)
@@ -299,7 +303,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                 "repository": _REPOSITORY,
                 "pull_request": _PULL_REQUEST,
                 "decision": decision,
-                "reason": reason,
+                **({"reason": reason} if reason is not None else {}),
                 **(reviewed if reviewed is not None else self._reviewed_preview()),
             },
         )
@@ -311,6 +315,78 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             "reviewed_preview_url": _preview_read_record().canonical_url,
             "reviewed_generation_id": generation.generation_id,
         }
+
+    async def test_accept_requires_the_open_pull_requests_current_head(self) -> None:
+        self._write_product()
+        owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
+        app = self._app()
+        current_notes = self.pull_request_notes
+        for head, state in (
+            ("b" * 40, "open"),
+            ("", "open"),
+            (current_notes.head_sha, "closed"),
+            (current_notes.head_sha, ""),
+        ):
+            with self.subTest(head=head, state=state):
+                self.pull_request_notes = current_notes._replace(head_sha=head, state=state)
+                read = (await self._get(app, owner)).json()
+                self.assertTrue(read["can_decide"])
+                self.assertFalse(read["preview_is_current"])
+                self.assertTrue(read["cannot_accept_reason"])
+                refused = await self._post(app, owner, decision="accepted")
+                self.assertEqual(refused.status_code, 409)
+                self.assertEqual(refused.json()["error"]["code"], "product_review_preview_changed")
+                self.assertEqual(
+                    self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                    ),
+                    (),
+                )
+        changed = await self._post(app, owner, decision="changes_requested")
+        self.assertEqual(changed.status_code, 400)
+        self.pull_request_notes = current_notes
+        read = (await self._get(app, owner)).json()
+        self.assertTrue(read["preview_is_current"])
+        self.assertFalse(read["cannot_accept_reason"])
+        accepted = await self._post(app, owner, decision="accepted")
+        self.assertEqual(accepted.status_code, 200)
+
+    async def test_accept_binds_the_fresh_head_check_to_the_submitted_preview(self) -> None:
+        self._write_product()
+        observed = resolve_serving_preview(
+            store=require_product_review_store(self.store),
+            profile=_profile(),
+            pull_request_number=_PULL_REQUEST,
+        )
+        generation = _preview_generation_read_record()
+        next_head = "b" * 40
+        self.store.write_preview_generation_record(
+            generation.model_copy(
+                update={
+                    "anchor_summary": generation.anchor_summary.model_copy(
+                        update={"head_sha": next_head}
+                    )
+                }
+            )
+        )
+        reviewed = {**self._reviewed_preview(), "reviewed_head_sha": next_head}
+        with patch(
+            "control_plane.http_routes.product_review.resolve_serving_preview",
+            return_value=observed,
+        ):
+            refused = await self._post(
+                self._app(),
+                _human(login="site-owner", github_id=_OWNER_GITHUB_ID),
+                decision="accepted",
+                reviewed=reviewed,
+            )
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            ),
+            (),
+        )
 
     async def test_stale_review_cannot_decide_a_changed_preview(self) -> None:
         self._write_product()
@@ -349,19 +425,15 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                     )
                 self.store.write_preview_generation_record(generation)
                 self.store.write_preview_record(preview)
-                for decision in ("accepted", "changes_requested"):
-                    response = await self._post(
-                        app,
-                        owner,
-                        decision=decision,
-                        reason="Fix the price.",
-                        reviewed=reviewed,
-                    )
-                    self.assertEqual(response.status_code, 409)
-                    self.assertEqual(
-                        response.json()["error"]["code"], "product_review_preview_changed"
-                    )
-                    self.publisher.publish.assert_not_called()
+                response = await self._post(
+                    app,
+                    owner,
+                    decision="accepted",
+                    reviewed=reviewed,
+                )
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json()["error"]["code"], "product_review_preview_changed")
+                self.publisher.publish.assert_not_called()
                 self.assertEqual(
                     self.store.list_product_review_decision_records(
                         repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
@@ -416,19 +488,22 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_owner_reviews_preview_and_decision_becomes_latest(self) -> None:
         self._write_product()
-        self.pull_request_notes = PullRequestNotes(
+        self.pull_request_notes = self.pull_request_notes._replace(
             title="Show the repair price",
             client_test_notes="Open the price list.",
             client_test_notes_error="",
+            latest_client_comment="Please show the repair price.",
+            latest_client_comment_url="https://github.com/every/example-site/pull/42#issuecomment-7",
         )
         app = self._app()
         owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
 
         before = await self._get(app, owner)
-        written = await self._post(
-            app, owner, decision="changes_requested", reason="The price is wrong."
-        )
+        written = await self._post(app, owner, decision="accepted", reason="")
         after = await self._get(app, owner)
+        self.assertEqual(
+            [call.args[3] for call in self.notes_reader.call_args_list], [True, False, True]
+        )
 
         self.assertEqual(before.status_code, 200)
         self.assertTrue(before.json()["can_decide"])
@@ -439,15 +514,19 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(before.json()["latest_decision"])
         self.assertEqual(before.json()["pull_request_title"], "Show the repair price")
         self.assertEqual(before.json()["client_test_notes"], "Open the price list.")
+        self.assertEqual(
+            before.json()["latest_client_comment"], self.pull_request_notes.latest_client_comment
+        )
         self.assertEqual(written.status_code, 200)
         latest = after.json()["latest_decision"]
-        self.assertEqual(latest["decision"], "changes_requested")
-        self.assertEqual(latest["reason"], "The price is wrong.")
+        self.assertEqual(latest["decision"], "accepted")
+        self.assertEqual(latest["reason"], "")
         self.assertEqual(latest["owner_github_login"], "site-owner")
         self.assertEqual(latest["head_sha"], "abcdef1234567890abcdef1234567890abcdef12")
 
     async def test_invalid_notes_block_acceptance_until_questions_are_answered(self) -> None:
         from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+        from control_plane.client_test_notes import CLIENT_REVIEW_NOTES_PENDING
 
         self._write_product()
         app = self._app()
@@ -458,26 +537,27 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             f"Nothing for the Client to test: CI only.\n### {OPEN_CLIENT_QUESTIONS}\n- Confirm the address.",
         ):
             with self.subTest(notes=notes):
-                self.pull_request_notes = PullRequestNotes(
+                self.pull_request_notes = self.pull_request_notes._replace(
                     title="Contact page",
                     client_test_notes=notes,
                     client_test_notes_error=client_test_notes(notes).error,
                 )
                 read = await self._get(app, owner)
-                self.assertTrue(read.json()["client_test_notes_error"])
+                self.assertEqual(
+                    read.json()["client_test_notes_error"], CLIENT_REVIEW_NOTES_PENDING
+                )
                 refused = await self._post(app, owner, decision="accepted")
                 self.assertEqual(refused.status_code, 409)
                 self.assertEqual(refused.json()["error"]["code"], "client_test_notes_required")
+                self.assertEqual(refused.json()["error"]["message"], CLIENT_REVIEW_NOTES_PENDING)
                 self.assertFalse(
                     self.store.list_product_review_decision_records(
                         repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
                     )
                 )
-        requested = await self._post(
-            app, owner, decision="changes_requested", reason="Please fill in the facts."
-        )
-        self.assertEqual(requested.status_code, 200)
-        self.pull_request_notes = PullRequestNotes(
+        requested = await self._post(app, owner, decision="changes_requested")
+        self.assertEqual(requested.status_code, 400)
+        self.pull_request_notes = self.pull_request_notes._replace(
             title="Contact page",
             client_test_notes=f"Check the contact page.\n### {OPEN_CLIENT_QUESTIONS}\n",
             client_test_notes_error="",
@@ -486,6 +566,22 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(read.json()["client_test_notes_error"])
         accepted = await self._post(app, owner, decision="accepted")
         self.assertEqual(accepted.status_code, 200)
+
+    async def test_unread_notes_offer_refresh_without_claiming_a_preview_update(self) -> None:
+        self._write_product()
+        self.pull_request_notes = UNREAD_PULL_REQUEST_NOTES
+        app = self._app()
+        owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
+        read = await self._get(app, owner)
+        self.assertEqual(
+            read.json()["client_test_notes_error"],
+            UNREAD_PULL_REQUEST_NOTES.client_test_notes_error,
+        )
+        refused = await self._post(app, owner, decision="accepted")
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(
+            refused.json()["error"]["message"], UNREAD_PULL_REQUEST_NOTES.client_test_notes_error
+        )
 
     async def test_owner_is_recognized_by_github_id_after_a_login_rename(self) -> None:
         self._write_product()
@@ -705,14 +801,14 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "browser_mutation_denied")
 
-    async def test_requesting_changes_without_a_reason_is_rejected(self) -> None:
+    async def test_requesting_changes_is_rejected(self) -> None:
         self._write_product()
 
         response = await self._post(
             self._app(),
             _human(login="site-owner", github_id=_OWNER_GITHUB_ID),
             decision="changes_requested",
-            reason="  ",
+            reason="The repair price is wrong.",
         )
 
         self.assertGreaterEqual(response.status_code, 400)

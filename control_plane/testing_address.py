@@ -59,7 +59,7 @@ class TestingAddressRequest(BaseModel):
 
     context: str = Field(min_length=1)
     instance: Literal["testing"] = "testing"
-    retirement_operation_id: str = Field(min_length=1)
+    retirement_operation_id: str = ""
     reservation_operation_id: str = Field(min_length=1)
     hostname: str = Field(pattern=r"^[a-z0-9.-]+$")
     mode: Literal["dry-run", "apply", "readback"] = "dry-run"

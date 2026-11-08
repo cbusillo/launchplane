@@ -871,6 +871,39 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertEqual(frame["predicate"], ReadbackPredicate.CLEANUP_DATABASE)
         self.assertEqual(frame["kind"], "refused")
 
+    def test_migrated_receiver_checks_whole_restore_capacity_before_streaming_with_snapshots_off(
+        self,
+    ) -> None:
+        from types import SimpleNamespace
+        from tests.test_migrated_testing_source import MigratedTestingRequestTests
+
+        source = MigratedTestingRequestTests().request().migrated_source
+        assert source is not None
+        self.spec.update(inspection_only=True)
+        self.spec["generation"].update(
+            source_mode="container-export",
+            source_binding_sha256=source.binding_sha256,
+            migrated_source=source.model_dump(mode="json"),
+            clean_snapshot_enabled=False,
+            drill_storage_budget={
+                "database_bytes": 1024,
+                "filestore_bytes": 1024,
+                "staging_bytes": 1024,
+                "reserve_bytes": 1024,
+            },
+        )
+        self.containers["script-runner"]["GraphDriver"] = {"Data": {"UpperDir": str(self.root)}}
+        with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=100000, f_frsize=1)):
+            status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.calls.clear()
+        with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=0, f_frsize=1)):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0, output)
+        frame = json.loads(output.strip().removeprefix("fixture:"))
+        self.assertEqual(frame["predicate"], ReadbackPredicate.BACKING_STORAGE)
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+
     def test_native_file_inspection_failure_does_not_report_database_read(self) -> None:
         self.spec.update(inspection_only=True, native_capture={})
         original = self.command
@@ -1356,7 +1389,6 @@ class FreshTestingHostProgramTests(unittest.TestCase):
     def test_website_exclusion_is_required_before_web_start(self) -> None:
         status, output = self.run_program()
         self.assertEqual(status, 0, output)
-        self.assertIsNotNone(self.website_settings_call)
         assert self.website_settings_call is not None
         self.assertEqual(self.website_settings_call[-2:], [self.database, self.gen.instance])
         readback = next(
@@ -1487,6 +1519,14 @@ class TestingCopyBoundaryTests(unittest.TestCase):
 
     def test_rehearsal_upgrade_keeps_the_sql_and_post_hook_boundaries(self) -> None:
         self.boundary_case("normal", instance="rehearsal", phase="resume")
+
+    def test_rehearsal_refuses_artifacts_without_migration_settings_or_readback_before_restore(
+        self,
+    ) -> None:
+        for fault in ("unsupported-purpose", "unsupported-readback"):
+            for sanitize_only in (True, False):
+                with self.subTest(fault=fault, sanitize_only=sanitize_only):
+                    self.boundary_case(fault, instance="rehearsal", sanitize_only=sanitize_only)
 
     def test_partial_initial_restore_drops_only_its_new_copy(self) -> None:
         self.boundary_case("restore-partial")
@@ -1721,7 +1761,13 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                         raise RuntimeError("partial initial restore")
 
                 def prepare_credentials_before_registry(self, **_: object) -> None:
+                    self_test.assertEqual(
+                        self.local.copy_purpose, "migration" if instance == "rehearsal" else None
+                    )
                     connection.execute("UPDATE res_users SET password=NULL")
+
+                def verify_isolated_copy_before_registry(self, *, database_connection: Any) -> None:
+                    pass
 
                 def _resolve_filestore_owner(self) -> str:
                     return "fixture-owner"
@@ -1757,12 +1803,18 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     events.append("drop-fresh")
 
             artifact: Any = ModuleType("run_odoo_data_workflows")
+            self_test = self
             artifact.LocalServerSettings = lambda: SimpleNamespace(
                 host="database",
                 db_name="fresh",
                 platform_instance=instance,
                 db_conn=Connection(connection, writer=True),
+                copy_purpose=None
+                if fault == "unsupported-purpose"
+                else os.environ.get("ODOO_COPY_PURPOSE"),
             )
+            if fault == "unsupported-readback":
+                delattr(NativeRunner, "verify_isolated_copy_before_registry")
             artifact.OdooDataWorkflowRunner = NativeRunner
             (Path(directory) / "fixture.dump").write_bytes(b"fixture verified dump")
             output = io.StringIO()
@@ -1815,6 +1867,22 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 ),
                 redirect_stdout(output),
             ):
+                if fault.startswith("unsupported-"):
+                    with self.assertRaises(SystemExit):
+                        exec(
+                            compile(
+                                rehearsal_copy_runner(sanitize_source_only=sanitize_only),
+                                "<copy-runner>",
+                                "exec",
+                            ),
+                            {},
+                        )
+                    self.assertFalse(events)
+                    self.assertEqual(
+                        connection.execute("SELECT password FROM res_users").fetchone()[0],
+                        "encoded-production-password",
+                    )
+                    return
                 if fault == "normal":
                     program = (
                         rehearsal_copy_runner(sanitize_source_only=sanitize_only)

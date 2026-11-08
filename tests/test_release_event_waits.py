@@ -62,19 +62,11 @@ class ReleaseEventWaitTests(unittest.TestCase):
         self.gone_issue = False
         self.race = False
         self.lost_response = False
-        self.reconciled: list[int] = []
-        self.reconciled_authors: list[tuple[int, ...]] = []
         self.enterContext(
             patch("control_plane.release_waits_github.github_api_request", self.github)
         )
         self.enterContext(
             patch("control_plane.merge_train_planning_completion.github_api_request", self.github)
-        )
-        self.enterContext(
-            patch(
-                "control_plane.release_waits_github.reconcile_issue_status",
-                side_effect=lambda scope, number: self.reconcile(number, scope.trusted_author_ids),
-            )
         )
 
     def github(
@@ -145,10 +137,6 @@ class ReleaseEventWaitTests(unittest.TestCase):
             return {**self.issue, "body": "Director changed the wait"}
         return deepcopy(self.issue)
 
-    def reconcile(self, number: int, author_ids: tuple[int, ...]) -> None:
-        self.reconciled.append(number)
-        self.reconciled_authors.append(author_ids)
-
     def resolve(self, product: str = "fixture") -> None:
         self.detail_reads = 0
         scope = PlanningRepositoryScope(self.repository, "main", "fixture", self.trusted_ids)
@@ -171,8 +159,6 @@ class ReleaseEventWaitTests(unittest.TestCase):
         self.assertIn(self.record["waits"][0]["release"]["next_action"], self.comments[0]["body"])
         self.resolve()
         self.assertEqual(len(self.writes), 1)
-        self.assertEqual(self.reconciled_authors, [(self.comments[0]["user"]["id"],)] * 2)
-        self.assertEqual(self.reconciled, [self.issue["number"], self.issue["number"]])
 
     def test_malformed_issue_does_not_starve_other_waits(self) -> None:
         self.bad_issue = True

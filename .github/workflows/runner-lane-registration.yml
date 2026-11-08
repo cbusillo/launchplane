@@ -140,16 +140,12 @@ jobs:
         shell: bash
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
-          GH_TOKEN: ${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "Missing runner administration GitHub token secret." >&2
-            exit 1
-          fi
-          GITHUB_TOKEN="$GH_TOKEN" uv run launchplane \
+          uv run launchplane \
             runner-inventory \
             --repository "$TARGET_REPOSITORY" \
+            --service-url "$LAUNCHPLANE_SERVICE_URL" \
             > runner-lane-lifecycle-pre-inventory.json
 
       - name: Run runner lane registration executor
@@ -163,7 +159,6 @@ jobs:
           RUNNER_PACKAGE_URL: ${{ inputs.runner_package_url }}
           RUNNER_LABELS_INPUT: ${{ inputs.labels }}
           AUDIT_RECORD_KEY: ${{ inputs.audit_record_key }}
-          GH_TOKEN: ${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}
           MUTATE_REQUESTED: ${{ inputs.mutate }}
         run: |
           set -euo pipefail
@@ -195,7 +190,7 @@ jobs:
           if [ "$MUTATE_REQUESTED" = "true" ]; then
             mutate_flag=--mutate
           fi
-          GITHUB_TOKEN="$GH_TOKEN" flock -n \
+          flock -n \
             /tmp/launchplane-runner-host-hygiene.lock \
             uv run launchplane \
             runner-lane-registration-executor \
@@ -229,7 +224,6 @@ jobs:
           LANE_NAME: ${{ inputs.lane_name }}
           REGISTRATION_ROOT: ${{ inputs.registration_root }}
           AUDIT_RECORD_KEY: ${{ inputs.audit_record_key }}
-          GH_TOKEN: ${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}
           MUTATE_REQUESTED: ${{ inputs.mutate }}
         run: |
           set -euo pipefail
@@ -252,7 +246,7 @@ jobs:
           if [ "$MUTATE_REQUESTED" = "true" ]; then
             mutate_flag=--mutate
           fi
-          GITHUB_TOKEN="$GH_TOKEN" flock -n \
+          flock -n \
             /tmp/launchplane-runner-host-hygiene.lock \
             uv run launchplane \
             runner-lane-retirement-executor \

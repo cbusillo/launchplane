@@ -4,10 +4,12 @@ import json
 import re
 from typing import Annotated, Literal, get_args
 
+from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverLane
 from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+from control_plane.contracts.testing_application import TestingApplicationState
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
@@ -26,6 +28,7 @@ from control_plane.contracts.snapshot_protocol import (
 )
 
 
+PreviewSecretEncoding = Literal["urlsafe", "base64"]
 ProductLifecycleState = Literal["active", "retiring", "retired"]
 ProductPublicWebsite = Literal["required", "none"]
 ProductionUseAuthority = Literal["explicit", "director_agent"]
@@ -329,8 +332,29 @@ def product_lane_monitoring_incident_eligible(
     return check_kind not in {"public_http", "tls"} or monitoring_intent == "public"
 
 
+class ProductGenericWebTestingState(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["none", "volume", "postgresql"]
+    container_path: str = ""
+
+    @model_validator(mode="after")
+    def validate_application_state(self) -> "ProductGenericWebTestingState":
+        if self.kind in {"none", "volume"}:
+            TestingApplicationState.model_validate(self.model_dump())
+        elif self.container_path:
+            raise ValueError("Only a local volume can declare an application state path.")
+        return self
+
+
 class ProductLaneProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    generic_web_testing_state: ProductGenericWebTestingState | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     odoo_testing_drill_enabled: bool = Field(
         default=False,
         exclude_if=lambda value: not value,
@@ -374,6 +398,8 @@ class ProductLaneProfile(BaseModel):
 
     @model_validator(mode="after")
     def _validate_lane(self) -> "ProductLaneProfile":
+        if self.generic_web_testing_state is not None and self.instance != "testing":
+            raise ValueError("Testing state declarations require the testing instance.")
         if (
             self.odoo_testing_drill_enabled or self.odoo_testing_drill_storage
         ) and self.instance != "testing":
@@ -419,10 +445,12 @@ class ProductPreviewProfile(BaseModel):
     domain_certificate_type: Literal["none", "letsencrypt"] = "none"
     required_provider_fields: tuple[str, ...] = ()
     data_transport_mode: Literal["none", "driver"] = "none"
-    transport_extension: Literal["", "verireel-postgres"] = Field(
+    transport_extension: Literal["", "postgres", "verireel-postgres"] = Field(
         default="",
         exclude_if=lambda value: not value,
-        json_schema_extra={"x-launchplane-optional-response": True},
+        json_schema_extra={
+            "x-launchplane-optional-response": True,
+        },
     )
     transport_database_prefix: str = Field(
         default="",
@@ -430,6 +458,25 @@ class ProductPreviewProfile(BaseModel):
         exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
+    generated_secret_env: dict[str, PreviewSecretEncoding] = Field(
+        default_factory=dict,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_postgres_transport(cls, value: object, info: ValidationInfo) -> object:
+        if (
+            isinstance(value, dict)
+            and value.get("transport_extension") == "verireel-postgres"
+            and not (info.context and info.context.get("stored_product_profile"))
+        ):
+            raise ValueError(
+                "The retired preview transport is read-only; apply a reviewed shared-web transition before editing this profile."
+            )
+        return value
+
     historical_transport: dict[str, str] = Field(
         default_factory=dict,
         exclude_if=lambda value: not value,
@@ -520,6 +567,38 @@ class ProductPreviewProfile(BaseModel):
             )
         if self.transport_database_prefix and not self.transport_extension:
             raise ValueError("preview transport database prefix requires a transport extension")
+        if self.generated_secret_env and self.transport_extension not in {
+            "postgres",
+            "verireel-postgres",
+        }:
+            raise ValueError("generated preview secrets require PostgreSQL transport")
+        if self.transport_extension == "postgres" and set(self.copied_env_keys).intersection(
+            {"DATABASE_URL", *self.generated_secret_env}
+        ):
+            raise ValueError(
+                "PostgreSQL previews generate database and declared application credentials; remove those keys from copied_env_keys."
+            )
+        if self.transport_extension == "postgres" and self.template_instance != "testing":
+            raise ValueError("PostgreSQL previews require a testing template lane")
+        for key in (*self.preview_url_env_keys, *self.preview_domain_env_keys):
+            if self.transport_extension == "postgres" and (
+                key == "DATABASE_URL"
+                or key.startswith("LAUNCHPLANE_")
+                or key in PLATFORM_CREDENTIAL_KEYS
+            ):
+                raise ValueError(
+                    "Preview URL keys cannot replace managed database, platform or identity keys"
+                )
+        reserved_keys = {"DATABASE_URL", *self.preview_url_env_keys, *self.preview_domain_env_keys}
+        for key in self.generated_secret_env:
+            if (
+                not re.fullmatch(r"[A-Z][A-Z0-9_]*", key)
+                or key.startswith("LAUNCHPLANE_")
+                or key in PLATFORM_CREDENTIAL_KEYS
+            ):
+                raise ValueError("generated preview secret requires an application environment key")
+            if key in reserved_keys:
+                raise ValueError("generated preview secret conflicts with a managed preview key")
 
         return self
 
@@ -792,6 +871,10 @@ class LaunchplaneProductProfileRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "LaunchplaneProductProfileRecord":
+        if self.driver_id != "generic-web" and any(
+            lane.generic_web_testing_state is not None for lane in self.lanes
+        ):
+            raise ValueError("Generic-web testing state requires the generic-web driver.")
         if not self.driver_id.strip():
             raise ValueError("product profile requires driver_id")
         if "image" not in self.model_fields_set:
@@ -922,16 +1005,19 @@ class LaunchplaneProductProfileRecord(BaseModel):
             raise ValueError(
                 "Use managed product configuration with instance preview instead of preview.override_env."
             )
-        legacy_extensions = self.preview.transport_extension == "verireel-postgres" or any(
+        requires_current_schema = self.preview.transport_extension in {
+            "postgres",
+            "verireel-postgres",
+        } or any(
             lane.generic_web_extensions.verification_extension == "verireel-testing"
             for lane in self.lanes
         )
-        if legacy_extensions and (
+        if requires_current_schema and (
             self.schema_version < CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION
             or "schema_version" not in self.model_fields_set
         ):
             raise ValueError(
-                "Legacy extension writes require a fresh current-schema profile; read the current profile and use the reviewed generic-web transition to preserve or remove declarations explicitly."
+                "Preview extension writes require a fresh current-schema profile; read the current profile and use the reviewed generic-web transition to preserve or remove declarations explicitly."
             )
         for lane in self.lanes:
             for check in lane.health_monitoring.checks:

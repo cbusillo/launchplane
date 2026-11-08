@@ -565,20 +565,20 @@ class PrerequisiteTests(PrerequisiteFixture):
         self.assertEqual(batch.applied, "explicit")
         self.assertEqual(batch.authority_applied, "match")
 
-    def test_excluded_authority_is_unknown_instead_of_an_omitted_default(self) -> None:
+    def test_target_settings_do_not_hide_authority_and_retirement_stays_unknown(self) -> None:
         key = config_parameter_runtime_key(SOURCE_PREFIXES["cm_data"] + ".port")
+        expected = self.read().sources[0].options
         original = self.fixture.store.read_dokploy_target_record.return_value
-        for kind in ("target", "retired"):
-            with self.subTest(kind=kind):
-                self.fixture.store.read_dokploy_target_record.return_value = original.model_copy(
-                    update={"env": {key: "17"}} if kind == "target" else {}
-                )
-                self.fixture.runtime = self.fixture.runtime.model_copy(
-                    update={"retired_provider_keys": (key,) if kind == "retired" else ()}
-                )
-                source = self.read().sources[0]
-                self.assertEqual(source.options[0].authority, "unknown")
-                self.assertEqual(source.options[0].authority_applied, "unknown")
+        self.fixture.store.read_dokploy_target_record.return_value = original.model_copy(
+            update={"env": {key: "17"}}
+        )
+        self.assertEqual(self.read().sources[0].options, expected)
+        self.fixture.runtime = self.fixture.runtime.model_copy(
+            update={"retired_provider_keys": (key,)}
+        )
+        source = self.read().sources[0]
+        self.assertEqual(source.options[0].authority, "unknown")
+        self.assertEqual(source.options[0].authority_applied, "unknown")
 
     def test_authority_changes_after_the_runtime_read_discard_evidence(self) -> None:
         original_remote = self.remote

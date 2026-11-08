@@ -8,6 +8,88 @@ the only needed copy of data, production resources and live credentials remain
 protected. A label, missing staff hold, distinct volume name or distinct secret
 version is not proof of those facts.
 
+## Recorded Odoo preview qualification
+
+For observation without admission publication, use the
+[inert exact-original evidence read](preview-workflow-contract.md#inert-exact-original-evidence).
+It shares the existing qualification reader with collection and requires an
+exact original/source/image and optional serving generation. It records no
+safety fact and cannot qualify historical data custody.
+
+The observations route's existing reviewed `collect` mode accepts an owned
+Odoo `preview_id` and its preview slug. It resolves the active serving
+generation, verifies its runtime identity against the immutable issued plan,
+and reads the completed deployment's concrete Compose ID. A current profile
+prefix or a different generation cannot select the recipient.
+
+A product without a registered production lane uses an empty production
+comparison only after complete service inventories confirm its profile,
+exclusive current and historical contexts, and absence of production targets,
+credentials, runtime settings and deployment inventory there. A live product,
+contradictory records, ambiguous ownership or an unavailable inventory cannot
+qualify this absence. The same reader rechecks that authority after probing.
+This does not classify unknown production use as prelaunch or establish data
+custody. Current runtime, usage, resource and integration probes still run.
+
+Collection reuses the testing usage reader for recent successful sign-ins and
+authenticated session files, and the shared copy-runtime probe for actual
+mounts, backing storage, network membership and ports. It checks the running
+web and runner identities, compares all container environments and configuration
+parameter values against current managed and provider production credentials,
+and runs the existing maintenance integration readback with no preview
+integration allowances.
+The host returns per-read salted digests of preview credential candidates to
+the service. Production values and digests stay inside the service. The same
+candidate reader handles URLs, JSON and encoded payloads on both sides. The
+comparison includes all configured production-context integrations, provider
+credentials, including literal and secret-backed configuration parameters.
+Production candidates retain whole managed secrets and every fragment of managed
+or credential-shaped provider values. Other provider values contribute only
+credential-named fragments. Nested names retain their credential context, and
+scalar values include their text representations. Within managed values and
+credential-named provider fragments, short, numeric or boolean-looking values
+and bearer URLs stay protected. A collision
+refuses with the production binding or environment key whose credential separation
+is unproven; keys inside credential payloads remain private. An
+untyped public endpoint, port or flag inside a protected value also refuses when
+it matches the preview, including public fields of two structured secrets.
+That leaves credential separation unproven until its purpose is established;
+URL or scalar shape alone cannot supply that fact.
+Database parameters are read in a read-only transaction through the pinned
+database image; the production database is not inventoried. Preview parameters
+are compared only against known managed and provider production values. This
+does not establish that `database.secret`, VAPID keys or other database-only
+production secrets have been rotated; sanitation proof
+belongs to the sanitized-copy work. Other tables, such as user API keys, are
+outside this inventory. The isolation evidence explicitly names this managed
+and provider comparison scope. Credential digests,
+user identities, session identifiers and provider details never reach the
+API response. Authenticated sessions and recent sign-ins are independent
+boolean facts; this read creates no login or Odoo session. Under Director decision
+Q1053, session and integration observations use the PR image's Python at the
+same trust as today's preview-deploy gate. These are not independent of the PR
+image. Host resource, environment, database-parameter and runtime-identity checks
+remain independent; no second executor is added.
+
+The reader rechecks provider, runtime, completed-operation and production
+authority before publication. Missing or changing facts refuse with a specific
+`preview_qualification_missing` reason or prerequisite code and publish no
+positive qualification. Provider authorization refusals remain denials.
+Successful collection can report `unused` or `in_use` and isolated production
+resources. Data custody and reproducibility remain UNKNOWN unless independently
+established; this read neither clones nor sanitizes data, and cannot qualify
+its historical origin. A production alias found in the preview slug's stored
+target ID is recorded protectively before collection refuses. Aliases found
+only through the completed deployment, or discovered after that pre-check,
+refuse without positive qualification. Existing protected-use, needed-copy and
+shared-resource records retain their protections. No lane, resource or
+credential is changed.
+
+Serving-process observation accepts the image wrapper's exact
+`/odoo/odoo-bin.source` entry point and gevent child only with matching served
+configuration, data/addon paths and supported server modules; session and
+read-only sign-in checks still determine usage.
+
 ## Native generic-web testing deployment
 
 The existing `POST /v1/drivers/generic-web/deploy` accepts the authenticated
@@ -191,12 +273,15 @@ receipt must verify independent resources, local credentials and removal of live
 connections before candidate startup. Fresh private health and exact runtime
 identity precede switching the existing route. Applied/public health and identity
 at the original address precede metadata adoption and old-copy retirement.
-Retirement drains/stops the old runtime and preserves its storage and custody;
-physical deletion is outside this operation. Public probe URLs must use the
+A healthy predecessor is drained/stopped only after verification, preserving its
+storage and custody. An unavailable-origin rebuild removes the admitted stopped
+containers before preparing the new application; volumes remain for the existing
+post-verification disposable-lane retirement, including its only-needed-copy hold. Public probe URLs must use the
 stable lane origin. Missing, stale, unverified or skipped evidence preserves the
 intent for observation. A fresh verified failure or identity mismatch starts
-automatic rollback. An unavailable-origin attempt also reverses its own cutover
-if positively observed predecessor or ingress changes invalidate its admission.
+automatic rollback. Before cutover, a changed predecessor ends admission. Once the candidate is
+selected, only candidate health failure reverses the cutover; old-side changes
+do not reverse a verified candidate.
 
 Failed preparation or private readiness leaves the old copy serving. Failed
 public verification, including immediately before metadata adoption or before
@@ -217,8 +302,10 @@ copies keep their actual storage/configuration witness without requiring an old
 runtime identity or starting a process. Fully absent containers leave any old
 storage custody unknown and preserved. Holds, positive use, needed-copy evidence,
 production isolation and unresolved provider effects keep their existing gates.
-An empty native rebuild can retain its caller's `isolation_staging` hold when
-it exactly matches the hold captured in the original serving snapshot. Staff
+An empty or offline migrated native rebuild can retain its caller's
+`isolation_staging` hold when it exactly matches the hold captured in the
+original serving snapshot. The migrated pair retains its normal source,
+upload and independent-copy checks. Staff
 testing, foreign and changed holds still block forward effects and retirement.
 Publication and inverse publication preserve the current lane hold, so automatic
 testing stays excluded until the separately reviewed lift. Activate matching API
@@ -226,15 +313,12 @@ and worker images together; older readers reject held publication plans and
 fail closed without changing their original records.
 The database and other owned dependencies may still be running. Their custody is
 retained, and the ordinary fenced stop runs after the candidate passes public
-health and metadata publication. A fresh retained-copy read immediately before
-retirement decides whether every service is already stopped and the stop can be
-skipped, unless the original stop has already been dispatched or completed.
-That durable effect resumes observation on replay. Admission-time state cannot
-skip a dependency that started later. After the candidate route is selected,
-an admitted running-unhealthy web may recover health on the same container and
-start time, with unchanged inventory, configuration and storage custody.
-Missing process evidence, a healthy replacement process or a reappeared Docker router
-still refuses continuation. The pre-write unavailable admission remains strict.
+health and metadata publication. A fresh retained-copy read immediately before retirement qualifies the current
+testing target and its independent storage. Once the new copy is selected and
+verified, a later process on that retiring target follows the same stop path:
+automatic deploys are disabled first, then the existing target-stop operation
+stops every remaining service. Fresh use, hold, placement and production-isolation
+checks still gate each mutation. Pre-cutover unavailable admission remains strict.
 A missing web or database does not invent its old data;
 every remaining mounted volume is still inspected for independent backing and
 foreign consumers. Both retained-copy and route observations use the same
@@ -243,6 +327,9 @@ web-availability classifier.
 An unavailable predecessor has no invented private endpoint, runtime identity or
 healthy public observation. The candidate route comes from the original recorded
 template or the provider's explicit raw web-router declaration for this host.
+An absent original with no serving inventory, generation or delivery history
+needs no old ingress record for its first delivery. Normal post-deploy health
+verifies ingress; used lanes and production sharing keep their existing guards.
 When no raw rule may match that host, the provider's converted declaration
 supplies its domain routes. Ambiguous or malformed matching raw rules refuse
 instead of falling back. Generated aliases do not replace explicit raw authority.
@@ -256,8 +343,8 @@ witnesses. Unrelated application environment, image or Compose formatting change
 do not change that declaration witness. Listener witnesses cover the entrypoints
 and certificate resolvers used
 by this lane; unrelated proxy logging and other listeners do not change them.
-Candidate serving readback verifies these dependencies and external redirect
-behavior after the file is selected, as well as before its forward write.
+These admission checks run before the forward write. Serving readback still
+requires the applied candidate route, identity and public health.
 Candidate preparation, generated
 local credentials, sanitation, immutable build, private identity and public
 health checks use the ordinary lifecycle.
@@ -279,40 +366,56 @@ original is not started or advertised as healthy by rollback. Inverse readback
 waits for exact original bytes or absence and the captured lane-owned applied
 routing before reversing metadata. It reports current stopped, absent or present
 process state separately; a reappeared process has unverified health.
-After successful publication, automatic
-deployment of the old target is disabled and its stop is recorded as undispatched
-because it was already unavailable. That success receipt does not itself request
-rollback after a checkpoint interruption. Forward publication and retirement
-require complete, quiescent old-target deployment and data-workflow observations,
-including before disabling automatic deploys and after that disable. Those jobs
-cannot trap the inverse of our route artifact. Its data is never deleted here.
+After successful publication, automatic deployment of the old target is disabled
+and every current service must be observed stopped or absent. Qualified stopped
+containers are then removed without deleting volumes. A healthy new copy stays
+selected while any retirement prerequisite is unresolved.
+This receipt does not request rollback after a checkpoint interruption. Complete,
+quiescent old-target deployment and data-workflow observations gate admission
+before cutover. Later old-side work does not reverse the selected candidate.
 
 Stopped custody binds member identities, ownership labels and storage, separately
 from current stopped/absent state. Incidental Docker lifecycle timestamps do not
-invalidate an unchanged stopped copy. The exact admission witness gates the
-original forward writer. Once the candidate is selected, complete current stopped
-or absent evidence is sufficient; pruning stopped containers does not undo a
-verified independent candidate. A bound normal retirement-success receipt and
-its completed disable receipt resume without requalifying later old-side work,
-while the candidate's current ingress and public health are still verified.
-Removing or dead members have an uncertain lifecycle and keep forward work
-pending until complete current evidence proves stopped or absent. Original-file
-readback may report those positively inventoried members as present, without
-claiming health or allowing an incomplete inventory to count as absence.
-Undispatched retirement exclusions retain the actual latched admission or health
-failure cause.
-A changed predecessor before cutover can
-end admission once original artifact custody, no metadata adoption and terminal
-candidate custody are proved. After possible cutover and current recovery-custody
-checks, the worker persists the original admission refusal and
-settles or excludes the original physical writer. That settlement never allocates
-another initializer or sends another forward write, including after a busy call.
-Unknown or busy execution stays pending with the decision latched. Reappeared
-Docker routers are not adopted or modified: the existing inverse may restore
-only the exact original file or the exact candidate document this attempt wrote.
-Foreign file bytes, changed physical custody and metadata CAS conflicts remain
-fenced. The admission-change result retains its actual reason and does not
-invent a health failure.
+invalidate an unchanged stopped copy. Pre-start container removal accepts only admitted IDs in complete current
+inventory and refuses running or replacement members. Post-verification removal
+captures the freshly qualified stopped IDs and storage in its durable effect;
+replay settles that same custody before qualifying a later batch. A positively
+observed restart or re-enabled automatic deployment after a completed effect
+starts a successor linked to that completed receipt. An unsettled effect always
+retains its original key. A stop may repeat on that same key only after complete
+current target and host readback positively proves the qualified old services
+still running; unknown inventory or placement remains fenced.
+Once an old-target stop or post-verification cleanup has dispatched, retirement
+finishes forward. A later candidate health failure never restores the already
+retired copy. The final probe remains required and a failed probe is reported as
+failed health with the new copy still selected, leaving an ordinary fresh rebuild
+available. A distinct terminal error keeps older checkpoint readers from
+recomputing a failed final probe as green after a lost outer response.
+Pending/skipped health never proves completion. Pre-start removal does
+not cross this boundary; before retirement dispatch, health failure still restores
+the captured original ingress and metadata, including stopped/absent originals.
+Holds, positive use and active old-target work pause the queued operation with
+their exact reason. The lane safety record still protects positive use, including
+a report awaiting fresh collection after cutover. After those conditions end, the existing queued operation
+continues automatically on its original keys. No provider-console stop or separate
+Resume request is required for an observation-pending operation.
+Both removal stages use Docker removal without force or volume
+deletion. Interrupted removal finishes only its stopped or dead leftovers;
+absent members need no repeated removal. Preparation resumes with the observed absent original,
+while preserving the original ingress preimage and metadata for health rollback.
+
+A changed predecessor before cutover ends admission once original artifact
+custody, no metadata adoption and terminal candidate custody are proved.
+After selection, the candidate's applied route, identity and health remain
+required. Old-side drift or unknown ingress is reported without selecting the
+old copy. A candidate health failure still restores only the captured route file
+or its original absence and reverses metadata this attempt adopted. Foreign file
+bytes, changed physical custody and metadata CAS conflicts remain fenced.
+An admission-change result retains its actual reason and never invents a health
+failure. Old volumes remain under their existing retirement and only-copy rules.
+Already recorded admission rollbacks keep their original-key completion path;
+new old-side changes cannot start one. Older intents without a container-ID list
+keep their existing retirement behavior without gaining container-removal authority.
 
 `testing_rebuild_storage.py` stores checkpoints in the existing DB-backed record
 payloads, scoped by product, context and operation key. The envelope is completed
@@ -497,17 +600,10 @@ effects. Their existing checks still run. In particular, no missing usage
 record becomes a reproducible-data or production-isolation fact. Preserve old
 operations, keys and retained resources when replacing a stranded generation.
 
-For an update, deploy the compatible API and Odoo worker together through the
-normal service path; no migration, grant, new runtime flag or per-product rule
-is required. Use the bounded collection client from that compatible source
-revision; older coverage/enum validation refuses the newly qualified resource
-facts. Use the existing monitor history and collect immediately before
-apply; a hold or changed recipient still refuses. Source tests do not qualify
-a real lane. Before a queued drill uses a downtime receipt, retain this image
-or a compatible successor and forward-fix: older workers require a negative
-usage result and cannot continue the new UNKNOWN admission. Do not rewrite
-receipts or clear fences to roll back. No live lane action is part of source
-delivery.
+Use the existing monitor history and collect immediately before apply;
+a hold or changed recipient still refuses. Queued drills using downtime
+receipts require workers that support UNKNOWN usage admission. Do not rewrite
+receipts or clear fences to roll back.
 
 The source accepts exact-scope `disposable_lane_safety` observations on the
 dedicated DB-backed lane record (and a separate collection for filesystem
@@ -610,11 +706,9 @@ authority lock. An unreadable collection also cannot clear observed use of the
 lane after a binding change, and caller assertions cannot clear it either;
 a complete subsequent negative read can. Production API replicas use the shared
 database clock to order these observations. Data custody and production isolation
-remain separate prerequisites and this read never starts a rebuild. Deploy the
-compatible service image, then use the existing `collect-disposable-lane.py`
-`inspect`/`collect` client. No schema migration or new grant is needed. Rollback to
-the prior image restores unknown usage collection; retained facts remain subject
-to their original binding and expiry. A lane with no readable application database
+remain separate prerequisites and this read never starts a rebuild. Use the
+existing `collect-disposable-lane.py` `inspect`/`collect` client; retained facts
+remain subject to their original binding and expiry. A lane with no readable application database
 still needs its supported bootstrap/never-served qualification; absence alone is
 not turned into an unused assertion.
 
@@ -647,6 +741,10 @@ protective-report qualification as refresh. Known use, a needed copy or shared
 resources remain holds even after a report expires. Missing positive preview
 observations alone do not block teardown; reviewed-plan, target ownership,
 executor fences and provider-resource guards still apply before every effect.
+An owned destroyed lifecycle record can admit a fresh destroy plan for its
+remaining concrete target. This only reaches the current safety checks; it
+does not prove absence, qualify data custody or settle an older operation.
+Observation and clearing still require their existing lifecycle authority.
 Odoo teardown inspects its generated storage once outside the mutation lock,
 then rechecks placement, volume environment and raw compose binding inside the lock
 before each deletion. Missing owned resources can converge; foreign volume
@@ -722,6 +820,31 @@ clears existing data nor creates a positive custody report. The qualified Direct
 refresh follows the [Odoo preview data-source policy](preview-workflow-contract.md#route-handoff)
 and retains managed integration/source filtering.
 
+Source-free reuse also requires the retained target's original source history,
+including failed and successful operations on that recipient. Today's `none`
+mode, an absent source reference or a serving generation cannot qualify old data.
+Legacy receipts lack a complete pre-effect source decision and remain unknown;
+ordinary old successful receipts cannot qualify a source-free refresh. An original
+with an upstream, snapshot, import or retained-copy source cannot qualify as
+source-free. An unresolved original recipient also retains the fence, except for
+a completed creation with explicit no-effect evidence and no allocated target or
+effect checkpoint. Disjoint concrete recipients do not lend each other authority.
+
+New operations retain their effective source decision in the immutable reservation
+intent before the first provider effect. Capture uses the same filtered site values
+as execution, before import-secret delivery and addon payload composition. Runtime
+configuration failures keep their existing structured diagnostics. Execution
+resolves the decision again and refuses source drift before dispatch. Observation and replay retain the saved decision;
+they never infer or backfill it from current settings or a later success. Unknown
+historical origins remain preserved; this guard supplies no new data-use authority.
+To continue preview review without qualifying an old recipient, use the existing
+normal preview flow on a separate PR, whose slug and resources form an independent
+recipient. Preserve the original PR, target, data and receipts. The new preview
+must meet its own source, safety, ownership and Client review gates; its success
+neither qualifies nor disposes of the old recipient. Same-PR retirement/recreation
+still requires its existing custody and disposal proof and is not a workaround
+for unknown data or a held original.
+
 Managed settings, aliases, protection reports, overrides and key policy are frozen
 for each bounded dispatch, with a lock timeout. Deploy/job waits hold no global
 transaction. A pre-effect admission refusal releases its reservation; a late
@@ -796,7 +919,6 @@ protected unknown outcomes; [#3664](https://github.com/cbusillo/launchplane/issu
 owns additional retained-evidence/replacement recovery. That follow-up is not
 permission to clear the fence. Original-key reconciliation still reports these
 cases as reconciliation-required rather than as a fresh-plan refusal.
-SQLite tests are rehearsals, not proof of PostgreSQL exclusion.
 
 Use `scripts/stage-testing-separation.py` with the installed authenticated
 transport. First review `hold-dry-run`, then use `hold-apply` with the same
@@ -827,19 +949,6 @@ That lift, including a repeated/no-op lift, requests no reconciliation or deploy
 ordinary staff holds retain their existing reconcile-on-lift behavior. A lift
 without the staging purpose refuses while that interlock is present. No
 production rollback or volume deletion is part of this procedure.
-
-The maintained catalog hold commands do not yet accept staging purpose; their
-projection/option update is tracked in
-[codex-skills#1881](https://github.com/cbusillo/codex-skills/issues/1881).
-Use the repo client's tested read/plan/apply modes with the installed transport;
-do not substitute hand-built authenticated calls or advertise catalog support
-before that companion lands. Existing staff and legacy hold commands retain
-their original shape and behavior.
-
-The added hold purpose is read-compatible with existing records in this image.
-Older images cannot read purpose-tagged holds; after using one, retain this
-image or a compatible successor and forward-fix rather than editing the hold
-or deleting evidence to make an older reader accept it.
 
 ## Preparing a testing production-copy policy
 
@@ -1061,9 +1170,6 @@ requires `isolated`; this preparation alone cannot release it. The old hostname
 is not moved by preparation. Recovery retains partial new resources and their
 service namespace in an additive allocation table. The retained custody payload
 is unchanged; downgrade retains allocation metadata and re-upgrade adopts it.
-An older image cannot continue the new resource route. After activation, retain
-the qualifying image and forward-fix rather than erasing custody or restoring
-an old database to clear the fence.
 
 ## Stable testing traffic between disposable copies
 
@@ -1287,8 +1393,7 @@ source component does not activate them or establish live CM proof.
 
 Maintenance uses the original candidate operation and its stored receipts.
 Rollback retains candidate application intent, storage and physical reservations;
-it does not clear fences or adopt a candidate as the serving lane. No schema
-migration is added beyond the candidate custody table.
+it does not clear fences or adopt a candidate as the serving lane.
 
 ## Atomic serving publication for a rebuilt testing copy
 
@@ -1382,14 +1487,23 @@ as the supported renewal path rather than returning a provider-domain error.
 
 Address-plan refusals retain their trace and sanitized source sites in the
 service cause log; responses and logs omit raw provider errors and request values.
+The log retains validated native failure predicates and kinds even when the remote
+program supplies no source lines. Copy-inspection failures also retain bounded
+source lines tied to the exact submitted program digest, without exception text.
 
 `POST /v1/products/{product}/testing-address` amends the current published Odoo
 testing lane without replacing its copy. The Director agent supplies `context`,
-`retirement_operation_id`, `reservation_operation_id`, `hostname`, and `reason`.
-`instance` is always `testing`. The retirement ID identifies the original
-retirement inspection; the reservation ID identifies the separate retained
-allocation or generation that actually reserves the requested hostname. These
-may be different operations. Production is outside this operation.
+`reservation_operation_id`, `hostname`, and `reason`, plus
+`retirement_operation_id` for replacement-operation custody. `instance` is always
+`testing`. The retirement ID identifies the original retirement inspection; the
+reservation ID identifies the separate retained allocation or generation that
+actually reserves the requested hostname. These may be different operations.
+For an initial allocation, omit the retirement ID. The service requires its
+recorded initial request, apply and reconcile state, no release, and an exact
+retained-target match. It binds both preparation and allocation state into the
+plan and checks them again under the original executor exclusion. No retirement
+receipt is created, and no original allocation, key or reservation is released.
+Production is outside this operation.
 
 Use `mode: dry-run` first. The service saves an immutable private plan and returns
 its `plan_sha256`, current target ID, new canonical hostname, retained original
@@ -1402,8 +1516,9 @@ grant is an input. Generated agent/OpenAPI contracts describe this service API.
 The reviewed reason is retained in the immutable plan and applied receipt.
 
 The plan requires exact retained hostname custody in the same product/context,
-a superseded original recipient operation, complete credential-visible provider
-domain membership, and stopped recipients on the existing testing server. The
+a superseded original recipient operation or the qualified initial allocation,
+complete credential-visible provider domain membership, and stopped recipients on
+the existing testing server. The
 old recipients must have known automatic-deployment flags and no target
 schedules. Enabled flags are bound into the reviewed plan; apply disables only
 those exact unbound retained recipients before route publication. Every recipient
@@ -1517,8 +1632,24 @@ keeping the existing message and payload bounds, guarded dispatch and
 original-program diagnostics. The plans preserve the
 current provider payload and change only its canonical URL and freeze parameter,
 including the existing website bootstrap URL. The plan binds the remaining
-provider environment, the sole native website and its database values. Planning
+provider environment, the reviewed native website and its database values. Planning
 uses the native copy's storage/network inspection and a read-only database probe.
+An unrelated website does not prevent address qualification. In a plural
+database, the probe requires exactly one website for the original canonical hostname
+and proves the unchanged bootstrap selector will write that same website after
+the address changes. A primary-page selector it cannot prove, competing original
+or new hostnames (including scheme, case, port and IDNA variants), or a different
+default writer refuse before effects. The selected website must also remain the
+dated alias's routing fallback after bootstrap sets its sequence to zero;
+readback checks the actual ordering. Later phases retain the reviewed website ID
+and recheck ownership. Qualification never selects or reorders unrelated website
+rows. Single-site plans retain their original value digest.
+Failed canonical-address `docker exec` reads and writers retain bounded
+stdout/stderr in the existing private host failure archive; the service logs
+only its validated opaque reference.
+This diagnostic evidence changes no lane data or operation state. Use the
+[private failure-evidence reader](host-program-package.md#private-copy-failure-evidence)
+with the trace, program digest and registered execution server.
 Known staff, needed-copy, use and sharing protections remain refusals. Original
 retired executors stay excluded; their records and UNKNOWN fences never change.
 The synchronous testing lane reservation also excludes current maintenance,
@@ -1820,6 +1951,37 @@ not change submission, settlement or resume authority. The machine
 target-replacement plan route supports the same native read without a provider
 write.
 
+After a verified build is selected, an execution blocker returns a conditional
+plan with `status: pending`, `blockers` and ordered `steps`, retaining the selected
+build, source mode and address. Blockers describe the first refused checkpoint;
+later checks remain unproved. Provider authorization denials remain denials.
+Submission repeats admission against current facts before registering the artifact
+or queuing work. A plan is never authority to bypass a blocker or replay an original.
+
+Positive Odoo use identifies the recorded account IDs and the earliest recorded
+login or session-file time available to the reader. Its bounded evidence expires;
+that deadline does not expire a browser session, a staff hold, needed data or a
+production-resource protection. A fresh read still protects an existing authenticated
+session regardless of its age. Legacy use records without a bounded deadline retain
+their protection and report missing actor/time details explicitly. Collection does
+not renew an inherited use deadline or infer an actor from an empty recipient.
+
+Preview creation retains the resource inspector's actual binding, qualification
+time and unstarted/existing recipient state as `resource_provenance` in its existing
+original-operation result, including a failed later preparation. Native testing
+creation already retains its independent-copy receipt in the rebuild record.
+These are creation facts, never proof that nobody currently uses the lane or that
+it has no only-needed copy. Current ownership, source custody, use and physical
+isolation checks still precede effects; legacy or external resources gain no
+qualification merely because Launchplane knows their ID.
+
+The machine native routes verify the current release through the same preflight
+and immutable artifact registration as the signed-in control. Planning records
+nothing; submission registers after admission checks. An exact original request
+is observed before rediscovering a build. A new request is refused with
+`testing_rebuild_active` while a rebuild remains unfinished; use the original
+request lookup and operation status to observe that operation.
+
 `POST /v1/products/{product}/testing-rebuild` takes the inspected build/source
 pair, a concrete reason and the original request key. Existing administrator
 cookie/CSRF and current policy checks precede admission. The server re-verifies
@@ -2022,9 +2184,6 @@ workflows for a newer artifact. It verifies retained route, storage, generated
 credential versions, private alias and both contract-owned image references.
 Provider IO and build ordering are mocked, storage is prequalified, and this
 does not constitute a live host rehearsal.
-Continuing native-route refresh is tracked in [#3995](https://github.com/cbusillo/launchplane/issues/3995).
-Scheduled native restores, retained-copy maintenance and capacity integration
-are tracked in [#3996](https://github.com/cbusillo/launchplane/issues/3996).
 
 ## Service collection
 
@@ -2035,6 +2194,13 @@ production target. The source references bind the lane snapshot and a digest
 of any matched production records. The authenticated agent requests collection;
 its supplied facts and references cannot affect the result. The existing stored
 actor kind and observation schema remain compatible with the previous image.
+
+An Odoo preview usage or resource qualification refusal retains its closed
+usage reason in `error.reason` on the existing HTTP 409
+`disposable_observation_refused` reply. The value uses the same classified
+payload filter as usage readback; unrecognized probe output remains
+`probe_result_invalid`. Other refusals and generic messages keep their existing
+behavior. No observation is published by a failed qualification.
 
 For Odoo testing, the read-only login/session probe described above can also
 publish `unused`. On a verified-down lane with a resettable data policy and a
@@ -2085,30 +2251,19 @@ every protection, then pass that exact digest to `clear` with
 `--expected-observation-sha256 <reviewed-observation>`, retaining the same product,
 context, instance and preview ID. Clear sends one request; it never silently
 re-inspects changed bindings or retries an uncertain result. A refused clear
-requires a new inspection and review. A new clear client against an older service
-fails request validation on the unknown observation-digest field before deletion;
-an older clear client against this service refuses its missing digest. Non-clear
-client requests retain their older shape. Rollback retains observations; the
-previous service rejects the new `collect` request.
-The service catalog deliberately publishes all existing API modes. The repo
-client supports `inspect`, `collect`, preview `record` and binding-bound `clear`. Catalog-helper integration is
-coordinated on codex-skills#1308; that consumer must refresh its vendored
-projection before advertising its own support.
+requires a new inspection and review.
 
-**Remaining producer gap:** bounded Odoo authenticated-use evidence does not supply
+Bounded Odoo authenticated-use evidence does not supply
 a universal occupancy or only-copy inventory, or a general
 inspection that proves every writable mount/backing store, live database,
 published port and credential relation. The schema does not pretend to supply
 that inspection. There is no universal producer of positive occupancy/custody facts permitting a
 disposable apply. The bounded existing-preview refresh above uses its own real
 resource inspection and protected-use rule instead. The assertion API cannot create one and a direct DB write is not a
-qualification procedure. Until a server-backed collector is available, apply paths
+qualification procedure. Without qualified facts, apply paths
 requiring positive facts return `disposable_lane_safety_unknown`; absent observations never mean unused,
 reproducible or isolated. Operational qualification records the missing sources
-on the owning item. The producer is tracked in
-[#3611](https://github.com/cbusillo/launchplane/issues/3611).
-Building the missing producer needs no access grant or new
-Director lane decision. Do not fill observations from names, IDs, old comments
+on the owning item. Do not fill observations from names, IDs, old comments
 or successful plans.
 
 A disposable Odoo testing rebuild first calls `prepare-rebuild` on the same API,
@@ -2146,18 +2301,12 @@ production-fence release occurs. This avoids requiring unavailable past-effect
 proof for a replaced disposable lane. Historical recovery on an unchanged target
 and every production, backup, promotion and release path remain as before.
 
-Deployment and lane qualification are separate from these source changes.
-Before any use, preserve the previous image and the normal DB recovery point.
-The additive migration's downgrade retains the observation and preparation
-tables and their evidence; its upgrade adopts those existing tables again.
-Profiles and held-operation payloads remain unchanged, so recording a gap or
-preparing a rebuild cannot break an older record reader. Before an older-image
-rollback, use the service's normal schema rollback procedure; do not drop these
-tables or erase captured target references. Filesystem rehearsals likewise keep
-separate collections. After an actual supersession, the new terminal status and
-replacement evidence need compatible readers: retain such an image and
-forward-fix the service; do not rewrite history or restore an old DB snapshot to
-clear a fence. This source session performs no live qualification or deployment.
+Observation, preparation, allocation, retirement and generation tables retain
+custody through schema downgrade and re-upgrade. Follow the
+[service recovery procedure](operations.md#launchplane-service-deploy-posture)
+with compatible readers and workers; retained tables alone cannot make an older
+reader enforce current fences or hostname reservations. Do not erase evidence
+or restore an old DB snapshot to clear a fence.
 
 Creation recovery reads the unique service namespace from complete provider
 project/environment/compose inventory. Each create dispatch records its exact
@@ -2184,10 +2333,6 @@ claim from the replacement lane itself. Preparation refuses unresolved pending
 route effects so their provider identities cannot be detached from their target.
 The reviewed plan authorizes this exact empty allocation; recovery re-derives
 current separation evidence and never starts an application under that receipt.
-After target adoption, an older image may read the unchanged custody identity but
-cannot enforce the new hostname reservations. Keep the qualifying service image
-or forward-fix with compatible readers; retaining additive tables through schema
-rollback does not make old code a supported continuation.
 
 ## Bootstrap a qualified fresh Odoo testing generation
 
@@ -2255,6 +2400,14 @@ no safe automatic conversion to the new digest. Preserve the original operation,
 generation, key and copy custody; do not edit its digest or invent a safe-release
 attestation. A forward fix for new journals does not establish recovery of an
 already stranded legacy operation.
+
+### Publish the first testing public edge
+
+Use the same client below without `--operation-id` for a service-created Odoo
+testing lane that has never deployed or served. Complete its approved origin
+hostname first. Review the dry-run, then apply and read back with the same saved
+evidence and stable key. Preserve that original key if the outcome is uncertain.
+Public TLS readback does not prove application serving or installed modules.
 
 ### Continue a restored generation's public edge
 
@@ -2457,7 +2610,15 @@ unknown historical effects; it never returns a safe-release assertion.
 The same client's `inspect` mode attributes each reserved hostname in that context
 to its retained generation or allocation, original target ID, operation and custody
 digest. It uses the reservation guard's own enumeration. It requires the original
-product, context, operation and reason, but no key or review file. It makes no provider call or
+product, context, operation and reason, but no key or review file. Without a
+retirement receipt, it checks exclusive ownership of the active Odoo testing
+context and returns its reservations with `plan=null`; the supplied operation
+and reason do not identify or verify an operation in this context-only result.
+Only the reservation entries attribute hostnames to recorded operations. Initial allocation facts
+show whether an initial request was recorded, its apply/reconcile/release times,
+and whether the retained target is still bound to a lane. Missing allocation
+details remain absent; they do not prove an unreserved hostname or safe transfer.
+The inspection makes no provider call or
 record change and leaves the original receipt and hostname reservations intact.
 These coordinates let the supported exact-target inspector read the preserved
 recipients. Missing preparation custody leaves its product and target ID null,
@@ -2487,10 +2648,7 @@ new generation never adopts the old capture receipt. A decision about preserved
 user logins or separate automation credentials remains effective for the new
 restore and startup; retirement does not resolve it or run either path.
 
-The additive retirement table is retained on schema downgrade and re-upgrade.
-Keep a compatible service image for retirement readback and hostname protection;
-forward-fix a failed transition using its original receipt rather than deleting
-custody or restoring old database state. Retained generations and copy artifacts
+Retained generations and copy artifacts
 require a separately authorized later disposal; this procedure cleans up none.
 
 For a containerized production source without host SSH restore coordinates, add
@@ -2561,6 +2719,48 @@ actual whole-file sizes and hashes match the immutable receipt also permit
 recovery without the private cache. Missing original bytes in both places,
 without a database witness, are held for recovery, never silently replaced with
 a newer production snapshot.
+
+An offline migrated pair uses `data_source_mode=migrated_restore` on the same
+independent testing rebuild. Its `migrated_source` names the product/context,
+backup and migration run, selected immutable target image, dump and compressed
+filestore SHA256/lengths, and complete expanded filestore file/byte counts.
+This is the declared offline output, never a claimed observation of
+production. The compiler binds it to the selected artifact and generation.
+
+Once the normal worker has recorded its private candidate application, the
+original authenticated testing caller uploads one part at a time to
+`wss://SERVICE/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source/{part}`
+with its existing bearer authorization. The first JSON frame supplies `offset`,
+and `prefix_sha256`; wait for the matching `ready` offset, send
+binary frames of at most 1 MiB, then JSON `{"complete": true}`. The final JSON
+frame reports the original upload state. GET the same path without `/{part}` to
+inspect retained sizes and completion. The authenticated WebSocket avoids
+proxy request-body buffering. Use the documented private connection.
+A disconnect retains the original prefix; its digest must match before resume.
+An explicit start at offset zero with the empty-prefix digest restarts only an
+incomplete part under its existing lock; completed originals cannot be reset.
+The receiver hashes and fsyncs each completed upload. A reused completed pair is
+size-checked before its generation receipt and fully rehashed before delivery. GET never commits a receipt. The original caller,
+product, candidate custody and unstarted restore remain required.
+
+Migrated uploads reuse one private content cache for the same product and source
+binding across candidate attempts. Each generation still has its own immutable
+capture receipt. A terminal failed candidate retains its source bytes for retry;
+a prepared candidate removes the completed pair cache after the normal restore
+and private-readiness proof. Candidate volumes retain the normal disposable-copy
+custody and collection protections.
+
+Migrated uploads use actual free space, the lane's existing storage reserve and
+their declared complete inventories instead of the small live-capture limits
+above. Capacity charges the larger of the existing filestore allowance and the
+declared expanded bytes, even when clean snapshots are disabled. Streaming and
+extraction keep the same reserve if another writer consumes free space. Delivery streams windows through
+one registered terminal connection into the candidate data volume, preserving
+only an exact verified prefix on interruption. Receiver size/hash verification still
+precedes restore. Streaming extraction rejects unsafe or duplicate paths and
+requires the exact declared full filestore count and bytes before publishing the
+dump. The existing credential boundary, quarantine, restore witness, private
+readiness, route cutover and clean snapshot remain the normal rebuild path.
 
 Native rebuilds bind a capture to their original private candidate's recorded
 generation while its restore remains undispatched and its allocation custody
@@ -2662,9 +2862,7 @@ rolling records back or deleting evidence. Unreferenced pre-receipt cache
 directories may be removed only after the owning executor is stopped and their
 absence from retained capture receipts is verified; published failed captures
 remain recovery evidence. There is no automatic raw-copy expiry: do not remove
-ambiguous or failed published captures merely because time has elapsed. Default
-SSH generations retain their previous stored field shape; this does not promise
-that older images can interpret native generations or newer schema migrations.
+ambiguous or failed published captures merely because time has elapsed.
 
 Replacement planning preflights the fresh generation's effective restore overrides
 against the strict integration policy. Integration or analytics settings, connection
@@ -2767,9 +2965,7 @@ process and its data-workflow children have exited.
 Do not retry the historical operation, fabricate a recovery journal, delete old storage,
 or point the old hostname at the replacement to clear a refusal.
 
-The generation table survives schema downgrade. Older service images cannot
-continue this route or enforce its guarantees; keep a compatible image or
-forward-fix. There is no production rollback or cleanup step in this testing-only
+There is no production rollback or cleanup step in this testing-only
 procedure. Retained old targets, storage, partial-copy evidence and hostnames stay
 in custody until separately authorized disposition.
 
@@ -2887,11 +3083,6 @@ is `never_served_not_attempted`; an older response without the field is
 positive qualification against the matching usage reason. A missing source,
 legacy witness, uncertain dispatch, served-once record or incomplete history
 stays UNKNOWN. Never start or repair a lane to manufacture negative evidence.
-A newer client rejects an older service's different coverage; deliver compatible
-API and Odoo workers together before using this path. After tracked generations
-exist, retain a compatible image and forward-fix: older images cannot read the
-new generation fields or enforce lifetime revocation. No migration, grant or
-production change enables the rule.
 
 ## Scheduled Odoo testing rebuild drill
 
@@ -3105,9 +3296,7 @@ older failure receipts. Alert retries never refresh the drill's observation
 time, and scheduler projection/delivery updates preserve the worker's admission
 fields under a row lock. Retired or removed lanes stop participating.
 
-For updates, deploy the compatible API and Odoo worker together after the PR
-lands; no schema migration or new grant is needed. Before the first live run,
-configure the flag only after initial-copy qualification, source configuration
+Configure the flag only after initial-copy qualification, source configuration
 and the existing Discord policy are prepared. Then obtain current hold/use/
 custody/isolation facts through the service before admission. A failed
 prerequisite is corrected on its supported service path, then a later slot can
@@ -3117,9 +3306,6 @@ for a failed or overdue drill; preserve original keys, capture receipts and
 partial copies for supported recovery. Do not clear fences, fabricate safety
 facts, delete the initial copy or change the source transport to obtain a pass.
 
-Once a drill generation exists, older images cannot interpret its additional
-identity fields. Retain this image or a compatible successor and forward-fix;
-do not erase generation history or restore an old DB snapshot to clear a failure.
 Staff holds provide the supported per-lane maintenance pause. A held queued
 operation has not selected its new database. A refusal after selection but before
 any provider dispatch can restore the exact previous generation and runtime
@@ -3136,10 +3322,8 @@ they are provenance, not a promise that a successfully superseded drill database
 still exists after bounded disposal. Remove failed raw-copy evidence only under
 the existing custody procedure above. No production rollback is part of this drill.
 
-Once a profile or generation contains a drill storage budget, use this image or a
-compatible successor for recovery. Older images cannot interpret those fields;
-forward-fix rather than removing custody evidence to roll back. Disabling the
-existing drill flag prevents new scheduled captures and changes no retained copy.
+Disabling the existing drill flag prevents new scheduled captures and changes
+no retained copy.
 
 For a deliberately retained copy, the existing authenticated profile path accepts
 `odoo_testing_drill_storage.retained_copy_bindings`, a list of exact original
@@ -3211,8 +3395,7 @@ These codes include unreadable dependencies and do not establish a particular
 bad record or authorize changing it. Read current supported metadata and usage
 evidence for that checkpoint; preserve unknowns and the original intent. Provider
 authorization denial remains `authorization_denied`. No private exception text
-or provider payload is exposed. Older service images return the grouped
-`testing_resources_refused`; an old trace cannot identify its failed checkpoint.
+or provider payload is exposed.
 
 Review the accepted receipt, then call `testing-replacement-resources-apply`
 with the unchanged `--payload-file`, `--idempotency-key <resource-key>`, the saved
@@ -3275,9 +3458,7 @@ the original upstream-restore mode and custody; a predecessor or existing-data
 retry receipt cannot apply to this generation. An unresolved earlier operation
 still prevents a new attempt; no key, fence or effect is cleared.
 
-Keep the service image that understands initial preparation fences active while
-one is open; forward-fix an interrupted preparation. An older image cannot
-interpret its exclusion contract. Never roll back storage or erase custody to
+Never roll back storage or erase custody to
 clear a fence. The stranded-operation procedure above retains its original
 admission and supersession meaning.
 
@@ -3301,6 +3482,17 @@ rotated. It creates no credential that reaches a live system and grants nobody
 access. No workflow or alternate identity substitutes for a denied service call.
 The source and target copies use the same SQL boundary independently, with a
 sanitized source-version snapshot preserved before the target registry runs.
+Both copy phases select `ODOO_COPY_PURPOSE=migration` before loading artifact
+settings. This preserves Shopify/eBay business identity, history, import cursors
+and pending export intent while the artifact disconnects executable work and
+removes copied credentials. Independent SQL readback and connection isolation
+still gate registry startup. An artifact without migration-purpose settings or
+isolated-copy readback returns `rehearsal_artifact_unavailable` before capture
+or copy restoration, with resources retained. The public refusal instructs the
+caller to refresh the selected artifact from current `odoo-devkit` and qualify
+it before starting a new rehearsal. The runner checks support again before
+restore.
+Ordinary testing and preview copies retain their development-store reset path.
 Filestore working copies use `cp --reflink=auto` with full-copy fallback where
 reflinks are unsupported; PostgreSQL `CREATE DATABASE ... TEMPLATE` remains a
 full copy, recovery archives and their restoration are unchanged, and capacity
@@ -3659,9 +3851,7 @@ key, so it cannot displace the held execute before disposal. A typed checkpoint
 binds the reviewed plan and native manifest before deletion; completed host
 disposal is persisted before provider placement removal. This checkpoint is
 excluded from the original execute binding and does not produce recovery
-copies. Legacy records without it retain their original binding. Use a
-compatible service to finish an admitted retirement before rolling back to a
-version that cannot read that checkpoint.
+copies. Legacy records without it retain their original binding.
 
 Completed same-key apply replay returns its stored result; readback validates
 the shared typed receipt and provider placement absence. Interrupted calls keep

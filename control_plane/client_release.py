@@ -112,7 +112,6 @@ from control_plane.release_review import (
     current_release_review,
     release_version,
     recorded_generic_web_testing_version,
-    checklist_blockers,
 )
 from control_plane.release_review_record import publish_release_decision
 from control_plane.generic_web_promotion_http import (
@@ -167,6 +166,14 @@ _STOPPED_STATUSES = frozenset({"fail", "cancelled", "reconciliation_required"})
 class ClientReleaseBackoff:
     blocked: dict[str, tuple[str, float]] = field(default_factory=dict)
     reconciliations: dict[str, tuple[str, float]] = field(default_factory=dict)
+
+    def should_defer(self, key: str, identity: str) -> bool:
+        now = monotonic()
+        blocked = self.blocked.get(key)
+        if blocked is not None and blocked[0] == identity and now < blocked[1]:
+            return True
+        self.blocked[key] = (identity, now + 300)
+        return False
 
 
 CLIENT_RELEASE_RECONCILIATION_SECONDS = 60.0
@@ -491,7 +498,12 @@ def live_temporary_hotfix(
 
 
 def _covering_decision(
-    store: object, product: str, *, decision_record_id: str = "", recovering: bool = False
+    store: object,
+    product: str,
+    *,
+    decision_record_id: str = "",
+    recovering: bool = False,
+    require_publication: bool = True,
 ) -> tuple[LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord] | None:
     record_store = cast(PostgresRecordStore, store)
     try:
@@ -523,7 +535,8 @@ def _covering_decision(
     if (
         (decision_record_id and decision.record_id != decision_record_id)
         or not decision.release_start
-        or not decision.release_issue_url
+        or require_publication
+        and not decision.release_issue_url
         or decision.checklist.owner_github_id != profile.owner.github_id
     ):
         return None
@@ -918,7 +931,7 @@ def native_release_recipient(
     recipient = custody(store, profile.product, _prod_context(profile))
     if recipient is None or recipient.phase == "retired":
         return None
-    if recipient.phase != "published":
+    if recipient.phase not in {"published", "retiring_old", "old_retired"}:
         return recipient
     trace = recipient.execution.get("release_trace", "")
     if not isinstance(trace, str) or not trace.startswith("client-release-"):
@@ -1366,11 +1379,8 @@ def _record_standing_acceptance(
             profile.model_dump_json() + production.model_dump_json() + candidate.model_dump_json()
         ).encode()
     ).hexdigest()
-    if backoff is not None:
-        blocked = backoff.blocked.get(profile.product)
-        if blocked is not None and blocked[0] == fingerprint and monotonic() < blocked[1]:
-            return
-        backoff.blocked[profile.product] = (fingerprint, monotonic() + 300)
+    if backoff is not None and backoff.should_defer(profile.product, fingerprint):
+        return
     # Stamp before reads: a human decision made while GitHub is being read remains
     # newer than this standing decision even if its DB write finishes first.
     decided_at = datetime.now(UTC).isoformat()
@@ -1381,7 +1391,7 @@ def _record_standing_acceptance(
     if (
         checklist is None
         or checklist.production == checklist.candidate
-        or checklist_blockers(checklist, profile=profile)
+        or not review.checklist_complete
     ):
         return
     existing = review.latest_decision
@@ -1410,21 +1420,10 @@ def _record_standing_acceptance(
             release_start=release_start_for_acceptance(store=store, profile=profile),
             acceptance_source="director_standing",
         )
-    decision = store.create_release_review_decision_record_if_absent(
+    store.create_release_review_decision_record_if_absent(
         decision,
         validate_before_insert=lambda: _require_standing_release_available(store, profile.product),
     )
-    # Use the existing publication/recovery path. An unpublished decision cannot
-    # queue a backup or promotion, and a retry keeps the same decision id.
-    issue_url = decision.release_issue_url or publish_release_decision(
-        store=store, control_plane_root=control_plane_root, profile=profile, decision=decision
-    )
-    if issue_url:
-        store.record_release_review_decision_publication(
-            record_id=decision.record_id, release_issue_url=issue_url
-        )
-        if backoff is not None:
-            backoff.blocked.pop(profile.product, None)
 
 
 def client_release_promotion_request(
@@ -1611,6 +1610,49 @@ def advance_client_releases(
             _record_standing_acceptance(store, control_plane_root, profile, release_backoff)
         except (ClientReleaseNotReady, FileNotFoundError, ValueError, click.ClickException):
             _LOGGER.info("standing acceptance not ready product=%s", profile.product)
+        pending = _covering_decision(store, profile.product, require_publication=False)
+        if (
+            pending is not None
+            and pending[1].decision == "accepted"
+            and not pending[1].release_issue_url
+        ):
+            pending_profile, decision = pending
+            publication_key = f"publication:{profile.product}"
+            if release_backoff is not None and release_backoff.should_defer(
+                publication_key, decision.record_id
+            ):
+                continue
+            try:
+                _require_current_release(
+                    store, control_plane_root, pending_profile, decision, require_publication=False
+                )
+                publish_release_decision(
+                    store=store,
+                    control_plane_root=control_plane_root,
+                    profile=pending_profile,
+                    decision=decision,
+                )
+                if release_backoff is not None:
+                    release_backoff.blocked.pop(publication_key, None)
+                    if decision.acceptance_source == "director_standing":
+                        release_backoff.blocked.pop(profile.product, None)
+            except (
+                ClientReleaseNotReady,
+                FileNotFoundError,
+                ValueError,
+                click.ClickException,
+            ):
+                _LOGGER.warning(
+                    "saved release decision publication pending product=%s", profile.product
+                )
+                continue
+            except Exception as error:
+                _LOGGER.error(
+                    "saved release decision publication failed product=%s error_type=%s",
+                    profile.product,
+                    type(error).__name__,
+                )
+                continue
         covered = _covering_decision(store, profile.product)
         if covered is None:
             continue
@@ -1856,9 +1898,9 @@ def _require_current_release(
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
+    *,
+    require_publication: bool = True,
 ) -> None:
-    """The release on the lanes now is exactly the one the Client accepted."""
-
     checklist = decision.checklist
     # Cheap reads first, so a stale acceptance does not read GitHub on every poll.
     try:
@@ -1898,7 +1940,7 @@ def _require_current_release(
             if review.checklist.candidate != checklist.candidate:
                 raise GenericWebPromotionSourceRefused("The accepted testing release changed.")
     if (
-        not review.approved
+        not (review.approved if require_publication else review.checklist_complete)
         or review.checklist_digest != decision.checklist_digest
         or review.latest_decision is None
         or review.latest_decision.record_id != decision.record_id

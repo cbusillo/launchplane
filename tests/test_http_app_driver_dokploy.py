@@ -13,6 +13,9 @@ from typing import Any, cast
 from unittest.mock import patch
 
 from click import ClickException
+from pydantic import ValidationError
+
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 
 from control_plane import dokploy as control_plane_dokploy
 
@@ -232,7 +235,6 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
         self.assertIn("Max-Age=1209600", response.headers["Set-Cookie"])
         renewed_session = session_store.read_session("expiring-session")
-        self.assertIsNotNone(renewed_session)
         assert renewed_session is not None
         self.assertGreater(renewed_session.expires_at, session.expires_at)
 
@@ -269,7 +271,6 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
         self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
         renewed_session = session_store.read_session("expiring-session")
-        self.assertIsNotNone(renewed_session)
         assert renewed_session is not None
         self.assertGreater(renewed_session.expires_at, session.expires_at)
 
@@ -307,7 +308,6 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "invalid_request")
         self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
         renewed_session = session_store.read_session("expiring-session")
-        self.assertIsNotNone(renewed_session)
         assert renewed_session is not None
         self.assertGreater(renewed_session.expires_at, session.expires_at)
 
@@ -618,6 +618,12 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
             _seed_dokploy_target_inspect_records(database_url)
             store = PostgresRecordStore(database_url=database_url)
             self.addCleanup(store.close)
+            target = store.read_dokploy_target_record(
+                context_name="cm_website", instance_name="prod"
+            )
+            store.write_dokploy_target_record(
+                target.model_copy(update={"env": {"PLAIN": "private-setting"}})
+            )
             for action, product, context, instances, subject, expected_status in cases:
                 with (
                     self.subTest(
@@ -640,6 +646,9 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
                             "env": "ODOO_DB_PASSWORD=private-value\n",
                         },
                     ) as fetch_target,
+                    patch.object(
+                        store, "list_runtime_environment_records", side_effect=AssertionError
+                    ) as read_settings,
                 ):
                     app = create_launchplane_fastapi_app(
                         verifier=_RejectingVerifier(),
@@ -671,6 +680,7 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
                     payload = response.json()
                     self.assertNotIn("private-value", str(payload))
                     self.assertNotIn("provider-token", str(payload))
+                    read_settings.assert_not_called()
                     if expected_status == 200:
                         self.assertEqual(payload["inspect"]["target_id"], "compose-cm-prod")
                         self.assertEqual(
@@ -866,7 +876,6 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
                 trace_id=response.json()["trace_id"],
                 observed_at=datetime.now(timezone.utc).isoformat(),
             )
-            self.assertIsNotNone(denial)
             assert denial is not None
             self.assertEqual(denial.action, "dokploy_target.inspect")
 
@@ -876,6 +885,12 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             _seed_dokploy_target_inspect_records(database_url)
             app_store = PostgresRecordStore(database_url=database_url)
+            target = app_store.read_dokploy_target_record(
+                context_name="cm_website", instance_name="prod"
+            )
+            app_store.write_dokploy_target_record(
+                target.model_copy(update={"env": {"PLAIN": "stored-private-value"}})
+            )
             with (
                 patch(
                     "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config",
@@ -900,7 +915,8 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
                     verifier=_StubVerifier(_identity()),
                     authz_policy=_record_read_policy(
                         action="dokploy_target.inspect",
-                        context="launchplane",
+                        context="*",
+                        extra_actions=("secret.list",),
                     ),
                     database_url=database_url,
                     record_store_factory=lambda: app_store,
@@ -915,6 +931,31 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
                 stored_evidence = app_store.read_provider_target_record(
                     context_name="cm_website", instance_name="prod"
                 ).provider_evidence
+                with self.assertRaises(ValidationError) as invalid:
+                    RuntimeEnvironmentRecord.model_validate(
+                        {
+                            "scope": "instance",
+                            "context": "cm_website",
+                            "instance": "prod",
+                            "env": {"PLAIN": "stored-private-value"},
+                            "retired_provider_keys": ["RETIRED"],
+                            "updated_at": "fixture-time",
+                        }
+                    )
+                for method in (
+                    "read_dokploy_target_record",
+                    "read_dokploy_target_id_record",
+                    "read_provider_target_record",
+                ):
+                    with (
+                        self.subTest(method=method),
+                        patch.object(app_store, method, side_effect=invalid.exception),
+                    ):
+                        failure = await _get_dokploy_target_inspect(
+                            app, context="cm_website", instance="prod"
+                        )
+                        self.assertEqual(failure.status_code, 503)
+                        self.assertNotIn("stored-private-value", failure.text)
                 app_store.close()
 
         self.assertEqual(response.status_code, 200)
@@ -933,7 +974,7 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
             payload["inspect"]["provider_target_record"]["provider_evidence"],
             stored_evidence,
         )
-        read_dokploy_config.assert_called_once_with(
+        read_dokploy_config.assert_called_with(
             control_plane_root=root,
             database_url=database_url,
         )

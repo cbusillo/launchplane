@@ -9,12 +9,10 @@ plane work that cannot safely be delegated through static administrator
 credentials. The boundary is separate from Client Acceptance, Agent Write
 Intents, workflow authorization, and ordinary admin mutations.
 
-The Access policy workbench includes closed candidate preparation for Agent
-delivery administration, administrator product-evidence reads, and agent
-product setup. Its add and remove controls derive the signed-in administrator,
+The Access policy workbench includes closed candidate preparation for
+administrator product-evidence reads and agent product setup. Its add and remove controls derive the signed-in administrator,
 principal, and policy inputs on the server and create a standard managed
 authorization plan for review. They do not approve or apply it. See
-[Preparing Agent Delivery Administration](authorization-authority.md#preparing-agent-delivery-administration),
 [Preparing Administrator Product Evidence Access](authorization-authority.md#preparing-administrator-product-evidence-access),
 and [Preparing Agent Product Setup](authorization-authority.md#preparing-agent-product-setup)
 for eligibility, collision, removal, and production-activation boundaries.
@@ -28,17 +26,6 @@ uses the Launchplane context. Its environment-level all-instances rule has an
 empty context selector so it can read the stored context of each environment.
 That standing access still requires
 separate concrete administrator confirmation and governed installation.
-
-Ordinary-agent delivery preparation and activation planning are removed.
-Historical activation records remain readable, but cannot be planned, approved,
-canceled, or revoked through the service. Schema-3 policy parsing and maintenance
-remain available for existing records. Exact removal of an ordinary rule through
-the existing managed-policy reconciliation path remains the policy stop: new
-worker authorization fails when its bound rule is absent. This source retirement
-assumes the completed Q91 access and pilot qualification; it adds no grant or
-policy mutation. Remaining deletion is tracked by
-[launchplane#2437](https://github.com/cbusillo/launchplane/issues/2437).
-
 
 ## Agent Policy Proposals
 
@@ -186,22 +173,6 @@ instead. Agents cannot cancel, approve, or revoke, including their own proposals
 After an uncertain response the reason stays locked for a retry with the same
 source event; refresh the plan to check its state. Retired operation types have
 no cancellation control.
-
-## Admin Confirmation Contract Seam
-
-`contracts/owner-control-contract.json` publishes canonical `owner-control`
-request and response bytes plus generic golden vectors for every registered
-descriptor. It is a cross-host conformance artifact only: it does not issue a
-challenge, consume an admin confirmation, alter browser approval, add a route,
-or authorize execution. See `docs/owner-control-channel.md`.
-
-The DB-backed shadow verifier remains independent from this lifecycle. No
-privileged-operation route, service, worker, transition, approval, or execution
-path imports it. Its unrouted storage API can retain test or future
-service-authored challenge state and return only `authorizes_execution: false`.
-Its service-only issuance derives a challenge from an already-locked planned
-record and active policy without mutating that record or its event ledger;
-browser approval remains the only active approval transport.
 
 ## Authorization
 
@@ -570,9 +541,7 @@ existing completion/adoption path, including after lease expiry. This typed
 rejection is the only new expired-reservation adoption path. Generic executor
 failures do not gain that permission, and completion/adoption mismatches retain
 their reconciliation fence and report that reconciliation is still required.
-The retired inspection records remain described in
-[Records](records.md#provider-delivery-inspection); no provider inspection
-orchestration remains.
+No provider inspection orchestration remains.
 
 ## Legacy Re-encryption Route
 
@@ -590,13 +559,6 @@ OIDC workload transport. Browser sessions, terminal agents, `local-operator` ide
 local administrators, and other bearer identities fail closed. Signed-in
 humans review and approve `managed-authz-policy-set` records; they cannot call a
 public policy execute route.
-
-## Completion Holds
-
-None. #2204 and #2177, the issues this section held open, are closed.
-
-**Preserved history:** Phase 1 planning-only descriptions remain historical
-context only; the supervised Phase 2 worker flow above is current guidance.
 
 ## Backup policy adapter
 

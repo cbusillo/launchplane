@@ -113,15 +113,77 @@ replay a previous failed attempt. Command text names an executable in the
 product artifact; runtime settings and managed bindings supply its secrets.
 
 Preview profiles using driver data transport can explicitly select the
-`verireel-postgres` transport extension through `transport_extension` while their
+`postgres` transport extension through `transport_extension` while their
 driver is `generic-web`, declaring its isolated database namespace through
 `transport_database_prefix`. The template lane, application prefix, database
-namespace and runtime product identity come from the profile. This uses the existing isolated PostgreSQL preparation
-and cleanup rather than the plain preview path. The VeriReel testing transition
-has qualified this declared shared path; the parallel deploy, promotion and rollback driver is removed. Historical deployment
+namespace and runtime product identity come from the profile, as do its port,
+health path, URL environment keys and generated secrets. The testing template
+must expose a PostgreSQL `DATABASE_URL` and its image must provide Node and `pg`
+for database administration. Application database URLs retain the template's
+scheme and connection options, replacing only credentials and the database name;
+see [PostgreSQL connection URIs](https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING-URIS).
+Query parameters that override connection identity or contain credentials are
+refused before effects. Put connection identity in the URI authority/path and
+credentials in the managed testing template instead.
+The shared preview health contract requires the observed runtime identity to
+match and rejects an explicit `ok: false`. Choose application and database prefixes unique
+to the product; storage checks the prospective profile set and provisioning and
+cleanup refuse overlapping rendered namespaces, including default prefixes and
+slug prefixes. Clean up retained previews before changing their resource names,
+source, template or transport. Disabling previews leaves cleanup available.
+Environment rendering uses the plain-preview model: only `copied_env_keys` are
+inherited from testing, declared required keys must exist, and managed preview
+runtime settings, secrets and retired keys apply before generated credentials.
+Use managed preview records for nongenerated settings; unlisted template values
+are absent. Copied credentials use the shared runtime key-safety gate;
+PostgreSQL also checks for credentials inside copied URL query values. Existing
+plain-preview classification is unchanged. Declare the copy list explicitly when transitioning
+a historical PostgreSQL profile. `preview.generated_secret_env` maps application
+environment keys to `urlsafe` or `base64`; values are generated for each preview
+and retained on refresh, never copied from testing. `preview_url_env_keys` and
+`preview_domain_env_keys` replace the
+product-specific URL rewriting. Maintenance and schedules remain profile-owned.
+Domain keys receive the full preview hostname, as with plain previews; a product
+needing a static base domain declares that value in managed preview settings.
+`DATABASE_URL` belongs to this transport, and `generated_secret_env` assigns its
+keys to the generator. Those declarations take precedence over managed values,
+secrets and retired-key entries. Remove an application key's generator declaration
+to retire it or supply it through managed configuration. Database credentials
+remain required while this transport is enabled; clean up previews before
+switching transport to use a separately managed database connection.
+This uses the existing isolated PostgreSQL preparation and cleanup rather than
+the plain preview path. Stored `verireel-postgres` declarations remain unchanged
+when read, including profiles embedded in retirement records and their hash
+fences. Historical declarations support database-aware cleanup using their
+stored resource names and testing template, including when the product is
+retiring or previews are disabled. Use `/v1/drivers/generic-web/preview-destroy`
+through the existing authorized agent route. Retired products remain refused;
+cleanup does not rewrite the profile or its retirement hash fence.
+Before preview refresh or other profile edits, apply a reviewed generic-web transition from the product's
+Shared web driver panel. Declare `postgres`, `copied_env_keys`, `generated_secret_env`,
+`preview_url_env_keys` and `preview_domain_env_keys` explicitly from the product's
+runtime contract. Empty collections mean the product requires none; Launchplane
+does not infer product keys. Keep existing resource prefixes and slug/template
+settings when retained previews still need cleanup. The review shows the new
+preview endpoint and HTTPS policy; a legacy effective endpoint is reported as
+unknown. Production endpoint settings are not rewritten. New inputs reject the
+retired name.
+New products declare their own keys
+and prefixes through the product profile or reviewed generic-web transition.
+Historical deployment
 and backup records and retired instance-scoped policy grants remain readable;
 no retired release endpoint is enabled by those grants. Production still changes only through an
 accepted release.
+
+Historical lifecycle translation remains in
+[`product_application_lifecycle_migration.py`](../control_plane/contracts/product_application_lifecycle_migration.py).
+[Issue 3856](https://github.com/cbusillo/launchplane/issues/3856) tracks its removal
+after persisted profile declarations and retirement/snapshot compatibility are
+qualified; this refactor does not rewrite live records to remove that reader.
+
+Application-only product retirement cannot clean PostgreSQL databases or roles.
+Destroy retained PostgreSQL previews through their normal preview cleanup route
+before integrated or no-target product retirement.
 
 Product browser checks belong to the product's Build. VeriReel qualifies every
 candidate image using disposable app, database and browser containers before
@@ -174,11 +236,30 @@ the card starts with the current declarations. Maintenance and schedule commands
 run in the product artifact and use existing managed runtime settings.
 
 Review returns the normalized declarations and a plan bound to the whole current
-profile. Apply requires that exact review, a signed-in administrator's existing
-`product_profile.write` authority, CSRF and an operation key. A concurrent profile
+profile. A signed-in administrator applies with existing `product_profile.write`
+authority and CSRF. The Director's authenticated `local_operator` or `terminal_agent`
+identity can apply preview-only declarations on an existing `generic-web` product
+through the same service API, under `product_profile.preview_transition.apply`.
+It cannot change the driver or any stable-lane declaration, including testing and
+production. Other agent identities cannot apply this operation, even with a
+profile-write rule. No access policy or credential is created or changed.
+
+For an agent call, read `GET /v1/product-profiles/{product}` first. Submit each
+lane's current `generic_web_extensions` unchanged as its `extensions`, and the
+reviewed preview declarations from the product's runtime contract. Use
+`mode: dry-run`, inspect the normalized result, then submit the same declarations
+and reason with `mode: apply`, `reviewed_plan_sha256` and an `Idempotency-Key`.
+Read the profile back independently. Credential copying still passes the existing
+preview runtime-key safety gate at deployment; this declaration writes no secret
+and supplies no live-site key. Keep preview resource prefixes and custody intact.
+
+Every apply requires that exact review and an operation key. A concurrent profile
 edit refuses the apply. The write and original response commit atomically;
 a lost response keeps the card locked to its original key until replay or the
 profile mutation receipt settles it.
+API callers retain their original body and key on a lost response; the profile's
+`mutation-receipts/generic-web-transition?operation_key=...` read settles completion
+without repeating a mutation. Same-key replay returns the original response.
 
 This changes driver and extension declarations only. Lane placement, Client,
 release policy, health settings, runtime settings, secrets, artifacts and deployment
@@ -271,6 +352,11 @@ slice. It models session-cookie authentication, proxy-host payloads, and the
 proxy-host create/read/update/disable/enable/delete lifecycle that was proven
 against a disposable canary route. Future ingress driver routes should use this
 adapter instead of direct NPMplus SQLite or generated nginx config writes.
+
+The adapter discards provider metadata on host reads and withholds response bodies
+and transport reasons from failures. `certificate_id="new"` is create-only.
+For an existing host, select the current certificate in NPMplus's certificate
+inventory and supply its integer ID for the reviewed update.
 
 The service-backed ingress route is `POST /v1/drivers/ingress/route-apply`.
 Callers send a product/context envelope plus a typed route request. `mode` is
@@ -368,18 +454,73 @@ Odoo routes inherit the extra NPMplus config used for the current password-gated
 edge path. Passing `advanced_config` explicitly replaces the provider value;
 passing an explicit empty string clears it.
 
-Future edge-driver work should investigate Cloudflare Tunnel in #1215 as a
-Launchplane provider before deepening edge-provider assumptions beyond NPMplus.
-The intended spike is a shadow hostname routed through `cloudflared` running in
-or near Dokploy, with the Traefik service in the Dokploy compose network as the
-origin router and NPMplus kept as the active fallback until Cloudflare health
-evidence passes. The Cloudflare slice must model account/zone/tunnel identifiers,
-public hostname routes, managed credentials, connector placement, health
-evidence, and rollback state as Launchplane records. Keep Authentik as a
-separate identity/access layer;
-issue #1051 tracks provider-neutral `identity_access` bindings and future
-Cloudflare Access/OIDC integration, but public website edge routing should prove
-itself without requiring Authentik.
+### Preview wildcard creation
+
+Use the same `POST /v1/drivers/ingress/route-apply` operation with
+`route.dns_challenge="cloudflare"` and `route.certificate_id="new"` for one
+product preview wildcard. The product must exclusively own the preview context,
+have previews enabled with `domain_certificate_type="none"`, and have a stored
+HTTPS `LAUNCHPLANE_PREVIEW_BASE_URL`. The requested wildcard must exactly name
+that namespace. A recorded active `edge_endpoint_key` supplies its upstream.
+Recorded product lane hostnames and parent or child preview namespaces owned by
+other products also block creation. Existing host and redirect/dead-host claims, including overlaps and uncertain
+regex claims, block creation. Existing-host updates still require an integer
+certificate ID and never resolve the DNS purpose.
+
+Dry-run uses metadata only and returns `dns_secret_ready`, `dns_secret_id` and
+`dns_secret_version_id` alongside the ordinary route plan/audit. Authorized context-wide wildcard
+plans validate the product's recorded preview namespace directly; standing read
+access does not substitute a stable testing hostname or gain apply authority.
+Missing or ambiguous credentials cannot authorize a create. After confirmed entry or an
+explicitly authorized initial transfer through the
+[existing managed-secret path](secrets.md#preview-wildcard-dns-credential),
+review the plan and pass its `dns_secret_version_id` in the ingress request for
+apply, with the original `Idempotency-Key`. Authorization uses
+`ingress_route.plan` or `ingress_route.apply`. The transport-marked Director
+agent can conditionally create this new preview wildcard with a minimal
+route: `domain_names`, `edge_endpoint_key`, `dns_challenge`, `certificate_id`,
+`ssl_forced` and `enabled`. Omitted options keep their defaults; arbitrary NGINX
+text, extra locations, authentication forwarding and upstream overrides are
+outside this conditional path. Instance-scoped audit authority cannot create a
+wildcard. The configured NPMplus service client supplies API
+authentication through its existing seam; this does not require source-record
+adoption or introduce another API credential store.
+
+Apply reuses the durable provider reservation and effect checkpoint. NPMplus's
+[existing quick-certificate create](https://github.com/ZoeyVid/NPMplus/blob/develop/backend/internal/proxy-host.js)
+issues the DNS-01 certificate before inserting the proxy host. That public
+source is not proof of the installed image revision. Deployed
+`GET /api/schema`, read through the pinned existing automation principal on
+November 6, 2026, confirms the create fields `npmplus_dns_challenge`,
+`npmplus_dns_provider` and write-only `npmplus_dns_provider_credentials`.
+The Cloudflare credential is a certbot `dns_cloudflare_api_token` assignment;
+no additional agreement or email input is required by that create schema.
+A service-owned operation marker binds readback to that exact create. Readback
+requires the exact host, upstream and options, loaded nginx and matching current
+certificate metadata. A response lost after dispatch is unknown, even if an
+HTTP error or empty inventory appears. Keep the original key: reconciliation
+can adopt the exact marked route. A complete native NPMplus error envelope
+records only its numeric HTTP status in the effect checkpoint. An original-key
+retry may reattempt only after fresh complete host, redirect/dead-host and
+certificate inventories prove absence. If the credential version changed, first
+reconcile the original request/key: its verified absent attempt refuses the stale
+version before decryption and releases the target. Then review a fresh plan and
+apply with that version and a new key. Proxy errors, invalid error bodies,
+transport loss and malformed success replies stay unknown; elapsed time never
+qualifies absence. A new key cannot bypass the outstanding target reservation.
+A retained certificate or mismatching host also prevents issuance. Qualify that
+exact resource through the existing integer-certificate route-apply path, under
+its original ownership and operational checks, rather than issuing again or
+deleting it. Preserve the original operation marker when completing or repairing that route so
+the original key can reconcile its exact readback.
+An interruption before the effect checkpoint is retryable under its original key.
+Post-dispatch absence is unknown while an issuance request could still be running.
+Unrelated hosts, certificates, source credentials and application records are
+untouched. Before runtime apply, run the existing operational snapshot/readiness,
+active-use, instance/principal pins, nginx, rollback and unrelated-live-route
+checks. These are operational prerequisites outside this route. The route
+checks nginx-online and exact provider readback; strict public TLS verification
+and a serving application test remain separate.
 
 The `Ingress Route Dry Run` workflow can discover the existing provider host for
 a domain before an apply. Leave `expected_host_id` blank to ask Launchplane to
@@ -471,10 +612,7 @@ deployment receipt.
 
 For declared preview transport, `preview.app_name_suffix` is part of the resource
 name used by creation, inventory and destruction. Existing VeriReel applications
-use `-app`; record that suffix explicitly when switching its profile. The named
-`verireel-postgres` transport retains VeriReel's Prisma, seed and environment
-interfaces while its template lane, product identity and resource prefixes come
-from the profile. It does not imply compatibility with other applications.
+use `-app`; record that suffix explicitly when switching its profile.
 
 A reservation keeps its original lifecycle declaration. Changing a declaration
 requires a new operation after exact recovery of the previous attempt; refusal

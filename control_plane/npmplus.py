@@ -1,6 +1,10 @@
 import json
-from dataclasses import dataclass
+from collections.abc import Callable
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from http.cookiejar import CookieJar
+from http.client import HTTPException
 from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -15,6 +19,12 @@ from control_plane.http_error_evidence import ProviderResponseValidationError
 type JsonPrimitive = str | int | float | bool | None
 type JsonValue = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
 type JsonObject = dict[str, JsonValue]
+
+PREVIEW_DNS_INTEGRATION = "preview_dns_cloudflare"
+PREVIEW_DNS_BINDING = "api_token"
+DNS_ISSUANCE_TIMEOUT_SECONDS = 300
+_MAX_ERROR_BODY_BYTES = 64 * 1024
+
 
 NpmplusForwardScheme = Literal["http", "https", "path", "empty", "grpc", "grpcs"]
 NpmplusAuthRequest = Literal[
@@ -221,6 +231,13 @@ class NpmplusProxyHost(NpmplusProxyHostPayload):
 
     @model_validator(mode="before")
     @classmethod
+    def _discard_provider_metadata(cls, value: object) -> object:
+        if isinstance(value, dict):
+            return {**value, "meta": {}}
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
     def _normalize_access_list_fields(cls, value: object) -> object:
         if not isinstance(value, dict):
             return value
@@ -273,28 +290,49 @@ class NpmplusCertificate(BaseModel):
 
     id: int = Field(ge=1)
     domain_names: tuple[str, ...]
-    expires_on: str
+    expires_on: str | None
+
+
+def certificate_covers_hostname(pattern: str, hostname: str) -> bool:
+    pattern = pattern.lower().rstrip(".")
+    return pattern == hostname or (
+        pattern.startswith("*.")
+        and hostname.endswith(pattern[1:])
+        and hostname.count(".") == pattern.count(".")
+    )
+
+
+def certificate_is_current(certificate: NpmplusCertificate) -> bool:
+    if not certificate.expires_on:
+        return False
+    expiry = datetime.fromisoformat(certificate.expires_on.replace("Z", "+00:00"))
+    return expiry.replace(tzinfo=expiry.tzinfo or timezone.utc) > datetime.now(timezone.utc)
 
 
 class NpmplusOtherHost(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     domain_names: tuple[str, ...] = Field(min_length=1)
-    enabled: bool
 
 
 def _validate_response[Model: BaseModel](model: type[Model], value: object) -> Model:
     try:
         return model.model_validate(value)
     except ValidationError as error:
-        raise ProviderResponseValidationError(error, model) from error
+        raise ProviderResponseValidationError(error, model) from None
+
+
+class NpmplusRequestRejected(click.ClickException):
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(f"NPMplus rejected the request ({status_code}); provider output withheld.")
 
 
 @dataclass(frozen=True)
 class NpmplusCredentials:
     base_url: str
     identity: str
-    secret: str
+    secret: str = field(repr=False)
 
     def __post_init__(self) -> None:
         normalized_base_url = self.base_url.strip().rstrip("/")
@@ -408,9 +446,16 @@ class NpmplusClient:
                 raise click.ClickException("NPMplus hostname claims are unavailable.")
             for item in payload:
                 host = _validate_response(NpmplusOtherHost, item)
-                if host.enabled:
-                    domains.extend(name.strip().lower() for name in host.domain_names)
+                domains.extend(name.strip().lower() for name in host.domain_names)
         return tuple(domains)
+
+    def list_certificates(self) -> tuple[NpmplusCertificate, ...]:
+        payload = self._request(method="GET", path="/api/nginx/certificates")
+        if not isinstance(payload, list):
+            raise click.ClickException(
+                "NPMplus certificate inventory is unavailable or incomplete."
+            )
+        return tuple(_validate_response(NpmplusCertificate, item) for item in payload)
 
     def get_certificate(self, certificate_id: int) -> NpmplusCertificate:
         payload = self._request(method="GET", path=f"/api/nginx/certificates/{certificate_id}")
@@ -445,6 +490,47 @@ class NpmplusClient:
             raise click.ClickException("NPMplus proxy-host create returned an invalid payload.")
         return _validate_response(NpmplusProxyHost, response)
 
+    def create_dns_proxy_host(
+        self,
+        payload: NpmplusProxyHostPayload,
+        *,
+        token: str,
+        before_dispatch: Callable[[], None] | None = None,
+    ) -> NpmplusProxyHost:
+        if (
+            payload.certificate_id != "new"
+            or not payload.enabled
+            or len(payload.domain_names) != 1
+            or not payload.domain_names[0].startswith("*.")
+            or re.fullmatch(r"[A-Za-z0-9_-]+", token) is None
+        ):
+            raise click.ClickException("Wildcard DNS certificate input is unavailable.")
+        body = payload.to_api_payload()
+        body.update(
+            npmplus_dns_challenge=True,
+            npmplus_dns_provider="cloudflare",
+            npmplus_dns_provider_credentials=f"dns_cloudflare_api_token = {token}",
+        )
+        if not self._authenticated:
+            self.authenticate()
+        if before_dispatch is not None:
+            before_dispatch()
+        response = self._request(
+            method="POST",
+            path="/api/nginx/proxy-hosts",
+            payload=body,
+            timeout_seconds=DNS_ISSUANCE_TIMEOUT_SECONDS,
+        )
+        host = _validate_response(NpmplusProxyHost, response)
+        if (
+            type(host.certificate_id) is not int
+            or host.certificate_id < 1
+            or host.model_dump(exclude={"id", "meta", "certificate_id"})
+            != payload.model_dump(exclude={"meta", "certificate_id"})
+        ):
+            raise click.ClickException("Wildcard proxy-host result is unverified; output withheld.")
+        return host
+
     def update_proxy_host(
         self, *, host_id: int, payload: NpmplusProxyHostPayload
     ) -> NpmplusProxyHost:
@@ -476,6 +562,7 @@ class NpmplusClient:
         payload: JsonObject | None = None,
         query: dict[str, str | int] | None = None,
         require_authentication: bool = True,
+        timeout_seconds: int | float | None = None,
     ) -> JsonValue:
         if require_authentication and not self._authenticated:
             self.authenticate()
@@ -493,24 +580,45 @@ class NpmplusClient:
 
         request = Request(request_url, data=request_body, headers=request_headers, method=method)
         try:
-            with self._opener.open(request, timeout=self._timeout_seconds) as response:
+            with self._opener.open(
+                request,
+                timeout=self._timeout_seconds if timeout_seconds is None else timeout_seconds,
+            ) as response:
                 raw_payload = response.read()
         except HTTPError as error:
-            error_body = error.read().decode(errors="replace").strip()
+            status = error.code
+            settled = False
+            try:
+                body = json.loads(error.read(_MAX_ERROR_BODY_BYTES))
+                settled = (
+                    status in {400, 401, 403, 404, 409, 422, 500}
+                    and isinstance(body, dict)
+                    and isinstance(body.get("error"), dict)
+                    and type(body["error"].get("code")) is int
+                    and body["error"]["code"] == status
+                )
+            except (ValueError, OSError, HTTPException):
+                settled = False
+            finally:
+                error.close()
+            if settled:
+                raise NpmplusRequestRejected(status) from None
             raise click.ClickException(
-                f"NPMplus API {method} {normalized_path} failed ({error.code}): {error_body}"
-            ) from error
-        except URLError as error:
+                f"NPMplus API {method} request failed ({status}); provider output withheld."
+            ) from None
+        except (URLError, TimeoutError, OSError, HTTPException) as error:
             raise click.ClickException(
-                f"NPMplus API {method} {normalized_path} request failed: {error.reason}"
-            ) from error
+                f"NPMplus API {method} request failed ({type(error).__name__}); provider output withheld."
+            ) from None
 
         if not raw_payload:
             return {}
         try:
             return _normalize_json_value(json.loads(raw_payload))
-        except json.JSONDecodeError:
-            return {"raw": raw_payload.decode("utf-8", errors="replace")}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise click.ClickException(
+                "NPMplus API returned invalid JSON; output withheld."
+            ) from None
 
 
 def _normalize_json_value(value: object) -> JsonValue:

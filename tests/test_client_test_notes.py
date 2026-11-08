@@ -16,7 +16,9 @@ class ClientTestNotesTests(unittest.TestCase):
         from control_plane.release_review import read_pull_request_notes
         from tests.support.profiles import product_profile_payload
 
-        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload("site"))
+        payload = product_profile_payload("site")
+        payload["owner"] = {"github_login": "client", "github_id": "9001"}
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
         for body, labels, blocked in (
             (
                 "## Client test notes\nNothing for the Client to test: CI only.",
@@ -38,10 +40,84 @@ class ClientTestNotesTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.release_review._read_release_github",
+                    side_effect=[
+                        {
+                            "title": "Checkout",
+                            "body": body,
+                            "labels": [{"name": label} for label in labels],
+                            "head": {"sha": "A" * 40},
+                            "state": "open",
+                        },
+                        [
+                            {"body": "Earlier feedback", "user": {"id": 9001}},
+                            {
+                                "body": "Please fix the price",
+                                "html_url": "https://github.com/example/site/pull/42#issuecomment-7",
+                                "user": {"id": 9001},
+                            },
+                            {"body": "Unrelated comment", "user": {"id": 9}},
+                        ],
+                    ],
+                ) as read_source,
+            ):
+                notes = read_pull_request_notes(
+                    control_plane_root=Path("unused"),
+                    profile=profile,
+                    pull_request_number=42,
+                    trace_id="fixture",
+                )
+                self.assertEqual(bool(notes.client_test_notes_error), blocked)
+                self.assertEqual(notes.head_sha, "a" * 40)
+                self.assertEqual(notes.state, "open")
+                self.assertEqual(notes.latest_client_comment, "Please fix the price")
+                self.assertTrue(notes.latest_client_comment_url.endswith("#issuecomment-7"))
+                self.assertEqual(
+                    notes.client_test_notes_error,
+                    change_client_review(
+                        body=body, labels=labels, review_label=profile.owner.review_label
+                    ).error,
+                )
+                read_source.side_effect = None
+                read_source.return_value = {
+                    "title": notes.title,
+                    "body": body,
+                    "labels": [{"name": label} for label in labels],
+                    "head": {"sha": notes.head_sha},
+                    "state": notes.state,
+                }
+                read_source.reset_mock()
+                without_comment = read_pull_request_notes(
+                    control_plane_root=Path("unused"),
+                    profile=profile,
+                    pull_request_number=42,
+                    trace_id="fixture",
+                    include_client_comment=False,
+                )
+                expected = notes._asdict()
+                expected.update(latest_client_comment="", latest_client_comment_url="")
+                self.assertEqual(without_comment._asdict(), expected)
+                read_source.assert_called_once()
+
+    def test_unknown_pull_request_identity_never_becomes_current_review_evidence(self) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from control_plane.release_review import read_pull_request_notes
+        from tests.support.profiles import product_profile_payload
+
+        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload("site"))
+        for head, state in ((None, None), ({"sha": "bad"}, []), ({"sha": 42}, "unknown")):
+            with (
+                self.subTest(head=head, state=state),
+                patch(
+                    "control_plane.release_review.launchplane_github_token",
+                    return_value=nullcontext("fixture"),
+                ),
+                patch(
+                    "control_plane.release_review._read_release_github",
                     return_value={
                         "title": "Checkout",
-                        "body": body,
-                        "labels": [{"name": label} for label in labels],
+                        "body": "## Client test notes\nCheck checkout.",
+                        "head": head,
+                        "state": state,
                     },
                 ),
             ):
@@ -51,13 +127,9 @@ class ClientTestNotesTests(unittest.TestCase):
                     pull_request_number=42,
                     trace_id="fixture",
                 )
-                self.assertEqual(bool(notes.client_test_notes_error), blocked)
-                self.assertEqual(
-                    notes.client_test_notes_error,
-                    change_client_review(
-                        body=body, labels=labels, review_label=profile.owner.review_label
-                    ).error,
-                )
+                self.assertFalse(notes.head_sha)
+                self.assertFalse(notes.state)
+                self.assertTrue(notes.client_test_notes)
 
     def test_questions_keep_the_review_notification_without_permitting_acceptance(self) -> None:
         from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS

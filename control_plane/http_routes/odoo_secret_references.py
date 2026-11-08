@@ -18,6 +18,7 @@ from control_plane.odoo_secret_references import (
     SecretReferenceStore,
     TestingSecretReferenceRefusal,
     ConfigParameterSecretReferenceError,
+    ReferenceAllowanceKind,
     plan_secret_reference_reconciliation,
 )
 from control_plane.service_auth import (
@@ -47,6 +48,9 @@ class SecretReferenceRequest(BaseModel):
     review_digest: str = ""
     confirmation: str = ""
     create_missing: bool = False
+    allowance_kind: ReferenceAllowanceKind = Field(
+        default="dev_store", exclude_if=lambda value: value == "dev_store"
+    )
 
 
 class SecretReferenceResponse(BaseModel):
@@ -202,6 +206,7 @@ def register_secret_reference_routes(
                 keys=keys,
                 create_missing=request.create_missing if request else False,
                 environment=lane.instance,
+                allowance_kind=request.allowance_kind if request else "dev_store",
             )
             if request is not None and request.mode == "apply":
                 if request.confirmation != f"APPLY {profile.product}/{lane.instance}":

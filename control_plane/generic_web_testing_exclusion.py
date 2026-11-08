@@ -262,8 +262,6 @@ def require_retained_application_custody(
         ) and _recorded_native_application_custody(store, row, product=product, context=context)
         if not event_original and not direct_original:
             raise TestingExclusionRefused("execution_ownership_unproved")
-    if not current:
-        raise TestingExclusionRefused("reservation_fence_absent")
     check()
     return tuple(current)
 
@@ -306,8 +304,13 @@ def _target_reservations(
                     )
                 )
         if matches:
+            if row.provider_target_key != target_key:
+                from control_plane.testing_activation import retained_fence_is_separated
+
+                if retained_fence_is_separated(store, row):
+                    continue
             selected.append(row)
-    if require_complete and not selected and unattributed:
+    if require_complete and unattributed:
         raise TestingExclusionRefused("execution_ownership_unproved")
     return tuple(selected)
 
@@ -382,6 +385,28 @@ def _inventory(read: Callable[[], object], *, kind: str, target_id: str) -> Test
         complete=True,
         count=count,
     )
+
+
+def require_quiescent_testing_provider_work(
+    *,
+    host: str,
+    token: str,
+    target_id: str,
+    never_deployed: bool = False,
+) -> None:
+    inspections: tuple[tuple[str, str, dict[str, str | int]], ...] = (
+        ("deployments", "/api/deployment.allByType", {"id": target_id, "type": "compose"}),
+        ("queue", "/api/deployment.queueList", {}),
+        ("schedules", "/api/schedule.list", {"id": target_id, "scheduleType": "compose"}),
+    )
+    for kind, path, query in inspections:
+        facet = _inventory(
+            lambda: dokploy_api.dokploy_request(host=host, token=token, path=path, query=query),
+            kind=kind,
+            target_id=target_id,
+        )
+        if facet.code != "proved" or never_deployed and kind == "deployments" and facet.count != 0:
+            raise ValueError("Provider testing work or serving history is present or unknown.")
 
 
 def _provider_target(payload: object, target_id: str) -> TestingExclusionFacet:

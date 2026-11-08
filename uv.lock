@@ -280,8 +280,8 @@ wheels = [
 [[package]]
 name = "codex-skills-plan-status"
 version = "0.1.0"
-source = { url = "https://github.com/cbusillo/codex-skills/archive/9e72d42ca6e268522f53a1dde8509dedc21c9888.tar.gz", subdirectory = "skills/github/scripts" }
-sdist = { hash = "sha256:c56549dc73389b5d0a0f12b940759dc2e6ad2777ac38a9c7f2393562c72240c4" }
+source = { url = "https://github.com/cbusillo/codex-skills/archive/0fafbf9d6953bd7ecf53fab1bd7550e97947c1dd.tar.gz", subdirectory = "skills/github/scripts" }
+sdist = { hash = "sha256:ae27c2b47b7b06ee500c58b0ed362211e0b2dad37fd3cd63fbfe49c4ebbac314" }
 
 [[package]]
 name = "cryptography"
@@ -361,6 +361,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/38/d5/b0aeb0b303650ac87b0411de4aaf3f901b06042dcc3fb00f30b97b7ff585/fastapi-0.143.3.tar.gz", hash = "sha256:b9ab567ee57afb4454004ce04c889f8f0160ac47946b99795887cd6e88484848", size = 469834, upload-time = "2026-10-16T14:14:13.31Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2c/1a/03d246befcf307219bb2161c97d8c5d314f84125bf7dd245730a28589828/fastapi-0.143.3-py3-none-any.whl", hash = "sha256:75e8bd68e2f52f77d29b2879749c257d64de2d85282d25270caf2bfccce5efe5", size = 144849, upload-time = "2026-10-16T14:14:11.763Z" },
+]
+
+[[package]]
+name = "graphql-core"
+version = "3.2.13"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4e/5e/aa0d4e701b50db0bab71b125dd19ddb0f98c638d008d6f7e3d8ce9cbc92e/graphql_core-3.2.13.tar.gz", hash = "sha256:bb81dd266d4ab7b591bd976f1b23639d97776cb9ac1a896b4a93c271e11ed618", size = 577471, upload-time = "2026-09-27T12:22:57.136Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1f/b4/b52a324b0b297ddc49b8ea31a51d39fae63132f694a267b9381d94e2e0af/graphql_core-3.2.13-py3-none-any.whl", hash = "sha256:b0eb04f2c31556b2310a77c8fb53c74e8b56570f8fea594d89c6ef7827dbb497", size = 268191, upload-time = "2026-09-27T12:22:55.661Z" },
 ]
 
 [[package]]
@@ -479,14 +488,14 @@ wheels = [
 
 [[package]]
 name = "joserfc"
-version = "1.7.1"
+version = "1.7.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/44/90/25cb27518750218e4f850be63d8bbb2343efaad1c01c3571aaa4b3c33bd7/joserfc-1.7.1.tar.gz", hash = "sha256:77d0b76514879c68c6f433bc5b7357a4ab72008ff1e33d8379fd11d72bd8ca81", size = 233181, upload-time = "2026-06-08T07:21:33.412Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bd/15/48ff246732232d35ee234228def22b52455fcc55577f06146602399a29b0/joserfc-1.7.7.tar.gz", hash = "sha256:471d0fd12a5a0d1c0942de280f39efe6f597878315033270b504d4d006d25510", size = 237446, upload-time = "2026-10-19T00:30:29.974Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b3/00/fa62404c3e347f946faa13aa21085205f9cc06ad17671e37f81a51662ae8/joserfc-1.7.1-py3-none-any.whl", hash = "sha256:b3e3d655612e2e1ef67b2600f2f420e12e537b020208fab1761fad647319c164", size = 70423, upload-time = "2026-06-08T07:21:32.001Z" },
+    { url = "https://files.pythonhosted.org/packages/df/9f/934db284aa22f37af59708e382903860d4b81329c137b1b0ed2745daeb65/joserfc-1.7.7-py3-none-any.whl", hash = "sha256:06979cfbab78bc802f14c0358f32969826cc26720e13cb38926ffdc86bc0cb2c", size = 71758, upload-time = "2026-10-19T00:30:28.498Z" },
 ]
 
 [[package]]
@@ -516,6 +525,7 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "asgi-lifespan" },
+    { name = "graphql-core" },
     { name = "httpx2" },
     { name = "mypy" },
     { name = "passlib" },
@@ -532,9 +542,10 @@ requires-dist = [
     { name = "asgi-lifespan", marker = "extra == 'dev'", specifier = ">=2.1.0" },
     { name = "authlib", specifier = ">=1.7.2" },
     { name = "click", specifier = ">=8.4.2" },
-    { name = "codex-skills-plan-status", url = "https://github.com/cbusillo/codex-skills/archive/9e72d42ca6e268522f53a1dde8509dedc21c9888.tar.gz", subdirectory = "skills/github/scripts" },
+    { name = "codex-skills-plan-status", url = "https://github.com/cbusillo/codex-skills/archive/0fafbf9d6953bd7ecf53fab1bd7550e97947c1dd.tar.gz", subdirectory = "skills/github/scripts" },
     { name = "cryptography", specifier = ">=50.0.0" },
     { name = "fastapi", specifier = ">=0.141.1" },
+    { name = "graphql-core", marker = "extra == 'dev'", specifier = ">=3.2,<3.3" },
     { name = "httpx2", marker = "extra == 'dev'", specifier = ">=2.10.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.3.0" },
     { name = "passlib", marker = "extra == 'dev'", specifier = ">=1.7.4" },

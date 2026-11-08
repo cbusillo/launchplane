@@ -23,8 +23,7 @@ from control_plane.contracts.merge_train_stall import (
 )
 from control_plane.merge_train_stall_monitor import (
     STALL_SECONDS,
-    STALL_ISSUE_MARKER,
-    GitHubStallReporter,
+    DiscordStallNotifier,
     observe_stall,
     run_stall_monitor_pass,
 )
@@ -43,6 +42,19 @@ def _time(seconds: int) -> str:
 
 
 class StallObservationTests(TestCase):
+    def test_idle_time_never_counts_toward_new_work_stalling(self) -> None:
+        old = self.observe(MergeTrainStallObservation(), 0)
+        idle = self.observe(old, STALL_SECONDS * 2, ready=(), busy=False)
+        self.assertFalse(idle.reasons)
+        for ready in ((), ("7:head",)):
+            with self.subTest(ready=ready):
+                started = self.observe(idle, STALL_SECONDS * 4, ready=ready)
+                self.assertFalse(started.reasons)
+                before = self.observe(started, STALL_SECONDS * 5 - 1, ready=ready)
+                self.assertFalse(before.reasons)
+                stalled = self.observe(before, STALL_SECONDS * 5, ready=ready)
+                self.assertIn("controller_unchanged", stalled.reasons)
+
     def test_stalled_check_recovery_names_the_controller_wait(self) -> None:
         first = self.observe(MergeTrainStallObservation(), 0)
         stalled = self.observe(first, STALL_SECONDS, wait_reason="candidate_checks_disagree")
@@ -136,7 +148,6 @@ class StallMonitorTests(TestCase):
         client, reporter = Mock(), Mock()
         client.target_setting_gaps.return_value = ()
         client.read_merge_train_snapshot.return_value = snapshot
-        reporter.publish.return_value = 91
         with (
             TemporaryDirectory() as directory,
             patch(
@@ -175,12 +186,15 @@ class StallMonitorTests(TestCase):
                     store=store,
                     root=root,
                     now=lambda: _time(seconds),
-                    reporter_factory=lambda **_: reporter,
+                    notifier_factory=lambda **_: reporter,
                 )
-            reporter.publish.assert_called_once()
-            body = reporter.publish.call_args.args[1]
-            self.assertIn("blocked_change_not_moving", body)
-            self.assertIn(f"{entry.pull_request_number}:{entry.head_sha}", body)
+            observation = store.read_merge_train_stall_record(snapshot.repository).observations[
+                "main"
+            ]
+            self.assertIn("blocked_change_not_moving", observation.reasons)
+            self.assertIn(
+                f"{entry.pull_request_number}:{entry.head_sha}", observation.blocked_since
+            )
             reporter.notify.assert_called_once()
             client.read_merge_train_snapshot.return_value = snapshot.model_copy(
                 update={"pull_requests": ()}
@@ -189,9 +203,189 @@ class StallMonitorTests(TestCase):
                 store=store,
                 root=root,
                 now=lambda: _time(STALL_SECONDS + 300),
-                reporter_factory=lambda **_: reporter,
+                notifier_factory=lambda **_: reporter,
             )
-            self.assertFalse(reporter.publish.call_args.kwargs["stalled"])
+            self.assertEqual(
+                store.read_merge_train_stall_record(snapshot.repository).issue_state, "closed"
+            )
+
+    def test_preview_held_ready_or_dependency_change_does_not_accrue_ready_stall_clock(
+        self,
+    ) -> None:
+        from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
+        from control_plane.merge_train import CURRENT_HEAD_PREVIEW_FAILED
+        from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
+        from tests.http_app_test_support import (
+            _preview_generation_read_record,
+            _preview_read_record,
+        )
+        from tests.merge_train_policy_fixtures import dependency_repository_policy
+        from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
+        from tests.support.profiles import product_profile_payload
+        from tests.test_merge_train_dependency_updates import INDIRECT_PATCH
+        from tests.test_merge_train_github import (
+            _ReconcileRequestStore,
+            _combined_status,
+            _conversation_rule,
+            _github_branch,
+            _github_commit,
+            _github_pull_request,
+            _label_events,
+            _protected_branch_with_checks,
+            _required_check_run,
+        )
+
+        repository = "cbusillo/sellyouroutboard"
+        target = dependency_repository_policy(repository=repository).model_copy(
+            update={"scheduler": MergeTrainSchedulerPolicy(enabled=True, mutate=True)}
+        )
+        policy = _policy_record((repository, target.scheduler))
+        policy.policy.policies = (target,)
+
+        def build_transport(*, bot_update: bool) -> RecordingMergeTrainGitHubTransport:
+            pull_request = _github_pull_request(16, author_association="CONTRIBUTOR")
+            dependency_reads: tuple[object, ...] = ()
+            if bot_update:
+                pull_request["user"] = {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"}
+                dependency_reads = (
+                    [_github_commit(49699333, INDIRECT_PATCH, sha="head-16")],
+                    [],
+                    {"files": [{"filename": "package.json", "status": "modified"}]},
+                )
+            return RecordingMergeTrainGitHubTransport(
+                responses=(
+                    _protected_branch_with_checks("ci-status", app_id=None),
+                    [],
+                    _github_branch(),
+                    [pull_request],
+                    pull_request,
+                    MergeTrainGitHubError("permission not found", status_code=404)
+                    if bot_update
+                    else {"permission": "admin"},
+                    _label_events(),
+                    *dependency_reads,
+                    _protected_branch_with_checks("ci-status", app_id=None),
+                    [],
+                    _combined_status(),
+                    {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
+                    _conversation_rule(),
+                    [],
+                )
+            )
+
+        def generation(head_sha: str, sequence: int = 1) -> PreviewGenerationRecord:
+            record = _preview_generation_read_record(anchor_pr_number=16, sequence=sequence)
+            summary = record.anchor_summary.model_copy(update={"head_sha": head_sha})
+            return record.model_copy(update={"anchor_summary": summary})
+
+        scan_refused = ProductReconcileRequestRecord(
+            target_key="example-site:preview:16",
+            product="example-site",
+            target_kind="preview",
+            pull_request_number=16,
+            state="done",
+            requested_at="2026-11-06T00:00:00Z",
+            updated_at="2026-11-06T00:00:00Z",
+            request_count=1,
+            last_plan={
+                "action": "wait",
+                "held": True,
+                "reason": "artifact_scan_refused",
+                "head_sha": "head-16",
+            },
+        )
+        for bot_update in (True, False):
+            with (
+                self.subTest(bot_update=bot_update),
+                TemporaryDirectory() as directory,
+                patch("control_plane.merge_train_codeowners._read_patterns", return_value=()),
+            ):
+                root = Path(directory)
+                store = _ReconcileRequestStore(state_dir=root, reconcile_request=scan_refused)
+                profile = product_profile_payload("example-site")
+                profile["repository"] = repository
+                profile["preview"] = {"enabled": True, "context": "example-site"}
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(profile)
+                )
+                store.write_preview_record(
+                    _preview_read_record(anchor_pr_number=16).model_copy(
+                        update={"anchor_repo": "sellyouroutboard", "state": "active"}
+                    )
+                )
+                store.write_preview_generation_record(generation("older-head"))
+                controller = GitHubMergeTrainClient(
+                    transport=RecordingMergeTrainGitHubTransport(
+                        responses=tuple(build_transport(bot_update=bot_update).responses[2:])
+                    ),
+                    source_screening=True,
+                    branch_refresh_store=store,
+                )
+                controller.begin_snapshot_pass(policy=target, read_only=False)
+                snapshot = controller.read_merge_train_snapshot(
+                    repository=repository, base_branch="main"
+                )
+                entry = build_merge_train_dry_run_result(
+                    policy=policy.policy, snapshot=snapshot, batch_landing=True
+                ).queue[0]
+                self.assertFalse(entry.eligible)
+                self.assertIn(CURRENT_HEAD_PREVIEW_FAILED, entry.ineligible_reasons)
+
+                reporter = Mock()
+                with (
+                    patch(
+                        "control_plane.merge_train_stall_monitor.resolve_merge_train_policy_record",
+                        return_value=policy,
+                    ),
+                    patch(
+                        "control_plane.merge_train_stall_monitor.resolve_merge_train_github_token",
+                        return_value="test-token",
+                    ),
+                    patch(
+                        "control_plane.merge_train_stall_monitor.UrllibMergeTrainGitHubTransport",
+                        side_effect=lambda **_: build_transport(bot_update=bot_update),
+                    ),
+                    patch(
+                        "control_plane.merge_train_stall_monitor.resolve_stall_workflow",
+                        return_value=MergeTrainStallWorkflow(
+                            repository="example/control", ref="main"
+                        ),
+                    ),
+                ):
+                    for seconds in (0, STALL_SECONDS):
+                        run_stall_monitor_pass(
+                            store=store,
+                            root=root,
+                            now=lambda: _time(seconds),
+                            notifier_factory=lambda **_: reporter,
+                        )
+                    held = store.read_merge_train_stall_record(repository)
+                    self.assertEqual(held.issue_state, "closed")
+                    self.assertEqual(held.observations["main"].ready_since, {})
+                    self.assertEqual(held.observations["main"].reasons, ())
+                    reporter.notify.assert_not_called()
+
+                    store.write_preview_generation_record(generation("head-16", 2))
+                    for seconds in (STALL_SECONDS * 2, STALL_SECONDS * 3):
+                        run_stall_monitor_pass(
+                            store=store,
+                            root=root,
+                            now=lambda: _time(seconds),
+                            notifier_factory=lambda **_: reporter,
+                        )
+                    stalled = store.read_merge_train_stall_record(repository)
+                    self.assertEqual(stalled.issue_state, "open")
+                    self.assertEqual(
+                        stalled.observations["main"].ready_since,
+                        {"16:head-16": _time(STALL_SECONDS * 2)},
+                    )
+                    self.assertEqual(
+                        stalled.observations["main"].reasons,
+                        ("controller_unchanged", "ready_change_not_moving"),
+                    )
+                    reporter.notify.assert_called_once()
 
     def test_missing_target_setting_alerts_at_once_and_resolves_when_added(self) -> None:
         snapshot = _FakeExpandedMergeTrainSnapshotReader(
@@ -222,7 +416,6 @@ class StallMonitorTests(TestCase):
         client.observe_batch_candidate_checks.side_effect = MergeTrainGitHubPolicyUnavailableError(
             "no required checks"
         )
-        reporter.publish.return_value = 91
         with (
             TemporaryDirectory() as directory,
             patch(
@@ -250,29 +443,43 @@ class StallMonitorTests(TestCase):
                 )
             )
             run_stall_monitor_pass(
-                store=store, root=root, now=lambda: _time(0), reporter_factory=lambda **_: reporter
+                store=store, root=root, now=lambda: _time(0), notifier_factory=lambda **_: reporter
             )
-            self.assertTrue(reporter.publish.call_args.kwargs["stalled"])
-            self.assertIn("Require status checks on main.", reporter.publish.call_args.args[1])
+            observation = store.read_merge_train_stall_record(snapshot.repository).observations[
+                "main"
+            ]
+            self.assertIn("target_not_ready", observation.reasons)
+            self.assertEqual(observation.setting_gaps, client.target_setting_gaps.return_value)
             reporter.notify.assert_called_once()
             client.target_setting_gaps.return_value = ()
             client.observe_batch_candidate_checks.side_effect = None
             client.observe_batch_candidate_checks.return_value = failed
-            run_stall_monitor_pass(
-                store=store,
-                root=root,
-                now=lambda: _time(300),
-                reporter_factory=lambda **_: reporter,
+            for seconds in (300, STALL_SECONDS):
+                run_stall_monitor_pass(
+                    store=store,
+                    root=root,
+                    now=lambda: _time(seconds),
+                    notifier_factory=lambda **_: reporter,
+                )
+                self.assertEqual(
+                    bool(
+                        store.read_merge_train_stall_record(snapshot.repository)
+                        .observations["main"]
+                        .reasons
+                    ),
+                    seconds == STALL_SECONDS,
+                )
+            self.assertIn(
+                "controller_unchanged",
+                store.read_merge_train_stall_record(snapshot.repository)
+                .observations["main"]
+                .reasons,
             )
-            self.assertFalse(reporter.publish.call_args.kwargs["stalled"])
 
-    def test_unresolved_alias_is_observed_without_a_current_lease_or_queue(self) -> None:
+    def test_empty_repository_ignores_leases_but_reports_unresolved_aliases(self) -> None:
         snapshot = (
             _FakeExpandedMergeTrainSnapshotReader(transport=object())
-            .read_merge_train_snapshot(
-                repository="example/repo",
-                base_branch="main",
-            )
+            .read_merge_train_snapshot(repository="example/repo", base_branch="main")
             .model_copy(update={"pull_requests": ()})
         )
         policy = _policy_record(
@@ -281,7 +488,6 @@ class StallMonitorTests(TestCase):
         client, reporter = Mock(), Mock()
         client.target_setting_gaps.return_value = ()
         client.read_merge_train_snapshot.return_value = snapshot
-        reporter.publish.return_value = None
         with (
             TemporaryDirectory() as directory,
             patch(
@@ -312,6 +518,38 @@ class StallMonitorTests(TestCase):
                     "active_record_id": "retained-provider-effect",
                 }
             )
+            state = alias.model_copy(
+                update={
+                    "repository": snapshot.repository,
+                    "controller_key": alias.controller_key.lower(),
+                    "active_record_id": "",
+                }
+            )
+            for seconds, owner, expires in (
+                (0, "", 0),
+                (STALL_SECONDS * 2, "controller", STALL_SECONDS * 3),
+                (STALL_SECONDS * 4, "controller", STALL_SECONDS * 3),
+                (STALL_SECONDS * 5, "controller", STALL_SECONDS * 3),
+                (STALL_SECONDS * 6, "", 0),
+            ):
+                with self.subTest(seconds=seconds, owner=owner):
+                    state.status = "running" if owner else "idle"
+                    state.lease_owner = owner
+                    state.lease_acquired_at = _time(0) if owner else ""
+                    state.heartbeat_at = _time(0) if owner else ""
+                    state.lease_expires_at = _time(expires) if owner else ""
+                    store.write_merge_train_controller_state_record(state)
+                    run_stall_monitor_pass(
+                        store=store,
+                        root=Path(directory),
+                        now=lambda: _time(seconds),
+                        notifier_factory=lambda **_: reporter,
+                    )
+                    observation = store.read_merge_train_stall_record(
+                        snapshot.repository
+                    ).observations["main"]
+                    self.assertFalse(observation.reasons)
+                    reporter.notify.assert_not_called()
             path = store._write_model(
                 "launchplane_merge_train_controller_states",
                 _merge_train_controller_storage_id(alias.controller_key),
@@ -321,8 +559,8 @@ class StallMonitorTests(TestCase):
             run_stall_monitor_pass(
                 store=store,
                 root=Path(directory),
-                now=lambda: _time(0),
-                reporter_factory=lambda **_: reporter,
+                now=lambda: _time(STALL_SECONDS * 6),
+                notifier_factory=lambda **_: reporter,
             )
             record = store.read_merge_train_stall_record(snapshot.repository)
             self.assertIn(
@@ -343,7 +581,6 @@ class StallMonitorTests(TestCase):
         client, reporter = Mock(), Mock()
         client.target_setting_gaps.return_value = ()
         client.read_merge_train_snapshot.return_value = snapshot
-        reporter.publish.return_value = 91
         hold_reader = Mock(return_value=object())
         state = build_merge_train_controller_state_record(
             repository=snapshot.repository,
@@ -395,17 +632,17 @@ class StallMonitorTests(TestCase):
                         store=store,
                         root=root,
                         now=lambda: _time(seconds),
-                        reporter_factory=lambda **_: reporter,
+                        notifier_factory=lambda **_: reporter,
                     )
 
                 run(0)
                 run(STALL_SECONDS * 2)
-                reporter.publish.assert_not_called()
+                reporter.notify.assert_not_called()
                 hold_reader.return_value = None
                 run(STALL_SECONDS * 2 + 300)
                 state.active_phase = "reconcile_candidate"
                 run(STALL_SECONDS * 3 + 299)
-                reporter.publish.assert_not_called()
+                reporter.notify.assert_not_called()
                 state.active_phase = "read_snapshot"
                 run(STALL_SECONDS * 3 + 300)
                 record = store.read_merge_train_stall_record(snapshot.repository)
@@ -413,7 +650,7 @@ class StallMonitorTests(TestCase):
                 self.assertIn("ready_change_not_moving", record.observations["main"].reasons)
                 reporter.notify.assert_called_once()
 
-    def test_reason_change_notification_survives_failed_issue_update(self) -> None:
+    def test_reason_change_notification_survives_failed_dispatch(self) -> None:
         snapshot = _FakeExpandedMergeTrainSnapshotReader(
             transport=object()
         ).read_merge_train_snapshot(repository="example/repo", base_branch="main")
@@ -426,7 +663,6 @@ class StallMonitorTests(TestCase):
         client, reporter = Mock(), Mock()
         client.target_setting_gaps.return_value = ()
         client.read_merge_train_snapshot.return_value = snapshot
-        reporter.publish.return_value = 91
         with (
             TemporaryDirectory() as directory,
             patch(
@@ -454,7 +690,7 @@ class StallMonitorTests(TestCase):
                     store=store,
                     root=root,
                     now=lambda: _time(seconds),
-                    reporter_factory=lambda **_: reporter,
+                    notifier_factory=lambda **_: reporter,
                 )
 
             run(0)
@@ -464,18 +700,24 @@ class StallMonitorTests(TestCase):
             client.read_merge_train_snapshot.return_value = snapshot.model_copy(
                 update={"base_sha": "new-base"}
             )
-            reporter.publish.side_effect = RuntimeError("temporary delivery failure")
+            reporter.notify.side_effect = RuntimeError("temporary delivery failure")
             run(STALL_SECONDS + 300)
             failed = store.read_merge_train_stall_record(snapshot.repository)
-            self.assertEqual(failed.published_reason_sha256, published.published_reason_sha256)
+            self.assertNotEqual(failed.notification_key, published.notification_key)
+            self.assertNotEqual(failed.notification_key, failed.notified_key)
+            self.assertEqual(failed.delivery_error, "RuntimeError")
             self.assertNotIn("controller_unchanged", failed.observations["main"].reasons)
-            reporter.publish.side_effect = None
+            reporter.notify.side_effect = None
             run(STALL_SECONDS + 600)
-            self.assertEqual(reporter.notify.call_count, 2)
+            self.assertEqual(reporter.notify.call_count, 3)
+            self.assertEqual(
+                store.read_merge_train_stall_record(snapshot.repository).notified_key,
+                failed.notification_key,
+            )
             run(STALL_SECONDS + 900)
-            self.assertEqual(reporter.notify.call_count, 2)
+            self.assertEqual(reporter.notify.call_count, 3)
 
-    def test_restart_updates_one_issue_and_closes_it_after_queue_clears(self) -> None:
+    def test_restart_preserves_stall_and_sends_resolution_after_queue_clears(self) -> None:
         snapshot = _FakeExpandedMergeTrainSnapshotReader(
             transport=object()
         ).read_merge_train_snapshot(
@@ -492,7 +734,6 @@ class StallMonitorTests(TestCase):
         client.target_setting_gaps.return_value = ()
         client.read_merge_train_snapshot.return_value = snapshot
         reporter = Mock()
-        reporter.publish.return_value = 91
         with (
             TemporaryDirectory() as directory,
             patch(
@@ -515,25 +756,24 @@ class StallMonitorTests(TestCase):
             root = Path(directory)
             store = FilesystemRecordStore(root)
             run_stall_monitor_pass(
-                store=store, root=root, now=lambda: _time(0), reporter_factory=lambda **_: reporter
+                store=store, root=root, now=lambda: _time(0), notifier_factory=lambda **_: reporter
             )
-            reporter.publish.assert_not_called()
+            reporter.notify.assert_not_called()
             restarted = FilesystemRecordStore(root)
             run_stall_monitor_pass(
                 store=restarted,
                 root=root,
                 now=lambda: _time(STALL_SECONDS),
-                reporter_factory=lambda **_: reporter,
+                notifier_factory=lambda **_: reporter,
             )
             stalled = restarted.read_merge_train_stall_record(snapshot.repository)
-            self.assertEqual(stalled.issue_number, 91)
             self.assertEqual(stalled.issue_state, "open")
             reporter.notify.assert_called_once()
             run_stall_monitor_pass(
                 store=restarted,
                 root=root,
                 now=lambda: _time(STALL_SECONDS + 300),
-                reporter_factory=lambda **_: reporter,
+                notifier_factory=lambda **_: reporter,
             )
             reporter.notify.assert_called_once()
             client.read_merge_train_snapshot.return_value = snapshot.model_copy(
@@ -543,112 +783,12 @@ class StallMonitorTests(TestCase):
                 store=restarted,
                 root=root,
                 now=lambda: _time(STALL_SECONDS + 600),
-                reporter_factory=lambda **_: reporter,
+                notifier_factory=lambda **_: reporter,
             )
             resolved = restarted.read_merge_train_stall_record(snapshot.repository)
-            self.assertEqual(resolved.issue_number, stalled.issue_number)
             self.assertEqual(resolved.issue_state, "closed")
-            self.assertFalse(reporter.publish.call_args.kwargs["stalled"])
-            self.assertEqual(reporter.notify.call_count, 2)
-
-    def test_issue_body_progress_does_not_repeat_discord_and_publish_failure_is_visible(
-        self,
-    ) -> None:
-        from control_plane.merge_train_github import MergeTrainGitHubError
-
-        snapshot = _FakeExpandedMergeTrainSnapshotReader(
-            transport=object()
-        ).read_merge_train_snapshot(
-            repository="cbusillo/sellyouroutboard",
-            base_branch="main",
-        )
-        policy = _policy_record(
-            (
-                snapshot.repository,
-                MergeTrainSchedulerPolicy(
-                    enabled=True,
-                    mutate=True,
-                ),
-            )
-        )
-        client, reporter = Mock(), Mock()
-        client.target_setting_gaps.return_value = ()
-        reporter.publish.return_value = 91
-        with (
-            TemporaryDirectory() as directory,
-            patch(
-                "control_plane.merge_train_stall_monitor.GitHubMergeTrainClient",
-                return_value=client,
-            ),
-            patch(
-                "control_plane.merge_train_stall_monitor.resolve_merge_train_github_token",
-                return_value="test-token",
-            ),
-            patch(
-                "control_plane.merge_train_stall_monitor.resolve_stall_workflow",
-                return_value=MergeTrainStallWorkflow(repository="example/control", ref="main"),
-            ),
-            patch(
-                "control_plane.merge_train_stall_monitor.resolve_merge_train_policy_record",
-                return_value=policy,
-            ),
-        ):
-            root = Path(directory)
-            store = FilesystemRecordStore(root)
-            for seconds, base in (
-                (0, "base-a"),
-                (STALL_SECONDS, "base-b"),
-                (STALL_SECONDS + 300, "base-c"),
-            ):
-                client.read_merge_train_snapshot.return_value = snapshot.model_copy(
-                    update={"base_sha": base}
-                )
-                run_stall_monitor_pass(
-                    store=store,
-                    root=root,
-                    now=lambda: _time(seconds),
-                    reporter_factory=lambda **_: reporter,
-                )
-            reporter.notify.assert_called_once()
-            self.assertEqual(reporter.publish.call_count, 2)
-            reporter.publish.side_effect = MergeTrainGitHubError("issue missing", status_code=404)
-            run_stall_monitor_pass(
-                store=store,
-                root=root,
-                now=lambda: _time(STALL_SECONDS + 600),
-                reporter_factory=lambda **_: reporter,
-            )
-            missing = store.read_merge_train_stall_record(snapshot.repository)
-            self.assertIsNone(missing.issue_number)
-            self.assertTrue(missing.delivery_error)
-            reporter.publish.side_effect = None
-            # A temporary missing response that reconciles the same issue does
-            # not manufacture another Discord transition.
-            run_stall_monitor_pass(
-                store=store,
-                root=root,
-                now=lambda: _time(STALL_SECONDS + 700),
-                reporter_factory=lambda **_: reporter,
-            )
-            reporter.notify.assert_called_once()
-            reporter.publish.side_effect = MergeTrainGitHubError("issue gone", status_code=410)
-            run_stall_monitor_pass(
-                store=store,
-                root=root,
-                now=lambda: _time(STALL_SECONDS + 800),
-                reporter_factory=lambda **_: reporter,
-            )
-            self.assertIsNone(store.read_merge_train_stall_record(snapshot.repository).issue_number)
-            reporter.publish.side_effect = None
-            reporter.publish.return_value = 92
-            run_stall_monitor_pass(
-                store=store,
-                root=root,
-                now=lambda: _time(STALL_SECONDS + 900),
-                reporter_factory=lambda **_: reporter,
-            )
             self.assertEqual(
-                store.read_merge_train_stall_record(snapshot.repository).issue_number, 92
+                store.read_merge_train_stall_record(snapshot.repository).issue_state, "closed"
             )
             self.assertEqual(reporter.notify.call_count, 2)
 
@@ -702,78 +842,6 @@ class StallMonitorTests(TestCase):
                 run_stall_monitor_pass(store=store, root=root)
             self.assertEqual(store.read_merge_train_stall_record(record.repository), record)
 
-    def test_lost_create_reply_is_reconciled_after_train_recovers(self) -> None:
-        snapshot = (
-            _FakeExpandedMergeTrainSnapshotReader(transport=object())
-            .read_merge_train_snapshot(repository="example/repo", base_branch="main")
-            .model_copy(update={"pull_requests": ()})
-        )
-        policy = _policy_record(
-            (snapshot.repository, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
-        )
-        client, reporter = Mock(), Mock()
-        client.target_setting_gaps.return_value = ()
-        client.read_merge_train_snapshot.return_value = snapshot
-        reporter.publish.return_value = 91
-        with (
-            TemporaryDirectory() as directory,
-            patch(
-                "control_plane.merge_train_stall_monitor.resolve_merge_train_policy_record",
-                return_value=policy,
-            ),
-            patch(
-                "control_plane.merge_train_stall_monitor.GitHubMergeTrainClient",
-                return_value=client,
-            ),
-            patch(
-                "control_plane.merge_train_stall_monitor.resolve_merge_train_github_token",
-                return_value="test-token",
-            ),
-            patch(
-                "control_plane.merge_train_stall_monitor.resolve_stall_workflow",
-                return_value=MergeTrainStallWorkflow(repository="example/control", ref="main"),
-            ),
-        ):
-            root = Path(directory)
-            store = FilesystemRecordStore(root)
-            store.write_merge_train_stall_record(
-                MergeTrainStallRecord(
-                    repository=snapshot.repository,
-                    observed_at=_time(0),
-                    delivery_error="TimeoutError",
-                )
-            )
-            run_stall_monitor_pass(
-                store=store,
-                root=root,
-                now=lambda: _time(300),
-                reporter_factory=lambda **_: reporter,
-            )
-            reporter.publish.assert_called_once()
-            self.assertFalse(reporter.publish.call_args.kwargs["stalled"])
-            recovered = store.read_merge_train_stall_record(snapshot.repository)
-            self.assertEqual(recovered.issue_number, 91)
-            self.assertEqual(recovered.issue_state, "closed")
-            self.assertFalse(recovered.delivery_error)
-            # If no creation actually occurred, there is no issue link to send.
-            store.write_merge_train_stall_record(
-                MergeTrainStallRecord(
-                    repository=snapshot.repository,
-                    observed_at=_time(0),
-                    delivery_error="TimeoutError",
-                    notification_key="pending-dispatch",
-                )
-            )
-            reporter.publish.return_value = None
-            reporter.notify.reset_mock()
-            run_stall_monitor_pass(
-                store=store,
-                root=root,
-                now=lambda: _time(600),
-                reporter_factory=lambda **_: reporter,
-            )
-            reporter.notify.assert_not_called()
-
     def test_database_storage_survives_restart(self) -> None:
         with TemporaryDirectory() as directory:
             url = _sqlite_database_url(Path(directory) / "state.db")
@@ -803,29 +871,37 @@ class StallMonitorTests(TestCase):
 
 
 class StallReporterTests(TestCase):
-    def test_lost_create_response_reconciles_existing_issue_before_writing(self) -> None:
-        reporter = object.__new__(GitHubStallReporter)
-        reporter.repository = "example/repo"
-        reporter.path = "/repos/example/repo"
-        reporter.transport = Mock()
-        body = STALL_ISSUE_MARKER + "\nA stalled train."
-        issue = {"number": 6, "body": body, "state": "open", "user": {"type": "Bot"}}
-        reporter.transport.request.side_effect = [{"total_count": 1, "items": [issue]}, issue]
-        record = MergeTrainStallRecord(repository=reporter.repository, observed_at=_time(0))
-        self.assertEqual(reporter.publish(record, body, stalled=True), issue["number"])
-        self.assertTrue(
-            all(
-                call.kwargs["method"] == "GET" for call in reporter.transport.request.call_args_list
-            )
+    def test_dispatch_requires_only_workflow_delivery_and_no_product_issue(self) -> None:
+        record = MergeTrainStallRecord(repository="example/repo", observed_at=_time(0))
+        workflow = MergeTrainStallWorkflow(repository="example/control", ref="main")
+        with (
+            patch(
+                "control_plane.merge_train_stall_monitor.resolve_delivery_github_token",
+                return_value="test-token",
+            ) as resolve,
+            patch(
+                "control_plane.merge_train_stall_monitor.UrllibMergeTrainGitHubTransport"
+            ) as transport,
+        ):
+            DiscordStallNotifier(root=Path(".")).notify(record, workflow)
+        resolve.assert_called_once_with(
+            control_plane_root=Path("."),
+            context_name="launchplane",
+            repository=workflow.repository,
+            purpose="workflow_dispatch",
         )
+        request = transport.return_value.request
+        request.assert_called_once()
+        self.assertEqual(request.call_args.kwargs["method"], "POST")
+        self.assertNotIn("/issues", request.call_args.kwargs["path"])
+        self.assertNotIn("issue_number", request.call_args.kwargs["body"]["inputs"])
 
-    def test_discord_payload_contains_only_identity_and_durable_link(self) -> None:
+    def test_discord_payload_points_to_launchplane_without_product_issue(self) -> None:
         with (
             patch.dict(
                 "os.environ",
                 {
                     "STALL_REPOSITORY": "example/repo",
-                    "STALL_ISSUE_NUMBER": "6",
                     "STALL_STATE": "open",
                     "STALL_NOTIFICATION_KEY": "a" * 64,
                 },
@@ -841,10 +917,8 @@ class StallReporterTests(TestCase):
             )
             module["send_stall_alert"]()
             payload = send.call_args.args[1]
+            self.assertNotIn("github.com", payload["embeds"][0]["description"])
             self.assertEqual(payload["allowed_mentions"], {"parse": []})
-            self.assertIn(
-                "https://github.com/example/repo/issues/6", payload["embeds"][0]["description"]
-            )
 
 
 class StallMonitorPostgresTests(TestCase):

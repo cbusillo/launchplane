@@ -541,7 +541,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
         self.assertTrue(finished.is_set())
         self.assertEqual(result.status, "stopped")
 
-    def test_source_scan_does_not_block_new_deploy_poll_and_shutdown_joins_it(self) -> None:
+    def test_busy_deploy_polls_admit_source_scan_and_shutdown_joins_it(self) -> None:
         started, release, finished, stop = Event(), Event(), Event(), Event()
         polls = []
 
@@ -558,7 +558,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
                 self.assertFalse(finished.is_set())
                 release.set()
                 stop.set()
-            return type("Idle", (), {"status": "idle"})()
+            return type("Worked", (), {"status": "worked"})()
 
         class Store:
             def claim_next_config_authority_delivery(self, *_args: object) -> None:

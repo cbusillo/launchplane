@@ -81,6 +81,7 @@ class PreviewPrFeedbackObservation(BaseModel):
     comment_author_login: str = ""
     token_actor_id: int = Field(ge=1)
     token_actor_login: str
+    retirement_sha256: str = Field(default="", pattern=r"^(?:[0-9a-f]{64})?$")
 
 
 class PreviewPrFeedbackMutationEvidence(BaseModel):

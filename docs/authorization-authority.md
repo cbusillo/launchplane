@@ -48,29 +48,6 @@ access to an invalid policy or silently starting with bootstrap authority.
   change, as [Denial Handling](#denial-handling) requires, is not such a
   workaround.
 
-`owner-control` channel-session, issued-challenge, and shadow-verification event
-records are inert verification evidence, not authorization policy or grants.
-They define no HTTP action, route, managed set, workflow, secret, or production
-access path; every result persists `authority_state = 'inert'` and
-`authorizes_execution = false`. Adding these records does not make a
-self-asserted key, binding, or challenge authoritative.
-Service-only challenge derivation may fail closed unless the enrolled admin's immutable
-GitHub ID has exactly one ID-only managed rule for the descriptor's
-existing approval action. That read does not define a new action, grant access,
-or authorize approval or execution; rules that also depend on mutable login,
-organization, team, or role selectors are intentionally insufficient without a
-live authenticated human identity.
-
-Administrator-enrollment records are likewise inert evidence only. They may
-record a Director-created, 30-minute opaque challenge and a later server-derived
-candidate GitHub identity that proved control, but they do not create an
-admin, grant a policy action, change a managed set, or make any route
-or workflow available. Every record is fixed to no authority. A future bridge
-may compile a final enrolled record into a Director-gated DB-native policy change
-only after separate design, review, apply, and read-back work, and installing it
-is a Director decision. Landing enrollment storage does not approve or
-implement that bridge.
-
 Repository inventory follows the same authority boundary. Its
 `repository_inventory.read` and `repository_inventory.write` actions use the
 Launchplane service scope (`product=launchplane`, `context=launchplane`), but
@@ -115,6 +92,9 @@ Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
+For the Director's capture-only permission and its durable authorization checks,
+see [production backups](production-backup-provider.md#service-contract).
+
 Route-binding reconcile admits the Director's existing `local_operator` transport
 to refresh evidence on an exclusively owned declared lane, including production,
 without granting `route_binding.apply`. The request must name the current record
@@ -147,6 +127,18 @@ Expected-configuration declaration authority and its authenticated Director-agen
 declaration exception are defined in the
 [product profile contract](service-boundary.md#product-profile-endpoints).
 
+The Director's `local_operator` may use the Odoo config-parameter and stable
+website-bootstrap writers to record testing intent for an active product not
+recorded as Live, on a context exclusively owned by that product. Ownership
+includes historical and preview contexts; unavailable ownership data does not
+admit a standing write. Storage rechecks the admitted product profile and context
+ownership before committing the intent. Production and recorded-live lanes retain their existing
+scoped authorization. The intent applies on the lane's next deploy, including an
+event-driven deploy, and previews may inherit testing website-bootstrap intent.
+Writing it does not prove runtime safety or completion. Terminal mutation
+restrictions, other callers' grants, validation, idempotency and compare-and-write
+behavior remain in place.
+
 The existing testing-retry route also admits the authenticated Director agent
 through the existing `local_operator` bearer transport under the standing
 permission. Terminal-agent credentials are not admitted on this retry route.
@@ -163,6 +155,13 @@ also has a bounded Director-agent path; that contract owns its safety and recove
 
 The [health alert drill](health-alert-drills.md) also has a bounded Director-agent
 send path; that contract owns its authorization and delivery rules.
+
+[Preview feedback remediation](operations.md#preview-feedback-remediation) admits
+the authenticated Director `local_operator` for an exact verified native Odoo
+retirement. This route-local standing path derives terminal `destroyed` feedback
+from the retained original and lifecycle evidence, bound to the reviewed dry run.
+It adds no grant to the general remediation action, other callers or statuses,
+and cannot change provider state, access, release or merge authority.
 
 Generic-web deploy recovery dry runs authorize the instance-scoped
 `generic_web_deploy_recovery.plan` action, with the existing execute grant as a
@@ -217,6 +216,14 @@ caller-supplied claim. Product-level metadata uses the `launchplane` context;
 separate context and instance rules support both scopes. Requests authorize
 the returned product and collections filter each returned record. Revocation
 continues to apply to these scoped rules and to all explicit write permissions.
+
+The product-profile Client setting route lets an authenticated Director agent
+record Client metadata for an active product explicitly classified `prelaunch`.
+Live and unknown classifications still require existing `product_profile.write`
+authority. The bounded operation changes no access policy, release decision,
+classification or promotion permission. The same-key replay rechecks the current
+classification, and the existing atomic profile comparison refuses concurrent
+profile changes. Other agents retain their scoped authorization checks.
 
 Product-config likewise lets the authenticated Director agent plan undeclared
 non-secret settings on a Live product, including testing, production and context
@@ -321,8 +328,10 @@ policy grant through the existing Dokploy target setup dry-run/apply endpoint.
 This path creates only a new project, a new environment and an empty raw compose
 for an active product's exclusively owned context. It accepts no existing
 project, environment or target IDs, replacement reference, repository source,
-domain route or published port. The testing lane and all three target authority
-records must be absent. Production ownership on the same product does not block
+domain route or published port. All three target authority records must be
+absent. A testing lane may already be registered only if it never deployed or
+served, as when [native Odoo onboarding](operations.md#native-odoo-onboarding)
+records the lane first. Production ownership on the same product does not block
 this new-resource staging and acquires no new permission.
 
 The service checks eligibility before each provider effect and provider read,
@@ -551,11 +560,6 @@ downgrade. Nonempty incompatible fragments still return HTTP 409
 `authz_policy_schema_conflict` with the deterministic schema incompatibility;
 refreshing and retrying the same request does not resolve it.
 
-The approved `operator.manager-preview-approval` contraction and independent
-empty-set readback are recorded on #2006. Its dedicated
-`manager-preview-approval-retirement` wrapper selection is removed after that
-operation; it is no longer a dispatch path.
-
 A PR that retires a caller links the matching grant-removal proposal in the
 same change, prepared with `privileged-policy-propose` through the
 [Launchplane helper](privileged-operations.md#agent-policy-proposals); if that
@@ -593,6 +597,10 @@ idempotency and compare-and-write checks remain required. This changes no
 credentials, grants, provider state or release authority. See
 [artifact scanning](artifact-security.md) for qualification and recovery.
 
+The transport-marked Director agent can also create a product preview
+wildcard conditionally through the existing ingress apply operation; see
+[preview wildcard creation](driver-development.md#preview-wildcard-creation).
+
 Treat `authorization_denied` as an authority result, not a credential-selection
 hint. Record the denied action, scope, and trace ID, then:
 
@@ -616,19 +624,6 @@ probing, wildcard grants, temporary CI authority, and copied policy payloads are
 not diagnostic substitutes.
 
 ## Target Model
-
-The delegated-session target in
-[issue #2240](https://github.com/cbusillo/launchplane/issues/2240) was closed as
-not planned; the ordinary-agent delegated-delivery design it served is retired
-(see [DIRECTION.md](../DIRECTION.md#retired)). Client acceptance remains
-product-decision evidence consumed by an independently
-authorized delivery request and never grants merge, deploy, configuration,
-secret, or policy-administration power.
-
-The currently implemented action-by-action policy evaluation, diagnostic
-routes, activation bridges, and recovery mechanisms recorded in this document
-remain the runtime contract. The administration surface described immediately below
-is itself the target model. This target text grants no capability.
 
 The DB-native administration surface must support authenticated administrators
 through Launchplane's API and UI:
@@ -893,23 +888,10 @@ Production policy changes are a Director decision made through the supported
 DB-native administration route; total-lockout recovery remains explicitly
 deferred.
 
-The ordinary-agent delegated-delivery pilot is retired (see
-[DIRECTION.md](../DIRECTION.md#retired)); issue
-[#2437](https://github.com/cbusillo/launchplane/issues/2437) deletes its code.
-Do not stage or install its `operator.ordinary-agent-delivery-administration`
-managed set.
-
 After parity and administration gates pass, protected desired-set secrets and
 routine authorization workflows must be retired. GitHub may remain an identity
 provider and transport for already-authorized workloads. No total-lockout
 bootstrap or break-glass path is active.
-
-Issue `#2243` removes the unactivated hardware-recovery API, UI, service, CLI,
-and public contracts. Alembic revision `f2239a0b1c2d` remains immutable deployed
-history, and its inert tables remain available only for safe rolling deployment
-and rollback compatibility. The outbox worker retains the historical recovery
-alert kind only to drain any already-persisted row; neither compatibility path
-can create authorization authority.
 
 ## Bootstrap And Break-Glass
 
@@ -981,54 +963,6 @@ until the worker's terminal reauthorization, then revoke every canary rule and
 read the active policy back after terminal verification or any post-activation
 worker stop.
 
-The ordinary-agent delegated-delivery design is retired (see
-[DIRECTION.md](../DIRECTION.md#retired)), and
-[#2437](https://github.com/cbusillo/launchplane/issues/2437) deletes its code.
-The ordinary-agent activation text below describes that code until then; do not
-activate or extend it.
-
-The retired activation executor and enrollment recovery have been removed.
-Historical activation contracts and schema-3 parsing remain until the
-domain/storage layers are deleted under #2437. Bounded legacy ciphertext expiry
-maintenance remains necessary for current managed-secret key retirement.
-
-The source-owned activation administration descriptor is
-`ordinary-agent-delivery-activation`. Its human lifecycle uses the distinct
-`ordinary_agent_delivery_activation.plan`, `.read`, `.cancel`, `.approve`, and
-`.revoke` actions. Each action must appear literally on the one matching managed
-rule; the legacy empty-action compatibility behavior used by other descriptors
-does not authorize this family. The descriptor has no terminal-agent proposal or
-summary capability.
-
-Setup resolves a stored managed-policy proposal and current repository inventory
-on the server. A schema-v2 source policy requires the explicit
-`migrate_v2_to_v3` proposal mode. A schema-v3 source policy uses an ordinary
-schema-v3 reconcile with migration mode `reject`; renewal does not repeat a
-completed migration. The source operation may be planned, approved, executing,
-or executed, and its request, evidence, plan, managed-set, and full candidate
-policy digests are recomputed. It must identify exactly one ordinary-agent rule
-and target. Other reviewed rule families remain governed by that policy
-operation rather than forcing an artificial package split.
-
-An approved setup writes only an inert activation record with desired state
-`guarded` and effective state `qualification_only`. A separate approved
-`revoke_activation` request performs exact activation CAS and makes both states
-terminal `revoked`. Replacing an expired guarded intent atomically supersedes the
-old projection, appends its event, and installs a new activation ID; a revoked
-predecessor stays unchanged. Recovery follows the append-only event bound to the
-setup or revoke operation, so later legitimate transitions do not erase the
-original result. Scope history and current-row uniqueness use the immutable
-repository ID, branch, managed set, and managed rule; the repository name remains
-display context and a rename cannot create a second current intent. The Launchplane
-UI offers server-resolved targets and server-clock expiry choices from one hour
-through 30 days without requiring typed record IDs, digests, issue IDs, or
-free-form reasons. The planner rejects any setup expiry beyond 30 days.
-
-This descriptor makes no provider call, installs no authorization grant,
-registers no ordinary worker, and derives no guarded readiness. New setups and
-revocations are refused, and the activation writers are deleted; stored
-activation records remain readable history.
-
 A schema-v3 policy write that adds or changes any ordinary rule, including a
 v2-to-v3 migration, is refused with `ordinary_authority_retired`, at both the
 service and the storage compare-and-write. Exact ordinary-rule removal and
@@ -1036,46 +970,6 @@ other schema-v3 maintenance remain possible with maintenance evidence; raw
 schema-v3 seed and unbound replacement stay fenced. Historical
 `runtime_capability_at_setup` and `policy_v3_write_supported` values on stored
 records are history only, not authority.
-
-### Preparing Agent Delivery Administration
-
-The Access policy workbench can prepare the closed
-`ordinary-agent-delivery-administration` candidate with an add or remove intent.
-Preparation derives the immutable GitHub ID from the signed-in browser session
-and the schema from the single active policy record. It requires existing
-managed `authz_policy_operation.propose` authority and strict immutable-ID
-administrator authority; it cannot repair missing policy-administration access.
-The browser supplies no principal, policy fragment, managed IDs, scope, actions,
-quorum change, or routine reason.
-
-The candidate owns a separate managed set for one pilot administrator. Its rule
-contains exactly the five explicit Agent delivery activation lifecycle actions,
-the authenticated immutable ID, the admin role, and global Launchplane scope.
-An occupied set with a different identity or shape refuses preparation. Adding
-access also refuses conflicting explicit activation authority; overlapping
-authority does not prevent removing this isolated set. Legacy empty-action rules remain
-unchanged and do not count as explicit activation authority. The foundational
-policy-operation set and all unrelated policy content remain untouched.
-
-Both intents create ordinary `managed-authz-policy-set` plans through the
-existing planner. Preparation may persist a planned operation and event; it
-does not write policy, approve a plan, change schema or quorum, enroll an agent,
-start a worker, or call a provider. Existing approval, current-policy checks,
-worker execution, CAS, and read-back still govern any policy change. Already
-satisfied intents create no new plan. Removal proposes an empty desired fragment
-for only this set and refuses while an unstopped current activation could lose
-its stop controls. Revoking an operation approval before worker claim and
-removing an already-installed administration rule are different operations.
-If an activation starts after removal was prepared, the policy write refuses
-under the shared authorization lock. Stop that activation before preparing a
-fresh removal; re-planning alone does not clear this condition.
-
-The five lifecycle actions are prepared together because an approved activation
-setup still writes only a qualification-only intent. They do not authorize the
-separate ordinary-agent policy, provider, or worker changes. The pilot is
-retired, so do not install this set; only its removal remains supported. This
-composer is a constrained input path for an existing
-admin, not a replacement bootstrap or total-lockout recovery.
 
 ### Preparing Administrator Product Evidence Access
 
@@ -1181,12 +1075,14 @@ The set deliberately leaves out:
 - `product_profile.write`. It also lets the holder override release review;
   the [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
   owns release authority. The Director sets the
-  Client, image repository, `production_use`, and whether the Client's acceptance
+  image repository, `production_use`, and whether the Client's acceptance
   starts the release (`release_on_acceptance`) in the Client panel under
   `product_profile.write`. Each control dry-runs and reads back the profile; the
   panel keeps the reviewed request frozen for Apply. Image Apply checks the
   starting repository; production-use and release Apply verify the full reviewed
   plan digest.
+  Client metadata also has the bounded Director-agent non-live path described
+  above; it does not confer general `product_profile.write` authority.
   Preview runtime settings use the existing product-config plan/apply authority
   on the product's preview context and exact instance `preview`. Product-profile
   POST rejects nonempty `preview.override_env`; its old one-key conditional
@@ -1195,8 +1091,8 @@ The set deliberately leaves out:
 
 - `product_onboarding.apply`. It is checked on product `launchplane` with no
   product or lane scope, so it would reach every product. Adding the lane record
-  uses Launchplane's onboarding record route, through the compatibility workflow
-  or a signed-in admin session. Browser generic-web apply requires the recorded
+  uses Launchplane's onboarding record route through the Advanced manifest
+  workflow or a signed-in admin session. Browser generic-web apply requires the recorded
   testing application from target setup.
   The Director agent's bounded new-product path follows the
   [native onboarding contract](operations.md#native-target-allocation).
@@ -1310,30 +1206,11 @@ creates a plan for review and changes nothing until approval, current-policy
 checks, worker execution, CAS and read-back install it. Installing it is a
 grant, so it is a Director decision.
 
-### Inspecting Pilot Preparation Inputs
-
-The dedicated ordinary-agent preparation routes and browser callers are removed.
-Historical preparation context remains readable; new generic proposals cannot
-supply it. Terminal enrollment candidate production and its candidate ID are
-removed from the generic candidate endpoint as well. Exact historical terminal
-request recognition remains for privileged-operation semantic review. The
-ordinary-agent delivery-policy compiler remains in use by
-`privileged_operation_registry` to validate retained prepared-request shapes;
-its removal needs a replacement for that validation. Remaining source tracing
-is tracked by [launchplane#5245](https://github.com/cbusillo/launchplane/issues/5245).
-The data retirement on #2437 is complete and is not reopened.
-
-
-### Preparing The First Ordinary Client Policy
-
-The first-client preparation route is removed. Its persisted context remains
-part of historical policy records.
-
 ## Existing-identity policy version compatibility
 
 Authorization policy readers support schemas 2 and 3 for existing human,
-workflow, and terminal-agent identities. `owner-control` challenge derivation,
-authorization diagnostics, and feedback actor/worker resolution preserve the
+workflow, and terminal-agent identities. Authorization diagnostics and feedback
+actor/worker resolution preserve the
 same immutable identity, scope, role, current policy, expiry, and revocation
 checks across these versions. This does not register an ordinary-agent identity
 or enable ordinary-agent execution.

@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -182,7 +183,6 @@ PUBLIC_INGRESS_GITHUB_TOKEN_ENV_KEY = "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"
 MISSING_AUTHORITY_SHA256 = "missing"
 DEPLOY_FENCE_PROVIDER = "launchplane"
 DEPLOY_FENCE_CHECK_NAME = "launchplane-deploy-fence"
-DEPLOY_INCIDENT_DEFERRAL = timedelta(minutes=5)
 # A deploy records its new runtime identity when its own rollout check passes,
 # and the public route can still answer from the previous container for a few
 # seconds. A mismatch is probed once more after this delay before it counts.
@@ -895,6 +895,17 @@ def run_public_ingress_monitor_once(
     lane_keys: frozenset[tuple[str, str, str]] | None = None,
     max_concurrent_probes: int = 1,
 ) -> PublicIngressMonitorResult:
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    _check_monitor_cancelled(should_stop)
+    authority_start = None
+    if isinstance(record_store, PostgresRecordStore):
+        try:
+            authority_start = record_store.begin_monitoring_authority_batch()
+        except Exception as error:
+            logging.getLogger(__name__).warning(
+                "Monitoring authority batch start failed: %s", type(error).__name__
+            )
     observed_at = checked_at.strip() or utc_now_timestamp()
     public_get = http_get or fetch_public_ingress_url
     private_get = private_http_get or fetch_private_health_url
@@ -920,40 +931,11 @@ def run_public_ingress_monitor_once(
     def probe(target: PublicIngressMonitorTarget) -> PublicIngressObservationRecord:
         _check_monitor_cancelled(should_stop)
         target_http_get = private_get if target.check_kind == "private_http" else public_get
-        if (
-            target.check_kind == "private_http"
-            and target.instance == "testing"
-            and target.private_endpoint_key
-            and _public_url_error(target.health_url) is None
-            and private_http_get is None
-        ):
+        if target.check_kind == "private_http" and private_http_get is None:
 
-            def testing_edge_get(url: str, timeout: int) -> HttpObservation:
-                # Keep existing private DNS/scoped-CA transport. Only a refused
-                # address may continue through the separately verified edge.
-                try:
-                    return fetch_private_health_url(
-                        url, timeout, tls_ca_pem=target.private_tls_ca_pem
-                    )
-                except PublicHttpDestinationError as error:
-                    if error.code != "private_url" or target.private_tls_ca_pem:
-                        raise
-                # Import lazily: the route driver also uses deploy workflows.
-                from control_plane.launchplane_mutations import control_plane_root
-                from control_plane.storage.postgres import PostgresRecordStore
-                from control_plane.testing_private_health import fetch_testing_private_health
-
-                if (
-                    not isinstance(record_store, PostgresRecordStore)
-                    or not target.require_runtime_identity
-                ):
-                    raise PublicHttpDestinationError(
-                        "private_url",
-                        "Testing edge health requires database authority and runtime identity.",
-                    )
-                response = fetch_testing_private_health(
-                    root=control_plane_root(),
-                    store=record_store,
+            def scoped_private_get(url: str, timeout: int) -> HttpObservation:
+                return fetch_scoped_private_health(
+                    record_store=record_store,
                     product=target.product,
                     context=target.context,
                     instance=target.instance,
@@ -961,27 +943,24 @@ def run_public_ingress_monitor_once(
                     endpoint_sha256=target.private_endpoint_sha256,
                     url=url,
                     timeout_seconds=timeout,
+                    tls_ca_pem=target.private_tls_ca_pem,
+                    require_runtime_identity=target.require_runtime_identity,
                 )
-                return _private_health_observation(response)
-
-            target_http_get = testing_edge_get
-        elif (
-            target.check_kind == "private_http"
-            and target.private_tls_ca_pem
-            and private_http_get is None
-        ):
-
-            def scoped_private_get(url: str, timeout: int) -> HttpObservation:
-                return fetch_private_health_url(url, timeout, tls_ca_pem=target.private_tls_ca_pem)
 
             target_http_get = scoped_private_get
-        return check_public_ingress_target(
+        record = check_public_ingress_target(
             target=target,
             checked_at=checked_at.strip() or utc_now_timestamp(),
             timeout_seconds=timeout_seconds,
             http_get=target_http_get,
             tls_get=tls_probe,
             dns_get=dns_get,
+        )
+
+        return (
+            _associate_recorded_deployment(record_store, record)
+            if record.status == "fail"
+            else record
         )
 
     if max_concurrent_probes < 1:
@@ -1076,7 +1055,7 @@ def run_public_ingress_monitor_once(
         reminder_states.extend(stored_transition.reminder_states)
         delivery_attempts.extend(stored_transition.delivery_attempts)
         authority_changed_count += int(stored_transition.authority_changed)
-    return PublicIngressMonitorResult(
+    result = PublicIngressMonitorResult(
         checked_at=observed_at,
         target_count=len(targets),
         pass_count=sum(
@@ -1099,6 +1078,16 @@ def run_public_ingress_monitor_once(
         reminder_states=tuple(reminder_states),
         delivery_attempts=tuple(delivery_attempts),
     )
+    if isinstance(record_store, PostgresRecordStore) and authority_start is not None:
+        try:
+            record_store.complete_monitoring_authority_batch(
+                start=authority_start, checked_at=observed_at, records=result.records
+            )
+        except Exception as error:
+            logging.getLogger(__name__).warning(
+                "Monitoring authority batch completion failed: %s", type(error).__name__
+            )
+    return result
 
 
 def record_monitor_cadence(
@@ -1194,7 +1183,7 @@ def _store_monitor_observation(
     ] = "monitoring_intent_changed",
 ) -> _StoredMonitorTransition:
     transition_writer = getattr(record_store, "write_public_ingress_transition_with_outbox", None)
-    plan: _PlannedIncidentTransition | None = None
+    plan: _PlannedIncidentTransition
     outbox_deliveries: tuple[OutboxDeliveryRecord, ...] = ()
     for _attempt in range(3):
         plan = _plan_public_ingress_incident_transition(
@@ -1250,51 +1239,23 @@ def _store_monitor_observation(
             ),
         )
         write_status = getattr(write_result, "status", "written")
-        if write_status == "provider_source_changed":
-            summary = (
-                "Provider operation evidence is unavailable; observation was not accepted."
-                if expected_provider_hold_snapshot is not None
-                and not expected_provider_hold_snapshot.source_sha256
-                else "Provider operation evidence changed before publication; observation was not accepted."
-            )
-            unavailable = record.model_copy(
-                update={
-                    "status": "skipped",
-                    "failure_code": None,
-                    "targets": tuple(
-                        target.model_copy(
-                            update={
-                                "status": "skipped",
-                                "failure_code": None,
-                                "summary": summary,
-                            }
-                        )
-                        for target in record.targets
-                    ),
-                    "summary": summary,
-                    "incident_id": "",
-                    "incident_event_id": "",
-                    "material_fingerprint": None,
-                    "material_fingerprint_sha256": "",
-                }
-            )
+        if write_status in {"provider_source_changed", "authority_changed"}:
+            if write_status == "authority_changed":
+                unavailable = plan.observation.unaccepted()
+            else:
+                summary = (
+                    "Provider operation evidence is unavailable; observation was not accepted."
+                    if expected_provider_hold_snapshot is not None
+                    and not expected_provider_hold_snapshot.source_sha256
+                    else "Provider operation evidence changed before publication; observation was not accepted."
+                )
+                unavailable = plan.observation.unaccepted(summary, preserve_failures=False)
             return _StoredMonitorTransition(unavailable, (), (), (), (), authority_changed=True)
         if write_status == "incident_changed":
             continue
-        if write_status == "authority_changed":
-            return _StoredMonitorTransition(
-                observation=record.model_copy(update={"incident_id": "", "incident_event_id": ""}),
-                incidents=(),
-                incident_events=(),
-                reminder_states=(),
-                delivery_attempts=(),
-                authority_changed=True,
-            )
         break
     else:
         raise RuntimeError("public ingress incident changed during three transition attempts")
-    if plan is None:
-        raise RuntimeError("public ingress transition planning did not produce a plan")
     delivery_attempts: list[PublicIngressNotificationAttemptRecord] = []
     incidents_by_id = {incident.incident_id: incident for incident in plan.incidents}
     for incident_event in plan.incident_events:
@@ -1662,20 +1623,6 @@ def _plan_public_ingress_incident_transition(
     expected_incident_sha256 = (
         public_ingress_incident_record_sha256(existing) if existing is not None else ""
     )
-    if existing is None and incident_eligible:
-        deploying = _deployment_deferring_failure(record_store, record)
-        if deploying is not None:
-            return _PlannedIncidentTransition(
-                observation=record.model_copy(
-                    update={
-                        "summary": f"{record.summary} Incident deferred during recorded deploy "
-                        f"{deploying.record_id}, bounded from {deploying.deploy.started_at}."
-                    }
-                ),
-                incidents=(),
-                incident_events=(),
-                reminder_states=(),
-            )
     incident_events: list[PublicIngressIncidentEventRecord] = []
     reconciled_duplicates: list[PublicIngressIncidentRecord] = []
     reconciled_reminder_states: list[PublicIngressIncidentReminderStateRecord] = []
@@ -2758,6 +2705,53 @@ def fetch_private_health_url(
     return _private_health_observation(response)
 
 
+def fetch_scoped_private_health(
+    *,
+    record_store: object,
+    product: str,
+    context: str,
+    instance: str,
+    endpoint_key: str,
+    endpoint_sha256: str,
+    url: str,
+    timeout_seconds: int,
+    tls_ca_pem: str = "",
+    require_runtime_identity: bool,
+    root: Path | None = None,
+) -> HttpObservation:
+    try:
+        return fetch_private_health_url(url, timeout_seconds, tls_ca_pem=tls_ca_pem)
+    except PublicHttpDestinationError as error:
+        if (
+            error.code != "private_url"
+            or instance != "testing"
+            or not endpoint_key
+            or _public_url_error(url) is not None
+            or tls_ca_pem
+        ):
+            raise
+    from control_plane.launchplane_mutations import control_plane_root
+    from control_plane.storage.postgres import PostgresRecordStore
+    from control_plane.testing_private_health import fetch_testing_private_health
+
+    if not isinstance(record_store, PostgresRecordStore) or not require_runtime_identity:
+        raise PublicHttpDestinationError(
+            "private_url", "Testing edge health requires database authority and runtime identity."
+        )
+    response = fetch_testing_private_health(
+        root=root if root is not None else control_plane_root(),
+        store=record_store,
+        product=product,
+        context=context,
+        instance=instance,
+        endpoint_key=endpoint_key,
+        endpoint_sha256=endpoint_sha256,
+        url=url,
+        timeout_seconds=timeout_seconds,
+    )
+    return _private_health_observation(response)
+
+
 def _private_health_observation(response: PublicHttpResponse) -> HttpObservation:
     payload: object = None
     if response.body and "json" in response.header("content-type").lower():
@@ -3243,83 +3237,38 @@ def _profile_uses_generic_web(profile: LaunchplaneProductProfileRecord) -> bool:
         return False
 
 
-def _deployment_deferring_failure(
+def _associate_recorded_deployment(
     record_store: PublicIngressMonitorStore, record: PublicIngressObservationRecord
-) -> DeploymentRecord | None:
-    transient_codes = {
-        "http_error",
-        "health_status_error",
-        "connection_timeout",
-        "wrong_runtime_identity",
-        "unknown_error",
-    }
-    if (
-        record.purpose != "probe"
-        or record.status != "fail"
-        or record.check_kind not in {"public_http", "private_http"}
-        or any(
-            target.failure_code not in transient_codes
-            for target in record.targets
-            if target.status == "fail"
-        )
-    ):
-        return None
+) -> PublicIngressObservationRecord:
+    if record.purpose != "probe" or record.check_kind not in {"public_http", "private_http"}:
+        return record
     read_latest = getattr(record_store, "read_latest_lane_deployment_record", None)
     if not callable(read_latest):
-        return None
-    deployment = cast(Callable[..., object], read_latest)(
-        context_name=record.context, instance_name=record.instance
-    )
-    if not isinstance(deployment, DeploymentRecord):
-        return None
-    identity = deployment.runtime_identity
-    owners = [
-        profile.product
-        for profile in record_store.list_product_profile_records()
-        if profile.is_active
-        and any(
-            (lane.context, lane.instance) == (record.context, record.instance)
-            for lane in profile.lanes
-        )
-    ]
-    if (
-        deployment.deploy.status != "pending"
-        or deployment.deploy.finished_at
-        or deployment.failure is not None
-        or owners != [record.product]
-        or identity is not None
-        and (identity.product, identity.context, identity.instance, identity.deployment_record_id)
-        != (record.product, record.context, record.instance, deployment.record_id)
-        or (deployment.context, deployment.instance) != (record.context, record.instance)
-    ):
-        return None
+        return record
     try:
-        started = _parse_utc_timestamp(deployment.deploy.started_at)
         observed = _parse_utc_timestamp(record.observed_at)
     except ValueError:
-        return None
-    if not started <= observed < started + DEPLOY_INCIDENT_DEFERRAL:
-        return None
-    previous = record_store.list_public_ingress_observation_records(
-        product=record.product,
-        context_name=record.context,
-        instance_name=record.instance,
-        check_name=record.check_name,
-        check_kind=record.check_kind,
-        limit=50,
+        return record
+    deployment = cast(Callable[..., object], read_latest)(
+        context_name=record.context, instance_name=record.instance, observed_at=observed
     )
-    preceding_probe = next(
-        (item for item in previous if item.purpose == "probe" and item.status != "skipped"), None
+    if not isinstance(deployment, DeploymentRecord):
+        return record
+    if (deployment.context, deployment.instance) != (record.context, record.instance):
+        return record
+    identity = deployment.runtime_identity
+    if identity is not None and identity.product != record.product:
+        return record
+    try:
+        if _parse_utc_timestamp(deployment.deploy.started_at) > _parse_utc_timestamp(
+            record.observed_at
+        ):
+            return record
+    except ValueError:
+        return record
+    return record.model_copy(
+        update={"summary": f"{record.summary} Recorded deployment: {deployment.record_id}."}
     )
-    if (
-        previous
-        and preceding_probe is None
-        or preceding_probe is not None
-        and preceding_probe.status == "fail"
-        and _parse_utc_timestamp(preceding_probe.observed_at) < started
-    ):
-        return None
-    return deployment
 
 
 def _expected_runtime_identity(

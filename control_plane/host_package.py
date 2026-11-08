@@ -40,11 +40,13 @@ def host_package() -> HostPackage:
         NATIVE_ODOO_SOURCE_READ_PROGRAM,
         NATIVE_TESTING_CHUNK_WRITE_PROGRAM,
     )
+    from control_plane.dokploy.native_testing_stream import NATIVE_TESTING_STREAM_WRITE_PROGRAM
     from control_plane._odoo_rehearsal_preflight_program import REHEARSAL_PREFLIGHT_PROGRAM
     from control_plane.preview_clean_snapshot import PREVIEW_CLEAN_SNAPSHOT_PROGRAM
     from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
     from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
     from control_plane.testing_activation import PORT_INSPECTION_PROGRAM
+    from control_plane._preview_fixture_program import PREVIEW_FIXTURE_PROGRAM
 
     programs = {
         "activation": (
@@ -59,6 +61,7 @@ def host_package() -> HostPackage:
         "resources": ODOO_TESTING_RESOURCE_PROGRAM,
         "capture": NATIVE_ODOO_SOURCE_READ_PROGRAM,
         "chunk": NATIVE_TESTING_CHUNK_WRITE_PROGRAM,
+        "stream": NATIVE_TESTING_STREAM_WRITE_PROGRAM,
         "preflight": REHEARSAL_PREFLIGHT_PROGRAM,
         "preview_snapshot": PREVIEW_CLEAN_SNAPSHOT_PROGRAM,
         "stale_lock": FRESH_TESTING_STALE_LOCK_PROGRAM,
@@ -69,6 +72,7 @@ def host_package() -> HostPackage:
         "upgrade_runner": rehearsal_copy_runner(sanitize_source_only=False),
         "readback": INTEGRATION_READBACK_PROGRAM,
         "website_settings": WEBSITE_SETTINGS_PROGRAM,
+        "preview_fixture": PREVIEW_FIXTURE_PROGRAM,
     }
     actions = {
         name: name
@@ -79,8 +83,10 @@ def host_package() -> HostPackage:
             "resources",
             "capture",
             "chunk",
+            "stream",
             "preflight",
             "preview_snapshot",
+            "preview_fixture",
         )
     }
     return build_package(programs, actions, include_installer=True)

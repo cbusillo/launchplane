@@ -14,6 +14,13 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.promotion_record import HealthcheckEvidence, DeploymentEvidence
 from control_plane.production_recipient import custody, authority_snapshot
+from control_plane.published_generation_resources import (
+    published_generation_resources,
+)
+from control_plane.workflows.generic_web_deploy_provider import DokployGenericWebDeployProvider
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.runtime_environments import resolve_site_runtime_environment
+from control_plane.product_config_service import read_lane_provider_env
 from control_plane.production_recipient_publication import (
     RecipientPublication,
     commit_publication,
@@ -27,6 +34,65 @@ from tests import test_production_recipient as preparation_tests
 
 class RecipientPublicationTests(unittest.TestCase):
     database_url = ""
+
+    def test_generation_resources_keep_the_published_and_retained_targets_distinct(self) -> None:
+        keys = {*self.record.request.volume_keys.values(), *self.record.request.ports}
+        generation_values = {
+            **{key: f"published-{role}" for role, key in self.record.request.volume_keys.items()},
+            **{key: str(value) for key, value in self.record.request.ports.items()},
+        }
+        publication = self.publication.model_copy(
+            update={
+                "target": self.publication.target.model_copy(
+                    update={"env": {**self.fixture.values, **generation_values}}
+                )
+            }
+        )
+        before_values = {
+            **self.fixture.values,
+            **{key: f"inverse-{role}" for role, key in self.record.request.volume_keys.items()},
+        }
+        before = {
+            **self.record.authority_snapshot,
+            "target": self.record.retained_target.model_copy(
+                update={"env": before_values}
+            ).model_dump(mode="json"),
+        }
+        record = self.record.model_copy(
+            update={
+                "phase": "published",
+                "publication": {"published": publication.model_dump(mode="json"), "before": before},
+                "retained_target": self.record.retained_target.model_copy(
+                    update={"env": self.fixture.values}
+                ),
+            }
+        )
+        store = self.store
+        with (
+            patch.object(
+                store, "read_production_recipient", return_value=record.model_dump(mode="json")
+            ) as read_recipient,
+            patch.object(
+                store, "read_dokploy_target_id_record", return_value=self.publication.target_id
+            ) as read_identity,
+        ):
+            selected = published_generation_resources(
+                store, context=record.context, instance="prod"
+            )
+            self.assertEqual(selected, generation_values)
+            read_identity.return_value = record.retained_target_id
+            with self.assertRaises(ValueError):
+                published_generation_resources(store, context=record.context, instance="prod")
+            record.phase = "inverse_published"
+            read_recipient.return_value = record.model_dump(mode="json")
+            retained = published_generation_resources(
+                store, context=record.context, instance="prod"
+            )
+            self.assertEqual(
+                retained, {key: value for key, value in before_values.items() if key in keys}
+            )
+        with self.assertRaises(TypeError):
+            published_generation_resources(object(), context=record.context, instance="prod")
 
     def setUp(self) -> None:
         self.fixture = preparation_tests.ProductionRecipientTests()
@@ -163,6 +229,83 @@ class RecipientPublicationTests(unittest.TestCase):
         return commit_publication(
             self.store, self.record, self.publication, validate_release=lambda: None
         )
+
+    def test_published_resources_remain_authoritative_across_runtime_deploy_and_adoption(
+        self,
+    ) -> None:
+        resources = {
+            **{key: f"generation-{role}" for role, key in self.record.request.volume_keys.items()},
+            **{key: str(value) for key, value in self.record.request.ports.items()},
+        }
+        self.publication = self.publication.model_copy(
+            update={"target": self.publication.target.model_copy(update={"env": resources})}
+        )
+        self.publish()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=self.record.context,
+                instance="prod",
+                env={**self.fixture.values, **{key: "stale-lane" for key in resources}},
+                updated_at=self.publication.target.updated_at,
+            )
+        )
+        target = self.store.read_dokploy_target_record(
+            context_name=self.record.context, instance_name="prod"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(
+                update={
+                    "env": {
+                        **{key: "stale-target" for key in resources},
+                        "TARGET_ONLY": "ignored",
+                        "DOKPLOY_SHIP_MODE": "application",
+                    }
+                }
+            )
+        )
+        resolved = resolve_site_runtime_environment(
+            control_plane_root=self.fixture.root,
+            context_name=self.record.context,
+            instance_name="prod",
+            database_url=self.store.database_url,
+        )
+        self.assertEqual({key: resolved.values[key] for key in resources}, resources)
+        self.assertNotIn("TARGET_ONLY", resolved.values)
+        lane = next(lane for lane in self.fixture.profile.lanes if lane.instance == "prod")
+        deployment = DokployGenericWebDeployProvider().resolve_deploy_target(
+            control_plane_root=self.fixture.root,
+            request_artifact_id=self.record.image_reference,
+            request_source_git_ref=self.record.request.source_commit,
+            request_timeout_seconds=None,
+            request_no_cache=False,
+            record_store=self.store,
+            profile=self.fixture.profile,
+            lane=lane,
+            normalized_artifact_id=self.record.image_reference,
+            fallback_target_name=target.target_name,
+        )
+        self.assertEqual(deployment.ship_request.deploy_mode, "dokploy-compose-api")
+        with (
+            patch(
+                "control_plane.product_config_service.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.invalid", "fixture-token"),
+            ),
+            patch(
+                "control_plane.product_config_service.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "\n".join(f"{key}={value}" for key, value in resources.items())
+                },
+            ),
+        ):
+            provider = read_lane_provider_env(
+                record_store=self.store,
+                control_plane_root=self.fixture.root,
+                product=self.record.product,
+                context_name=self.record.context,
+                instance_name="prod",
+            )
+        self.assertTrue(resources.keys() <= provider.recorded_keys)
 
     def test_read_only_inventory_bookkeeping_does_not_weaken_publication_mutation_guards(
         self,

@@ -692,7 +692,6 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         self.assertTrue(self.schedules["billing-recovery"]["enabled"])
         self.assertEqual(store.inventories[0].post_deploy_update.status, "pass")
         receipt = recorded_application_lifecycle(store.deployments[0])
-        self.assertIsNotNone(receipt)
         assert receipt is not None
         self.assertEqual(receipt.state, "qualified")
 

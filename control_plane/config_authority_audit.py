@@ -908,13 +908,6 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
             )
         ),
     },
-    ".github/workflows/product-onboarding.yml": {
-        "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
-        "fail-result-paths": frozenset(('""',)),
-        "idempotency-key": frozenset(("${{ steps.onboarding.outputs.idempotency_key }}",)),
-        "payload-file": frozenset(("${{ steps.onboarding.outputs.request_file }}",)),
-        "response-output-file": frozenset(("product-onboarding.json",)),
-    },
     ".github/workflows/provider-target-operations.yml": {
         "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
         "fail-result-paths": frozenset(("result.operation_status",)),
@@ -1078,9 +1071,6 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
     ".github/workflows/runner-host-hygiene.yml": {
         "GH_TOKEN": frozenset(("${{ steps.github-read-token.outputs.token }}",)),
         "RUNNER_REPOSITORY_SCOPE": frozenset(("${{ github.repository }}",)),
-    },
-    ".github/workflows/runner-lane-registration.yml": {
-        "GH_TOKEN": frozenset(("${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}",))
     },
 }
 INGRESS_ROUTE_WORKFLOW_PATHS = frozenset(
@@ -3124,6 +3114,17 @@ def _severity(*, rule_id: str, key: str) -> str:
     return "medium"
 
 
+def _is_python_tool_target(*, path: str, key: str) -> bool:
+    filename = PurePosixPath(path).name
+    if filename == "pyproject.toml":
+        if re.fullmatch(r"tool\.black\.target-version\[[0-9]+]", key):
+            return True
+        key = key.removeprefix("tool.ruff.") if key.startswith("tool.ruff.") else ""
+    elif filename not in {"ruff.toml", ".ruff.toml"}:
+        return False
+    return key == "target-version" or bool(re.fullmatch(r"per-file-target-version\..+", key))
+
+
 def _allow_reason(
     *,
     path: str,
@@ -3167,10 +3168,8 @@ def _allow_reason(
         ):
             return ALLOW_REASON_SCHEMA_ONLY
     if (
-        normalized == "pyproject.toml"
-        and re.fullmatch(r"tool\.black\.target-version\[[0-9]+]", key)
+        _is_python_tool_target(path=normalized, key=key)
         and isinstance(value, str)
-        # Black's supported target identifiers, not arbitrary TARGET values.
         and re.fullmatch(r"py3(?:[3-9]|1[0-5])", value)
     ):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS

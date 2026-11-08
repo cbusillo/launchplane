@@ -172,7 +172,6 @@ class OdooProdBackupRestoreStorageTests(unittest.TestCase):
             self.assertEqual(persisted.operation_id, operation.operation_id)
             self.assertFalse(duplicate_created)
             self.assertEqual(duplicate.operation_id, operation.operation_id)
-            self.assertIsNotNone(checkpointed)
             assert checkpointed is not None
             self.assertEqual(checkpointed.phase, "database_restore_started")
             self.assertEqual(
@@ -257,7 +256,6 @@ class OdooProdBackupRestoreStorageTests(unittest.TestCase):
                 operation.operation_id
             )
 
-            self.assertIsNotNone(requeued)
             assert requeued is not None
             self.assertEqual(requeued.status, "pending")
             self.assertEqual(requeued.phase, "verification_started")
@@ -266,7 +264,6 @@ class OdooProdBackupRestoreStorageTests(unittest.TestCase):
             self.assertEqual(claimed.status, "running")
             self.assertEqual(claimed.phase, "verification_started")
             self.assertEqual(claimed.attempt, 2)
-            self.assertIsNotNone(replay_checkpoint)
             assert replay_checkpoint is not None
             self.assertEqual(replay_checkpoint.phase, "post_deploy_started")
             self.assertEqual(
@@ -317,7 +314,6 @@ class OdooProdBackupRestoreStorageTests(unittest.TestCase):
                 operation.operation_id
             )
 
-            self.assertIsNotNone(requeued)
             assert requeued is not None
             self.assertEqual(requeued.status, "pending")
             self.assertEqual(requeued.phase, "verification_started")

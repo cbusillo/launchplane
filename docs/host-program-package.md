@@ -76,6 +76,12 @@ private (0700), each new file is 0600, and aliases or unsafe permissions
 refuse retention. Storage failure reports `unavailable` without replacing the
 original copy failure or its recovery classification.
 
+Failed canonical-address `docker exec` reads and writers use this same private
+archive, including read-only native inspections. Their failure frame and the trace's
+`handled_error_cause` log retain only the validated opaque reference and program
+digest, with source sites when available. This diagnostic file is the only added
+persistent effect of a failed inspection; it changes no lane or operation state.
+
 Use the private infrastructure [host read access](https://github.com/cbusillo/shiny-infra-ops/blob/main/docs/services/launchplane.md#operator-access)
 and [SSH access](https://github.com/cbusillo/shiny-infra-ops/blob/main/docs/infrastructure/ssh-access.md)
 routes to read that exact file as the schedule's execution user,
@@ -83,6 +89,9 @@ after binding the original reservation, attempt, completed provider job,
 package/action versions and execution server. No provider job needs to run to
 read it. Those private runbooks own the host and guest selectors; a
 control-plane host is not necessarily the operation's execution server.
+Native terminal inspections have no provider job: bind their reference to the
+trace, submitted program digest and plan's registered execution server, then
+read as the account that server's provider terminal uses.
 The file records a digest of the expanded host input as audit metadata. The evidence ID in the
 bound job's log is its retrieval reference; this is not a new service-side
 verification or original-settlement receipt. It also records creation time,

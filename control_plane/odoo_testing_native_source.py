@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import shutil
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, cast, TypeVar
+from typing import Literal, TYPE_CHECKING, cast, TypeVar
 import uuid
 
 from control_plane.contracts.odoo_testing_source import (
@@ -21,6 +21,7 @@ from control_plane.contracts.odoo_testing_source import (
     NativeOdooTestingSource,
     NativeTestingCopyArtifact,
     NativeTestingCopyCapture,
+    MigratedOdooTestingSource,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -95,7 +96,6 @@ def native_testing_source_authority(
                 "prod" if scope == "instance" else ""
             ):
                 values.update({key: str(value) for key, value in runtime.env.items()})
-    values.update({key: str(value) for key, value in target.env.items()})
     database = values.get("ODOO_DB_NAME", "")
     filestore = Path(values.get("ODOO_FILESTORE_PATH", "/volumes/data/filestore"))
     if not filestore.is_absolute() or ".." in filestore.parts:
@@ -269,8 +269,14 @@ def require_private_copy_mount(private: Path) -> None:
     )
 
 
+def capture_cache_binding(capture: NativeTestingCopyCapture) -> str:
+    if isinstance(capture.source_observation, MigratedOdooTestingSource):
+        return capture.source_binding_sha256
+    return capture.generation_binding_sha256
+
+
 def verify_native_capture_files(capture: NativeTestingCopyCapture) -> tuple[Path, Path]:
-    directory = _cache_directory(capture.generation_binding_sha256) / capture.capture_id
+    directory = _cache_directory(capture_cache_binding(capture), create=False) / capture.capture_id
     files = []
     for part in ("database", "filestore"):
         path = directory / part
@@ -395,7 +401,7 @@ def prepare_native_testing_delivery(
     *,
     root: Path,
     generation: FreshOdooTestingGeneration,
-    descriptor: NativeOdooTestingSource,
+    descriptor: NativeOdooTestingSource | MigratedOdooTestingSource,
     host: str,
     token: str,
     server_id: str,
@@ -456,6 +462,10 @@ def prepare_native_testing_delivery(
     }:
         return capture
     if capture is None:
+        if isinstance(descriptor, MigratedOdooTestingSource):
+            raise NativeSourceUnavailable(
+                "The declared migrated pair has not finished its authenticated upload."
+            )
         try:
             capture = capture_native_testing_source(
                 store, root=root, generation=generation, descriptor=descriptor
@@ -468,6 +478,29 @@ def prepare_native_testing_delivery(
         if resume:
             raise ValueError("The testing database appeared during source capture.")
     files = verify_native_capture_files(capture)
+    if isinstance(descriptor, MigratedOdooTestingSource):
+        from control_plane.dokploy.native_testing_stream import write_native_testing_stream
+
+        if before_mutation is not None:
+            before_mutation("native_testing_copy_stream")
+        for part, path in zip(("database", "filestore"), files, strict=True):
+            write_native_testing_stream(
+                host=host,
+                token=token,
+                server_id=server_id,
+                container_id=runner,
+                capture_id=capture.capture_id,
+                part=cast(Literal["database", "filestore"], part),
+                path=path,
+                artifact=getattr(capture, part),
+                reserve_bytes=generation.drill_storage_budget.reserve_bytes
+                if generation.drill_storage_budget
+                else 0,
+            )
+        final_runner, resume, _, _ = inspect(None)
+        if final_runner != runner or resume:
+            raise ValueError("Migrated output failed receiver integrity readback.")
+        return capture
     expected: dict[tuple[str, int], dict[str, object]] = {}
     delivery_started = False
     for part, path in zip(("database", "filestore"), files, strict=True):
@@ -522,6 +555,6 @@ def prepare_native_testing_delivery(
 
 
 def remove_completed_native_capture_cache(capture: NativeTestingCopyCapture) -> None:
-    root = _cache_directory(capture.generation_binding_sha256, create=False)
+    root = _cache_directory(capture_cache_binding(capture), create=False)
     if root.exists():
         shutil.rmtree(root)

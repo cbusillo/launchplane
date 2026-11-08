@@ -173,84 +173,16 @@ baseline readiness JSON. `--mutate` records the admin's explicit mutation
 intent in the request so the planner can tell whether a future host adapter would
 be allowed to proceed, but this CLI command itself remains a dry-run surface.
 
-Runner maintainer planning is also read-only. The typed contract in
-`control_plane.contracts.runner_lane_maintainer` captures the desired durable
-runner state for a repository, host, lane, registration root, service user,
-systemd unit name, labels, and runner-version policy. It compares that desired
-state against saved GitHub runner inventory and saved baseline readiness, then
-returns the future maintainer decision without contacting GitHub or the host.
+## Existing-runner relabel
 
-To build the first desired-state plan for a product lane, run:
+For authorized runner label changes, use the catalog's
+[`gh-owner-admin.py`](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/cli-reference.md#verified-repository-owner-administration)
+using the Director's verified GitHub login: save and review the exact runner's plan,
+apply its digest, then independently read it back. Preserve prior custom labels
+for undo.
 
-```bash
-uv run launchplane runner-maintainer-plan \
-  --repository owner/name \
-  --host-name chris-testing \
-  --lane-name product-runner-1 \
-  --runner-directory \
-    /home/launchplane-runner-hygiene/actions-runners/product-runner-1 \
-  --service-user launchplane-runner-hygiene \
-  --systemd-unit-name launchplane-runner@product-runner-1.service \
-  --label self-hosted \
-  --label launchplane \
-  --label launchplane-managed \
-  --allowed-repository owner/name \
-  --approved-host chris-testing \
-  --allowed-registration-root /home/launchplane-runner-hygiene/actions-runners \
-  --allowed-service-user launchplane-runner-hygiene \
-  --inventory-file runner-inventory.json \
-  --baseline-readiness-file runner-baseline.json
-```
-
-The plan decision can be `recommend_create`, `recommend_verify_adoption`,
-`recommend_remove_recreate`, or `blocked`. A recommendation names the durable
-action a future maintainer should take; it does not authorize this command to
-perform that action. Until the supervised host maintainer exists,
-otherwise-valid create, adoption-verification, and remove/recreate plans remain
-`status: blocked` with the typed capability blocker
-`supervised_maintainer_required`. These packets set `policy_ready: true` and
-`capability_ready: false` and expose no mutation capability.
-
-Baseline readiness has different timing for absent-lane planning and existing
-lane remediation. An absent lane may remain policy-ready for
-`recommend_create` despite a non-ready packet only when that packet has zero
-observed lanes, zero compliant lanes, and no violations. A non-ready packet
-with existing fleet observations or violations blocks even an absent-lane
-recommendation. By default, any matching existing lane must have a ready
-aggregate baseline packet before the planner can recommend adoption
-verification or remove/recreate; otherwise it returns `decision: blocked` with
-`baseline_not_ready`. The admin may explicitly disable this coarse
-pre-action gate with
-`--allow-missing-baseline-readiness`, but the recommendation remains blocked by
-`supervised_maintainer_required` and does not become completion evidence. The
-current readiness packet is fleet-aggregate evidence and does not prove that
-the desired lane itself was observed. A future supervised executor must bind
-post-action baseline evidence to the exact lane before it can claim completion
-or product-job admission; this read-only planner does not implement that
-completion gate.
-
-Other policy blockers such as an unapproved host, unsafe runner directory,
-missing managed label, unsupported observed lane status, duplicate lane name,
-or repository mismatch also produce `decision: blocked` with
-`policy_ready: false` and must be resolved before any host mutation can be
-considered. The maintainer planner's desired runner directories and allowed
-registration roots reject explicit `..` path components rather than resolving
-them into a different path. Registration and retirement remain separate
-lifecycle contracts and are not covered by this planner validation.
-
-## Existing-runner relabel library
-
-`control_plane.workflows.runner_lane_relabel` provides the exact-existing-runner
-custom-label engine and typed audit contract. This is library support only:
-there is no relabel workflow, local live CLI, or service execution route. It
-adds no live authority, credential binding or supported dispatch path. Under
-[DIRECTION.md](../DIRECTION.md), a relabel requested by an admin or agent belongs in the
-service under the signed-in admin or agent identity. Native integration must
-record that actor, enforce the reviewed repository/runner policy, serialize
-conflicting updates, and use a purpose-bound runner-administration capability.
-Missing capability is an activation prerequisite, never permission to borrow a
-workflow's credential or identity. Existing register/retire workflow modes stay
-supported until their complete replacement is deployed.
+`control_plane.workflows.runner_lane_relabel` remains the existing custom-label
+library and typed audit contract.
 
 The engine takes an explicit repository/host/root policy, exact runner name/ID,
 reviewed prior custom labels and desired custom labels. It preserves automatic
@@ -262,21 +194,12 @@ no registration, service, filesystem or host operation is part of this engine.
 
 GitHub offers no conditional label replacement. The prior-state check is
 optimistic, not atomic compare-and-swap with an unrelated administrator. A
-native caller must coordinate external label writers. A job can start after an
+caller must coordinate external label writers. A job can start after an
 idle observation; relabeling never interrupts it. `mutation_reconciliation_required`
 means outcome/readback is uncertain: read the runner back and do not retry the
 write automatically. For an inverse, review the verified current custom labels
 as expected and the saved original custom labels as desired, with fresh identity
 checks. Empty custom-label sets are valid inverses.
-
-`audit_delivery_pending` retains the terminal audit, its original idempotency
-key and observed mutation status. `deliver_terminal_audit` validates that packet
-and sends only evidence through the injected poster; it cannot change labels.
-Validation is structural, not cryptographic provenance or a new provider
-observation. The native caller must bind packets to the original operation and
-actor, and retain uncertain outcomes for reconciliation. An absent result never
-proves that no provider write occurred. Audit acceptance is evidence acceptance,
-not execution authorization.
 
 ## Lifecycle Executors
 
@@ -369,11 +292,13 @@ The manual workflow defaults `registration_root` to `auto`, which resolves to
 `$HOME/actions-runners` for the constrained service user. An explicit root must
 match that resolved approved root exactly.
 
-The manual workflow requires the repository secret
-`LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN` for cross-repository runner
-inventory and registration-token requests. The default `GITHUB_TOKEN` from the
-Launchplane workflow is not sufficient authority for product repository runner
-administration.
+The manual workflow calls Launchplane's service-backed
+[runner lifecycle App](secrets.md#runner-lifecycle-app-credential) for runner
+inventory, registration tokens, active-run reads and retirement. It holds
+neither the App key nor an installation token and does not read the old PAT.
+The service uses one repository-scoped token per call and revokes it afterward.
+Local rehearsal mode still accepts an explicitly supplied fixture token; service
+audit mode always uses Launchplane and has no GitHub-token fallback.
 
 This executor is the proving-ground adapter for #1231. Mutating runs require a
 `runner_package_url` workflow input (passed as `--runner-package-url`) that

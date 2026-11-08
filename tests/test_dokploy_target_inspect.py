@@ -5,7 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -122,11 +122,14 @@ class DokployTargetInspectTests(unittest.TestCase):
                         project_name="odoo",
                         domains=("cm-website-prod.shinycomputers.com",),
                         public_hosts=("example.com", "www.example.com"),
-                        env={"ODOO_UPSTREAM_USER": "synthetic-reader-not-for-output"},
+                        env={
+                            "ODOO_UPSTREAM_USER": "synthetic-reader-not-for-output",
+                        },
                         updated_at="2026-06-14T00:00:00Z",
                         source_label="test",
                     )
                 )
+
                 store.write_dokploy_target_id_record(
                     DokployTargetIdRecord(
                         context="cm_website",
@@ -151,16 +154,14 @@ class DokployTargetInspectTests(unittest.TestCase):
                     )
                 )
 
-                result = inspect_dokploy_target(
-                    record_store=store,
-                    host="https://dokploy.example.invalid",
-                    token="token",
-                    request=DokployTargetInspectRequest(
-                        context="cm_website",
-                        instance="prod",
-                    ),
-                    fetch_target_payload=_fake_target_payload,
-                )
+                with patch.object(store, "read_secret_version", side_effect=AssertionError):
+                    result = inspect_dokploy_target(
+                        record_store=store,
+                        host="https://dokploy.example.invalid",
+                        token="token",
+                        request=DokployTargetInspectRequest(context="cm_website", instance="prod"),
+                        fetch_target_payload=_fake_target_payload,
+                    )
                 stored_evidence = store.read_provider_target_record(
                     context_name="cm_website", instance_name="prod"
                 ).provider_evidence

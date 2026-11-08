@@ -471,7 +471,6 @@ class AuthzAdministrationReadHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertNotIn("set-cookie", response.headers)
         self.assertEqual(session_after, session_before)
-        self.assertIsNotNone(session_before)
         assert session_before is not None
         self.assertTrue(manager.csrf_token_is_valid(session_before, csrf_token))
         for rejected in (missing_csrf, cross_site):
@@ -520,7 +519,6 @@ class AuthzAdministrationReadHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
         self.assertNotIn("set-cookie", response.headers)
         self.assertEqual(session_after, session_before)
-        self.assertIsNotNone(session_before)
         assert session_before is not None
         self.assertTrue(manager.csrf_token_is_valid(session_before, csrf_token))
 

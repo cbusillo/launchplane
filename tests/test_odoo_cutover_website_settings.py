@@ -644,6 +644,77 @@ class CutoverWebsiteTests(unittest.TestCase):
         )
         self.assertEqual(self.provider.target, self.provider.cutover.old)
 
+    def test_interrupted_inverse_can_be_reclaimed_at_each_pause_transition(self) -> None:
+        from control_plane.odoo_cutover_recovery import (
+            cutover_reconciliation_eligible,
+            cutover_reconciliation_uses_budget,
+        )
+
+        for interrupted_save, expected_state in enumerate(
+            (None, "fencing", "fencing", "drained", "resuming", "complete"), 1
+        ):
+            with self.subTest(interrupted_save=interrupted_save):
+                fixture = CutoverWebsiteTests()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                completed = fixture.run_cutover()
+                assert completed.maintenance is not None
+                completed = completed.model_copy(
+                    update={
+                        "maintenance": completed.maintenance.model_copy(
+                            update={
+                                "evidence_id": payload_digest(maintenance_payload(completed.plan))
+                            }
+                        )
+                    }
+                )
+                fixture.store.save(completed)
+                saves = 0
+
+                def interrupt(step: str) -> None:
+                    nonlocal saves
+                    if step in {"pause_checkpoint", "rolled_back"}:
+                        saves += 1
+                        if saves == interrupted_save:
+                            raise TimeoutError()
+
+                with self.assertRaises(TimeoutError):
+                    rollback_compatible_cutover(
+                        fixture.store,
+                        fixture.provider,
+                        fixture.record_id,
+                        checkpoint=interrupt,
+                    )
+                held = fixture.store.load(fixture.record_id)
+                self.assertEqual(held.step, "rolling_back")
+                self.assertEqual(
+                    held.rollback_pause.state if held.rollback_pause is not None else None,
+                    expected_state,
+                )
+                self.assertTrue(cutover_reconciliation_eligible(held))
+                self.assertFalse(cutover_reconciliation_uses_budget(held))
+                self.assertFalse(
+                    cutover_reconciliation_eligible(held.model_copy(update={"backup": None}))
+                )
+                if held.rollback_pause is not None:
+                    foreign = held.rollback_pause.model_copy(
+                        update={"pause_id": held.rollback_pause.pause_id + "-foreign"}
+                    )
+                    self.assertFalse(
+                        cutover_reconciliation_eligible(
+                            held.model_copy(update={"rollback_pause": foreign})
+                        )
+                    )
+                resumed = rollback_compatible_cutover(
+                    fixture.store, fixture.provider, fixture.record_id
+                )
+                self.assertEqual(resumed.step, "rolled_back")
+                self.assertEqual(resumed.plan, completed.plan)
+                self.assertEqual(resumed.backup, completed.backup)
+                assert resumed.rollback_pause is not None
+                self.assertEqual(resumed.rollback_pause.state, "complete")
+                self.assertEqual(fixture.provider.target, completed.plan.old)
+
     def test_abort_before_maintenance_resumes_old_without_disabling_collection(self) -> None:
         with patch.object(self.provider, "backup", side_effect=ValueError("fixture refusal")):
             with self.assertRaises(ValueError):

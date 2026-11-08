@@ -174,7 +174,6 @@ class OdooProdRetainedVolumeBackupImportStorageTests(unittest.TestCase):
                             self.assertIsNone(_claim_stable_lane_operation(store, blocked_kind))
 
                         claimed = _claim_stable_lane_operation(store, "stable_bootstrap")
-                        self.assertIsNotNone(claimed)
                         assert claimed is not None
                         self.assertEqual(claimed.operation_id, "bootstrap-operation-cm-prod")
                         self.assertEqual(claimed.status, "running")
@@ -341,7 +340,6 @@ class OdooProdRetainedVolumeBackupImportStorageTests(unittest.TestCase):
         self.assertEqual(persisted.operation_id, operation.operation_id)
         self.assertFalse(duplicate_created)
         self.assertEqual(duplicate.operation_id, operation.operation_id)
-        self.assertIsNotNone(checkpointed)
         assert checkpointed is not None
         self.assertEqual(checkpointed.phase, "inspection_started")
         self.assertEqual(

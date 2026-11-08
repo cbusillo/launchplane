@@ -1101,30 +1101,12 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             "/v1/drivers/odoo/prod-rollback-plan",
             native_routes._driver_route_metadata_from_descriptors(),
         )
-        self.assertNotIn(
-            "/v1/drivers/odoo/prod-rollback-plan",
-            native_routes._driver_route_metadata_from_descriptors(),
-        )
         self.assert_route_paths_match_descriptor(
             driver_id="odoo",
             route_paths_by_action={
                 "preview_apply": ODOO_PREVIEW_APPLY_ROUTE,
                 "preview_apply_inputs": ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
             },
-        )
-
-    def test_native_route_set_includes_generic_web_routes(self) -> None:
-        self.assertIn(
-            "/v1/drivers/generic-web/prod-promotion",
-            native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
-        )
-        self.assertIn(
-            "/v1/drivers/generic-web/prod-promotion-workflow",
-            native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
-        )
-        self.assertIn(
-            generic_web_preview_dispatch._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
-            native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
         )
 
     def test_preview_read_model_is_capability_driven_not_verireel_named(self) -> None:
@@ -1164,7 +1146,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             view.drivers[0].preview_summaries[0].preview.preview_id, "preview-web-pr-7"
         )
         preview_inventory_provenance = view.drivers[0].preview_inventory_provenance
-        self.assertIsNotNone(preview_inventory_provenance)
         assert preview_inventory_provenance is not None
         self.assertEqual(preview_inventory_provenance.freshness_status, "unsupported")
         self.assertEqual(preview_inventory_provenance.source_record_id, "")

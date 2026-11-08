@@ -15,6 +15,11 @@ from control_plane.lane_health_history import (
     LaneHealthHistoryResponse,
     read_lane_health_history,
 )
+from control_plane.monitoring_authority_history import (
+    MonitoringAuthorityHistoryResponse,
+    MonitoringAuthorityQueryError,
+    MonitoringAuthorityUnavailable,
+)
 
 from control_plane import (
     product_operational_readiness_service as control_plane_product_operational_readiness_service,
@@ -43,6 +48,8 @@ from control_plane.contracts.product_incident_read_model import (
     ProductEnvironmentIncidentList,
     ProductIncidentDetail,
     ProductIncidentReadModelCapabilityError,
+    ProductIncidentOrder,
+    ProductIncidentQueryError,
     ProductIncidentReferenceUnavailableError,
     ProductIncidentStatusFilter,
     build_product_environment_incident_detail,
@@ -1358,15 +1365,38 @@ def register_product_environment_read_routes(
         historical_context: Annotated[str, Query(max_length=200)] = "",
     ) -> LaneHealthHistoryResponse:
         trace_id = common.next_trace_id()
-        scope = _build_product_incident_scope(
-            dependencies=common,
-            identity=identity,
-            record_store=record_store,
-            trace_id=trace_id,
-            product=product,
-            environment=environment,
-            historical_context=historical_context,
-        )
+        if historical_context:
+            if environment not in {"testing", "prod"}:
+                raise common.http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="not_found",
+                    message="Historical observations require a testing or production lane.",
+                )
+            if not common.authorization_allows(
+                identity=identity,
+                action="product_environment.read",
+                product=product,
+                context=historical_context,
+                target=AuthorizationTarget(scope="instance", instances=(environment,)),
+            ):
+                raise common.http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Identity cannot read this product's historical lane evidence.",
+                )
+            lane = (product, historical_context, environment)
+        else:
+            scope = _build_product_incident_scope(
+                dependencies=common,
+                identity=identity,
+                record_store=record_store,
+                trace_id=trace_id,
+                product=product,
+                environment=environment,
+            )
+            lane = (scope.product, scope.context, scope.instance)
         _require_database_read_store_methods(
             record_store,
             dependencies=common,
@@ -1379,9 +1409,9 @@ def register_product_environment_read_routes(
                 raise HistoryQueryError("History cannot include future observations.")
             history = read_lane_health_history(
                 cast(HistoryStore, record_store),
-                product=scope.product,
-                context=scope.context,
-                instance=scope.instance,
+                product=lane[0],
+                context=lane[1],
+                instance=lane[2],
                 since=since,
                 until=until,
                 limit=limit,
@@ -1404,6 +1434,8 @@ def register_product_environment_read_routes(
         status: Annotated[ProductIncidentStatusFilter, Query()] = "all",
         limit: Annotated[int, Query(ge=1, le=50)] = 20,
         historical_context: Annotated[str, Query(max_length=200)] = "",
+        order: Annotated[ProductIncidentOrder, Query()] = "attention",
+        cursor: Annotated[str | None, Query(max_length=4096)] = None,
     ) -> ProductEnvironmentIncidentsResponse:
         trace_id = common.next_trace_id()
         incident_scope = _build_product_incident_scope(
@@ -1424,7 +1456,16 @@ def register_product_environment_read_routes(
                 status=status,
                 limit=limit,
                 scope=incident_scope,
+                order=order,
+                cursor=cursor,
             )
+        except ProductIncidentQueryError as error:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
         except ProductIncidentReferenceUnavailableError as error:
             raise common.http_error(
                 status_code=503,
@@ -1611,11 +1652,12 @@ def register_product_environment_read_routes(
         normalized_driver_id = driver_id.strip()
         try:
             profile_store = require_product_profile_list_store(record_store)
-            product_profile_payload = (
-                control_plane_product_read_service.build_product_profile_list_service_payload(
-                    record_store=profile_store,
-                    driver_id=normalized_driver_id,
+            profiles = tuple(
+                profile
+                for profile in profile_store.list_product_profile_records(
+                    driver_id=normalized_driver_id
                 )
+                if profile.is_active
             )
         except TypeError as error:
             raise common.http_error(
@@ -1624,10 +1666,6 @@ def register_product_environment_read_routes(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        payload_profiles = cast(list[object], product_profile_payload["profiles"])
-        profiles = tuple(
-            LaunchplaneProductProfileRecord.model_validate(profile) for profile in payload_profiles
-        )
         if not service_reader and identity is not None:
             profiles = tuple(
                 profile
@@ -1641,7 +1679,7 @@ def register_product_environment_read_routes(
             )
         return ProductProfileListResponse(
             trace_id=trace_id,
-            driver_id=str(product_profile_payload["driver_id"]),
+            driver_id=normalized_driver_id,
             profiles=profiles,
             coverage=read_coverage(
                 profile_store,
@@ -1764,6 +1802,68 @@ def register_product_profile_read_routes(
     dependencies: ProductReadRouteDependencies,
 ) -> None:
     common = dependencies.common
+
+    def read_monitoring_authority_history(
+        response: Response,
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        product: Annotated[str, Query(max_length=200, pattern=r"^\S*$")] = "",
+        limit: Annotated[int, Query(ge=1, le=500)] = 200,
+        cursor: Annotated[str | None, Query(max_length=4096)] = None,
+    ) -> MonitoringAuthorityHistoryResponse:
+        trace_id = common.next_trace_id()
+        global_reader = director_agent_identity(identity) or common.authorization_allows(
+            identity=identity,
+            action="product_profile.read",
+            product="launchplane",
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
+            inherit_agent_read_role=False,
+        )
+        if (not product and not global_reader) or (
+            product
+            and not common.authorization_allows(
+                identity=identity,
+                action="product_profile.read",
+                product=product,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+            )
+            and not global_reader
+        ):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Choose a product this identity can read, or use the existing service read access.",
+            )
+        try:
+            if not isinstance(record_store, PostgresRecordStore):
+                raise MonitoringAuthorityUnavailable(
+                    "Retained authority history requires database storage"
+                )
+            history = record_store.read_monitoring_authority_history(
+                product=product, limit=limit, cursor=cursor
+            )
+        except (MonitoringAuthorityUnavailable, MonitoringAuthorityQueryError) as error:
+            raise common.http_error(
+                status_code=400 if isinstance(error, MonitoringAuthorityQueryError) else 503,
+                trace_id=trace_id,
+                code="invalid_query"
+                if isinstance(error, MonitoringAuthorityQueryError)
+                else "history_unavailable",
+                message=str(error),
+            ) from error
+        response.headers["Cache-Control"] = "no-store"
+        return MonitoringAuthorityHistoryResponse(trace_id=trace_id, history=history)
+
+    app.add_api_route(
+        "/v1/monitoring-authority-history",
+        read_monitoring_authority_history,
+        methods=["GET"],
+        response_model=MonitoringAuthorityHistoryResponse,
+        operation_id="read_monitoring_authority_history",
+        summary="Read settled monitoring decisions and completed batch confirmations",
+        responses={code: {"model": common.error_response_model} for code in (400, 401, 403, 503)},
+    )
 
     def read_product_profile(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],

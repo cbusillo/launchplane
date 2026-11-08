@@ -12,6 +12,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
+from control_plane.storage.migrations import monitoring_authority_v1
 
 from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as retired_delivery,
@@ -19,6 +20,8 @@ from control_plane.storage.migrations.versions import (
     f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
     c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
     d1a5b7c9d2e4_join_attestations_compatibility as attestations_compatibility_join,
+    e2b6c8d0a4f7_monitoring_authority_history as monitoring_history,
+    f3c7d9e1b5a8_join_monitoring_history as monitoring_history_join,
 )
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
@@ -28,7 +31,7 @@ def _migration_head() -> str:
     head = ScriptDirectory(str(Path(__file__).parent / "migrations")).get_current_head()
     if head is None:
         raise ValueError("Launchplane migration graph has no head.")
-    if head != attestations_compatibility_join.revision:
+    if head != monitoring_history_join.revision:
         raise ValueError(
             "The prepared retired-delivery migration hold must be reconciled before "
             "advancing the migration head. See docs/operations.md#prepared-retired-"
@@ -44,6 +47,8 @@ RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (
     idle_hostnames_join.revision,
     idle_compatibility_join.revision,
     integration_attestations.revision,
+    attestations_compatibility_join.revision,
+    monitoring_history.revision,
     EXPECTED_ALEMBIC_HEAD_REVISION,
 )
 ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE = "launchplane_ordinary_agent_delivery_activations"
@@ -1696,7 +1701,7 @@ def verify_postgres_schema_invariants(engine: Engine | Connection) -> None:
             "Launchplane shared storage requires PostgreSQL for hosted service startup; "
             f"got {backend_name!r}."
         )
-    _verify_alembic_head(engine)
+    revision = _verify_alembic_head(engine)
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
     metadata = _BatchedSchemaInspector(
@@ -1735,6 +1740,12 @@ def verify_postgres_schema_invariants(engine: Engine | Connection) -> None:
         *authz_policy_write_fence_errors(engine),
         *merge_train_policy_write_fence_errors(engine),
         *ordinary_effect_write_fence_errors(engine),
+        *(
+            monitoring_authority_capture_errors(engine)
+            if revision in {monitoring_history.revision, monitoring_history_join.revision}
+            or monitoring_authority_v1.TABLE_NAME in table_names
+            else ()
+        ),
     ]
     if errors:
         joined_errors = "; ".join(errors)
@@ -1930,6 +1941,84 @@ def _verify_alembic_head(engine: Engine | Connection) -> str:
             "Run the serialized Launchplane schema migration before starting the hosted service."
         )
     return version_numbers[0]
+
+
+def monitoring_authority_capture_errors(engine: Engine | Connection) -> list[str]:
+    inspector = inspect(engine)
+    table = monitoring_authority_v1.history
+    if table.name not in inspector.get_table_names():
+        return ["Monitoring authority capture is not installed"]
+    columns = {column["name"]: column for column in inspector.get_columns(table.name)}
+    errors: list[str] = []
+    for column in table.columns:
+        actual = columns.get(column.name)
+        if actual is None:
+            errors.append(f"{table.name} is missing {column.name}")
+        elif (
+            str(actual["type"].compile(dialect=engine.dialect))
+            != str(column.type.compile(dialect=engine.dialect))
+            or actual["nullable"] != column.nullable
+        ):
+            errors.append(f"{table.name}.{column.name} has incompatible storage")
+    if inspector.get_pk_constraint(table.name).get("constrained_columns") != [
+        column.name for column in table.primary_key
+    ]:
+        errors.append(f"{table.name} has an incompatible primary key")
+    for source in monitoring_authority_v1.SOURCES:
+        errors.extend(
+            _postgres_write_fence_errors(
+                engine=engine,
+                table_name=source,
+                trigger_name=source + "_monitoring_capture",
+                function_name="launchplane_monitoring_authority_capture_v1",
+                trigger_fragments=("after insert or delete or update", "for each row"),
+                function_fragments=(
+                    "launchplane_monitoring_projection_v1",
+                    "insert into " + table.name,
+                    "pg_current_xact_id()",
+                    "tg_op = 'delete'",
+                ),
+            )
+        )
+    errors.extend(
+        _postgres_write_fence_errors(
+            engine=engine,
+            table_name=table.name,
+            trigger_name="monitoring_history_immutable",
+            function_name="launchplane_monitoring_history_immutable_v1",
+            trigger_fragments=("before delete or update", "for each row"),
+            function_fragments=("raise exception", "append-only"),
+        )
+    )
+    with nullcontext(engine) if isinstance(engine, Connection) else engine.connect() as connection:
+        definition = connection.scalar(
+            text(
+                "SELECT pg_get_functiondef(to_regprocedure("
+                "'launchplane_monitoring_projection_v1(text,jsonb)'))"
+            )
+        )
+    if definition is None:
+        errors.append("Monitoring authority projection is missing")
+    else:
+        for field in (
+            "schema_version",
+            "production_use",
+            "lifecycle_state",
+            "public_website",
+            "driver_id",
+            "health_path",
+            "lanes",
+            "health_monitoring",
+            "domains",
+            "external_ingress",
+            "endpoint_key",
+            "url",
+            "tls_ca_pem",
+            "status",
+        ):
+            if f"'{field}'" not in str(definition):
+                errors.append(f"Monitoring authority projection is missing {field}")
+    return errors
 
 
 def authz_policy_write_fence_errors(engine: Engine | Connection) -> list[str]:

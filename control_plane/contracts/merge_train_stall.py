@@ -4,6 +4,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from control_plane.contracts.repository_inventory import normalize_repository
 
+STALL_WORKFLOW_REPOSITORY_KEY = "LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REPOSITORY"
+STALL_WORKFLOW_REF_KEY = "LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REF"
+
+
+def parse_merge_train_stall_repository(value: str) -> str:
+    return normalize_repository(value, "repository")
+
+
+def parse_merge_train_stall_ref(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("merge train stall workflow ref is required")
+    return normalized
+
 
 class MergeTrainStallWorkflow(BaseModel):
     """Existing sender's repository/ref from Launchplane runtime settings."""
@@ -15,7 +29,12 @@ class MergeTrainStallWorkflow(BaseModel):
     @field_validator("repository")
     @classmethod
     def valid_repository(cls, value: str) -> str:
-        return normalize_repository(value, "repository")
+        return parse_merge_train_stall_repository(value)
+
+    @field_validator("ref")
+    @classmethod
+    def valid_ref(cls, value: str) -> str:
+        return parse_merge_train_stall_ref(value)
 
 
 class MergeTrainStallObservation(BaseModel):

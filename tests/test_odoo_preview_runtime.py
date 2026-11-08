@@ -398,7 +398,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.preview_resources = self.enterContext(
-            patch("control_plane.odoo_preview_resources.require_existing_preview_resources")
+            patch(
+                "control_plane.odoo_preview_resources.require_existing_preview_resources",
+                return_value="a" * 64,
+            )
         )
         self.preview_resource_binding = self.enterContext(
             patch("control_plane.odoo_preview_resources.require_preview_resource_binding")
@@ -471,7 +474,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "ready")
-        self.assertIsNotNone(result.runtime_plan.target)
         assert result.runtime_plan.target is not None
         self.assertEqual(result.runtime_plan.target.target_id, "compose-cm-pr-45")
         self.assertEqual(result.dry_run_plan.compose_ref, "compose-cm-pr-45")
@@ -510,7 +512,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         self.assertEqual(result.status, "ready")
         self.assertEqual(result.runtime_plan.operation, "destroy")
-        self.assertIsNotNone(result.runtime_plan.target)
         assert result.runtime_plan.target is not None
         self.assertEqual(result.runtime_plan.target.target_id, "compose-cm-pr-45")
         self.assertEqual(result.dry_run_plan.compose_ref, "compose-cm-pr-45")
@@ -553,7 +554,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "ready")
-        self.assertIsNotNone(result.runtime_plan.target)
         assert result.runtime_plan.target is not None
         self.assertEqual(result.runtime_plan.target.target_id, "compose-cm-pr-45")
         self.assertEqual(result.dry_run_plan.compose_ref, "compose-cm-pr-45")
@@ -1620,6 +1620,38 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             restore_upstream=True,
         )
 
+    def test_invalid_worker_count_refuses_before_provider_reads_or_effects(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        for workers in ("auto", " ", "-1"):
+            with (
+                self.subTest(workers=workers),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                    return_value=("https://dokploy.example", "token"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
+                    side_effect=AssertionError("Provider read reached before worker validation"),
+                ) as fetch,
+            ):
+                result = execute_odoo_preview_dokploy_apply(
+                    control_plane_root=ANY,
+                    request=OdooPreviewDokployApplyRequest(
+                        dry_run_plan=dry_run,
+                        manifest=artifact_manifest_v2(),
+                        environment_values={**_environment_values(), "ODOO_WORKERS": workers},
+                    ),
+                )
+                self.assertEqual(result.status, "fail")
+                self.assertFalse(result.provider_effect_attempted)
+                self.assertFalse(result.created_compose)
+                fetch.assert_not_called()
+
     def test_preview_refuses_incomplete_or_root_upstream_before_provider_effects(self) -> None:
         source = {
             "ODOO_UPSTREAM_HOST": "source.example.test",
@@ -1951,9 +1983,12 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                         "environmentId": "env-cm-preview",
                         "serverId": "server-nonprod",
                         "appName": dry_run.compose_name,
-                        "env": f"{PREVIEW_FISHBOWL_SOURCE_ENV_KEY}={previous_source}"
-                        if previous_source
-                        else "",
+                        "env": "ODOO_KEY=fixture-previous-workflow-key\n"
+                        + (
+                            f"{PREVIEW_FISHBOWL_SOURCE_ENV_KEY}={previous_source}"
+                            if previous_source
+                            else ""
+                        ),
                     },
                 ),
             ) as fetch_target_payload,
@@ -2005,6 +2040,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                     manifest=manifest,
                     environment_values={
                         **_environment_values(),
+                        "ODOO_KEY": "fixture-workflow-provisioning-key",
                         **(source_environment or {}),
                         dokploy_post_deploy.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "payload",
                         dokploy_post_deploy.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY: "true",
@@ -2015,6 +2051,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 ),
             )
 
+        self.assertEqual(
+            result.resource_provenance["binding_sha256"], self.preview_resources.return_value
+        )
+        self.assertEqual(result.resource_provenance["recipient_state"], "unstarted")
+        self.assertTrue(result.resource_provenance["qualified_at"])
         if fail_preparation:
             self.assertEqual(result.status, "fail")
             delete_compose.assert_not_called()
@@ -2038,7 +2079,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         fetch_targets = [call.kwargs["target_id"] for call in fetch_target_payload.call_args_list]
         self.assertEqual(fetch_targets, ["compose-template", "compose-cm-pr-45"])
         create_payload = requests[2]["payload"]
-        self.assertIsInstance(create_payload, dict)
         assert isinstance(create_payload, dict)
         self.assertEqual(create_payload["environmentId"], "env-cm-preview")
         self.assertEqual(create_payload["serverId"], "server-nonprod")
@@ -2052,6 +2092,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         update_env.assert_called_once()
         env_map = dokploy_api.parse_dokploy_env_text(update_env.call_args.kwargs["env_text"])
         self.assertEqual(env_map["PLATFORM_INSTANCE"], "preview")
+        self.assertNotIn("ODOO_KEY", env_map)
         self.assertEqual(
             env_map["ODOO_INSTALL_MODULES"],
             "launchplane_settings,disable_odoo_online,cm_website",
@@ -2788,6 +2829,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                     "composeId": "compose-cm-pr-45",
                     "environmentId": "env-cm-preview",
                     "serverId": "server-nonprod",
+                    "env": "ODOO_KEY=fixture-previous-workflow-key",
                 },
             ),
             patch(
@@ -2796,7 +2838,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_preview_runtime.memory_capacity.require_preview_host_memory_capacity"
             ),
-            patch("control_plane.odoo_preview_resources.require_existing_preview_resources"),
+            patch(
+                "control_plane.odoo_preview_resources.require_existing_preview_resources",
+                return_value="b" * 64,
+            ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_api.update_dokploy_target_env",
             ) as update_env,
@@ -2834,7 +2879,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 request=OdooPreviewDokployApplyRequest(
                     dry_run_plan=dry_run,
                     image_reference=identity.image_reference,
-                    environment_values={**_environment_values(), "PLATFORM_INSTANCE": "testing"},
+                    environment_values={
+                        **_environment_values(),
+                        "PLATFORM_INSTANCE": "testing",
+                        "ODOO_KEY": "fixture-workflow-provisioning-key",
+                    },
                 ),
             )
 
@@ -2850,6 +2899,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertFalse(services[PREVIEW_GATEWAY_SERVICE].get("volumes"))
         env_map = dokploy_api.parse_dokploy_env_text(update_env.call_args.kwargs["env_text"])
         self.assertEqual(env_map["PLATFORM_INSTANCE"], "preview")
+        self.assertNotIn("ODOO_KEY", env_map)
         self.assertNotIn("smoke_check", [step.name for step in result.steps])
         paths = {call.kwargs.get("path") for call in provider.call_args_list}
         self.assertFalse(paths & {"/api/domain.delete", "/api/compose.delete"})
@@ -3034,7 +3084,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         delete_payload = next(
             item["payload"] for item in requests if item["path"] == "/api/compose.delete"
         )
-        self.assertIsInstance(delete_payload, dict)
         assert isinstance(delete_payload, dict)
         self.assertEqual(delete_payload["composeId"], "compose-cm-pr-45")
         self.assertTrue(delete_payload["deleteVolumes"])

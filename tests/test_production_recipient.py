@@ -226,6 +226,10 @@ class ProductionRecipientTests(unittest.TestCase):
                 "environmentId": body["environmentId"],
                 "appName": body["appName"],
                 "serverId": body["serverId"],
+                "composeType": "docker-compose",
+                "createEnvFile": True,
+                "command": None,
+                "randomize": False,
             }
             return {"composeId": "new-recipient"}
         if path == "/api/compose.update":

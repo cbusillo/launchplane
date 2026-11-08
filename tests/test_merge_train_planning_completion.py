@@ -12,7 +12,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 
 import click
-from github_plan_status import DEFAULT_STATUS_LABELS
 
 from control_plane import merge_train_planning_completion as completion
 from control_plane.merge_train_pr_feedback import (
@@ -38,7 +37,10 @@ from tempfile import TemporaryDirectory
 
 _REPO = "example/product"
 _BOT = 41
-_LABELS = DEFAULT_STATUS_LABELS
+_LABELS = {
+    "plan": "plan",
+    **{key: f"plan:{key}" for key in ("active", "blocked", "waiting", "stale", "done")},
+}
 
 
 def _wait(state: str = "clear") -> str:
@@ -76,6 +78,7 @@ class PlanningProvider:
             "node_id": "issue7",
             "state": "closed",
             "state_reason": "completed",
+            "updated_at": "2026-09-30T23:58:00Z",
             "user": {"id": _BOT, "login": "example-bot[bot]"},
             "body": "<!-- github-plan:managed-provenance -->\n" + _wait(),
             "labels": [{"name": _LABELS[key]} for key in ("plan", "active")] + [{"name": "bug"}],
@@ -84,7 +87,7 @@ class PlanningProvider:
         self.blockers: list[dict[str, Any]] = []
         self.children: list[dict[str, Any]] = []
         self.writes: list[tuple[str, object]] = []
-        self.fail_labels = False
+        self.fail_project_read = False
         self.config: dict[str, Any] = {}
         self.project_status = "active"
         self.drop_project_write = False
@@ -100,7 +103,6 @@ class PlanningProvider:
         self.base_branch = "main"
         self.default_branch: Any = "main"
         self.merged_at: Any = "2026-09-30T23:59:00Z"
-        self.drop_label_write = False
         self.issue_reads: list[str] = []
 
     def request(self, *, path: str, method: str = "GET", body: Any = None, **_kwargs: Any) -> Any:
@@ -108,6 +110,10 @@ class PlanningProvider:
             self.issue_reads.append(path)
         if path == "/graphql":
             query = body["query"]
+            if self.fail_project_read and "projectV2(number:" in query:
+                raise click.ClickException("temporary project read failure") from URLError(
+                    "offline"
+                )
             if "closingIssuesReferences" in query:
                 return {
                     "data": {
@@ -137,6 +143,7 @@ class PlanningProvider:
                 self.writes.append(("project", body))
                 if not self.drop_project_write:
                     self.project_status = "done"
+                    self.issue["updated_at"] = self.merged_at
                 return {
                     "data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "item7"}}}
                 }
@@ -198,34 +205,13 @@ class PlanningProvider:
             return copy.deepcopy(self.blockers)
         if "/sub_issues?" in path:
             return copy.deepcopy(self.children)
-        if "/dependencies/blocking?" in path:
-            return []
-        if path.endswith("/parent"):
-            raise click.ClickException("not found") from HTTPError(
-                path, 404, "Not Found", Message(), None
-            )
         if method == "GET" and path == f"/repos/{_REPO}":
             return {"default_branch": self.default_branch}
         if method == "GET" and path == f"/repos/{_REPO}/issues/{self.issue['number']}":
             return copy.deepcopy(self.issue)
         if method == "GET":
             raise AssertionError(f"Unexpected provider read: {path}")
-        self.writes.append((method, path))
-        if self.fail_labels:
-            error = click.ClickException("temporary provider failure")
-            error.__cause__ = URLError("offline")
-            raise error
-        if not self.drop_label_write:
-            if method == "POST":
-                self.issue["labels"].extend({"name": name} for name in body["labels"])
-            elif method == "DELETE":
-                from urllib.parse import unquote
-
-                name = unquote(path.rsplit("/", 1)[-1])
-                self.issue["labels"] = [
-                    label for label in self.issue["labels"] if label["name"] != name
-                ]
-        return None
+        raise AssertionError(f"Unexpected provider write: {path}")
 
 
 class PlanningCompletionTests(TestCase):
@@ -270,16 +256,15 @@ class PlanningCompletionTests(TestCase):
             planning_author_ids=planning_author_ids,
         )
 
-    def test_native_completion_cleans_labels_and_persists_readback_without_driver(self) -> None:
+    def test_native_completion_preserves_labels_and_persists_readback_without_driver(self) -> None:
+        self.provider.issue["labels"] = []
         before = copy.deepcopy(self.provider.issue)
         record = self.record()
         self.assertEqual(record.delivery_status, "delivered")
-        self.assertEqual(
-            {label["name"] for label in self.provider.issue["labels"]},
-            {_LABELS["plan"], _LABELS["done"], "bug"},
-        )
         self.assertEqual(self.provider.issue["state"], before["state"])
-        self.assertEqual(self.provider.issue["body"], before["body"])
+        self.assertEqual(self.provider.issue, before)
+        self.assertFalse(self.provider.writes)
+        self.assertEqual(_receipt(record)["issues"][0]["derived_status"], "done")
         self.assertTrue(_receipt(record)["ok"])
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(Path(directory))
@@ -367,10 +352,6 @@ class PlanningCompletionTests(TestCase):
             self.assertEqual((delivered, failed), (1, 0))
             record = store.list_merge_train_pr_feedback_records(repository=_REPO)[0]
             self.assertTrue(_receipt(record)["ok"])
-            self.assertEqual(
-                {label["name"] for label in self.provider.issue["labels"]},
-                {_LABELS["plan"], _LABELS["done"], "bug"},
-            )
 
     def test_direct_controller_landing_queues_cleanup_for_idle_worker_without_caller_return(
         self,
@@ -435,6 +416,7 @@ class PlanningCompletionTests(TestCase):
             ):
                 for _ in range(2):
                     controller._finish_landed_merge_train_batch(
+                        candidate_store=store,
                         request=controller.MergeTrainControllerRunOnceEnvelope(
                             repository=_REPO, mutate=True
                         ),
@@ -471,74 +453,6 @@ class PlanningCompletionTests(TestCase):
             self.assertEqual((delivered, failed), (1, 0))
             saved = store.list_merge_train_pr_feedback_records(repository=_REPO)
             self.assertTrue(_receipt(saved[0])["ok"])
-            self.assertNotIn(
-                _LABELS["active"], {label["name"] for label in self.provider.issue["labels"]}
-            )
-
-    def test_landing_recomputes_direct_dependent_from_remaining_blockers_and_wait(self) -> None:
-        for remaining, waiting, expected in (
-            (False, False, "active"),
-            (True, False, "blocked"),
-            (False, True, "waiting"),
-        ):
-            with self.subTest(remaining=remaining, waiting=waiting):
-                self.provider = PlanningProvider()
-                dependent = copy.deepcopy(self.provider.issue)
-                dependent.update(
-                    number=8,
-                    node_id="issue8",
-                    state="open",
-                    state_reason=None,
-                    body="<!-- github-plan:managed-provenance -->\n"
-                    + _wait("waiting" if waiting else "clear"),
-                    labels=[{"name": _LABELS[key]} for key in ("plan", "blocked")],
-                )
-                body_before = dependent["body"]
-                blocker = {
-                    "number": 9,
-                    "state": "open",
-                    "repository_url": f"https://api.github.com/repos/{_REPO}",
-                }
-
-                def request(
-                    *, path: str, method: str = "GET", body: Any = None, **kwargs: Any
-                ) -> Any:
-                    from urllib.parse import unquote
-
-                    if "/issues/7/dependencies/blocking?" in path:
-                        return [
-                            {**dependent, "repository_url": f"https://api.github.com/repos/{_REPO}"}
-                        ]
-                    if path.endswith("/parent"):
-                        raise click.ClickException("not found") from HTTPError(
-                            path, 404, "Not Found", Message(), None
-                        )
-                    if "/issues/8" not in path:
-                        return self.provider.request(path=path, method=method, body=body, **kwargs)
-                    if "/comments?" in path or "/sub_issues?" in path:
-                        return []
-                    if "/dependencies/blocked_by?" in path:
-                        return [blocker] if remaining else []
-                    if method == "GET":
-                        return copy.deepcopy(dependent)
-                    if method == "POST":
-                        dependent["labels"].extend({"name": name} for name in body["labels"])
-                    elif method == "DELETE":
-                        name = unquote(path.rsplit("/", 1)[-1])
-                        dependent["labels"] = [
-                            item for item in dependent["labels"] if item["name"] != name
-                        ]
-                    return None
-
-                with patch.object(completion, "github_api_request", side_effect=request):
-                    result = self.record()
-                self.assertEqual(result.delivery_status, "delivered")
-                names = {item["name"] for item in dependent["labels"]}
-                self.assertEqual(
-                    names & set(_LABELS.values()), {_LABELS["plan"], _LABELS[expected]}
-                )
-                self.assertEqual(dependent["body"], body_before)
-                self.assertEqual(dependent["state"], "open")
 
     def test_standalone_landing_persists_completion_before_returning(self) -> None:
         policy = _policy_record(
@@ -649,7 +563,7 @@ class PlanningCompletionTests(TestCase):
                 self.assertFalse(self.provider.writes)
                 self.comment_mock.assert_not_called()
 
-    def test_configured_status_labels_and_all_stale_statuses_are_reconciled(self) -> None:
+    def test_retired_label_configuration_and_assignments_are_ignored(self) -> None:
         self.provider.config = {
             "planning": {
                 "labels": {
@@ -666,18 +580,19 @@ class PlanningCompletionTests(TestCase):
             {"name": name}
             for name in ("work", "work:active", "work:blocked", "work:waiting", "work:stale", "bug")
         ]
+        before = copy.deepcopy(self.provider.issue)
         self.assertEqual(self.record().delivery_status, "delivered")
-        self.assertEqual(
-            {label["name"] for label in self.provider.issue["labels"]}, {"work", "work:done", "bug"}
-        )
+        self.assertEqual(self.provider.issue, before)
+        self.assertFalse(self.provider.writes)
 
     def test_native_completion_refuses_false_success_then_retries_transient_failure(self) -> None:
-        self.provider.fail_labels = True
+        self.provider.config = {"planning": {"projects": {"default_project": 2}}}
+        self.provider.fail_project_read = True
         record = self.record()
         self.assertEqual(record.delivery_status, "failed")
         self.assertTrue(record.retryable)
         self.comment_mock.assert_not_called()
-        self.provider.fail_labels = False
+        self.provider.fail_project_read = False
         retry = deliver_merge_train_pr_feedback_record(
             record=record,
             token="fixture",
@@ -686,14 +601,12 @@ class PlanningCompletionTests(TestCase):
         )
         self.assertEqual(retry.delivery_status, "delivered")
         self.assertTrue(_receipt(retry)["ok"])
-        self.assertNotIn(
-            _LABELS["active"], {label["name"] for label in self.provider.issue["labels"]}
-        )
 
     def test_retry_cannot_reuse_an_author_retired_by_current_policy(self) -> None:
-        self.provider.fail_labels = True
+        self.provider.config = {"planning": {"projects": {"default_project": 2}}}
+        self.provider.fail_project_read = True
         record = self.record()
-        self.provider.fail_labels = False
+        self.provider.fail_project_read = False
         self.provider.writes.clear()
         retry = deliver_merge_train_pr_feedback_record(
             record=record,
@@ -704,7 +617,6 @@ class PlanningCompletionTests(TestCase):
         self.assertEqual(retry.delivery_status, "failed")
         self.assertFalse(retry.retryable)
         self.assertFalse(self.provider.writes)
-        self.assertIn(_LABELS["active"], {label["name"] for label in self.provider.issue["labels"]})
 
     def test_waits_reporters_and_unfinished_native_prerequisites_are_preserved(self) -> None:
         original = copy.deepcopy(self.provider.issue)
@@ -732,10 +644,6 @@ class PlanningCompletionTests(TestCase):
                 self.assertEqual(self.provider.issue["body"], before["body"])
                 self.assertEqual(self.provider.issue["state"], before["state"])
                 if change in {"waiting", "unreviewed"}:
-                    names = {item["name"] for item in self.provider.issue["labels"]}
-                    self.assertIn(_LABELS["done"], names)
-                    self.assertNotIn(_LABELS["active"], names)
-                    self.assertEqual(_LABELS["waiting"] in names, change == "waiting")
                     self.assertFalse(_receipt(record)["ok"])
                     self.assertFalse(_receipt(record)["issues"][0]["verified"])
                 else:
@@ -788,17 +696,9 @@ class PlanningCompletionTests(TestCase):
                 self.comment_mock.reset_mock()
                 with patch.object(completion, "github_api_request", side_effect=request):
                     record = self.record()
-                self.assertEqual(
-                    {label["name"] for label in self.provider.issue["labels"]},
-                    {_LABELS["plan"], _LABELS["done"], "bug"},
-                )
                 self.assertEqual(held.issue["body"], before["body"])
                 self.assertEqual(held.issue["state"], before["state"])
                 if reason in {"waiting", "project"}:
-                    names = {item["name"] for item in held.issue["labels"]}
-                    self.assertIn(_LABELS["done"], names)
-                    self.assertNotIn(_LABELS["active"], names)
-                    self.assertEqual(_LABELS["waiting"] in names, reason == "waiting")
                     self.assertEqual(held.project_status, "active")
                 else:
                     self.assertEqual(held.issue, before)
@@ -820,18 +720,11 @@ class PlanningCompletionTests(TestCase):
                             else "review_related_finish_line"
                             if reason == "project"
                             else "review_reporter_acceptance",
-                            7: "reconciled",
+                            7: "reconciled" if reason == "project" else "unchanged",
                         },
                     )
 
     def test_failed_readback_never_certifies_completion_or_publishes_an_unknown_write(self) -> None:
-        self.provider.drop_label_write = True
-        partial = self.record()
-        self.assertEqual(partial.delivery_status, "failed")
-        self.assertFalse(_receipt(partial)["ok"])
-        self.comment_mock.assert_called_once()
-        self.comment_mock.reset_mock()
-        self.provider.drop_label_write = False
         self.provider.config = {"planning": {"projects": {"default_project": 2}}}
         self.provider.drop_project_write = True
         self.assertEqual(self.record().delivery_status, "failed")
@@ -844,13 +737,14 @@ class PlanningCompletionTests(TestCase):
 
     def test_metadata_permission_denial_stops_other_sources_without_retry(self) -> None:
         self.provider.references = [7, 8]
+        self.provider.config = {"planning": {"projects": {"default_project": 2}}}
         other = PlanningProvider()
         other.issue.update(number=8, node_id="issue8")
         before = copy.deepcopy(other.issue)
         attempts: list[str] = []
 
         def request(*, path: str, method: str = "GET", **kwargs: Any) -> Any:
-            if method != "GET" and path != "/graphql":
+            if "updateProjectV2ItemFieldValue" in (kwargs.get("body") or {}).get("query", ""):
                 attempts.append(path)
                 error = click.ClickException("provider denied metadata write")
                 error.__cause__ = HTTPError(path, 403, "Forbidden", Message(), BytesIO())
@@ -861,7 +755,7 @@ class PlanningCompletionTests(TestCase):
         with patch.object(completion, "github_api_request", side_effect=request):
             record = self.record()
         self.assertEqual(len(attempts), 1)
-        self.assertTrue(attempts[0].startswith(f"/repos/{_REPO}/issues/7/"))
+        self.assertEqual(attempts, ["/graphql"])
         self.assertEqual(other.issue, before)
         self.assertFalse(other.writes)
         self.assertEqual(record.delivery_status, "failed")
@@ -869,7 +763,7 @@ class PlanningCompletionTests(TestCase):
         self.comment_mock.assert_not_called()
 
     def test_nonplans_and_no_closing_references_have_no_metadata_writes(self) -> None:
-        self.provider.issue["labels"] = [{"name": "bug"}]
+        self.provider.issue.update(body="Ordinary outside report", labels=[{"name": "bug"}])
         self.assertEqual(self.record().delivery_status, "delivered")
         self.assertFalse(self.provider.writes)
         self.provider.references = []
@@ -877,7 +771,7 @@ class PlanningCompletionTests(TestCase):
         self.assertFalse(self.provider.writes)
 
     def test_nonplanning_source_needs_no_automation_author_grant(self) -> None:
-        self.provider.issue["labels"] = [{"name": "bug"}]
+        self.provider.issue.update(body="Ordinary outside report", labels=[{"name": "bug"}])
 
         record = self.record(planning_author_ids=())
 
@@ -964,7 +858,6 @@ class PlanningCompletionTests(TestCase):
         )
         self.assertTrue(self.comment_mock.called)
         self.assertFalse(self.provider.writes)
-        self.assertIn(_LABELS["done"], {item["name"] for item in held.issue["labels"]})
         self.assertEqual(held.comments[0]["body"], _wait("waiting"))
 
     def test_graphql_failure_classification_requires_transient_evidence(self) -> None:
@@ -988,7 +881,7 @@ class PlanningCompletionTests(TestCase):
                 self.comment_mock.assert_not_called()
 
     def test_later_global_provider_failure_preserves_verified_source_receipt(self) -> None:
-        for failure in ("read", "project", "write", "malformed"):
+        for failure in ("read", "project", "malformed"):
             with self.subTest(failure=failure), TemporaryDirectory() as directory:
                 self.provider = PlanningProvider()
                 self.provider.references = [7, 8]
@@ -1004,9 +897,7 @@ class PlanningCompletionTests(TestCase):
                     source = path.startswith(f"/repos/{_REPO}/issues/8")
                     if failure == "malformed" and source and "/comments?" in path:
                         return {"incomplete": True}
-                    if (failure == "read" and source and method == "GET") or (
-                        failure == "write" and source and method != "GET"
-                    ):
+                    if failure == "read" and source and method == "GET":
                         error = click.ClickException("temporary provider failure")
                         error.__cause__ = URLError("offline")
                         raise error
@@ -1020,7 +911,6 @@ class PlanningCompletionTests(TestCase):
                 self.assertEqual(result.retryable, failure != "malformed")
                 if failure == "malformed":
                     self.assertTrue(self.comment_mock.called)
-                    self.assertIn(_LABELS["done"], {item["name"] for item in other.issue["labels"]})
                 else:
                     self.comment_mock.assert_not_called()
                 store = FilesystemRecordStore(Path(directory))
@@ -1030,7 +920,7 @@ class PlanningCompletionTests(TestCase):
                 self.assertEqual(
                     {item["number"]: item["status"] for item in _receipt(saved)["issues"]},
                     {
-                        7: "reconciled",
+                        7: "reconciled" if failure == "project" else "unchanged",
                         8: "review_wait_record"
                         if failure == "malformed"
                         else "reconciliation_failed",

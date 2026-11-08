@@ -497,6 +497,24 @@ delay without charging another deployment attempt. Missing, ended, foreign or un
 held. A failing candidate health probe can be switched back after retained-slot
 private readiness; positive foreign identity still refuses rollback.
 
+The cutover transport compresses command envelopes within its existing wire
+bound. Decoded commands and output share a bounded buffer; incomplete or trailing
+compressed input refuses before execution. Native argv, stdin and sealed
+maintenance payloads retain their original bytes and authority.
+
+Failed commands report only an allowlisted category and numeric exit code;
+timeouts and missing transport completion never prove that effects ended.
+Private health distinguishes connection failures, HTTP protocol/status and body
+limits, invalid health data and foreign runtime identity. When its existing retry deadline expires,
+readiness reports its start time, elapsed time, attempt count and configured
+budget, followed by a bounded read of the candidate web container's
+running, OOM and exit state, including Docker's last-start timestamp. That
+timestamp may precede the readiness check and does not prove health or run-marker
+publication. Unavailable state stays unknown. Commands, stdin,
+response bodies, provider errors and container logs are excluded. These
+diagnostics do not change the original operation's reconciliation hold,
+readiness deadline, writer fences or recovery authority.
+
 The installed qualification uses isolated representative Odoo 20 data and the
 shipped web/scheduler commands. It must prove real scheduled ticks without HTTP,
 physical drain, coherent capture/restore, browser readiness, persisted prepared
@@ -598,6 +616,12 @@ If `aborted` was saved before the terminal worker write, the same path verifies
 the old route and finishes the failure audit without creating another rollback.
 Expired-lease recovery reads the complete checkpoint history and production-write
 evidence, including death before the first dispatch of a reclaimed lease.
+An interrupted compatible inverse remains claimable before its pause is first
+saved, during fencing, and after writer resumption. Its prepared snapshot and
+any persisted pause must still belong to the original plan. Reclaiming does not
+prove drain or permit startup: those effect gates continue to require their
+complete native evidence. Inverse reconciliation retains the original operation,
+attempt and checkpoints after the forward attempt budget is exhausted.
 
 Before aborting an absent capture, the host atomically seals its native claim as
 cancelled, preventing delayed original dispatch from capturing later. Archive

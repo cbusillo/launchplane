@@ -6,13 +6,73 @@ title: Preview Memory Admission
 
 ## Idle previews
 
-The Odoo idle scheduler uses the preview gateway's last visit and active-request
-count to sleep healthy previews after 15 quiet minutes. The gateway remains
-running and a visit requests a wake. A directory-only `DATA_WORKFLOW_SSH_DIR`
-setting does not establish a source connection. Both binding and native runtime
-inspection use the same source-connection predicate; upstream settings and other
+Service-issued Odoo previews without upstream connections put their public route
+on a small router from the same immutable image. It receives the preview generation
+identity, with no application environment file, data mount or source credential.
+The existing network layout stays the same. A private Unix socket lets Launchplane
+read activity and coordinate sleep through its existing provider transport.
+There is no public control endpoint or outbound wake callback.
+
+A directory-only `DATA_WORKFLOW_SSH_DIR` setting does not establish a source
+connection. Both binding and native runtime inspection use the same
+source-connection predicate; upstream settings and other
 SSH settings still refuse sleep. Native inspection continues to require exclusive
 volumes, private application resources and no credential bind mounts.
+
+The gateway keeps ordinary HTTP and Odoo websocket traffic on separate
+listeners. The preview's host-scoped `/websocket` route uses Odoo's evented
+listener when workers are enabled and the HTTP listener in threaded mode.
+Both paths share the same activity and sleep accounting, so an open websocket
+prevents idle sleep. Neither listener publishes a host port. Initial previews
+that still need a source connection route websockets directly to their web service using the same
+worker-mode selection; they retain their existing refusal of idle sleep.
+
+After fifteen minutes without traffic and with no open connections or active
+runner execution, Launchplane freezes forwarding and stops web, the runner and
+PostgreSQL. It retains their containers, database, attachments and overlay source.
+A visitor sees a page that checks again while Launchplane starts the preview.
+A waiting non-GET request is forwarded once after wake, or receives a temporary
+failure if startup exceeds its bounded wait. The router never replays it.
+
+Sleep and wake use the existing preview executor and product locks plus the
+host project lock. They are best-effort, idempotent operations without durable
+provider reservations or retained intents. Each pass observes the current ready
+generation, gateway receipt and service state. A partial stop finishes on a later
+pass, after any failure backoff, before admitting a requested wake. This lets
+the next wake measure headroom after the stop completes. An admitted partial
+wake uses the gateway's persisted receipt as its idempotency key while a recent
+visitor is asking. When visits stop for the idle interval, an unfinished wake
+returns to sleep. A router or scheduler restart needs only another observation;
+a lost successful completion response preserves the running services.
+A failed stop/start backs off that preview for five minutes in memory, allowing
+other previews and ordinary refresh/destroy operations to proceed; no retry
+intent or budget is stored. Busy host locks and failed observations retry on the
+next pass. Manual stops, staff testing holds, changed generations, other
+provider reservations and unavailable custody still block idle effects.
+
+Wakes serialize on the host and check the configured memory headroom threshold
+and disk reserve before starting stopped services. PostgreSQL starts first,
+followed by runner and web. A wake keeps the existing executor and host startup
+locks for one attempt, with one shared five-minute health deadline. Docker
+reporting a stopped, restarting or unhealthy service fails the attempt at once.
+The gateway opens only after all services pass health and the exact runtime
+identity agrees. Insufficient capacity leaves the preview asleep; a later pass
+checks capacity again. The gateway's wake receipt identifies recovery; any
+attempt that still needs to start stopped services checks current memory and
+disk again. If admission refuses a partial wake, its running services stop so
+it releases their memory before the next pass. It does not reserve capacity
+across an interruption. A preview that
+never becomes healthy can be refreshed or destroyed through the ordinary
+preview path. Data-preserving refreshes also credit their own running services
+after matching the current target's identity; cold starts still meet the memory
+floor.
+
+Gateway receipt IDs keep the existing wire format for routers already deployed;
+they are opaque correlation IDs and no longer refer to database reservations.
+Refresh and destroy use their own ordinary recovery paths and have no idle
+supersession special case.
+Quiet polling does not take the preview executor lock or perform a host-wide
+storage inspection. Full qualification runs under exclusion before effects.
 
 Product Ops shows each provider-observed preview's last sleep observation from
 the existing inventory collector: awake, asleep, cannot sleep with a reason,
@@ -39,10 +99,7 @@ or retirement. Closed changes use the existing guarded lifecycle retirement.
 
 The coverage invariant is that every provider-observed preview has an explicit
 sleep observation or an explanation of missing coverage. Serving-generation
-health alone never proves idle coverage. The former scheduler silently skipped
-ineligible bindings and enumerated only successful preview records, while the
-inventory collector measured presence without reporting sleep capability.
-This extends that collector rather than adding a monitor. Observation failure
+health alone never proves idle coverage. Observation failure
 does not block a deployment or trigger cleanup. Existing source-connection,
 custody, ownership, memory-floor and runtime-inspection refusals continue to
 block sleep or wake; rebuilds keep their normal deployment and health gates.
@@ -100,17 +157,10 @@ details. An unused idempotency key remains retryable. Event-driven reconciliatio
 records the same code and numeric details without exposing provider text. Its
 next attempt can retry the same verified build after headroom recovers.
 
-The initial CT106 activation should record **5 GiB (5368709120 bytes)** against
-its actual provider server ID, derived from
-[incident accounting PR #629](https://github.com/cbusillo/shiny-infra-ops/pull/629):
-19 GiB total cgroup current under the existing 24 GiB cap leaves 5 GiB.
-[Director decision Q654](https://github.com/cbusillo/shiny-infra-ops/issues/628#issuecomment-6342021925)
-approves this preview-start floor. Activation is a separate service-record
-mutation; this source change performs none. The observation is a point-in-time
-admission check, not a memory reservation or a measured preview peak, and does
-not establish a safe concurrency count for heavy rehearsals.
+The observation is a point-in-time admission check, not a memory reservation or
+a measured preview peak, and does not establish a safe concurrency count for
+heavy rehearsals.
 
 The chosen budget counts total cgroup usage, including inactive file cache.
 It does not assume that cache can be reclaimed. Cache-dominated usage can
-therefore defer new previews conservatively; live qualification must distinguish
-that availability tradeoff from the incident's mostly shared-memory pressure.
+therefore defer new previews conservatively.

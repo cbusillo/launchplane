@@ -1526,7 +1526,6 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(first_result.status, "written")
         self.assertEqual(replay_result.status, "replayed")
         self.assertEqual(records, (record,))
-        self.assertIsNotNone(stored_idempotency)
         assert stored_idempotency is not None
         self.assertEqual(stored_idempotency.state, "completed")
         self.assertEqual(stored_idempotency.response_payload, mutation.response_payload)
@@ -2322,7 +2321,6 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 )
             store.close()
 
-        self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.schema_version, 1)
         self.assertEqual(loaded.state, "completed")
@@ -3107,7 +3105,6 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 idempotency_key=record.idempotency_key,
             )
 
-            self.assertIsNotNone(loaded)
             assert loaded is not None
             self.assertEqual(loaded.request_fingerprint, "fingerprint-123")
             self.assertEqual(loaded.response_payload["records"]["preview_id"], "preview-35")
@@ -3205,7 +3202,6 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
         self.assertEqual(first.delivery_id, delivery.delivery_id)
         self.assertEqual(duplicate.delivery_id, delivery.delivery_id)
-        self.assertIsNotNone(loaded_idempotency)
         assert loaded_idempotency is not None
         self.assertEqual(
             loaded_idempotency.response_payload["records"]["outbox_delivery_id"],
@@ -3367,7 +3363,6 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
         self.assertEqual(first.status, "acquired")
         self.assertEqual(found.status, "found")
-        self.assertIsNotNone(found.record)
         assert found.record is not None
         self.assertEqual(found.record.scope, "github-actions:attempt-1")
         self.assertEqual(found.observed_at, "2026-08-16T16:00:00Z")
@@ -4061,7 +4056,6 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.close()
 
         self.assertEqual(marked.status, "updated")
-        self.assertIsNotNone(marked.record)
         assert marked.record is not None
         self.assertEqual(marked.record.state, "reconcile_required")
         self.assertEqual(marked.record.reconciliation_key, "provider-operation-unknown")
@@ -4220,7 +4214,6 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.delete_session(session.session_id)
             deleted = store.read_session(session.session_id)
 
-        self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.identity.login, "alice")
         self.assertEqual(loaded.identity.role, "admin")
@@ -4249,7 +4242,6 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
         self.assertTrue(rotated)
         self.assertFalse(replayed)
-        self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.csrf_generation, 1)
 
@@ -4811,7 +4803,6 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
         self.assertEqual(write_result.status, "written")
         self.assertEqual(conflict_result.status, "stale")
-        self.assertIsNotNone(conflict_result.current_record)
         assert conflict_result.current_record is not None
         self.assertEqual(conflict_result.current_record.record_id, replacement_record.record_id)
         self.assertEqual(
@@ -5649,7 +5640,6 @@ private_key_context = "example_context"
         self.assertEqual(replay_result.status, "replayed")
         self.assertIsNotNone(replay_result.idempotency_record)
         self.assertEqual(conflict_result.status, "idempotency_conflict")
-        self.assertIsNotNone(stored_idempotency)
         assert stored_idempotency is not None
         self.assertEqual(stored_idempotency.state, "completed")
         self.assertEqual(stored_idempotency.response_trace_id, mutation.response_trace_id)
@@ -5698,7 +5688,6 @@ private_key_context = "example_context"
 
         self.assertEqual(acquired.status, "acquired")
         self.assertEqual(result.status, "written")
-        self.assertIsNotNone(stored_record)
         assert stored_record is not None
         self.assertEqual(stored_record.state, "completed")
         self.assertEqual(stored_record.attempt, 2)
@@ -6124,6 +6113,46 @@ private_key_context = "example_context"
                 context_name="verireel-testing",
                 limit=1,
             )
+            feedback = listed_records[0]
+            filesystem = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "files")
+            filesystem.write_preview_pr_feedback_record(feedback)
+            self.assertEqual(
+                filesystem.read_preview_pr_feedback_record(feedback.feedback_id), feedback
+            )
+            self.assertEqual(store.read_preview_pr_feedback_record(feedback.feedback_id), feedback)
+            for record_store in (store, filesystem):
+                other_pr = feedback.model_copy(
+                    update={
+                        "feedback_id": "other-preview-pr",
+                        "anchor_pr_number": 124,
+                        "requested_at": "2026-04-20T11:00:00Z",
+                    }
+                )
+                other_context = feedback.model_copy(
+                    update={
+                        "feedback_id": "other-preview-context",
+                        "context": "another-context",
+                        "requested_at": "2026-04-20T12:00:00Z",
+                    }
+                )
+                record_store.write_preview_pr_feedback_record(other_pr)
+                record_store.write_preview_pr_feedback_record(other_context)
+                self.assertEqual(
+                    record_store.list_preview_pr_feedback_records(
+                        context_name=feedback.context,
+                        anchor_pr_number=feedback.anchor_pr_number,
+                        limit=1,
+                    ),
+                    (feedback,),
+                )
+                self.assertEqual(
+                    record_store.list_preview_pr_feedback_records(
+                        context_name=feedback.context,
+                        anchor_pr_number=other_pr.anchor_pr_number,
+                        limit=1,
+                    ),
+                    (other_pr,),
+                )
             store.close()
 
         self.assertEqual(len(listed_records), 1)
@@ -6911,7 +6940,6 @@ private_key_context = "example_context"
                 instance_name="testing",
             )
             listed_events = store.list_secret_audit_events(secret_id=newer_record.secret_id)
-            self.assertIsNotNone(found_record)
             assert found_record is not None
             self.assertEqual(found_record.secret_id, newer_record.secret_id)
             self.assertEqual(

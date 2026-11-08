@@ -397,10 +397,9 @@ When creating a new website repo for Launchplane:
 - Publish immutable container images or artifacts from
   `.github/workflows/build.yml`, with the build manifest described in
   [artifact-provenance.md](artifact-provenance.md).
-- Use the [existing admin onboarding operation](operations.md#conventional-generic-web-onboarding) to create the required product
-  profile and target records. This remains compatibility work until a deployed
-  service operation replaces every required mode; do not put its inputs or
-  authorization policy in the product repository.
+- Use [native target allocation and record apply](operations.md#native-target-allocation)
+  to create the required product profile and target records without preview
+  caller grants. Keep its inputs in admin-owned state outside the product repository.
 - Use `generic-web` directly when the product is a stateless or mostly
   stateless web app with standard preview/deploy behavior.
 - Use the Dokploy service deployment contract when the product is a simple bot

@@ -78,6 +78,99 @@ uses `repository_evidence_stale`. Both are pre-effect denials: the controller
 returns a normal block and releases its lease without requiring reconciliation.
 The denial exposes a bounded message, not raw provider details or file paths.
 
+## Merge Readiness
+
+Merge readiness is an ephemeral read of the evidence for one exact merge attempt.
+It authorizes no effect. The live adapter uses the same evaluation for guarded
+landing and the [governance projection](#governance-projection).
+
+Current readiness checks the required technical checks at the exact candidate
+SHA, advisory engineering-review observations, current policy fingerprints,
+candidate and rolling-base provenance, and the controller lease plus expected
+effect SHA. Technical checks use the
+[shared required-check evaluation](merge-train-policy.md#candidate-validation):
+a missing named check is pending, while unavailable policy or evidence cannot
+qualify a pass. Other missing authoritative evidence stays unknown;
+contradictory evidence blocks the attempt. Each landing re-reads these inputs.
+
+A single-entry candidate can reuse current passing PR-head checks when the
+head, tree, base and candidate identities match its stored reuse binding.
+Both exact candidates and structurally proven collapsed-stack roots qualify;
+recorded rolling provenance does not discard that binding. Unproven stack
+composition, changed identities and lost check evidence still refuse landing.
+
+The six current policy dimensions are `technical_checks`, `engineering_review`,
+`ruleset`, `merge_train`, `authorization`, and `admission_algorithm`. Advisory
+engineering-review evidence and its policy fingerprint remain visible without
+blocking. Stored required-review snapshots keep their historical aggregation
+and digests; current evaluations always use advisory review. Reserved Launchplane
+advisory check projections never count as required technical-check authority.
+
+States aggregate deterministically: unknown, candidate identity, policy,
+technical checks, then ready. Every active facet keeps its
+reason codes. Legacy Client facets and Client-blocked states remain readable
+only in old snapshots and never trigger a fresh Client evaluation.
+Policy, evidence, and state collections are canonicalized; observation timestamps
+and advisory GitHub observations do not change the readiness digest.
+
+The candidate must match the current repository, base, queue position, PR head and
+tree, and expected effect. A recorded rolling base is accepted only with complete
+prior landing evidence. The controller must still own its unexpired lease and the
+observed effect must equal the admitted SHA. None of these checks can be replaced
+by a Client decision or a GitHub approval.
+
+## Structural Provenance
+
+Launchplane records structural candidate provenance for each merge-train batch.
+The record binds the repository and base branch, base commit and tree, policy
+identity, ordered PR positions, exact PR head commits and trees, every rolling
+parent/head/result commit and tree, the terminal candidate
+identity, and an optional proven stack-collapse root.
+
+The provenance and candidate fingerprints are canonical SHA-256 digests. A
+landing-plan fingerprint separately binds the active plan while excluding
+mutable landing progress. These digests are evidence identifiers, not merge or
+release authority.
+
+`evaluate_merge_train_structural_candidate` is pure and read-only. It produces
+the `exact | recorded_rolling | mismatch | unknown` status consumed by merge
+readiness:
+
+- `exact` requires the active candidate and landing plan, unchanged policy and
+  queue, exact head/tree evidence, and the original recorded base.
+- `recorded_rolling` additionally requires every prior plan entry to be durably
+  recorded as landed at its exact head/tree, with an unbroken actual rolling
+  base and result-tree chain. A proven stack-collapse root is also recorded
+  rolling composition, including at position one.
+- `mismatch` means available evidence contradicts the live candidate, queue,
+  plan, policy, base, head/tree, stack, or rolling chain.
+- `unknown` means required evidence is absent or legacy records predate this
+  additive contract. Old records remain readable but never default to exact.
+  Legacy delta fingerprints, affected subjects and combined Client bindings
+  stay readable and unused.
+
+Strict technical checks still read current required-check policy and results
+for the exact final candidate against the observed base. A proven
+`recorded_rolling` result satisfies base freshness when GitHub's actual landing
+commit differs from the synthetic candidate commit despite identical trees.
+Every prior merge must have the recorded head and result tree, and the actual
+base must match that chain. The original technical observation and its digest
+remain unchanged; readiness combines it with structural proof. Missing
+evidence, tree drift, or failed required checks continue to refuse landing.
+
+Landing observes and stores the actual rolling-base SHA/tree, landed-head
+SHA/tree, and merge-result SHA/tree on normal, retry, and already-merged crash
+recovery paths. Candidate no-op entries land as `skipped`, preserve the rolling
+parent as their result, and remain usable when later queue positions are
+evaluated. Absent legacy landing identities remain `unknown`, not contradiction.
+
+Ordinary jobs additionally bind a skipped entry to the persisted candidate
+effect's exact containment proof and a joined no-op finalization. A candidate
+record alone does not authorize skipping. The finalization preserves the actual
+rolling base, records fresh admission and a truthful zero-effect outcome, and
+advances progress atomically. Later successors may carry that proven skipped
+entry without treating it as a provider merge.
+
 ## Outcome Boundary
 
 Outcomes use only three public states:
@@ -91,8 +184,12 @@ Outcomes use only three public states:
 
 An admission without an outcome is effect-unknown. A `reconcile_required`
 outcome is also effect-unknown. Neither state permits another provider attempt.
-Reconciliation observes GitHub first and appends a successor outcome; it never
-rewrites history or repeats an ambiguous mutation.
+Do not rerun the merge by hand or infer success from checks, candidate status,
+landing-plan progress, or a sent GitHub request; run the controller again so it
+observes GitHub and appends a successor outcome. Reconciliation never rewrites
+history or repeats an ambiguous mutation; terminal `landed` and `rejected`
+outcomes cannot be superseded. Contradictory or incomplete evidence stays
+`reconcile_required` for admin investigation.
 
 A GitHub merge-endpoint HTTP 405 remains a conclusive rejected outcome. The
 adapter makes one read of the same PR to diagnose the refusal from its
@@ -103,6 +200,15 @@ attempt's trace, PR number, provider status, and that state as
 unresolved conversation or a missing review (`merge_blocked`). A failed,
 malformed, closed, or changed-head read leaves the diagnosis unconfirmed and
 asks the admin to reread merge requirements. Raw provider response bodies are not copied into this diagnosis.
+For a blocked head, the adapter also reads the active branch's required
+code-scanning tools and the exact head's native `github-advanced-security`
+results through the existing rule and check readers. If a required tool is
+absent after all observed checks have been complete for the configured grace, the
+refusal diagnosis is `required_code_scanning_missing`. That grace allows GitHub
+to process a just-uploaded result. Running checks, missing completion times,
+unreadable evidence and changed heads do not prove an absent scan; a similarly
+named check from another app cannot supply the native result. This recovery
+neither requests scans nor changes GitHub's rules or findings thresholds.
 The refusal returns HTTP 409 `github_merge_rejected`, not an upstream-outage
 retry instruction; no second merge is attempted by the diagnostic read.
 Before each subsequent merge, the existing PR read also blocks an observed
@@ -178,7 +284,9 @@ computing or persisting fresh merge admission; GitHub's merge endpoint has not
 yet been called. `merge_pull_request` is checkpointed only after an immutable
 admission exists and immediately before the guarded GitHub merge request. An
 admin must not infer that GitHub rejected a merge from a 409 recorded under
-the admission phase.
+the admission phase: an HTTP 409 alone does not distinguish controller fencing,
+admission refusal, admission reconciliation, or a GitHub state conflict. Keep
+the response JSON and trace ID from a failed call.
 
 On restart, an already-merged exact PR is reconciled against its preceding
 admission and receives a truthful `landed` outcome only after Launchplane reads
@@ -188,6 +296,38 @@ and the expected base did not advance, Launchplane appends conclusive no-effect
 evidence and may create a fresh admission only after complete L2 recomputation.
 Candidate-ref cleanup happens after landing evidence, so cleanup failure cannot
 erase or downgrade a truthful outcome.
+
+## Governance Projection
+
+`GET /v1/governance/projection` reads current machine readiness, immutable merge
+admission, landing outcomes, and advisory observations for a repository/PR/base
+branch. It adds no record stream. When live repository evidence is available,
+the requested base must match the pull request. Repository policy or
+merge-train policy-target read authority controls access.
+
+The response authorizes no effect. `merge_readiness` is ephemeral and recomputed
+with the same live evaluator used for landing. `merge_admission` describes the
+latest recorded exact attempt, without granting current effect authority.
+`landing_outcome` independently records landed, rejected, reconciliation-required,
+or not-observed state. Admission and outcome targets are classified as current or
+historical against the live head/tree, or unknown when that evidence is unavailable.
+GitHub observations are advisory only. `owner_judgment` is nullable for schema
+compatibility and current responses return null.
+
+When no active landing lineage exists, readiness is `not_active`; missing current
+provider, candidate or controller evidence is `unavailable`. Authorized reads
+retain stored admission and outcome records for the requested repository, base
+branch and PR. When the repository provider fails, `target` is null and
+`requested_target` identifies only the lookup scope; missing stored records stay
+absent. The endpoint uses the repository policy's configured GitHub token source
+and performs no writes. Repository policy and read authorization must be
+established before history lookup; missing policy still returns an unavailable
+response rather than bypassing that check.
+
+`/ui/engineering/governance-projection` shows four separate regions: current
+readiness, recorded admission, landing outcome, and GitHub observations. It keeps
+technical-check reasons, cached evidence, unavailable state and access refusal
+visible on desktop and narrow viewports. It has no mutation controls.
 
 ## Persistence
 
@@ -206,7 +346,7 @@ lineage, lease acquisition, PR, queue position, sequence, and expected effect;
 attempt and admission bindings are unique. Landing observations are unique and
 ordered authoritatively by admission plus observation sequence, with timestamps
 retained only as metadata. Exact replay is idempotent; conflicting replay fails
-closed.
+closed. Historical landing plans are not backfilled into admissions.
 
 New landing outcomes capture `observed_at` after the provider result or exact
 reconciliation has been processed, using a clock separate from the controller

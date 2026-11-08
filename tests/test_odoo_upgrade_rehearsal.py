@@ -900,11 +900,19 @@ class RehearsalScenario(unittest.TestCase):
             )
         return adapter
 
-    def test_new_record_and_source_inputs_leave_canonical_lane_authority_unchanged(self) -> None:
+    def test_source_inputs_ignore_target_settings_and_keep_canonical_authority(self) -> None:
+        prod = next(lane for lane in self.profile.lanes if lane.instance == "prod")
+        target = self.store.read_dokploy_target_record(
+            context_name=prod.context, instance_name="prod"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"env": {**target.env, "ODOO_WORKERS": "99"}})
+        )
         before = self.authority()
-        planned, _, _ = rehearsal_inputs(
+        planned, _, shape = rehearsal_inputs(
             self.root, self.store, self.product, self.request, self.principal
         )
+        self.assertEqual(shape, self.shape)
         self.assertEqual(planned, self.record)
         self.assertEqual(self.authority(), before)
         spec = rehearsal_host_spec(
@@ -2622,6 +2630,91 @@ class RehearsalScenario(unittest.TestCase):
 
 
 class RehearsalHostSafetyTests(unittest.TestCase):
+    def test_artifact_capabilities_are_checked_before_copy_effects(self) -> None:
+        import io
+        import sys
+        from contextlib import redirect_stdout
+        from types import ModuleType, SimpleNamespace
+
+        artifact = ModuleType("run_odoo_data_workflows")
+        settings = SimpleNamespace(model_fields={"copy_purpose": object()})
+        runner = SimpleNamespace(verify_isolated_copy_before_registry=Mock())
+        setattr(artifact, "LocalServerSettings", settings)
+        setattr(artifact, "OdooDataWorkflowRunner", runner)
+        unavailable = False
+
+        def docker(*arguments: str) -> bytes:
+            if unavailable:
+                raise RuntimeError("Artifact runtime is unavailable")
+            output = io.StringIO()
+            with (
+                patch.dict(sys.modules, {artifact.__name__: artifact}),
+                patch.object(sys, "path", list(sys.path)),
+                redirect_stdout(output),
+            ):
+                exec(compile(arguments[-1], "<artifact-capabilities>", "exec"), {})
+            return output.getvalue().encode()
+
+        spec, root, containers = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        self.host["docker"] = docker
+        self.assertTrue(self.host["migration_copy_supported"](containers))
+        self.host["current"] = Mock(return_value=(self.fixture.database, "fixture-image"))
+        self.host["prepared_rebuild_runtime"] = Mock(return_value=containers)
+        self.host["inspection"] = Mock(return_value=containers)
+        self.host["validate_snapshots"] = Mock()
+        self.host["preserved_rehearsal_abandonment"] = Mock(return_value=True)
+        self.host["capture"] = Mock(side_effect=AssertionError("No source capture"))
+        self.host["restore_preserved_snapshot"] = Mock(side_effect=AssertionError("No restoration"))
+        self.host["copy_runner"] = Mock(side_effect=AssertionError("No copy execution"))
+        for action, state in (
+            ("execute", "prepared"),
+            ("simulate-final", "upgraded"),
+            ("rebuild-final", "retired"),
+        ):
+            for missing in ("purpose", "readback", "unavailable"):
+                with self.subTest(action=action, missing=missing):
+                    unavailable = missing == "unavailable"
+                    settings.model_fields = (
+                        {} if missing == "purpose" else {"copy_purpose": object()}
+                    )
+                    runner.verify_isolated_copy_before_registry = (
+                        None if missing == "readback" else Mock()
+                    )
+                    spec["action"] = action
+                    spec["record"]["state"] = state
+                    spec["attempt_sha256"] = hashlib.sha256((action + missing).encode()).hexdigest()
+                    result = self.run_host(spec)
+                    self.assertFalse(result["completed"])
+                    if unavailable:
+                        from control_plane.contracts.odoo_upgrade_rehearsal import (
+                            REHEARSAL_PUBLIC_FAILURE_MESSAGES,
+                        )
+
+                        self.assertIn(result["refusal_code"], REHEARSAL_PUBLIC_FAILURE_MESSAGES)
+                        self.assertNotEqual(
+                            result["refusal_code"], RehearsalPrerequisite.ARTIFACT_UNAVAILABLE
+                        )
+                    else:
+                        self.assertEqual(
+                            result["refusal_code"], RehearsalPrerequisite.ARTIFACT_UNAVAILABLE
+                        )
+                    self.assertEqual(result["copies"], spec["record"]["copies"])
+                    self.assertFalse((root / "raw-source").exists())
+                    marker = (
+                        self.host["rehearsal_effect_marker"](action, spec["attempt_sha256"])
+                        if action == "rebuild-final"
+                        else action + ".started"
+                    )
+                    self.assertFalse((root / marker).exists())
+                    spec["mode"] = "observe"
+                    self.assertEqual(self.run_host(spec), result)
+                    spec["mode"] = "apply"
+        self.host["capture"].assert_not_called()
+        self.host["restore_preserved_snapshot"].assert_not_called()
+        self.host["copy_runner"].assert_not_called()
+
     def test_copy_runner_delegates_logging_and_failures_to_its_artifact(self) -> None:
         import ast
         import subprocess

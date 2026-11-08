@@ -13,6 +13,9 @@ from __future__ import annotations
 from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
 from control_plane.timestamps import utc_now_timestamp as _utc_now
+from control_plane.contracts.product_reconcile import preview_failure_observed_at
+from control_plane.http_error_evidence import log_handled_error_cause
+from control_plane.merge_train_provider_failure import provider_failure
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
 from control_plane.drivers.generic_web_dispatch import GenericWebDeployEnvelope
@@ -96,6 +99,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.idempotency_record import (
+    build_launchplane_mutation_reservation_id,
     LaunchplaneIdempotencyRecord,
     parse_launchplane_mutation_timestamp,
 )
@@ -421,7 +425,7 @@ def resolve_build_provenance_transport(
         raise ProductReconcileError(
             f"No build-provenance token: minting failed ({type(error).__name__}: {error})."
         ) from error
-    return GitHubBuildProvenanceTransport(token=token.token)
+    return GitHubBuildProvenanceTransport(token=token)
 
 
 def resolve_pull_request_feedback_token(
@@ -1702,20 +1706,23 @@ def _plan_testing_target(
     )
     current_commit = ""
     current_run_id = 0
-    if current_artifact_id:
+    current_manifest = None
+    if current_artifact_id and profile.driver_id == "odoo":
         try:
             current_manifest = record_store.read_artifact_manifest(current_artifact_id)
             current_commit = current_manifest.source_commit
             if current_manifest.source_build is not None:
                 current_run_id = current_manifest.source_build.run_id
         except FileNotFoundError:
-            try:
-                inventory = record_store.read_environment_inventory(
-                    context_name=lane.context, instance_name="testing"
-                )
-                current_commit = inventory.source_git_ref
-            except FileNotFoundError:
-                pass
+            pass
+    if current_artifact_id and current_manifest is None:
+        try:
+            inventory = record_store.read_environment_inventory(
+                context_name=lane.context, instance_name="testing"
+            )
+            current_commit = inventory.source_git_ref
+        except FileNotFoundError:
+            pass
     selection: dict[str, object] = {}
     desired, rejected, absent_reason = _desired_release(
         transport=transport,
@@ -1797,6 +1804,8 @@ def _plan_testing_target(
                 ),
             )
         except LaneMovementRefused as error:
+            if isinstance(error.__cause__, BuildProvenanceError) and error.__cause__.retry_at:
+                raise error.__cause__
             plan.update(action="none", reason=error.code, held=True)
             return plan, None
         plan.update(action="deploy")
@@ -1817,6 +1826,7 @@ def _hold_preview_destroy(
             "The preview remains recorded; retirement requires an operator."
         ),
     )
+    _carry_preview_failure(plan, previous)
     return ReconcileOutcome(plan)
 
 
@@ -1828,6 +1838,7 @@ def _hold_preview_cleanup(plan: dict[str, object], reason: str) -> ReconcileOutc
         plan.pop("disposal_original_reservation_id", None)
     plan.pop("last_failed_error_code", None)
     plan.pop("last_failed_error_summary", None)
+    plan.pop("last_failed_at", None)
     plan.update(action="wait", held=True, reason=reason)
     return ReconcileOutcome(plan)
 
@@ -1851,6 +1862,7 @@ def reconcile_preview_target(
         interrupted_preview_restore,
         original_preview_intent,
         recover_held_preview,
+        recover_held_walkthrough,
         preview_restore_originals,
         preview_rebuild_already_failed,
     )
@@ -1863,6 +1875,21 @@ def reconcile_preview_target(
     retained_intent_invalid = False
     for reservation in held[:100]:
         classified = classify_preview_reservation(reservation, profile=profile, store=record_store)
+        if (
+            classified["action"] == "odoo-walkthrough"
+            and classified["target_pull_request_number"] == pull_request_number
+            and control_plane_root is not None
+            and isinstance(record_store, PostgresRecordStore)
+        ):
+            recovery.append(
+                recover_held_walkthrough(
+                    store=record_store,
+                    reservation=reservation,
+                    profile=profile,
+                    root=control_plane_root,
+                )
+            )
+            continue
         try:
             original = original_preview_intent(reservation, profile=profile, store=record_store)
         except ValueError:
@@ -1941,6 +1968,16 @@ def reconcile_preview_target(
                 "reason": "held_preview_recovery_required",
                 "held_reservations": recovery,
                 "held_reservations_truncated": len(held) > 100,
+                **{
+                    key: decision.plan[key]
+                    for key in (
+                        "head_sha",
+                        "pull_request_state",
+                        "build_run_id",
+                        "last_failed_error_code",
+                    )
+                    if key in decision.plan
+                },
                 **(
                     {"disposal_original_reservation_id": disposal_original}
                     if disposal_original
@@ -2207,6 +2244,7 @@ def _plan_preview_target(
     if not head_sha:
         raise ProductReconcileError(f"GitHub returned no head for PR {pull_request_number}.")
     plan["head_sha"] = head_sha.lower()
+    plan["pull_request_state"] = pull_request.get("state")
     observed.update(
         head_sha=head_sha.lower(),
         eligible=_preview_eligible(pull_request),
@@ -2301,8 +2339,13 @@ def _plan_preview_target(
             )
         )
     except BuildProvenanceError as error:
-        # A PR's build is untrusted input: an unprovable or malformed one is not built yet.
         plan.update(action="wait", reason="no_verified_build", detail=str(error), held=False)
+        if error.code == "build_run_failed":
+            plan.update(
+                reason="preview_build_failed",
+                build_run_id=error.run_id,
+                last_failed_error_code="preview_build_failed",
+            )
         return _PreviewDecision(plan=plan, lifecycle_token=lifecycle_token, observed=observed)
     manifest = verified.manifest
     desired_digest = manifest.image.digest.lower()
@@ -2387,6 +2430,7 @@ def _run_preview_operation(
         operation_key += f":interrupted-{disposal_original}"
     reservation_scope = reconcile_reservation_scope(profile.product)
     plan_id = build_odoo_preview_plan_id(scope=reservation_scope, idempotency_key=operation_key)
+    trace_id = f"{RECONCILE_SOURCE}-{uuid4().hex}"
     plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
     reservation = record_store.read_idempotency_record(
         scope=reservation_scope, route_path=ODOO_PREVIEW_APPLY_ROUTE, idempotency_key=plan_id
@@ -2484,11 +2528,104 @@ def _run_preview_operation(
     def run_issued_plan(
         operation_plan: OdooPreviewApplyInputsResult, *, allow_mutation: bool
     ) -> DurableProviderOperationResult:
+        preview_binding = ""
+        original_id = ""
+        existing = record_store.read_idempotency_record(
+            scope=reservation_scope, route_path=ODOO_PREVIEW_APPLY_ROUTE, idempotency_key=plan_id
+        )
+        if existing is not None and cast(
+            PostgresRecordStore, record_store
+        ).read_original_mutation_intent(existing):
+            from control_plane.preview_reservation_recovery import original_preview_intent
+
+            original_id = original_preview_intent(
+                existing, profile=profile, store=record_store
+            ).apply_request.unrecorded_original_reservation_id
+        elif (
+            existing is None
+            and operation == "refresh"
+            and not profile.preview.clean_testing_snapshot
+            and not operation_plan.dry_run_plan.compose_ref.startswith("${created.")
+            and not any(
+                profile.preview.slug_template.format(number=item.anchor_pr_number)
+                == operation_plan.preview_slug
+                for item in record_store.list_preview_records(context_name=operation_plan.context)
+            )
+        ):
+            from control_plane.preview_reservation_recovery import (
+                require_unrecorded_preview_original,
+            )
+
+            originals = cast(PostgresRecordStore, record_store).list_odoo_preview_cleanup_originals(
+                product=profile.product, number=pull_request_number
+            )
+            for original in sorted(
+                originals,
+                key=lambda item: (item.state != "completed", item.created_at, item.record_id),
+                reverse=True,
+            ):
+                try:
+                    require_unrecorded_preview_original(
+                        cast(PostgresRecordStore, record_store),
+                        profile=profile,
+                        number=pull_request_number,
+                        reservation_id=original.record_id,
+                    )
+                except ValueError:
+                    continue
+                original_id = original.record_id
+                break
+
+        def preview_checkpoint() -> None:
+            nonlocal preview_binding
+            if operation != "refresh" or plan.get("preview_mutation_attempted") is not True:
+                pre_mutation_guard()
+            if operation != "refresh":
+                return
+            from control_plane.disposable_lanes import (
+                DisposableLaneSafetyUnknown,
+                require_disposable_preview_operation,
+            )
+
+            try:
+                if original_id:
+                    from control_plane.preview_reservation_recovery import (
+                        require_unrecorded_preview_refresh,
+                    )
+
+                    binding = require_unrecorded_preview_refresh(
+                        cast(PostgresRecordStore, record_store),
+                        profile=profile,
+                        issued_plan=operation_plan,
+                        original_reservation_id=original_id,
+                        operation_record_id=build_launchplane_mutation_reservation_id(
+                            scope=reservation_scope,
+                            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+                            idempotency_key=plan_id,
+                        ),
+                        control_plane_root=control_plane_root,
+                    )
+                else:
+                    binding = require_disposable_preview_operation(
+                        cast(PostgresRecordStore, record_store),
+                        profile=profile,
+                        issued_plan=operation_plan,
+                        allow_unrecorded_creation=True,
+                    )
+                if preview_binding and binding != preview_binding:
+                    raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
+                preview_binding = binding
+            except (FileNotFoundError, ValueError) as protection_error:
+                raise OdooPreviewPlanProvenanceError(
+                    code="disposable_lane_safety_unknown", message=str(protection_error)
+                ) from protection_error
+
         apply_request = validate_odoo_preview_issued_plan(
             plan_id=plan_id,
             issued_plan=operation_plan,
             request=OdooPreviewApplyEnvelope(
                 product=profile.product,
+                unrecorded_original_reservation_id=original_id,
                 apply=OdooPreviewDokployApplyRequest(
                     dry_run_plan=operation_plan.dry_run_plan,
                     manifest=operation_plan.plan_request.manifest,
@@ -2510,12 +2647,12 @@ def _run_preview_operation(
             reservation_scope=reservation_scope,
             idempotency_key=plan_id,
             request_fingerprint=_fingerprint({"operation_key": operation_key}),
-            trace_id=f"{RECONCILE_SOURCE}-{uuid4().hex}",
+            trace_id=trace_id,
             execute_apply=execute_apply,
             observe_apply=preview_hooks.observe_apply,
             supersession_is_quiescent=preview_hooks.quiescence_check,
-            pre_mutation_guard=pre_mutation_guard,
-            qualify_existing_preview=bool(disposal_original),
+            pre_mutation_guard=preview_checkpoint,
+            qualify_existing_preview=operation == "refresh" or bool(disposal_original),
             disposable_cleanup=operation == "destroy"
             and plan.get("reason") == "pull_request_not_open",
             allow_mutation=allow_mutation,
@@ -2649,7 +2786,15 @@ def _run_preview_operation(
     except OdooPreviewApplyConfigError as error:
         plan["missing_keys"] = list(env_key_names(error.missing_keys))
         return _preview_failure(plan, "preview_config_refused")
-    except OdooPreviewPlanProvenanceError:
+    except OdooPreviewPlanProvenanceError as error:
+        plan["failure_trace_id"] = trace_id
+        plan["preview_result_error_code"] = error.code
+        log_handled_error_cause(error, trace_id, operation_id=plan_id)
+        if error.code in {
+            "odoo_preview_source_major_mismatch",
+            "odoo_preview_source_version_unavailable",
+        }:
+            return _preview_failure(plan, error.code)
         return _preview_failure(plan, "preview_provenance_refused")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
         if is_transient_dokploy_error(error):
@@ -2728,8 +2873,24 @@ def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
         last_failed_error_code=code,
         last_failed_error_summary=summary,
         last_failed_head_sha=plan.get("head_sha", ""),
+        last_failed_at=_utc_now(),
     )
     return ReconcileOutcome(plan, error=summary)
+
+
+def _carry_preview_failure(
+    plan: dict[str, object], previous: Mapping[str, object], *, observed_at: str = ""
+) -> None:
+    for key in ("last_failed_error_code", "last_failed_error_summary"):
+        if key in previous:
+            plan[key] = previous[key]
+    if "last_failed_error_summary" not in previous:
+        return
+    failed_at = observed_at or previous.get("last_failed_at")
+    if isinstance(failed_at, str) and failed_at.strip():
+        plan["last_failed_at"] = failed_at
+    else:
+        plan.pop("last_failed_at", None)
 
 
 def _run_generic_web_preview_operation(
@@ -3019,7 +3180,7 @@ def reconcile_product_request(
             testing_hooks=testing_hooks,
         )
     assert request.pull_request_number is not None
-    return reconcile_preview_target(
+    outcome = reconcile_preview_target(
         previous_plan=dict(request.last_plan),
         lease_held=lease_held,
         record_store=record_store,
@@ -3030,6 +3191,15 @@ def reconcile_product_request(
         control_plane_root=control_plane_root,
         preview_hooks=preview_hooks,
     )
+    if (
+        outcome.plan.get("build_run_id")
+        and not outcome.deferred
+        and outcome.plan.get("reason")
+        in {"preview_build_failed", "held_preview_recovery_required", "interrupted_preview_restore"}
+        and (not outcome.error or outcome.plan.get("reason") == "held_preview_recovery_required")
+    ):
+        return _preview_failure(dict(outcome.plan), "preview_build_failed")
+    return outcome
 
 
 def _has_preview_reservation(
@@ -3087,22 +3257,48 @@ def run_product_reconcile_once(
                 lease_held=lease.held,
             )
     except Exception as error:
-        _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
-        failed_plan: dict[str, object] = {"target": request.target_kind}
-        if request.target_kind == "testing":
-            trace_id = f"{RECONCILE_SOURCE}-{uuid4().hex}"
-            failed_plan.update(
-                last_failed_error_code=getattr(error, "code", "") or "testing_reconcile_failed",
-                failure_trace_id=trace_id,
+        if (
+            request.target_kind == "testing"
+            and isinstance(error, BuildProvenanceError)
+            and error.retry_at
+        ):
+            _LOGGER.warning("Product reconcile of %s deferred: %s", request.target_key, error)
+            quota_plan: dict[str, object] = {
+                key: request.last_plan[key]
+                for key in (
+                    "context",
+                    "desired_artifact_id",
+                    "desired_commit",
+                    "queued_operation_id",
+                    "last_failed_operation_id",
+                )
+                if key in request.last_plan
+            }
+            quota_plan.update(
+                target=request.target_kind,
+                action="wait",
+                reason="github_rate_limited",
+                deferred=True,
+                retry_at=error.retry_at,
+                quota_error=str(error),
             )
-            _LOGGER.warning("Testing reconcile failure trace: %s", trace_id)
-        if request.target_kind == "preview":
-            # A failed read or lost lease must not re-arm a previously exhausted destroy.
-            for key in ("destroy_retry_key", "destroy_failed_attempts"):
-                if key in request.last_plan:
-                    failed_plan[key] = request.last_plan[key]
-            failed_plan["last_failed_error_code"] = getattr(error, "code", "")
-        outcome = ReconcileOutcome(failed_plan, error=_error_text(error))
+            outcome = ReconcileOutcome(quota_plan, deferred=True)
+        else:
+            _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
+            failed_plan: dict[str, object] = {"target": request.target_kind}
+            if request.target_kind == "testing":
+                trace_id = f"{RECONCILE_SOURCE}-{uuid4().hex}"
+                failed_plan.update(
+                    last_failed_error_code=getattr(error, "code", "") or "testing_reconcile_failed",
+                    failure_trace_id=trace_id,
+                )
+                _LOGGER.warning("Testing reconcile failure trace: %s", trace_id)
+            if request.target_kind == "preview":
+                for key in ("destroy_retry_key", "destroy_failed_attempts"):
+                    if key in request.last_plan:
+                        failed_plan[key] = request.last_plan[key]
+                failed_plan["last_failed_error_code"] = getattr(error, "code", "")
+            outcome = ReconcileOutcome(failed_plan, error=_error_text(error))
     else:
         if outcome.error:
             _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, outcome.error)
@@ -3115,6 +3311,8 @@ def run_product_reconcile_once(
             "preview_plan_blocked",
             "preview_config_refused",
             "preview_provenance_refused",
+            "odoo_preview_source_major_mismatch",
+            "odoo_preview_source_version_unavailable",
             "preview_apply_failed",
             "preview_reconcile_failed",
             "preview_build_failed",
@@ -3128,9 +3326,9 @@ def run_product_reconcile_once(
         outcome = _preview_failure(dict(outcome.plan), str(code))
         if "action" not in outcome.plan and "destroy_retry_key" in outcome.plan:
             # A pre-plan read failure is not the destroy failure that exhausted the budget.
-            for key in ("last_failed_error_code", "last_failed_error_summary"):
-                if key in request.last_plan:
-                    outcome.plan[key] = request.last_plan[key]
+            _carry_preview_failure(
+                outcome.plan, request.last_plan, observed_at=preview_failure_observed_at(request)
+            )
     plan = dict(outcome.plan)
     timing = {
         "requested_at": request.requested_at,
@@ -3144,11 +3342,11 @@ def run_product_reconcile_once(
         and plan.get("action") != "destroy"
         and plan.get("reason") not in {"pull_request_not_open", "already_serving"}
         and plan.get("preview_result_status") != "pass"
-        and preview_refresh_failure(request)
+        and preview_refresh_failure(request, store=record_store)
     ):
-        for key in ("last_failed_error_code", "last_failed_error_summary"):
-            if key in request.last_plan:
-                plan[key] = request.last_plan[key]
+        _carry_preview_failure(
+            plan, request.last_plan, observed_at=preview_failure_observed_at(request)
+        )
         plan["last_failed_head_sha"] = request.last_plan.get(
             "last_failed_head_sha", request.last_plan.get("head_sha", "")
         )
@@ -3179,6 +3377,7 @@ def run_product_reconcile_once(
         request.target_kind == "preview"
         and feedback is not None
         and feedback.get("status") == "failed"
+        and plan.get("last_failed_error_code") != "preview_build_failed"
         and (
             (
                 outcome.error
@@ -3613,11 +3812,11 @@ def _testing_build_read[Result](read: Callable[[str], Result], path: str) -> Res
         if isinstance(failure, HTTPError) and failure.code in {401, 403}:
             # The shared selector may skip an invalid build. An identity refusal
             # is not an invalid build and must stop before another candidate read.
-            rate_limited = failure.code == 403 and (
-                failure.headers.get("Retry-After") is not None
-                or failure.headers.get("X-RateLimit-Remaining") == "0"
-            )
-            if urlsplit(failure.geturl()).hostname == "api.github.com" and not rate_limited:
+            if (
+                urlsplit(failure.url).hostname == "api.github.com"
+                and not error.retry_at
+                and not provider_failure(failure).rate_limited
+            ):
                 raise NativeSourceAuthorizationDenied(
                     "The existing build reader refused access."
                 ) from error
@@ -3641,9 +3840,19 @@ class _TestingRebuildBuildReads:
 def latest_verified_testing_build(
     record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
 ) -> VerifiedBuildArtifact:
-    """Reuse testing's verified-build selection for an explicit native rebuild."""
     if profile.driver_id != "odoo" or lane.instance != "testing":
         raise ValueError("Native rebuild build selection requires an Odoo testing lane.")
+    verified = latest_verified_testing_release(record_store, profile, lane)
+    if not isinstance(verified, VerifiedBuildArtifact):
+        raise ValueError("Odoo testing requires its verified artifact manifest.")
+    return verified
+
+
+def latest_verified_testing_release(
+    record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+) -> VerifiedBuildArtifact | VerifiedGenericWebBuild:
+    if profile.driver_id not in {"odoo", "generic-web"} or lane.instance != "testing":
+        raise ValueError("Rebuild build selection requires a supported testing lane.")
     identity = product_repository_identity(record_store, profile)
     plan, verified = _plan_testing_target(
         record_store=cast(ProductReconcileStore, record_store),
@@ -3653,7 +3862,7 @@ def latest_verified_testing_build(
         profile=profile,
         repository_id=identity.repository_id,
     )
-    if not isinstance(verified, VerifiedBuildArtifact):
+    if verified is None:
         raise ProductReconcileError(
             "No current verified testing build.",
             code=str(plan.get("reason") or "no_verified_build"),
@@ -3678,7 +3887,6 @@ def _desired_release(
         {
             "branch": default_branch,
             "event": "push",
-            "status": "success",
             "per_page": str(TESTING_BUILD_RUN_PAGE_SIZE),
         }
     )
@@ -3708,12 +3916,24 @@ def _desired_release(
         ):
             raise
         return None, [], "build_workflow_missing"
+
+    def successful_build_run(run: dict[str, object]) -> bool:
+        return (
+            run.get("path") == BUILD_WORKFLOW_PATH
+            and run.get("event") == "push"
+            and run.get("head_branch") == default_branch
+            and run.get("status") == "completed"
+            and run.get("conclusion") == "success"
+            and bool(run.get("head_sha"))
+        )
+
     runs = _list(payload.get("workflow_runs"))
     # A held or explicitly rolled-back lane may be beyond the newest page.
     # Search bounded history rather than making a busy repository stay held.
     for page in range(2, 21):
         if not current_commit or any(
             isinstance(run, dict)
+            and successful_build_run(run)
             and str(run.get("head_sha", "")).lower() == current_commit
             and (not current_run_id or run.get("id") == current_run_id)
             for run in runs
@@ -3733,18 +3953,19 @@ def _desired_release(
     built_commits = {
         str(run.get("head_sha") or "").lower()
         for run in (item for item in runs if isinstance(item, dict))
-        if run.get("path") == BUILD_WORKFLOW_PATH
-        and run.get("event") == "push"
-        and run.get("head_branch") == default_branch
-        and run.get("conclusion") == "success"
-        and run.get("head_sha")
+        if successful_build_run(run)
     }
     generic_web = reconciles_as_generic_web(profile)
     if current_commit and (
         current_commit not in built_commits
         or (
             current_run_id
-            and not any(isinstance(run, dict) and run.get("id") == current_run_id for run in runs)
+            and not any(
+                isinstance(run, dict)
+                and successful_build_run(run)
+                and run.get("id") == current_run_id
+                for run in runs
+            )
         )
     ):
         # Before product-owned Build adoption, a recorded generic-web deployment
@@ -3812,6 +4033,8 @@ def _desired_release(
             )
             return verified, rejected, ""
         except BuildProvenanceError as error:
+            if error.retry_at:
+                raise
             rejected.append(
                 {"commit": commit, "run_id": error.run_id, "code": error.code, "error": str(error)}
             )

@@ -5,9 +5,14 @@ from typing import Literal
 from uuid import uuid4
 
 import click
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
-from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.build_provenance import (
+    BuildProvenanceError,
+    VerifiedBuildArtifact,
+    VerifiedGenericWebBuild,
+    record_verified_build_artifact,
+)
 from control_plane.clean_testing_snapshot import snapshot_storage_budget
 from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -20,8 +25,12 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.odoo_target_replacement_apply_http import (
     _validate_target_replacement_apply_artifact_authority,
 )
-from control_plane.odoo_target_replacement_plan_http import (
-    resolve_odoo_target_replacement_plan_lane,
+from control_plane.testing_rebuild_driver import (
+    resolve_testing_rebuild_driver,
+    TestingRebuildDriver,
+    TESTING_REBUILD_EXECUTION_UNAVAILABLE,
+    TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE,
+    testing_rebuild_build_identity,
 )
 from control_plane.odoo_testing_native_source import native_testing_source_authority
 from control_plane.testing_candidate_runtime import candidate_credential_authority
@@ -37,25 +46,108 @@ from control_plane.testing_rebuild_service import (
     capture_rebuild_intent,
     check_testing_rebuild_protection,
     TestingRebuildRefused,
+    GenericWebTestingRebuildIntent,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+
+
+class TestingRebuildBlocker(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    message: str
 
 
 class TestingRebuildPreflight(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["pass"] = "pass"
+    status: Literal["pass", "pending"] = "pass"
+    message: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     product: str
     context: str
     instance: Literal["testing"] = "testing"
     base_url: str
     artifact_id: str
     source_git_ref: str
-    data_source_mode: Literal["empty", "production_restore", "upstream_restore"]
+    data_source_mode: Literal["empty", "production_restore", "upstream_restore", "migrated_restore"]
     observed_at: str
+    blockers: tuple[TestingRebuildBlocker, ...] = ()
+    steps: tuple[str, ...] = (
+        "prepare_independent_copy",
+        "verify_source_and_isolation",
+        "verify_private_health_and_identity",
+        "publish_same_address",
+        "verify_public_health_and_identity",
+        "retire_predecessor_runtime",
+    )
     # This is admission evidence. The worker still proves the actual independent
     # candidate's isolation, credentials, restore, health and cutover before use.
     candidate_verification: Literal["pending"] = "pending"
+    restore_applicable: bool | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+
+
+def inspect_current_testing_rebuild(
+    *,
+    root: Path,
+    store: PostgresRecordStore,
+    request: OdooStableTargetReplacementRequest,
+    actor: str,
+    verified_build: VerifiedBuildArtifact | VerifiedGenericWebBuild | None = None,
+) -> tuple[TestingRebuildPreflight, VerifiedBuildArtifact | VerifiedGenericWebBuild]:
+    if request.instance != "testing" or request.strategy != "replace-and-cutover":
+        raise ValueError("Current-build inspection requires a native testing rebuild.")
+
+    from control_plane.product_reconcile import (
+        ProductReconcileError,
+        latest_verified_testing_release,
+    )
+
+    driver = resolve_testing_rebuild_driver(store, request.product)
+    if verified_build is None:
+        try:
+            verified_build = latest_verified_testing_release(store, driver.profile, driver.lane)
+        except (BuildProvenanceError, ProductReconcileError) as error:
+            raise TestingRebuildRefused(
+                "testing_rebuild_inputs_unverified", "The current testing build is unavailable."
+            ) from error
+    inspection = inspect_testing_rebuild(
+        root=root, store=store, request=request, actor=actor, verified_build=verified_build
+    )
+    return inspection, verified_build
+
+
+def admit_current_testing_rebuild(
+    *,
+    root: Path,
+    store: PostgresRecordStore,
+    request: OdooStableTargetReplacementRequest,
+    actor: str,
+    verified_build: VerifiedBuildArtifact | VerifiedGenericWebBuild | None = None,
+) -> None:
+    resolve_testing_rebuild_driver(store, request.product).require_execution()
+    inspection, verified = inspect_current_testing_rebuild(
+        root=root, store=store, request=request, actor=actor, verified_build=verified_build
+    )
+    if inspection.status != "pass":
+        if inspection.blockers:
+            blocker = inspection.blockers[0]
+            raise TestingRebuildRefused(blocker.code, blocker.message)
+        raise TestingRebuildRefused(TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE, inspection.message)
+    if isinstance(verified, VerifiedBuildArtifact):
+        try:
+            record_verified_build_artifact(record_store=store, verified=verified)
+        except BuildProvenanceError as error:
+            raise TestingRebuildRefused(
+                "testing_rebuild_inputs_unverified", "The verified testing artifact changed."
+            ) from error
 
 
 def inspect_testing_rebuild(
@@ -63,21 +155,64 @@ def inspect_testing_rebuild(
     root: Path,
     store: PostgresRecordStore,
     request: OdooStableTargetReplacementRequest,
-    verified_manifest: ArtifactIdentityManifest | None = None,
+    verified_build: VerifiedBuildArtifact | VerifiedGenericWebBuild | None = None,
     actor: str = "",
 ) -> TestingRebuildPreflight:
     if request.strategy != "replace-and-cutover":
         raise ValueError("Native preflight requires the testing copy lifecycle.")
     apply = OdooStableTargetReplacementApplyRequest.model_validate(request.model_dump())
-    lane = resolve_odoo_target_replacement_plan_lane(
-        record_store=store, product=apply.product, instance=apply.instance
-    )
-    _validate_target_replacement_apply_artifact_authority(
-        operation_store=store,
-        replacement_request=apply,
-        context=lane.context,
-        verified_manifest=verified_manifest,
-    )
+    driver = resolve_testing_rebuild_driver(store, apply.product)
+    lane = driver.lane
+    if apply.instance != "testing":
+        raise ValueError("Testing rebuild preflight cannot inspect production.")
+    if driver.profile.driver_id == "odoo":
+        if verified_build is not None and not isinstance(verified_build, VerifiedBuildArtifact):
+            raise TestingRebuildRefused(
+                "testing_rebuild_inputs_unverified", "The selected build is not an Odoo artifact."
+            )
+        _validate_target_replacement_apply_artifact_authority(
+            operation_store=store,
+            replacement_request=apply,
+            context=lane.context,
+            verified_manifest=verified_build.manifest if verified_build is not None else None,
+        )
+    else:
+        if not isinstance(verified_build, VerifiedGenericWebBuild):
+            raise TestingRebuildRefused(
+                "testing_rebuild_inputs_unverified", "A verified generic-web build is required."
+            )
+        if testing_rebuild_build_identity(verified_build) != (
+            apply.artifact_id,
+            apply.source_git_ref,
+        ):
+            raise TestingRebuildRefused(
+                "testing_rebuild_inputs_unverified", "The selected build differs from its product."
+            )
+    if apply.data_source_mode not in {
+        "empty",
+        "production_restore",
+        "upstream_restore",
+        "migrated_restore",
+    }:
+        raise TestingRebuildRefused(
+            "testing_rebuild_inputs_unverified",
+            "A native rebuild requires its explicit testing source.",
+        )
+    if apply.migrated_source is not None:
+        manifest = (
+            verified_build.manifest
+            if isinstance(verified_build, VerifiedBuildArtifact)
+            else store.read_artifact_manifest(apply.artifact_id)
+        )
+        if (
+            apply.migrated_source.product,
+            apply.migrated_source.context,
+            apply.migrated_source.target_image,
+        ) != (apply.product, lane.context, manifest.image.digest):
+            raise TestingRebuildRefused(
+                "testing_rebuild_inputs_unverified",
+                "Migrated output differs from the selected product, lane or build.",
+            )
     now = utc_now_timestamp()
     # A local read identity, never persisted or passed to a provider executor.
     operation = OdooStableTargetReplacementOperationRecord(
@@ -91,9 +226,57 @@ def inspect_testing_rebuild(
         created_at=now,
         updated_at=now,
     )
+    inspection = TestingRebuildPreflight(
+        product=apply.product,
+        context=lane.context,
+        base_url=lane.base_url,
+        artifact_id=apply.artifact_id,
+        source_git_ref=apply.source_git_ref,
+        data_source_mode=apply.data_source_mode,
+        observed_at=now,
+        restore_applicable=driver.state.kind != "none" if driver.state is not None else None,
+    )
+    try:
+        return _inspect_execution(root, store, operation, driver, inspection, actor)
+    except TestingRebuildRefused as error:
+        return inspection.model_copy(
+            update={
+                "status": "pending",
+                "message": str(error),
+                "blockers": (TestingRebuildBlocker(code=error.code, message=str(error)),),
+            }
+        )
+
+
+def _inspect_execution(
+    root: Path,
+    store: PostgresRecordStore,
+    operation: OdooStableTargetReplacementOperationRecord,
+    driver: TestingRebuildDriver,
+    inspection: TestingRebuildPreflight,
+    actor: str,
+) -> TestingRebuildPreflight:
+    apply = operation.request
+    lane = driver.lane
     try:
         intent = capture_rebuild_intent(root, store, operation)
+        if isinstance(intent, GenericWebTestingRebuildIntent):
+            from control_plane.testing_rebuild_application_state import rebuild_address
+
+            inspection.base_url = rebuild_address(intent)
         check_testing_rebuild_protection(root, store, operation, intent, actor=actor)
+        generic_execution = (
+            isinstance(intent, GenericWebTestingRebuildIntent)
+            and driver.execution_available
+            and intent.before.target.target_type == "application"
+        )
+        if generic_execution:
+            from control_plane.generic_web_testing_rebuild import (
+                inspect_generic_web_testing_rebuild,
+            )
+
+            assert isinstance(intent, GenericWebTestingRebuildIntent)
+            inspect_generic_web_testing_rebuild(root, store, intent)
     except api.DokployRequestFailed as error:
         if error.status_code in {401, 403}:
             raise NativeSourceAuthorizationDenied(
@@ -115,6 +298,12 @@ def inspect_testing_rebuild(
             "testing_rebuild_inputs_unverified",
             "The retained testing inputs could not be verified.",
         ) from error
+    if isinstance(intent, GenericWebTestingRebuildIntent):
+        if not generic_execution:
+            raise TestingRebuildRefused(
+                TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE, TESTING_REBUILD_EXECUTION_UNAVAILABLE
+            )
+        return inspection
     if apply.data_source_mode != "empty":
         try:
             snapshot_storage_budget(intent.profile, lane.context)
@@ -158,7 +347,7 @@ def inspect_testing_rebuild(
                 secret_binding_keys=frozenset(),
             )
             post_deploy.resolve_upstream_restore_workflow_environment(
-                desired_env_map={**environment.values, **intent.before.target.env}
+                desired_env_map=environment.values
             )
     except NativeSourceAuthorizationDenied:
         raise
@@ -167,15 +356,4 @@ def inspect_testing_rebuild(
             "testing_restore_source_unconfigured",
             "The selected testing restore source is not configured or available.",
         ) from error
-    # Configuration is not a completed or healthy copy. The worker verifies the
-    # real source and independent candidate before exposing it at the address.
-    assert apply.data_source_mode in {"empty", "production_restore", "upstream_restore"}
-    return TestingRebuildPreflight(
-        product=apply.product,
-        context=lane.context,
-        base_url=lane.base_url,
-        artifact_id=apply.artifact_id,
-        source_git_ref=apply.source_git_ref,
-        data_source_mode=apply.data_source_mode,
-        observed_at=now,
-    )
+    return inspection

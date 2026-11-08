@@ -13,8 +13,8 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
@@ -61,12 +61,13 @@ class TestingInputStore(
     RuntimeKeySafetyPolicyReadStore,
     Protocol,
 ):
-    def read_dokploy_target_record(
-        self, *, context_name: str, instance_name: str
-    ) -> DokployTargetRecord: ...
     def read_dokploy_target_id_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetIdRecord: ...
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
     ) -> ProviderTargetRecord: ...
@@ -173,8 +174,7 @@ def testing_input_authority(
         profile=profile, context_name=lane.context, instance_name=lane.instance
     )
     if (
-        not target.env
-        and not selected
+        not selected
         and not declared
         and not retired
         and not any(record.env for record in site_records)
@@ -188,7 +188,7 @@ def testing_input_authority(
                     "context": lane.context,
                     "instance": lane.instance,
                     "id": binding.target_id,
-                    "env": target.env,
+                    "env": {},
                 },
                 "settings": sorted(
                     (
@@ -233,14 +233,12 @@ def prepare_testing_inputs(
     profile = store.read_product_profile_record(profile.product)
     if testing_input_authority(store, profile, lane) != expected_digest:
         raise click.ClickException("Application testing input authority changed before delivery.")
-    target = store.read_dokploy_target_record(
-        context_name=lane.context, instance_name=lane.instance
-    )
+    store.read_dokploy_target_record(context_name=lane.context, instance_name=lane.instance)
     environment = environments.resolve_site_runtime_environment_from_store(
         record_store=store,
         context_name=lane.context,
         instance_name=lane.instance,
-        target_environment=target.env,
+        target_environment={},
     )
     declared = runtime.product_lane_declared_keys(
         record_store=store,

@@ -11,6 +11,37 @@ Neither path calls a provider, syncs a runtime, deploys, or restarts a lane.
 
 ## Plain stored settings
 
+Ordinary settings come from lane declarations. Volumes and ports selected by a
+published generation come from its saved recipient or activation records, bound
+to the serving target identity. Retained generations keep their own resource
+selections. Candidate preparation explicitly excludes the serving generation.
+Tracked target environment fields remain in frozen records for publication,
+rollback and recovery comparisons; they no longer supply runtime settings.
+File-backed local rehearsals have no generation custody and use their lane
+declarations. Unsupported shared stores refuse rather than hiding a failed read.
+Onboarding declares ordinary settings in `runtime_environments`, not provider
+targets. Live delivery still requires accepted releases and verified backups.
+The temporary target/lane/generation comparison has been removed after
+qualification; target inspection continues to report stored key names only.
+
+The existing Odoo target-replacement plan also reports two advisory fields on
+`current_target`. `compose_matches_generated` compares the live provider Compose
+document with the current deployment renderer, accepting JSON and YAML, only
+when the provider uses the raw Compose source at the generated path, the
+evaluated artifact, inventory and full provider identity agree, and generation
+authority is available. Null means no comparison was available. False reports a
+difference from that renderer, which can include a template change; it does not
+prove provider drift or add a blocker. The plan retains its existing validation
+and two-slot refusal; this evidence is unavailable on two-slot lanes.
+`override_environment_keys` lists the environment names referenced by the saved
+provider override payload's config-parameter and addon-setting descriptors. It
+reuses the producer payload schema and returns no values. Null means the payload
+is absent, malformed, unsupported, belongs to another lane or exceeds the read's
+bounds, or a referenced name cannot be safely reported; an empty list means a complete valid payload references no environment
+names. These fields add no provider call, stored record, removal authorization or
+replacement gate. They observe provider configuration, not a running container's
+command or environment, and do not establish consumer or rollback qualification.
+
 `POST /v1/admin/runtime-settings/removal` accepts `mode: dry-run`, `apply`, or
 `readback`, an exact `product`, `scope` (`global`, `context`, `instance`),
 `context`, `instance`, `keys`, and `reason`. Global scope requires

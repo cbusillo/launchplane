@@ -15,6 +15,7 @@ from control_plane.contracts.product_reconcile import (
 )
 from control_plane.production_delivery_monitor import _candidate_key, _observe, _time
 from control_plane.product_reconcile import _testing_failure_reason
+from control_plane.product_reconcile_read import testing_reconcile_failure_code
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -140,15 +141,7 @@ def _record_attention(
     if plan.get("held") is True:
         return
     if not reason:
-        reason = (
-            "post_deploy_failed"
-            if plan.get("post_deploy_status") == "fail"
-            else "deploy_failed"
-            if plan.get("deploy_status") == "fail"
-            else "testing_qualification_failed"
-            if plan.get("reason") == "testing_qualification_failed"
-            else "testing_reconcile_failed"
-        )
+        reason = testing_reconcile_failure_code(plan)
     safe_reason = (
         reason if re.fullmatch(r"[a-z][a-z0-9_.]{0,149}", reason) else "testing_reconcile_failed"
     )

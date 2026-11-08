@@ -163,6 +163,124 @@ class TestingAddressTests(unittest.TestCase):
                 self.store, self.plan, self.reservation, self.now, self.health
             )
 
+    def use_initial_custody(self) -> None:
+        from control_plane.contracts.disposable_lane import (
+            DisposableTestingReplacementPreparation,
+            DisposableTestingResourcePreparation,
+        )
+
+        allocation = DisposableTestingResourcePreparation(
+            operation_id="bootstrap-allocation",
+            product=self.product,
+            context=self.context,
+            retained_target_id="retained-target",
+            prepared_by="fixture",
+            recorded_at=self.now,
+            initial_request_sha256=canonical_json_sha256({"request": "initial"}),
+            initial_apply_started_at=self.now.isoformat(),
+            initial_reconcile_requested_at=self.now.isoformat(),
+            retained_target_record=self.fixture.before.target.model_copy(
+                update={"domains": (self.hostname,)}
+            ),
+        )
+        base = set(DisposableTestingReplacementPreparation.model_fields)
+        with self.store._session_factory() as session:
+            for kind in (
+                db.LaunchplaneRetainedTestingGenerationRow,
+                db.LaunchplaneOdooStableTargetReplacementOperationRow,
+            ):
+                row = session.get(kind, self.operation.operation_id)
+                assert row is not None
+                session.delete(row)
+            session.add(
+                db.LaunchplaneDisposableReplacementPreparationRow(
+                    operation_id=allocation.operation_id,
+                    payload=allocation.model_dump(mode="json", include=base),
+                )
+            )
+            session.add(
+                db.LaunchplaneDisposableTestingResourceAllocationRow(
+                    operation_id=allocation.operation_id,
+                    payload=allocation.model_dump(mode="json", exclude=base),
+                )
+            )
+            session.commit()
+        self.plan = self.plan.model_copy(
+            update={
+                "retirement_operation_id": "",
+                "retirement_sha256": "",
+                "operation_sha256": {
+                    allocation.operation_id: canonical_json_sha256(
+                        allocation.model_dump(mode="json")
+                    )
+                },
+                "reservations": self.store.read_retained_testing_hostname_reservations(
+                    self.context
+                ),
+            }
+        )
+        self.reservation = self.store.reserve_mutation(
+            scope="fixture-address-initial",
+            route_path="fixture-address-initial",
+            idempotency_key="original-initial-key",
+            request_fingerprint=self.plan.digest,
+            lease_owner="fixture",
+            reconciliation_key=self.plan.digest,
+            provider_target_key="fixture-initial-address-target",
+        ).record
+
+    def test_initial_custody_keeps_alias_through_refresh_and_next_rebuild(self) -> None:
+        self.use_initial_custody()
+        self.test_amended_route_refresh_and_next_rebuild_retain_both_hosts()
+
+    def test_initial_custody_preserves_retained_target_fence(self) -> None:
+        self.use_initial_custody()
+        self.test_address_plan_reports_original_retained_target_hold_before_provider_reads()
+
+    def test_replacement_custody_still_requires_retirement(self) -> None:
+        before = self.fixture.current()
+        self.plan = self.plan.model_copy(
+            update={"retirement_operation_id": "", "retirement_sha256": ""}
+        )
+        from control_plane.testing_address_storage import verify_testing_address_retained_custody
+
+        with (
+            exclude_address_executors(self.store, tuple(self.plan.operation_sha256)),
+            self.assertRaises(ValueError),
+        ):
+            verify_testing_address_retained_custody(self.store, self.plan)
+        self.assertEqual(self.fixture.current(), before)
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(
+                self.operation.operation_id
+            ),
+            self.operation,
+        )
+
+    def test_initial_custody_changes_refuse_without_releasing_original(self) -> None:
+        self.use_initial_custody()
+        before = self.fixture.current()
+        for change in (
+            {"initial_released_at": self.now.isoformat()},
+            {"initial_reconcile_requested_at": ""},
+            {"initial_request_sha256": ""},
+            {"resources_binding_sha256": canonical_json_sha256({"changed": True})},
+        ):
+            with self.subTest(change=change), self.store._session_factory() as session:
+                row = session.get(
+                    db.LaunchplaneDisposableTestingResourceAllocationRow,
+                    next(iter(self.plan.operation_sha256)),
+                )
+                assert row is not None
+                original = deepcopy(row.payload)
+                row.payload = {**original, **change}
+                session.commit()
+                with self.assertRaises(ValueError):
+                    self.commit()
+                self.assertEqual(self.fixture.current(), before)
+                row.payload = original
+                session.commit()
+
     def test_canonical_address_moves_health_fallback_with_its_path(self) -> None:
         from urllib.parse import urlsplit
 
@@ -508,6 +626,13 @@ class TestingAddressTests(unittest.TestCase):
         }
         binding = self.fixture.current().binding
         assert binding is not None
+        from control_plane.contracts.testing_route_refresh import testing_route_domains
+        from control_plane.testing_publication_storage import serving_snapshot_matches
+
+        self.store.write_route_binding_record(
+            binding.model_copy(update={"domains": testing_route_domains(route)})
+        )
+        stale_snapshot = self.fixture.current()
         with (
             patch.object(
                 api,
@@ -537,8 +662,14 @@ class TestingAddressTests(unittest.TestCase):
                 assert refreshed is not None
                 self.assertEqual(
                     {(item.domain_name, item.role) for item in refreshed.domains},
-                    {(route.host, "primary"), *((alias, "alias") for alias in route.aliases)},
+                    {(route.host, "primary")},
                 )
+                if key == "repair-alias":
+                    self.assertFalse(
+                        serving_snapshot_matches(
+                            self.fixture.current(), stale_snapshot, store=self.store
+                        )
+                    )
                 self.assertEqual(
                     published_testing_copy(self.store, product=self.product, context=self.context),
                     self.publication,
@@ -1091,8 +1222,8 @@ class TestingAddressTests(unittest.TestCase):
                     self.store,
                     product=self.product,
                     context=self.context,
-                    retirement_operation_id=self.operation.operation_id,
-                    reservation_operation_id=self.operation.operation_id,
+                    retirement_operation_id=self.plan.retirement_operation_id,
+                    reservation_operation_id=self.plan.reservations[0].operation_id,
                     hostname=self.hostname,
                     reason=self.plan.reason,
                 )

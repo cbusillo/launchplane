@@ -53,11 +53,13 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [preview-workflow-contract.md](preview-workflow-contract.md) — existing preview compatibility, data-source safety, recovery, and Client-review contract.
 - [product-retirement.md](product-retirement.md) — reviewed product retirement,
   including owned previews, disposable-lane eligibility, and resumable execution.
+- [retained-volume-sweep.md](retained-volume-sweep.md) — private kept-volume custody and reviewed service cleanup after retirement.
 - [disposable-lanes.md](disposable-lanes.md) — usage/data/isolation facts, safe
   testing writes and replacement of stranded testing operations.
 - [odoo-shopify-identity.md](odoo-shopify-identity.md) — hash-only held-testing Shopify identity and applied-production comparison.
 - [odoo-testing-walkthrough.md](odoo-testing-walkthrough.md) — testing task
   accounts, opaque service-owned browser sign-in, receipts and cleanup.
+- [preview-fixtures.md](preview-fixtures.md) — image-owned, repeatable sample data through the existing audited preview maintenance operation.
 - [legacy-preview-reconciliation.md](legacy-preview-reconciliation.md) — reviewed
   reconciliation of provider-absent generic-web and Odoo preview history.
 - [driver-descriptors.md](driver-descriptors.md) — provider-neutral driver
@@ -68,25 +70,17 @@ not describe runtime authority until it is implemented, deployed, and activated.
   review rubric.
 - [`operator-experience.md`](operator-experience.md) — product, environment,
   Client-review, settings, promotion, cleanup, and UI delivery contract.
-- [post-v2-audit.md](post-v2-audit.md) — post-v2 product, security,
-  persistence, contract, test, and modularity audit baseline and execution
-  graph.
 - [discussion-topics.md](discussion-topics.md) — product-scoped neutral topics,
   supported add/close API, and separate page/reminder delivery slices.
+- [request-attention.md](request-attention.md) — original-source waiting requests,
+  Supervisor routing and explicit collection coverage.
 - [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge
   train policy contract, enqueue authority, and smoke-target policy.
 - [merge-train-events.md](merge-train-events.md) — signed App events, worker wake hints,
   bounded controller progression and timed recovery.
-- [merge-readiness.md](merge-readiness.md) — ephemeral machine-derived merge
-  readiness facets, fail-closed aggregation, and live-evidence adapter boundary.
-- [governance-evidence.md](governance-evidence.md) — one read-only API and
-  workbench projection that keeps current readiness, recorded admission,
-  landing outcomes, and advisory observations independent.
-- [merge-train-structural-provenance.md](merge-train-structural-provenance.md) —
-  deterministic candidate, rolling-base, and landing-plan
-  provenance consumed by merge readiness.
-- [merge-admission.md](merge-admission.md) — immutable per-attempt Level 3
-  admission, truthful landing outcomes, and append-only reconciliation.
+- [merge-admission.md](merge-admission.md) — merge readiness, structural
+  provenance, immutable per-attempt admission, truthful landing outcomes,
+  append-only reconciliation and the read-only governance projection.
 - [merge-train-historical-completion.md](merge-train-historical-completion.md) —
   applicability proof and atomic historical disposition without an admission.
 - [runner-lane-baseline.md](runner-lane-baseline.md) — self-hosted runner lane
@@ -101,21 +95,13 @@ not describe runtime authority until it is implemented, deployed, and activated.
   run records, dispatch binding, credential boundary, and worker lifecycle.
 - [engineering-review-decisions.md](engineering-review-decisions.md) — exact-head
   classification plus independent-run evaluation and shadow GitHub projection.
-- [`product-owner-policy.md`](product-owner-policy.md) — retired Client policy
-  history and the current product-profile Client boundary.
 - [`owner-acceptance.md`](owner-acceptance.md) — current Client review and the
   compatibility boundary for retired acceptance history.
 - [odoo-website-settings.md](odoo-website-settings.md) — typed settings preparation, exact release application, rollback and nonproduction exclusion.
 - [release-review.md](release-review.md) — Client checklist decisions for production
   promotion, revision changes, and recorded admin overrides.
-- [mediaforce-releases.md](mediaforce-releases.md) — source-side macOS release
-  adapter, host fencing/evidence contract, and separate activation prerequisites.
-- [`owner-control-channel.md`](owner-control-channel.md) — public canonical admin
-  challenge payloads, cross-host conformance artifact, and deferred runtime boundary.
 - [privileged-operations.md](privileged-operations.md) — typed human-governed
   planning, managed-rule authorization, redaction, and future execution boundary.
-- [change-impact-policy.md](change-impact-policy.md) — retired classifier history and the
-  independent repository-evidence boundary.
 - [operations.md](operations.md) — admin workflows and runtime boundary rules.
 - [health-alert-drills.md](health-alert-drills.md) — isolated routing reads and
   explicitly marked, rate-limited Discord test alerts for existing lane checks.
@@ -140,6 +126,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [clean-testing-snapshots.md](clean-testing-snapshots.md) — independent sanitized testing snapshots, preview copies and transition prerequisites.
 - [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,
   and local contract.
+- [credential-inventory.md](credential-inventory.md) — administrator metadata-only
+  inventory, source coverage, freshness and recurring drift reports.
 - [testing-local-credentials.md](testing-local-credentials.md) — Bounded external-provider
   observations, service-generated testing passwords, creation/rebuild integration
   and names-only overlap audit.
@@ -162,7 +150,4 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [style/testing.md](style/testing.md) — testing conventions.
 - [policies/coding-standards.md](policies/coding-standards.md) — naming and
   code-quality guardrails.
-- [codex-lab-workers.md](codex-lab-workers.md) — historical worker compatibility
-  and retained engineering-review transport.
-
 - [host-program-package.md](host-program-package.md) — versioned host programs, installation and readback.

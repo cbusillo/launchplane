@@ -19,7 +19,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.service_deploy_drain import read_status
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.release_review_shared import repository_key
+from control_plane.artifact_release_inputs import recorded_release_repositories, repository_key
 from control_plane.release_review import (
     ReleaseReviewStore,
     release_version,
@@ -96,11 +96,7 @@ def _release_repositories(
         artifact = store.read_artifact_manifest(checklist.candidate.artifact_id)
     except FileNotFoundError:
         return repositories
-    return (
-        repositories
-        | {repository_key(source.repository) for source in artifact.addon_sources}
-        | {repository_key(selector.repository) for selector in artifact.addon_selectors}
-    )
+    return repositories | recorded_release_repositories(artifact)
 
 
 def _release_in_flight(

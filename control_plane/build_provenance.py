@@ -7,13 +7,17 @@ are never evidence. See docs/artifact-provenance.md.
 """
 
 import io
+from datetime import datetime, timezone
+from hashlib import sha256
+from math import ceil
 from http.client import HTTPException
 import json
+import re
 import zipfile
 from collections.abc import Iterator
 from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -24,18 +28,29 @@ from control_plane.contracts.artifact_identity import (
     BuildPurpose,
 )
 
+from control_plane.github_response_headers import normalized_github_quota_response_headers
+from control_plane.github_read_cache import GitHubReadCache
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+from control_plane.merge_train_provider_failure import (
+    ProviderFailure,
+    provider_failure,
+    provider_retry_deadline,
+)
+
 BUILD_WORKFLOW_PATH = ".github/workflows/build.yml"
 MANIFEST_ARTIFACT_PREFIX = "artifact-manifest-"
 # A PR author controls a preview build's upload; never read more than this.
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 FIRST_PARENT_PAGE_LIMIT = 3
 _GITHUB_API = "https://api.github.com"
+_BUILD_READ_CACHE = GitHubReadCache()
 
 
 BuildProvenanceReasonCode = Literal[
     "artifact_record_conflict",
     "build_purpose_mismatch",
     "build_run_missing",
+    "build_run_failed",
     "download_too_large",
     "github_read_failed",
     "github_response_invalid",
@@ -63,11 +78,17 @@ class BuildProvenanceError(Exception):
     """
 
     def __init__(
-        self, message: str, *, code: BuildProvenanceReasonCode, run_id: int | None = None
+        self,
+        message: str,
+        *,
+        code: BuildProvenanceReasonCode,
+        run_id: int | None = None,
+        retry_at: str = "",
     ) -> None:
         super().__init__(message)
         self.code = code
         self.run_id = run_id
+        self.retry_at = retry_at
 
 
 class BuildProvenanceTransport(Protocol):
@@ -79,12 +100,51 @@ class BuildProvenanceTransport(Protocol):
 class GitHubBuildProvenanceTransport:
     """Read-only GitHub transport for one repository-scoped installation token."""
 
-    def __init__(self, *, token: str, timeout_seconds: float = 30) -> None:
-        self._token = token
+    def __init__(
+        self,
+        *,
+        token: str | GitHubAppInstallationToken,
+        timeout_seconds: float = 30,
+        read_cache: GitHubReadCache | None = None,
+    ) -> None:
+        self._token = token.token if isinstance(token, GitHubAppInstallationToken) else token
         self._timeout_seconds = timeout_seconds
+        self._read_cache = read_cache if read_cache is not None else _BUILD_READ_CACHE
+        scope = (
+            json.dumps(
+                (
+                    token.app_id,
+                    token.installation_id,
+                    token.repository_id,
+                    token.permissions,
+                    token.repository_private,
+                )
+            )
+            if isinstance(token, GitHubAppInstallationToken)
+            else token
+        )
+        self._cache_namespace = sha256(f"{_GITHUB_API}\0{scope}".encode()).hexdigest()
 
     def get_json(self, path: str) -> object:
-        return json.loads(self._read(self._api_request(path)) or b"null")
+        cached = self._read_cache.get(self._cache_namespace, path)
+        request = self._api_request(path)
+        if cached is not None and cached.etag:
+            request.add_header("If-None-Match", cached.etag)
+        try:
+            with urlopen(request, timeout=self._timeout_seconds) as response:
+                payload = json.loads(response.read() or b"null")
+                etag = response.headers.get("ETag", "")
+                if isinstance(etag, str) and etag:
+                    self._read_cache.put(self._cache_namespace, path, etag=etag, payload=payload)
+                else:
+                    self._read_cache.discard(self._cache_namespace, path)
+                return payload
+        except HTTPError as error:
+            if error.code == 304 and cached is not None and cached.etag:
+                return cached.payload
+            raise _github_read_failure(path, error) from error
+        except (URLError, OSError, HTTPException) as error:
+            raise _github_read_failure(path, error) from error
 
     def get_bytes(self, path: str) -> bytes:
         """Download a redirected archive without sending the token to the storage host."""
@@ -95,23 +155,19 @@ class GitHubBuildProvenanceTransport:
                 return _bounded_read(response, path)
         except HTTPError as redirect:
             location = (
-                redirect.headers.get("Location") if redirect.code in {301, 302, 307} else None
+                redirect.headers.get("Location")
+                if redirect.code in {301, 302, 307} and redirect.headers is not None
+                else None
             )
             if not location:
-                raise BuildProvenanceError(
-                    f"GitHub read failed for {path}: {redirect}", code="github_read_failed"
-                ) from redirect
+                raise _github_read_failure(path, redirect) from redirect
         except (URLError, OSError, HTTPException) as error:
-            raise BuildProvenanceError(
-                f"GitHub read failed for {path}: {error}", code="github_read_failed"
-            ) from error
+            raise _github_read_failure(path, error) from error
         try:
             with urlopen(Request(url=location), timeout=self._timeout_seconds) as response:
                 return _bounded_read(response, path)
         except (HTTPError, URLError, OSError, HTTPException) as error:
-            raise BuildProvenanceError(
-                f"GitHub read failed for {path}: {error}", code="github_read_failed"
-            ) from error
+            raise _github_read_failure(path, error, stage="storage") from error
 
     def _api_request(self, path: str) -> Request:
         return Request(
@@ -123,14 +179,91 @@ class GitHubBuildProvenanceTransport:
             },
         )
 
-    def _read(self, request: Request) -> bytes:
-        try:
-            with urlopen(request, timeout=self._timeout_seconds) as response:
-                return bytes(response.read())
-        except (HTTPError, URLError, OSError, HTTPException) as error:
-            raise BuildProvenanceError(
-                f"GitHub read failed for {request.full_url}: {error}", code="github_read_failed"
-            ) from error
+
+def _github_read_failure(
+    path: str, error: Exception, *, stage: Literal["api", "storage"] = "api"
+) -> BuildProvenanceError:
+    route = "unknown"
+    for pattern, category in (
+        (r"", "repository"),
+        (r"/commits", "commit_history"),
+        (r"/pulls(?:/[^/]+)?", "pull_requests"),
+        (r"/actions/(?:workflows/[^/]+/)?runs", "workflow_runs"),
+        (r"/actions/workflows", "workflows"),
+        (r"/actions/runs/[^/]+/artifacts", "artifacts"),
+        (r"/actions/artifacts/[^/]+/zip", "artifact_download"),
+    ):
+        if re.fullmatch(r"/repos/[^/]+/[^/]+" + pattern, urlsplit(path).path):
+            route = category
+            break
+    evidence: dict[str, object] = {
+        "route": route,
+        "stage": stage,
+        "classification": "transport_error",
+        "error_type": type(error).__name__[:64],
+    }
+    if isinstance(error, URLError) and not isinstance(error, HTTPError):
+        evidence["reason_type"] = type(error.reason).__name__[:64]
+    headers = (
+        normalized_github_quota_response_headers(error.headers)
+        if isinstance(error, HTTPError) and stage == "api"
+        else {}
+    )
+    if isinstance(error, HTTPError):
+        evidence["status"] = error.code
+        for header, field in (
+            ("x-ratelimit-remaining", "rate_limit_remaining"),
+            ("x-ratelimit-reset", "rate_limit_reset"),
+            ("x-ratelimit-limit", "rate_limit_limit"),
+            ("retry-after", "retry_after_seconds"),
+        ):
+            value = headers.get(header, "")
+            if re.fullmatch(r"[0-9]{1,12}", value):
+                evidence[field] = int(value)
+        request_id = (
+            error.headers.get("X-GitHub-Request-Id", "")
+            if stage == "api" and error.headers is not None
+            else ""
+        )
+        if re.fullmatch(r"[0-9A-Fa-f:]{1,128}", request_id):
+            evidence["request_id"] = request_id
+        if error.code == 429 or (
+            error.code == 403
+            and (
+                evidence.get("rate_limit_remaining") == 0
+                or "retry-after" in headers
+                or (
+                    stage == "api" and error.fp is not None and provider_failure(error).rate_limited
+                )
+            )
+        ):
+            evidence["classification"] = "rate_limited"
+        elif error.code == 401:
+            evidence["classification"] = "unauthorized"
+        elif error.code == 403:
+            evidence["classification"] = "forbidden"
+        elif 500 <= error.code <= 599:
+            evidence["classification"] = "transient"
+        else:
+            evidence["classification"] = "http_error"
+    retry_at = ""
+    if evidence["classification"] == "rate_limited" and stage == "api":
+        deadline = provider_retry_deadline(
+            ProviderFailure(
+                remaining=headers.get("x-ratelimit-remaining", ""),
+                reset=headers.get("x-ratelimit-reset", ""),
+                retry_after=headers.get("retry-after", ""),
+            ),
+            now=datetime.now(timezone.utc),
+        )
+        retry_at = datetime.fromtimestamp(ceil(deadline.timestamp()), tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    return BuildProvenanceError(
+        f"GitHub read failed: {json.dumps(evidence, sort_keys=True)}",
+        code="github_read_failed",
+        retry_at=retry_at,
+    )
 
 
 def _bounded_read(response: object, path: str) -> bytes:
@@ -454,22 +587,36 @@ def _select_build_run(
         and run.get("event") == event
         and _repository_id(run.get("repository")) == repository_id
         and _repository_id(run.get("head_repository")) == repository_id
-        and run.get("status") == "completed"
-        and run.get("conclusion") == "success"
         and (purpose != "release" or run.get("head_branch") == default_branch)
     ]
-    if not runs:
+    successful = [
+        run
+        for run in runs
+        if run.get("status") == "completed" and run.get("conclusion") == "success"
+    ]
+    if not successful:
+        failed = [
+            run
+            for run in runs
+            if run.get("status") == "completed"
+            and run.get("conclusion") in {"failure", "timed_out", "startup_failure"}
+        ]
+        if purpose == "preview" and failed:
+            latest = max(failed, key=_build_run_order)
+            raise BuildProvenanceError(
+                "The preview build did not complete successfully.",
+                code="build_run_failed",
+                run_id=_int(latest.get("id"), "run id"),
+            )
         raise BuildProvenanceError(
             f"No successful {event} run of {BUILD_WORKFLOW_PATH} built {commit} in this repository.",
             code="build_run_missing",
         )
-    return max(
-        runs,
-        key=lambda run: (
-            _int(run.get("id"), "run id"),
-            _int(run.get("run_attempt") or 1, "run attempt"),
-        ),
-    )
+    return max(successful, key=_build_run_order)
+
+
+def _build_run_order(run: dict[str, object]) -> tuple[int, int]:
+    return _int(run.get("id"), "run id"), _int(run.get("run_attempt") or 1, "run attempt")
 
 
 def _require_first_parent(

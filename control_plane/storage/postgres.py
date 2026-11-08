@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 from control_plane.generic_web_onboarding import GenericWebOnboardingIntent
+from control_plane.odoo_onboarding import OdooOnboardingIntent
+from control_plane.preview_namespaces import (
+    require_postgres_preview_cleanup,
+    preview_resource_declaration_changed,
+    preview_product_operation_key,
+    validate_preview_profile_writes,
+)
 from control_plane.timestamps import utc_now_timestamp as _utc_now_timestamp
 
 from control_plane.contracts.public_hosts import retained_hostname_identity
@@ -64,10 +71,15 @@ from control_plane.storage.delivery_evidence import (
     metadata as delivery_evidence_metadata,
     register_source_events,
 )
+from control_plane.storage import monitoring_authority
+from control_plane.monitoring_authority_history import (
+    MonitoringAuthorityBatchStart,
+    MonitoringAuthorityHistory,
+)
 
 from uuid import uuid4
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -137,14 +149,6 @@ from sqlalchemy.types import TypeDecorator
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
-from control_plane.contracts.administrator_enrollment import (
-    AdministratorEnrollmentConflictError,
-    AdministratorEnrollmentRecord,
-    complete_administrator_enrollment,
-    expire_administrator_enrollment,
-    prove_administrator_enrollment_control,
-    withdraw_administrator_enrollment,
-)
 from control_plane.contracts.solo_administration_confirmation import (
     SoloAdministrationConfirmationConflictError,
     SoloAdministrationConfirmationConsumptionBinding,
@@ -160,6 +164,7 @@ from control_plane.authz_candidate_preparation import (
     ordinary_agent_delivery_administration_removed,
 )
 from control_plane.contracts.authz_policy_record import (
+    AuthzPolicyConflictError,
     AuthzPolicyCompareWriteResult,
     LaunchplaneAuthzPolicyRecord,
     build_authz_policy_record_id,
@@ -262,6 +267,7 @@ from control_plane.contracts.every_code_feedback_resume import (
 )
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
 from control_plane.contracts.idempotency_record import (
+    SUPERSEDED_PROVIDER_EFFECT_PHASE,
     LaunchplaneIdempotencyRecord,
     build_launchplane_mutation_reservation,
     build_launchplane_mutation_reservation_id,
@@ -289,36 +295,6 @@ from control_plane.contracts.merge_admission_record import (
 )
 from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceEventRecord,
-)
-from control_plane.contracts.owner_control import (
-    ChannelBindingRecord,
-    OwnerControlConfirmationEnvelope,
-    owner_control_channel_binding_sha256,
-)
-from control_plane.contracts.owner_control_enrollment_provenance import (
-    OwnerControlChannelEnrollment,
-    OwnerControlEnrollmentProvenanceConflictError,
-    OwnerControlEnrollmentProvenanceRecord,
-    OwnerControlHostPrincipalClaim,
-    build_owner_control_enrollment_provenance_record,
-)
-from control_plane.contracts.owner_control_shadow_verifier import (
-    OWNER_CONTROL_SHADOW_MAX_ATTEMPTS,
-    OwnerControlChannelSessionRecord,
-    OwnerControlChallengeLifecycleEventRecord,
-    OwnerControlChallengeIssueRequest,
-    OwnerControlIssuedChallengeRecord,
-    OwnerControlShadowVerificationEvaluation,
-    OwnerControlShadowVerificationEventRecord,
-    OwnerControlShadowVerificationResult,
-    OwnerControlShadowVerifierConflictError,
-    build_owner_control_channel_session_record,
-    evaluate_owner_control_shadow_verification,
-    issue_owner_control_challenge_record,
-    terminalize_expired_owner_control_challenge_record,
-    owner_control_confirmation_envelope_sha256,
-    owner_control_verification_event_id,
-    revoke_owner_control_channel_session_record,
 )
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
@@ -432,11 +408,6 @@ from control_plane.contracts.privileged_operation_identity import (
 )
 from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PrivilegedOperationWorkerHeartbeatRecord,
-)
-from control_plane.owner_control_challenge import (
-    OwnerControlChallengeProvenanceError,
-    derive_owner_control_approval_request,
-    owner_control_challenge_semantics,
 )
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -635,6 +606,7 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
     authz_policy_allows_immutable_github_id_administration,
     effective_administrator_quorum,
     strict_immutable_github_human_administrator_ids,
@@ -658,6 +630,7 @@ from control_plane.storage.product_authority_bundle import (
     require_absent_products,
     require_runtime_key_safety_policies,
     ProductAuthorityBundle,
+    ServiceIdentityAuthorityError,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
     OdooInstanceOverrideConflictError,
@@ -5831,7 +5804,12 @@ class PostgresRecordStore(HumanSessionStore):
     def _read_payload(*, model_type: type[RecordModel], payload: PayloadDict) -> RecordModel:
         if model_type is LaunchplaneProductProfileRecord:
             return cast(RecordModel, PostgresRecordStore._read_product_profile_payload(payload))
-        return model_type.model_validate(payload)
+        return model_type.model_validate(
+            payload,
+            context={"stored_product_profile": True}
+            if model_type is ProductRetirementRecord
+            else None,
+        )
 
     def _write_row(self, row: Base) -> None:
         with self._session_factory() as session:
@@ -5867,6 +5845,8 @@ class PostgresRecordStore(HumanSessionStore):
             if authority_row:
                 self._begin_serialized_write(session)
                 self._lock_product_authority_bundle_write(session)
+                if isinstance(row, LaunchplaneDokployTargetIdRow):
+                    self._require_unretired_provider_identity(session, row.target_id)
                 if isinstance(row, LaunchplaneDokployTargetRow):
                     self._assert_available_target_hosts(
                         session, DokployTargetRecord.model_validate(row.payload)
@@ -6319,6 +6299,8 @@ class PostgresRecordStore(HumanSessionStore):
         return None
 
     def _merge_authority_row(self, session: Any, row: Base, *, step_name: str) -> None:
+        if isinstance(row, LaunchplaneDokployTargetIdRow):
+            self._require_unretired_provider_identity(session, row.target_id)
         if isinstance(row, LaunchplaneDokployTargetRow):
             self._protect_testing_hold_non_use(
                 session, DokployTargetRecord.model_validate(row.payload)
@@ -6328,6 +6310,44 @@ class PostgresRecordStore(HumanSessionStore):
         else:
             session.merge(row)
         self._after_product_authority_bundle_step(step_name)
+
+    def _validate_preview_profile_writes_in_session(
+        self, session: Any, replacements: tuple[LaunchplaneProductProfileRecord, ...]
+    ) -> None:
+        if not replacements:
+            return
+        profiles = tuple(
+            self._read_product_profile_payload(row.payload)
+            for row in session.scalars(select(LaunchplaneProductProfileRow))
+        )
+        validate_preview_profile_writes(
+            profiles=profiles,
+            replacements=replacements,
+            previews=(
+                PreviewRecord.model_validate(row.payload)
+                for row in session.scalars(
+                    select(LaunchplanePreviewRow).where(LaunchplanePreviewRow.state != "destroyed")
+                )
+            ),
+        )
+        if self._engine.dialect.name == "postgresql":
+            current = {profile.product: profile for profile in profiles}
+            for replacement in sorted(replacements, key=lambda item: item.product):
+                if not preview_resource_declaration_changed(
+                    current.get(replacement.product), replacement
+                ):
+                    continue
+                key = preview_product_operation_key(replacement.product)
+                if self._preview_refresh_is_held(key, exclusive=True):
+                    continue
+                excluded = session.scalar(
+                    text("SELECT pg_try_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                    {"lock_name": self._preview_refresh_lock_name(key)},
+                )
+                if excluded is not True:
+                    raise ValueError(
+                        "A product operation is still running; finish it before changing preview resource declarations."
+                    )
 
     def _product_profile_row(
         self, record: LaunchplaneProductProfileRecord
@@ -6480,24 +6500,36 @@ class PostgresRecordStore(HumanSessionStore):
             payload=self._payload_dict(record),
         )
 
-    def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
-        self._write_product_authority_bundle(bundle)
+    def write_product_authority_bundle(
+        self, bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity | None = None
+    ) -> None:
+        self._write_product_authority_bundle(bundle, caller_identity=identity)
 
     def write_new_product_onboarding_bundle(
-        self, bundle: ProductAuthorityBundle, *, intent: GenericWebOnboardingIntent
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        intent: GenericWebOnboardingIntent | OdooOnboardingIntent,
     ) -> None:
         from control_plane.onboarding_target import require_unallocated_onboarding_contexts
 
+        allocated_testing = isinstance(intent, GenericWebOnboardingIntent)
+
         def guard(_session: Any) -> None:
             try:
-                require_unallocated_onboarding_contexts(self, intent, allocated_testing=True)
+                require_unallocated_onboarding_contexts(
+                    self, intent, allocated_testing=allocated_testing
+                )
             except ValueError as error:
                 raise ProductProfileConflictError(str(error)) from error
 
         self._write_product_authority_bundle(bundle, guard_provider=guard)
 
     def compare_and_write_product_authority_bundle(
-        self, bundle: ProductAuthorityBundle, *, mutation: DbOnlyMutationRequest
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        mutation: DbOnlyMutationRequest,
     ) -> tuple[str, LaunchplaneIdempotencyRecord]:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -6508,7 +6540,10 @@ class PostgresRecordStore(HumanSessionStore):
                 return status, reservation
             assert reservation_row is not None
             self._write_product_authority_bundle(
-                bundle, write_session=session, write_transaction_started=True, commit=False
+                bundle,
+                write_session=session,
+                write_transaction_started=True,
+                commit=False,
             )
             completion = complete_launchplane_mutation_reservation(
                 reservation,
@@ -6522,17 +6557,237 @@ class PostgresRecordStore(HumanSessionStore):
             return "written", completion
 
     def write_director_secret_bundle(
-        self, bundle: ProductAuthorityBundle, *, identity: GitHubHumanIdentity
+        self, bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity
     ) -> None:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_active_authz_policy(session)
             active = self._locked_active_authz_policy_record(session)
-            if not active.policy.names_administrator(identity):
-                raise PermissionError("Only the Director can store service credentials.")
+            self._require_service_identity_administrator(active.policy, identity)
             self._write_product_authority_bundle(
-                bundle, write_session=session, write_transaction_started=True
+                bundle,
+                write_session=session,
+                write_transaction_started=True,
+                caller_identity=identity,
             )
+
+    def write_preview_dns_secret_bundle(
+        self, bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity
+    ) -> None:
+        from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION
+        from control_plane.service_auth import (
+            AuthorizationTarget,
+            LocalOperatorIdentity,
+            director_agent_identity,
+        )
+
+        secret_ids = {record.secret_id for record in bundle.secret_records}
+        remaining = bundle.model_copy(
+            update={
+                "secret_records": (),
+                "secret_versions": (),
+                "secret_bindings": (),
+                "secret_audit_events": (),
+                "idempotency_record": None,
+            }
+        )
+        if (
+            remaining.requires_write()
+            or len(bundle.secret_records) != 1
+            or len(bundle.secret_versions) != 1
+            or len(bundle.secret_bindings) != 1
+            or len(bundle.secret_audit_events) != 1
+            or bundle.absent_secret_ids
+            or bundle.expected_secret_records
+            or any(
+                (record.scope, record.context, record.instance, record.integration, record.name)
+                != ("context", "launchplane", "", PREVIEW_DNS_INTEGRATION, PREVIEW_DNS_BINDING)
+                for record in bundle.secret_records
+            )
+            or any(
+                (binding.context, binding.instance, binding.integration, binding.binding_key)
+                != ("launchplane", "", PREVIEW_DNS_INTEGRATION, PREVIEW_DNS_BINDING)
+                or binding.secret_id not in secret_ids
+                for binding in bundle.secret_bindings
+            )
+            or any(
+                item.secret_id not in secret_ids
+                for item in (*bundle.secret_versions, *bundle.secret_audit_events)
+            )
+        ):
+            raise ServiceIdentityAuthorityError(
+                "Only the absent preview DNS service credential can be filled."
+            )
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_active_authz_policy(session)
+            try:
+                policy = self._locked_active_authz_policy_record(session).policy
+            except AuthzPolicyConflictError as error:
+                raise ServiceIdentityAuthorityError(
+                    "Current Director-agent authority is unavailable."
+                ) from error
+            if (
+                not isinstance(identity, LocalOperatorIdentity)
+                or not director_agent_identity(identity)
+                or not policy.allows(
+                    identity=identity,
+                    action="product_config.apply",
+                    product="launchplane",
+                    context="launchplane",
+                    target=AuthorizationTarget(scope="context"),
+                    inherit_agent_read_role=False,
+                )
+            ):
+                raise ServiceIdentityAuthorityError(
+                    "The DNS credential transfer requires current Director-agent authority."
+                )
+            self._write_product_authority_bundle(
+                bundle.model_copy(update={"absent_secret_ids": tuple(secret_ids)}),
+                write_session=session,
+                write_transaction_started=True,
+                caller_identity=identity,
+            )
+
+    @staticmethod
+    def _require_service_identity_administrator(
+        policy: LaunchplaneAuthzPolicy, identity: LaunchplaneIdentity | None
+    ) -> None:
+        from control_plane.service_auth import AuthorizationTarget, LocalAdminIdentity
+
+        administrator = (
+            isinstance(identity, GitHubHumanIdentity) and policy.names_administrator(identity)
+        ) or isinstance(identity, LocalAdminIdentity)
+        if (
+            not administrator
+            or identity is None
+            or not policy.allows(
+                identity=identity,
+                action="authz_policy_grant.write",
+                product="launchplane",
+                context="launchplane",
+                target=AuthorizationTarget(scope="context"),
+            )
+        ):
+            raise ServiceIdentityAuthorityError(
+                "Service identity changes require an admin with policy-write authority."
+            )
+
+    @staticmethod
+    def _bundle_changes_service_identity(session: Session, bundle: ProductAuthorityBundle) -> bool:
+        from control_plane.service_agent_identities import (
+            AGENT_BEARER_ENVIRONMENT_KEYS,
+            AGENT_BEARER_SOURCE_KEY,
+            AGENT_SELECTOR_KEYS,
+        )
+        from control_plane.secrets import LAUNCHPLANE_SERVICE_SECRET_INTEGRATION
+
+        selector_keys = AGENT_SELECTOR_KEYS | {AGENT_BEARER_SOURCE_KEY}
+        runtime_records = (
+            *bundle.runtime_environments,
+            *(write.record for write in bundle.runtime_environment_writes),
+        )
+        runtime_changes = [(record, record.env) for record in runtime_records]
+        runtime_changes.extend(
+            (deletion.expected_record, {}) for deletion in bundle.delete_runtime_environments
+        )
+        for record, values in runtime_changes:
+            if (record.scope, record.context, record.instance) != ("context", "launchplane", ""):
+                continue
+            current = session.get(
+                LaunchplaneRuntimeEnvironmentRow, (record.scope, record.context, record.instance)
+            )
+            previous_values = (
+                RuntimeEnvironmentRecord.model_validate(current.payload).env if current else {}
+            )
+            previous = {
+                key: previous_values[key] for key in selector_keys if key in previous_values
+            }
+            proposed = {key: values[key] for key in selector_keys if key in values}
+            if json.dumps(previous, sort_keys=True) != json.dumps(proposed, sort_keys=True):
+                return True
+
+        if not (bundle.secret_bindings or bundle.secret_records or bundle.secret_versions):
+            return False
+        token_keys = frozenset(
+            key for field, key in AGENT_BEARER_ENVIRONMENT_KEYS.items() if field.endswith("_token")
+        )
+        bindings = {
+            row.binding_id: SecretBinding.model_validate(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneSecretBindingRow).where(
+                    LaunchplaneSecretBindingRow.integration
+                    == LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                    LaunchplaneSecretBindingRow.context == "launchplane",
+                    LaunchplaneSecretBindingRow.instance == "",
+                    LaunchplaneSecretBindingRow.binding_key.in_(token_keys),
+                )
+            ).all()
+        }
+        binding_fields = {
+            "binding_id",
+            "integration",
+            "binding_key",
+            "context",
+            "instance",
+            "secret_id",
+            "status",
+        }
+        for binding in bundle.secret_bindings:
+            previous_binding = bindings.get(binding.binding_id)
+            selected = (
+                binding.integration == LAUNCHPLANE_SERVICE_SECRET_INTEGRATION
+                and binding.context == "launchplane"
+                and not binding.instance
+                and binding.binding_key in token_keys
+            )
+            if not selected and previous_binding is None:
+                continue
+            if previous_binding is None or previous_binding.model_dump(
+                include=binding_fields
+            ) != binding.model_dump(include=binding_fields):
+                return True
+
+        if not (bundle.secret_records or bundle.secret_versions):
+            return False
+        secret_ids = {binding.secret_id for binding in bindings.values()}
+        if not secret_ids:
+            return False
+        records = {
+            row.secret_id: SecretRecord.model_validate(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneSecretRow).where(LaunchplaneSecretRow.secret_id.in_(secret_ids))
+            ).all()
+        }
+        record_fields = {
+            "secret_id",
+            "scope",
+            "integration",
+            "context",
+            "instance",
+            "current_version_id",
+            "policy",
+            "status",
+        }
+        for secret_record in bundle.secret_records:
+            if secret_record.secret_id not in secret_ids:
+                continue
+            previous_record = records.get(secret_record.secret_id)
+            if previous_record is None or previous_record.model_dump(
+                include=record_fields
+            ) != secret_record.model_dump(include=record_fields):
+                return True
+        version_ids = {record.current_version_id for record in records.values()}
+        version_fields = {"version_id", "secret_id", "ciphertext", "key_id"}
+        for version in bundle.secret_versions:
+            if version.version_id not in version_ids:
+                continue
+            previous_version = session.get(LaunchplaneSecretVersionRow, version.version_id)
+            if previous_version is None or SecretVersion.model_validate(
+                previous_version.payload
+            ).model_dump(include=version_fields) != version.model_dump(include=version_fields):
+                return True
+        return False
 
     def write_product_public_hosts_bundle(
         self,
@@ -6728,6 +6983,7 @@ class PostgresRecordStore(HumanSessionStore):
         commit: bool = True,
         validate_only: bool = False,
         write_transaction_started: bool = False,
+        caller_identity: LaunchplaneIdentity | None = None,
     ) -> None:
         if not bundle.requires_write():
             return
@@ -6738,7 +6994,22 @@ class PostgresRecordStore(HumanSessionStore):
         ):
             if not write_transaction_started:
                 self._begin_serialized_write(session)
+            if caller_identity is not None:
+                self._lock_active_authz_policy(session)
             self._lock_product_authority_bundle_write(session)
+            self._validate_preview_profile_writes_in_session(session, bundle.product_profiles)
+            if self._bundle_changes_service_identity(session, bundle):
+                if caller_identity is None:
+                    raise ServiceIdentityAuthorityError(
+                        "Service identity changes require a separate apply by an authorized administrator."
+                    )
+                try:
+                    active_policy = self._locked_active_authz_policy_record(session).policy
+                except AuthzPolicyConflictError as error:
+                    raise ServiceIdentityAuthorityError(
+                        "Current administrator authority is unavailable."
+                    ) from error
+                self._require_service_identity_administrator(active_policy, caller_identity)
             reservation_reader = getattr(
                 self._provider_evidence_context, "reservation_reader", None
             )
@@ -7246,6 +7517,8 @@ class PostgresRecordStore(HumanSessionStore):
         session: Any,
         write: ProviderTargetWrite,
     ) -> None:
+        if write.record.provider_id == "dokploy":
+            self._require_unretired_provider_identity(session, write.record.target_id)
         conflicting_identity_statement = select(LaunchplaneProviderTargetRow).where(
             LaunchplaneProviderTargetRow.provider_id == write.record.provider_id,
             LaunchplaneProviderTargetRow.target_category == write.record.target_category,
@@ -8205,9 +8478,6 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             return self._database_mutation_timestamp(session)
 
-    def _owner_control_shadow_timestamp(self, session: Any) -> str:
-        return self._database_mutation_timestamp(session).replace("Z", "+00:00")
-
     @staticmethod
     def _mutation_lease_expiry(*, observed_at: str, lease_seconds: int) -> str:
         if lease_seconds < 1 or lease_seconds > 86_400:
@@ -8959,6 +9229,35 @@ class PostgresRecordStore(HumanSessionStore):
                 return None
             return self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
 
+    def read_latest_credential_inventory(
+        self, *, successful: bool = False
+    ) -> LaunchplaneIdempotencyRecord | None:
+        from control_plane.credential_inventory import INVENTORY_ROUTE, INVENTORY_SCOPE
+
+        filters = [
+            LaunchplaneIdempotencyRow.scope == INVENTORY_SCOPE,
+            LaunchplaneIdempotencyRow.route_path == INVENTORY_ROUTE,
+            LaunchplaneIdempotencyRow.state == "completed",
+        ]
+        if successful:
+            filters.append(
+                LaunchplaneIdempotencyRow.payload["response_payload"]["status"].as_string()
+                == "collected"
+            )
+        records = self._list_models(
+            model_type=LaunchplaneIdempotencyRecord,
+            orm_model=LaunchplaneIdempotencyRow,
+            filters=tuple(filters),
+            order_by=(
+                LaunchplaneIdempotencyRow.payload["response_payload"]["attempted_at"]
+                .as_string()
+                .desc(),
+                LaunchplaneIdempotencyRow.record_id.desc(),
+            ),
+            limit=1,
+        )
+        return records[0] if records else None
+
     def list_lane_service_restart_reservations(
         self, *, product: str, limit: int = 50
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
@@ -9595,6 +9894,13 @@ class PostgresRecordStore(HumanSessionStore):
             product=product, number=number, include_failed=True
         )
 
+    def list_odoo_preview_originals(
+        self, *, product: str, number: int
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        return self._list_odoo_preview_reservations(
+            product=product, number=number, include_completed=True
+        )
+
     def _list_odoo_preview_reservations(
         self,
         *,
@@ -9602,8 +9908,13 @@ class PostgresRecordStore(HumanSessionStore):
         limit: int | None = None,
         number: int | None = None,
         include_failed: bool = False,
+        include_completed: bool = False,
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
         from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
+        from control_plane.contracts.odoo_walkthrough import (
+            WALKTHROUGH_ROUTE,
+            walkthrough_activity_scope,
+        )
         from control_plane.product_reconcile import reconcile_reservation_scope
 
         original = aliased(LaunchplaneIdempotencyRow)
@@ -9630,6 +9941,42 @@ class PostgresRecordStore(HumanSessionStore):
             )
             .exists()
         )
+        retained_fixture = (
+            select(original.record_id)
+            .where(
+                original.scope == LaunchplaneIdempotencyRow.scope,
+                original.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                original.idempotency_key == LaunchplaneIdempotencyRow.record_id,
+                original.request_fingerprint == LaunchplaneIdempotencyRow.request_fingerprint,
+                original.payload["response_payload"]["original_intent"]["maintenance"][
+                    "intent"
+                ].as_string()
+                == "preview-fixture",
+            )
+            .exists()
+        )
+        retained_walkthrough = (
+            select(original.record_id)
+            .where(
+                original.scope == LaunchplaneIdempotencyRow.scope,
+                original.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                original.idempotency_key == LaunchplaneIdempotencyRow.record_id,
+                original.request_fingerprint == LaunchplaneIdempotencyRow.request_fingerprint,
+                original.payload["response_payload"]["original_intent"]["read_only"]
+                .as_boolean()
+                .is_(True),
+                original.payload["response_payload"]["original_intent"]["identity"][
+                    "environment_kind"
+                ].as_string()
+                == "preview",
+            )
+            .exists()
+        )
+        walkthrough = and_(
+            LaunchplaneIdempotencyRow.route_path == WALKTHROUGH_ROUTE,
+            LaunchplaneIdempotencyRow.scope == walkthrough_activity_scope(product),
+            retained_walkthrough,
+        )
         held_states = LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required"))
         states = (
             or_(
@@ -9650,14 +9997,22 @@ class PostgresRecordStore(HumanSessionStore):
             else or_(
                 LaunchplaneIdempotencyRow.scope == reconcile_reservation_scope(product),
                 retained_product,
+                walkthrough,
             )
         )
         return self._list_models(
             model_type=LaunchplaneIdempotencyRecord,
             orm_model=LaunchplaneIdempotencyRow,
             filters=(
-                LaunchplaneIdempotencyRow.route_path == ODOO_PREVIEW_APPLY_ROUTE,
-                states,
+                or_(
+                    LaunchplaneIdempotencyRow.route_path == ODOO_PREVIEW_APPLY_ROUTE,
+                    and_(
+                        LaunchplaneIdempotencyRow.route_path == "/v1/drivers/odoo/app-maintenance",
+                        retained_fixture,
+                    ),
+                    walkthrough,
+                ),
+                True if include_completed else states,
                 product_scope,
             ),
             order_by=(LaunchplaneIdempotencyRow.record_id,),
@@ -10839,6 +11194,7 @@ class PostgresRecordStore(HumanSessionStore):
         provider_target_origin: ProviderTargetOrigin | None = None,
         original_intent: dict[str, Any] | None = None,
         expected_original_intent: dict[str, Any] | None = None,
+        retain_effect_custody: bool = False,
     ) -> MutationReconciliationSupersessionResult:
         normalized_response_trace_id = response_trace_id.strip()
         normalized_reconciliation_key = reconciliation_key.strip()
@@ -10957,6 +11313,12 @@ class PostgresRecordStore(HumanSessionStore):
                     reconciliation_key=normalized_reconciliation_key,
                     provider_target_key=normalized_provider_target_key,
                 )
+                if retain_effect_custody:
+                    replacement = self._updated_idempotency_record(
+                        replacement,
+                        provider_effect_phase=SUPERSEDED_PROVIDER_EFFECT_PHASE,
+                        provider_effect_started_at=observed_at,
+                    )
                 self._sync_idempotency_row(row, superseded_record)
                 session.add(self._idempotency_row(replacement))
                 session.flush()
@@ -12375,8 +12737,19 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if row is not None:
                 previous = self._read_payload(model_type=DisposableLaneSafety, payload=row.payload)
+                if previous.observed_at > record.observed_at or (
+                    previous.observed_at == record.observed_at
+                    and previous.usage == "in_use"
+                    and record.usage != "in_use"
+                ):
+                    if record.usage == "in_use":
+                        session.commit()
+                    return False
                 if not collect_facts and (
-                    (previous.usage == "in_use" and record.usage != "in_use")
+                    (
+                        previous.current_usage(record.observed_at) == "in_use"
+                        and record.usage != "in_use"
+                    )
                     or (previous.data == "only_copy" and record.data != "only_copy")
                     or (
                         previous.production_resources == "shared"
@@ -12395,14 +12768,6 @@ class PostgresRecordStore(HumanSessionStore):
                         self._invalidate_testing_non_use_in_session(
                             session, product=record.product, context=record.context
                         )
-                if previous.observed_at > record.observed_at or (
-                    previous.observed_at == record.observed_at
-                    and previous.usage == "in_use"
-                    and record.usage != "in_use"
-                ):
-                    if record.usage == "in_use":
-                        session.commit()
-                    return False
             session.merge(
                 LaunchplaneDisposableLaneSafetyRow(
                     product=record.product,
@@ -13783,9 +14148,23 @@ class PostgresRecordStore(HumanSessionStore):
                 if (
                     (candidate.product, candidate.context) != (record.product, record.context)
                     or app is None
-                    or app.phase != "restoring"
-                    or app.restore_workflow_started is not False
-                    or app.plan.source != "production"
+                    or (
+                        not (
+                            app.plan.source == "migrated"
+                            and app.phase
+                            in {
+                                "planned",
+                                "configuring",
+                                "configured",
+                                "deploying",
+                                "deployed",
+                                "restoring",
+                            }
+                            and app.restore_workflow_started is not True
+                        )
+                        and (app.phase != "restoring" or app.restore_workflow_started is not False)
+                    )
+                    or app.plan.source not in {"production", "migrated"}
                     or app.plan.generation is None
                     or custody is None
                     or (custody.provider_id, custody.target_category, custody.target_id)
@@ -13808,6 +14187,12 @@ class PostgresRecordStore(HumanSessionStore):
                 or generation.source_binding_sha256 != record.source_binding_sha256
             ):
                 raise ValueError("Native capture differs from the active generation.")
+            if generation.migrated_source is not None and (
+                record.source_observation != generation.migrated_source
+                or record.database != generation.migrated_source.database
+                or record.filestore != generation.migrated_source.filestore
+            ):
+                raise ValueError("Migrated capture differs from its admitted output pair.")
             row = session.get(
                 LaunchplaneNativeTestingCopyCaptureRow, record.generation_binding_sha256
             )
@@ -13832,6 +14217,26 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             row = session.get(LaunchplaneProductionRecipientRow, (product, context))
             return dict(row.payload) if row else None
+
+    def list_production_recipient_payloads(self) -> tuple[dict[str, Any], ...]:
+        with self._session_factory() as session:
+            return tuple(
+                dict(row.payload)
+                for row in session.scalars(select(LaunchplaneProductionRecipientRow)).all()
+            )
+
+    @staticmethod
+    def _require_unretired_provider_identity(session: Any, target_id: str) -> None:
+        from control_plane.production_recipient_retirement_names import require_available_name
+
+        require_available_name(
+            (
+                dict(row.payload)
+                for row in session.scalars(select(LaunchplaneProductionRecipientRow))
+            ),
+            "",
+            target_id,
+        )
 
     def write_production_recipient(
         self,
@@ -14100,7 +14505,8 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 if (
                     safety_row is not None
-                    and DisposableLaneSafety.model_validate(safety_row.payload).usage == "in_use"
+                    and DisposableLaneSafety.model_validate(safety_row.payload).current_usage()
+                    == "in_use"
                 ):
                     raise ValueError("Known staff use protects the retained testing recipient.")
             application = record.request.application is not None
@@ -19462,7 +19868,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def read_latest_lane_deployment_record(
-        self, *, context_name: str, instance_name: str
+        self, *, context_name: str, instance_name: str, observed_at: datetime | None = None
     ) -> DeploymentRecord | None:
         with self._session_factory() as session:
             records = self._monitor_deployment_states(session, {(context_name, instance_name)}).get(
@@ -19470,6 +19876,14 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if not records or any(not item.started_at for item in records):
                 return None
+            if observed_at is not None:
+                records = [
+                    item
+                    for item in records
+                    if datetime.fromisoformat(item.started_at) <= observed_at
+                ]
+                if not records:
+                    return None
             latest = max(records, key=lambda item: (item.started_at, item.record_id))
             row = session.get(LaunchplaneDeploymentRow, latest.record_id)
             return DeploymentRecord.model_validate(row.payload) if row is not None else None
@@ -19950,6 +20364,10 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.commit()
 
+    @staticmethod
+    def _preview_refresh_lock_name(preview_id: str) -> str:
+        return f"launchplane-preview-refresh:{preview_id}"
+
     @contextmanager
     def serialize_preview_refresh(
         self, *, preview_id: str, dedicated: bool = False, shared: bool = False
@@ -19973,7 +20391,7 @@ class PostgresRecordStore(HumanSessionStore):
             lock_function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
             session.execute(
                 text(f"select {lock_function}(hashtextextended(:lock_name, 0))"),
-                {"lock_name": f"launchplane-preview-refresh:{normalized_preview_id}"},
+                {"lock_name": self._preview_refresh_lock_name(normalized_preview_id)},
             )
             held = getattr(self._preview_execution_context, "held", ())
             self._preview_execution_context.held = (
@@ -20077,90 +20495,6 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
-    def _owner_control_channel_session_row(
-        self,
-        session: Any,
-        *,
-        channel_session_id: str,
-        for_update: bool = False,
-    ) -> LaunchplaneOwnerControlChannelSessionRow | None:
-        statement = select(LaunchplaneOwnerControlChannelSessionRow).where(
-            LaunchplaneOwnerControlChannelSessionRow.channel_session_id == channel_session_id
-        )
-        if for_update:
-            statement = statement.execution_options(populate_existing=True)
-            if not self.database_url.startswith("sqlite"):
-                statement = statement.with_for_update()
-        return cast(LaunchplaneOwnerControlChannelSessionRow | None, session.scalar(statement))
-
-    def _owner_control_enrollment_provenance_row(
-        self,
-        session: Any,
-        *,
-        channel_session_id: str,
-        for_update: bool = False,
-    ) -> LaunchplaneOwnerControlEnrollmentProvenanceRow | None:
-        statement = select(LaunchplaneOwnerControlEnrollmentProvenanceRow).where(
-            LaunchplaneOwnerControlEnrollmentProvenanceRow.channel_session_id == channel_session_id
-        )
-        if for_update:
-            statement = statement.execution_options(populate_existing=True)
-            if not self.database_url.startswith("sqlite"):
-                statement = statement.with_for_update()
-        return cast(
-            LaunchplaneOwnerControlEnrollmentProvenanceRow | None,
-            session.scalar(statement),
-        )
-
-    def _owner_control_issued_challenge_row(
-        self,
-        session: Any,
-        *,
-        challenge_nonce: str,
-        for_update: bool = False,
-    ) -> LaunchplaneOwnerControlIssuedChallengeRow | None:
-        statement = select(LaunchplaneOwnerControlIssuedChallengeRow).where(
-            LaunchplaneOwnerControlIssuedChallengeRow.challenge_nonce == challenge_nonce
-        )
-        if for_update:
-            statement = statement.execution_options(populate_existing=True)
-            if not self.database_url.startswith("sqlite"):
-                statement = statement.with_for_update()
-        return cast(LaunchplaneOwnerControlIssuedChallengeRow | None, session.scalar(statement))
-
-    def _owner_control_active_challenge_row_for_operation(
-        self,
-        session: Any,
-        *,
-        operation_id: str,
-        for_update: bool = False,
-    ) -> LaunchplaneOwnerControlIssuedChallengeRow | None:
-        statement = select(LaunchplaneOwnerControlIssuedChallengeRow).where(
-            LaunchplaneOwnerControlIssuedChallengeRow.operation_id == operation_id,
-            LaunchplaneOwnerControlIssuedChallengeRow.state == "issued",
-        )
-        if for_update:
-            statement = statement.execution_options(populate_existing=True)
-            if not self.database_url.startswith("sqlite"):
-                statement = statement.with_for_update()
-        return cast(LaunchplaneOwnerControlIssuedChallengeRow | None, session.scalar(statement))
-
-    def _locked_privileged_operation_record(
-        self,
-        session: Any,
-        *,
-        operation_id: str,
-    ) -> PrivilegedOperationRecord:
-        statement = select(LaunchplanePrivilegedOperationRow).where(
-            LaunchplanePrivilegedOperationRow.operation_id == operation_id
-        )
-        if not self.database_url.startswith("sqlite"):
-            statement = statement.with_for_update()
-        row = session.scalar(statement)
-        if row is None:
-            raise FileNotFoundError(f"Privileged operation {operation_id} was not found.")
-        return self._read_payload(model_type=PrivilegedOperationRecord, payload=row.payload)
-
     def _locked_active_authz_policy_record(
         self,
         session: Any,
@@ -20175,700 +20509,8 @@ class PostgresRecordStore(HumanSessionStore):
             statement = statement.with_for_update()
         rows = tuple(session.scalars(statement))
         if len(rows) != 1:
-            raise OwnerControlShadowVerifierConflictError(
-                "Owner-control issuance requires exactly one active authorization policy."
-            )
+            raise AuthzPolicyConflictError("Exactly one active authorization policy is required.")
         return self._read_authz_policy_row(rows[0])
-
-    @staticmethod
-    def _owner_control_channel_session_record_from_row(
-        row: LaunchplaneOwnerControlChannelSessionRow,
-    ) -> OwnerControlChannelSessionRecord:
-        return OwnerControlChannelSessionRecord.model_validate(row.payload)
-
-    @staticmethod
-    def _owner_control_enrollment_provenance_record_from_row(
-        row: LaunchplaneOwnerControlEnrollmentProvenanceRow,
-    ) -> OwnerControlEnrollmentProvenanceRecord:
-        return OwnerControlEnrollmentProvenanceRecord.model_validate(row.payload)
-
-    @staticmethod
-    def _owner_control_issued_challenge_record_from_row(
-        row: LaunchplaneOwnerControlIssuedChallengeRow,
-    ) -> OwnerControlIssuedChallengeRecord:
-        return OwnerControlIssuedChallengeRecord.model_validate(row.payload)
-
-    def _owner_control_channel_session_row_from_record(
-        self,
-        record: OwnerControlChannelSessionRecord,
-    ) -> LaunchplaneOwnerControlChannelSessionRow:
-        binding = record.channel_binding()
-        return LaunchplaneOwnerControlChannelSessionRow(
-            channel_session_id=record.channel_session_id,
-            owner_github_id=record.owner_github_id,
-            status=record.status,
-            session_issued_at=binding.session_issued_at,
-            session_expires_at=binding.session_expires_at,
-            binding_sha256=record.binding_sha256,
-            enrolled_at=record.enrolled_at,
-            revoked_at=record.revoked_at,
-            authority_state=record.authority_state,
-            payload=self._payload_dict(record),
-        )
-
-    def _owner_control_enrollment_provenance_row_from_record(
-        self,
-        record: OwnerControlEnrollmentProvenanceRecord,
-    ) -> LaunchplaneOwnerControlEnrollmentProvenanceRow:
-        return LaunchplaneOwnerControlEnrollmentProvenanceRow(
-            channel_session_id=record.channel_session_id,
-            owner_github_id=record.owner_github_id,
-            binding_sha256=record.binding_sha256,
-            host_principal_claim_sha256=record.host_principal_claim_sha256,
-            enrolled_at=record.enrolled_at,
-            enrollment_context=record.enrollment_context,
-            server_observed_corroboration=record.server_observed_corroboration,
-            provenance_tier=record.provenance_tier,
-            authority_state=record.authority_state,
-            authorizes_execution=record.authorizes_execution,
-            payload=self._payload_dict(record),
-        )
-
-    def _sync_owner_control_channel_session_row(
-        self,
-        row: LaunchplaneOwnerControlChannelSessionRow,
-        record: OwnerControlChannelSessionRecord,
-    ) -> None:
-        binding = record.channel_binding()
-        row.owner_github_id = record.owner_github_id
-        row.status = record.status
-        row.session_issued_at = binding.session_issued_at
-        row.session_expires_at = binding.session_expires_at
-        row.binding_sha256 = record.binding_sha256
-        row.enrolled_at = record.enrolled_at
-        row.revoked_at = record.revoked_at
-        row.authority_state = record.authority_state
-        row.payload = self._payload_dict(record)
-
-    def _owner_control_issued_challenge_row_from_record(
-        self,
-        record: OwnerControlIssuedChallengeRecord,
-    ) -> LaunchplaneOwnerControlIssuedChallengeRow:
-        return LaunchplaneOwnerControlIssuedChallengeRow(
-            challenge_id=record.challenge_id,
-            challenge_nonce=record.challenge_nonce,
-            channel_session_id=record.channel_session_id,
-            operation_id=record.operation_id,
-            descriptor_id=record.descriptor_id,
-            owner_github_id=record.owner_github_id,
-            issued_at=record.issued_at,
-            expires_at=record.expires_at,
-            approval_request_sha256=record.approval_request_sha256,
-            binding_sha256=record.binding_sha256,
-            state=record.state,
-            attempt_count=record.attempt_count,
-            consumed_at=record.consumed_at,
-            terminal_event_id=record.terminal_event_id,
-            authority_state=record.authority_state,
-            payload=self._payload_dict(record),
-        )
-
-    def _sync_owner_control_issued_challenge_row(
-        self,
-        row: LaunchplaneOwnerControlIssuedChallengeRow,
-        record: OwnerControlIssuedChallengeRecord,
-    ) -> None:
-        row.state = record.state
-        row.attempt_count = record.attempt_count
-        row.consumed_at = record.consumed_at
-        row.terminal_event_id = record.terminal_event_id
-        row.authority_state = record.authority_state
-        row.payload = self._payload_dict(record)
-
-    def _owner_control_challenge_lifecycle_event_row_from_record(
-        self,
-        record: OwnerControlChallengeLifecycleEventRecord,
-    ) -> LaunchplaneOwnerControlChallengeLifecycleEventRow:
-        return LaunchplaneOwnerControlChallengeLifecycleEventRow(
-            event_id=record.event_id,
-            challenge_id=record.challenge_id,
-            challenge_nonce=record.challenge_nonce,
-            channel_session_id=record.channel_session_id,
-            operation_id=record.operation_id,
-            approval_request_sha256=record.approval_request_sha256,
-            binding_sha256=record.binding_sha256,
-            from_state=record.from_state,
-            to_state=record.to_state,
-            transition_reason=record.transition_reason,
-            challenge_expires_at=record.challenge_expires_at,
-            occurred_at=record.occurred_at,
-            authorizes_execution=record.authorizes_execution,
-            authority_state=record.authority_state,
-            payload=self._payload_dict(record),
-        )
-
-    def enroll_owner_control_channel_session(
-        self,
-        binding: ChannelBindingRecord,
-        *,
-        host_principal_claim: OwnerControlHostPrincipalClaim,
-    ) -> OwnerControlChannelEnrollment:
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            existing_row = self._owner_control_channel_session_row(
-                session,
-                channel_session_id=binding.channel_session_id,
-                for_update=True,
-            )
-            if existing_row is not None:
-                existing_record = self._owner_control_channel_session_record_from_row(existing_row)
-                if not (
-                    existing_record.binding_sha256 == owner_control_channel_binding_sha256(binding)
-                    and existing_record.channel_binding() == binding
-                ):
-                    raise OwnerControlShadowVerifierConflictError(
-                        "Channel-session enrollment changed the stored binding."
-                    )
-                provenance_row = self._owner_control_enrollment_provenance_row(
-                    session,
-                    channel_session_id=binding.channel_session_id,
-                    for_update=True,
-                )
-                if provenance_row is None:
-                    raise OwnerControlEnrollmentProvenanceConflictError(
-                        "Channel-session enrollment provenance is missing."
-                    )
-                existing_provenance = self._owner_control_enrollment_provenance_record_from_row(
-                    provenance_row
-                )
-                candidate_provenance = build_owner_control_enrollment_provenance_record(
-                    binding=binding,
-                    claim=host_principal_claim,
-                    enrolled_at=existing_record.enrolled_at,
-                )
-                if existing_provenance != candidate_provenance:
-                    raise OwnerControlEnrollmentProvenanceConflictError(
-                        "Channel-session re-enrollment changed immutable provenance."
-                    )
-                session.rollback()
-                return OwnerControlChannelEnrollment(
-                    session=existing_record,
-                    provenance=existing_provenance,
-                )
-            enrolled_at = self._owner_control_shadow_timestamp(session)
-            record = build_owner_control_channel_session_record(
-                binding=binding,
-                enrolled_at=enrolled_at,
-            )
-            provenance = build_owner_control_enrollment_provenance_record(
-                binding=binding,
-                claim=host_principal_claim,
-                enrolled_at=enrolled_at,
-            )
-            session.add(self._owner_control_channel_session_row_from_record(record))
-            session.add(self._owner_control_enrollment_provenance_row_from_record(provenance))
-            session.commit()
-            return OwnerControlChannelEnrollment(session=record, provenance=provenance)
-
-    def revoke_owner_control_channel_session(
-        self,
-        *,
-        channel_session_id: str,
-    ) -> OwnerControlChannelSessionRecord:
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            row = self._owner_control_channel_session_row(
-                session,
-                channel_session_id=channel_session_id,
-                for_update=True,
-            )
-            if row is None:
-                raise FileNotFoundError(
-                    f"Owner-control channel session {channel_session_id} was not found."
-                )
-            record = self._owner_control_channel_session_record_from_row(row)
-            revoked_record = revoke_owner_control_channel_session_record(
-                record,
-                revoked_at=self._owner_control_shadow_timestamp(session),
-            )
-            if revoked_record != record:
-                self._sync_owner_control_channel_session_row(row, revoked_record)
-                session.commit()
-            else:
-                session.rollback()
-            return revoked_record
-
-    def issue_owner_control_challenge(
-        self,
-        issue_request: OwnerControlChallengeIssueRequest,
-    ) -> OwnerControlIssuedChallengeRecord:
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            session_row = self._owner_control_channel_session_row(
-                session,
-                channel_session_id=issue_request.channel_session_id,
-                for_update=True,
-            )
-            if session_row is None:
-                raise FileNotFoundError(
-                    f"Owner-control channel session {issue_request.channel_session_id} was not found."
-                )
-            session_record = self._owner_control_channel_session_record_from_row(session_row)
-            provenance_row = self._owner_control_enrollment_provenance_row(
-                session,
-                channel_session_id=issue_request.channel_session_id,
-                for_update=True,
-            )
-            if provenance_row is None:
-                raise OwnerControlEnrollmentProvenanceConflictError(
-                    "Owner-control challenge issuance requires enrollment provenance."
-                )
-            OwnerControlChannelEnrollment(
-                session=session_record,
-                provenance=self._owner_control_enrollment_provenance_record_from_row(
-                    provenance_row
-                ),
-            )
-            operation = self._locked_privileged_operation_record(
-                session,
-                operation_id=issue_request.operation_id,
-            )
-            policy_record = self._locked_active_authz_policy_record(session)
-            existing_row = self._owner_control_active_challenge_row_for_operation(
-                session,
-                operation_id=operation.operation_id,
-                for_update=True,
-            )
-            issued_at = self._owner_control_shadow_timestamp(session)
-            issued_at_value = datetime.fromisoformat(issued_at)
-            session_expires_at = datetime.fromisoformat(
-                session_record.channel_binding().session_expires_at
-            ).astimezone(timezone.utc)
-            expires_at_value = min(
-                issued_at_value + timedelta(seconds=issue_request.expires_in_seconds),
-                session_expires_at,
-            ).replace(microsecond=0)
-            expires_at = expires_at_value.isoformat()
-            if session_record.status != "enrolled":
-                raise OwnerControlShadowVerifierConflictError("Channel session is not enrolled.")
-            if operation.status != "planned":
-                raise OwnerControlShadowVerifierConflictError(
-                    "Owner-control challenges require a planned operation."
-                )
-            if expires_at_value <= issued_at_value:
-                raise OwnerControlShadowVerifierConflictError(
-                    "Owner-control challenge expiry does not remain within live provenance."
-                )
-            try:
-                candidate = derive_owner_control_approval_request(
-                    operation=operation,
-                    policy_record=policy_record,
-                    owner_github_id=session_record.owner_github_id,
-                    nonce=secrets.token_urlsafe(32),
-                    issued_at=issued_at,
-                    expires_at=expires_at,
-                )
-            except OwnerControlChallengeProvenanceError as error:
-                raise OwnerControlShadowVerifierConflictError(str(error)) from error
-            if existing_row is not None:
-                existing_record = self._owner_control_issued_challenge_record_from_row(existing_row)
-                existing_expires_at = datetime.fromisoformat(existing_record.expires_at)
-                if existing_expires_at <= issued_at_value:
-                    terminalized_record, lifecycle_event = (
-                        terminalize_expired_owner_control_challenge_record(
-                            existing_record,
-                            observed_at=issued_at,
-                        )
-                    )
-                    self._sync_owner_control_issued_challenge_row(
-                        existing_row,
-                        terminalized_record,
-                    )
-                    session.add(
-                        self._owner_control_challenge_lifecycle_event_row_from_record(
-                            lifecycle_event
-                        )
-                    )
-                    session.flush()
-                else:
-                    if (
-                        existing_record.channel_session_id == session_record.channel_session_id
-                        and existing_record.binding_sha256 == session_record.binding_sha256
-                        and existing_expires_at <= expires_at_value
-                        and owner_control_challenge_semantics(existing_record.approval_request())
-                        == owner_control_challenge_semantics(candidate)
-                    ):
-                        session.rollback()
-                        return existing_record
-                    raise OwnerControlShadowVerifierConflictError(
-                        "An active owner-control challenge already binds this operation."
-                    )
-            record = issue_owner_control_challenge_record(
-                issue_request=issue_request,
-                session=session_record,
-                approval_request=candidate,
-            )
-            session.add(self._owner_control_issued_challenge_row_from_record(record))
-            session.flush()
-            final_observed_at = self._owner_control_shadow_timestamp(session)
-            if datetime.fromisoformat(record.expires_at) <= datetime.fromisoformat(
-                final_observed_at
-            ):
-                session.rollback()
-                raise OwnerControlShadowVerifierConflictError(
-                    "Owner-control challenge expired before issuance committed."
-                )
-            session.commit()
-            return record
-
-    def verify_owner_control_confirmation_shadow(
-        self,
-        envelope: OwnerControlConfirmationEnvelope,
-    ) -> OwnerControlShadowVerificationResult:
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            observed_challenge_row = self._owner_control_issued_challenge_row(
-                session,
-                challenge_nonce=envelope.challenge_response.approval_request.nonce,
-            )
-            if observed_challenge_row is None:
-                session.rollback()
-                raise FileNotFoundError("Owner-control challenge was not issued.")
-            observed_challenge = self._owner_control_issued_challenge_record_from_row(
-                observed_challenge_row
-            )
-            session_row = self._owner_control_channel_session_row(
-                session,
-                channel_session_id=observed_challenge.channel_session_id,
-                for_update=True,
-            )
-            if session_row is not None:
-                provenance_row = self._owner_control_enrollment_provenance_row(
-                    session,
-                    channel_session_id=observed_challenge.channel_session_id,
-                    for_update=True,
-                )
-                if provenance_row is None:
-                    raise OwnerControlEnrollmentProvenanceConflictError(
-                        "Owner-control shadow verification requires enrollment provenance."
-                    )
-                OwnerControlChannelEnrollment(
-                    session=self._owner_control_channel_session_record_from_row(session_row),
-                    provenance=self._owner_control_enrollment_provenance_record_from_row(
-                        provenance_row
-                    ),
-                )
-            challenge_row = self._owner_control_issued_challenge_row(
-                session,
-                challenge_nonce=observed_challenge.challenge_nonce,
-                for_update=True,
-            )
-            if challenge_row is None:
-                session.rollback()
-                raise FileNotFoundError("Owner-control challenge was not issued.")
-            challenge_record = self._owner_control_issued_challenge_record_from_row(challenge_row)
-            if challenge_record.attempt_count >= OWNER_CONTROL_SHADOW_MAX_ATTEMPTS:
-                session.rollback()
-                raise OwnerControlShadowVerifierConflictError(
-                    "Owner-control challenge verification attempt budget is exhausted."
-                )
-            observed_at = self._owner_control_shadow_timestamp(session)
-            evaluation = evaluate_owner_control_shadow_verification(
-                envelope=envelope,
-                channel_session=(
-                    self._owner_control_channel_session_record_from_row(session_row)
-                    if session_row is not None
-                    else None
-                ),
-                issued_challenge=challenge_record,
-                observed_at=observed_at,
-            )
-            sequence = challenge_record.attempt_count + 1
-            if (
-                evaluation.verification_status == "rejected"
-                and evaluation.resulting_challenge_state == "issued"
-                and sequence == OWNER_CONTROL_SHADOW_MAX_ATTEMPTS
-            ):
-                evaluation = OwnerControlShadowVerificationEvaluation(
-                    verification_status="rejected",
-                    rejection_reason="attempt_budget_exhausted",
-                    resulting_challenge_state="rejected",
-                )
-            envelope_sha256 = owner_control_confirmation_envelope_sha256(envelope)
-            event_id = owner_control_verification_event_id(
-                challenge_id=challenge_record.challenge_id,
-                sequence=sequence,
-                envelope_sha256=envelope_sha256,
-                verification_status=evaluation.verification_status,
-                rejection_reason=evaluation.rejection_reason,
-            )
-            first_terminal_transition = (
-                challenge_record.state == "issued"
-                and evaluation.resulting_challenge_state != "issued"
-            )
-            updated_challenge = challenge_record.model_copy(
-                update={
-                    "attempt_count": sequence,
-                    "state": evaluation.resulting_challenge_state,
-                    "consumed_at": (
-                        observed_at
-                        if evaluation.resulting_challenge_state == "consumed"
-                        and challenge_record.consumed_at is None
-                        else challenge_record.consumed_at
-                    ),
-                    "terminal_event_id": (
-                        event_id
-                        if first_terminal_transition
-                        else challenge_record.terminal_event_id
-                    ),
-                }
-            )
-            self._sync_owner_control_issued_challenge_row(challenge_row, updated_challenge)
-            event = OwnerControlShadowVerificationEventRecord(
-                event_id=event_id,
-                challenge_id=challenge_record.challenge_id,
-                sequence=sequence,
-                channel_session_id=challenge_record.channel_session_id,
-                challenge_nonce=challenge_record.challenge_nonce,
-                envelope_sha256=envelope_sha256,
-                approval_request_sha256=challenge_record.approval_request_sha256,
-                binding_sha256=challenge_record.binding_sha256,
-                verification_status=evaluation.verification_status,
-                rejection_reason=evaluation.rejection_reason,
-                resulting_challenge_state=evaluation.resulting_challenge_state,
-                occurred_at=observed_at,
-            )
-            session.add(
-                LaunchplaneOwnerControlShadowVerificationEventRow(
-                    event_id=event.event_id,
-                    challenge_id=event.challenge_id,
-                    sequence=event.sequence,
-                    channel_session_id=event.channel_session_id,
-                    challenge_nonce=event.challenge_nonce,
-                    envelope_sha256=event.envelope_sha256,
-                    approval_request_sha256=event.approval_request_sha256,
-                    binding_sha256=event.binding_sha256,
-                    verification_status=event.verification_status,
-                    rejection_reason=event.rejection_reason,
-                    resulting_challenge_state=event.resulting_challenge_state,
-                    occurred_at=event.occurred_at,
-                    verifier_mode=event.verifier_mode,
-                    authorizes_execution=event.authorizes_execution,
-                    authority_state=event.authority_state,
-                    payload=self._payload_dict(event),
-                )
-            )
-            session.commit()
-            return OwnerControlShadowVerificationResult(
-                event_id=event.event_id,
-                challenge_id=event.challenge_id,
-                sequence=event.sequence,
-                verification_status=event.verification_status,
-                rejection_reason=event.rejection_reason,
-                resulting_challenge_state=event.resulting_challenge_state,
-            )
-
-    def read_owner_control_channel_session(
-        self,
-        *,
-        channel_session_id: str,
-    ) -> OwnerControlChannelSessionRecord:
-        return self._read_model(
-            model_type=OwnerControlChannelSessionRecord,
-            orm_model=LaunchplaneOwnerControlChannelSessionRow,
-            filters=(
-                LaunchplaneOwnerControlChannelSessionRow.channel_session_id == channel_session_id,
-            ),
-        )
-
-    def read_owner_control_enrollment_provenance(
-        self,
-        *,
-        channel_session_id: str,
-    ) -> OwnerControlEnrollmentProvenanceRecord:
-        return self._read_model(
-            model_type=OwnerControlEnrollmentProvenanceRecord,
-            orm_model=LaunchplaneOwnerControlEnrollmentProvenanceRow,
-            filters=(
-                LaunchplaneOwnerControlEnrollmentProvenanceRow.channel_session_id
-                == channel_session_id,
-            ),
-        )
-
-    def read_owner_control_issued_challenge(
-        self,
-        *,
-        challenge_nonce: str,
-    ) -> OwnerControlIssuedChallengeRecord:
-        return self._read_model(
-            model_type=OwnerControlIssuedChallengeRecord,
-            orm_model=LaunchplaneOwnerControlIssuedChallengeRow,
-            filters=(LaunchplaneOwnerControlIssuedChallengeRow.challenge_nonce == challenge_nonce,),
-        )
-
-    @staticmethod
-    def _administrator_enrollment_row(
-        record: AdministratorEnrollmentRecord,
-    ) -> LaunchplaneAdministratorEnrollmentRow:
-        return LaunchplaneAdministratorEnrollmentRow(
-            enrollment_id=record.enrollment_id,
-            state=record.state,
-            proposer_github_id=record.proposer_github_id,
-            candidate_github_id=record.candidate_github_id,
-            challenge_sha256=record.challenge_sha256,
-            reason=record.reason,
-            provenance_sha256=record.provenance_sha256,
-            created_at=record.created_at,
-            expires_at=record.expires_at,
-            control_proven_at=record.control_proven_at,
-            withdrawn_at=record.withdrawn_at,
-            expired_at=record.expired_at,
-            enrolled_at=record.enrolled_at,
-            enrolled_policy_record_id=record.enrolled_policy_record_id,
-            enrolled_policy_revision=record.enrolled_policy_revision,
-            enrolled_policy_sha256=record.enrolled_policy_sha256,
-            reviewed_plan_sha256=record.reviewed_plan_sha256,
-            bridge_idempotency_key_sha256=record.bridge_idempotency_key_sha256,
-            authority_state=record.authority_state,
-            authorizes_policy=record.authorizes_policy,
-            policy_bridge_state=record.policy_bridge_state,
-            payload=PostgresRecordStore._payload_dict(record),
-        )
-
-    @staticmethod
-    def _sync_administrator_enrollment_row(
-        row: LaunchplaneAdministratorEnrollmentRow, record: AdministratorEnrollmentRecord
-    ) -> None:
-        row.state = record.state
-        row.candidate_github_id = record.candidate_github_id
-        row.control_proven_at = record.control_proven_at
-        row.withdrawn_at = record.withdrawn_at
-        row.expired_at = record.expired_at
-        row.enrolled_at = record.enrolled_at
-        row.enrolled_policy_record_id = record.enrolled_policy_record_id
-        row.enrolled_policy_revision = record.enrolled_policy_revision
-        row.enrolled_policy_sha256 = record.enrolled_policy_sha256
-        row.reviewed_plan_sha256 = record.reviewed_plan_sha256
-        row.bridge_idempotency_key_sha256 = record.bridge_idempotency_key_sha256
-        row.policy_bridge_state = record.policy_bridge_state
-        row.payload = PostgresRecordStore._payload_dict(record)
-
-    def create_administrator_enrollment_if_absent(
-        self, record: AdministratorEnrollmentRecord
-    ) -> tuple[AdministratorEnrollmentRecord, bool]:
-        with self._session_factory() as session:
-            session.add(self._administrator_enrollment_row(record))
-            try:
-                session.commit()
-                return record, True
-            except IntegrityError as error:
-                session.rollback()
-                existing_row = session.get(
-                    LaunchplaneAdministratorEnrollmentRow, record.enrollment_id
-                )
-                if existing_row is None:
-                    raise AdministratorEnrollmentConflictError(
-                        "administrator enrollment challenge digest is already reserved"
-                    ) from error
-                existing = AdministratorEnrollmentRecord.model_validate(existing_row.payload)
-                if existing != record:
-                    raise AdministratorEnrollmentConflictError(
-                        "administrator enrollment creation conflicts with persisted record"
-                    ) from error
-                return existing, False
-
-    def read_administrator_enrollment(self, enrollment_id: str) -> AdministratorEnrollmentRecord:
-        return self._read_model(
-            model_type=AdministratorEnrollmentRecord,
-            orm_model=LaunchplaneAdministratorEnrollmentRow,
-            filters=(LaunchplaneAdministratorEnrollmentRow.enrollment_id == enrollment_id,),
-        )
-
-    def _transition_administrator_enrollment(
-        self,
-        enrollment_id: str,
-        transition: Callable[[AdministratorEnrollmentRecord], AdministratorEnrollmentRecord],
-    ) -> AdministratorEnrollmentRecord:
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            statement = (
-                select(LaunchplaneAdministratorEnrollmentRow)
-                .where(LaunchplaneAdministratorEnrollmentRow.enrollment_id == enrollment_id)
-                .limit(1)
-            )
-            if not self.database_url.startswith("sqlite"):
-                statement = statement.with_for_update()
-            row = session.scalar(statement)
-            if row is None:
-                raise FileNotFoundError(enrollment_id)
-            current = AdministratorEnrollmentRecord.model_validate(row.payload)
-            updated = transition(current)
-            if updated != current:
-                self._sync_administrator_enrollment_row(row, updated)
-                session.commit()
-            return updated
-
-    def prove_administrator_enrollment_control(
-        self,
-        *,
-        enrollment_id: str,
-        challenge: str,
-        server_derived_candidate_github_id: int,
-        control_proven_at: str,
-    ) -> AdministratorEnrollmentRecord:
-        return self._transition_administrator_enrollment(
-            enrollment_id,
-            lambda record: prove_administrator_enrollment_control(
-                record,
-                challenge=challenge,
-                server_derived_candidate_github_id=server_derived_candidate_github_id,
-                control_proven_at=control_proven_at,
-            ),
-        )
-
-    def expire_administrator_enrollment(
-        self, *, enrollment_id: str, expired_at: str
-    ) -> AdministratorEnrollmentRecord:
-        return self._transition_administrator_enrollment(
-            enrollment_id,
-            lambda record: expire_administrator_enrollment(record, expired_at=expired_at),
-        )
-
-    def withdraw_administrator_enrollment(
-        self, *, enrollment_id: str, proposer_github_id: int, withdrawn_at: str
-    ) -> AdministratorEnrollmentRecord:
-        return self._transition_administrator_enrollment(
-            enrollment_id,
-            lambda record: withdraw_administrator_enrollment(
-                record, proposer_github_id=proposer_github_id, withdrawn_at=withdrawn_at
-            ),
-        )
-
-    def complete_administrator_enrollment(
-        self,
-        *,
-        enrollment_id: str,
-        server_derived_candidate_github_id: int,
-        enrolled_at: str,
-        enrolled_policy_record_id: str,
-        enrolled_policy_revision: int,
-        enrolled_policy_sha256: str,
-        reviewed_plan_sha256: str,
-        bridge_idempotency_key_sha256: str,
-    ) -> AdministratorEnrollmentRecord:
-        return self._transition_administrator_enrollment(
-            enrollment_id,
-            lambda record: complete_administrator_enrollment(
-                record,
-                server_derived_candidate_github_id=server_derived_candidate_github_id,
-                enrolled_at=enrolled_at,
-                enrolled_policy_record_id=enrolled_policy_record_id,
-                enrolled_policy_revision=enrolled_policy_revision,
-                enrolled_policy_sha256=enrolled_policy_sha256,
-                reviewed_plan_sha256=reviewed_plan_sha256,
-                bridge_idempotency_key_sha256=bridge_idempotency_key_sha256,
-            ),
-        )
 
     @staticmethod
     def _solo_administration_confirmation_row(
@@ -21141,61 +20783,6 @@ class PostgresRecordStore(HumanSessionStore):
             order_by=(
                 LaunchplaneSoloAdministrationConfirmationLifecycleEventRow.occurred_at,
                 LaunchplaneSoloAdministrationConfirmationLifecycleEventRow.event_id,
-            ),
-            limit=limit,
-        )
-
-    def list_owner_control_challenge_lifecycle_events(
-        self,
-        *,
-        challenge_nonce: str = "",
-        operation_id: str = "",
-        limit: int | None = None,
-    ) -> tuple[OwnerControlChallengeLifecycleEventRecord, ...]:
-        filters: list[object] = []
-        if challenge_nonce:
-            filters.append(
-                LaunchplaneOwnerControlChallengeLifecycleEventRow.challenge_nonce == challenge_nonce
-            )
-        if operation_id:
-            filters.append(
-                LaunchplaneOwnerControlChallengeLifecycleEventRow.operation_id == operation_id
-            )
-        return self._list_models(
-            model_type=OwnerControlChallengeLifecycleEventRecord,
-            orm_model=LaunchplaneOwnerControlChallengeLifecycleEventRow,
-            filters=filters,
-            order_by=(
-                LaunchplaneOwnerControlChallengeLifecycleEventRow.occurred_at.desc(),
-                LaunchplaneOwnerControlChallengeLifecycleEventRow.event_id.desc(),
-            ),
-            limit=limit,
-        )
-
-    def list_owner_control_shadow_verification_events(
-        self,
-        *,
-        challenge_nonce: str = "",
-        channel_session_id: str = "",
-        limit: int | None = None,
-    ) -> tuple[OwnerControlShadowVerificationEventRecord, ...]:
-        filters: list[object] = []
-        if challenge_nonce:
-            filters.append(
-                LaunchplaneOwnerControlShadowVerificationEventRow.challenge_nonce == challenge_nonce
-            )
-        if channel_session_id:
-            filters.append(
-                LaunchplaneOwnerControlShadowVerificationEventRow.channel_session_id
-                == channel_session_id
-            )
-        return self._list_models(
-            model_type=OwnerControlShadowVerificationEventRecord,
-            orm_model=LaunchplaneOwnerControlShadowVerificationEventRow,
-            filters=filters,
-            order_by=(
-                LaunchplaneOwnerControlShadowVerificationEventRow.occurred_at.desc(),
-                LaunchplaneOwnerControlShadowVerificationEventRow.event_id.desc(),
             ),
             limit=limit,
         )
@@ -26624,6 +26211,13 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def read_preview_pr_feedback_record(self, feedback_id: str) -> PreviewPrFeedbackRecord:
+        return self._read_model(
+            model_type=PreviewPrFeedbackRecord,
+            orm_model=LaunchplanePreviewPrFeedbackRow,
+            filters=(LaunchplanePreviewPrFeedbackRow.feedback_id == feedback_id,),
+        )
+
     def write_preview_pr_feedback_record(self, record: PreviewPrFeedbackRecord) -> None:
         self._write_row(
             LaunchplanePreviewPrFeedbackRow(
@@ -26643,11 +26237,14 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         *,
         context_name: str = "",
+        anchor_pr_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[PreviewPrFeedbackRecord, ...]:
         filters: list[object] = []
         if context_name:
             filters.append(LaunchplanePreviewPrFeedbackRow.context == context_name)
+        if anchor_pr_number is not None:
+            filters.append(LaunchplanePreviewPrFeedbackRow.anchor_pr_number == anchor_pr_number)
         return self._list_models(
             model_type=PreviewPrFeedbackRecord,
             orm_model=LaunchplanePreviewPrFeedbackRow,
@@ -26889,6 +26486,17 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             limit=limit,
         )
+
+    def notify_request_attention(self, payload: str) -> None:
+        from control_plane.request_attention_events import ATTENTION_EVENT_CHANNEL
+
+        if self.database_dialect_name != "postgresql":
+            raise ValueError("Attention notifications require PostgreSQL.")
+        with self._engine.begin() as connection:
+            connection.execute(
+                text("SELECT pg_notify(:channel, :payload)"),
+                {"channel": ATTENTION_EVENT_CHANNEL, "payload": payload},
+            )
 
     def notify_merge_train(
         self,
@@ -27406,16 +27014,18 @@ class PostgresRecordStore(HumanSessionStore):
                 observed_at=observed_at, lease_seconds=lease_seconds
             )
             row_model = LaunchplaneProductReconcileRequestRow
+            retry_at = row_model.payload["last_plan"]["retry_at"].as_string()
             statement = (
                 select(row_model)
                 .where(
+                    or_(retry_at.is_(None), retry_at <= observed_at),
                     or_(
                         row_model.state == "pending",
                         and_(
                             row_model.state == "running",
                             row_model.lease_expires_at < observed_at,
                         ),
-                    )
+                    ),
                 )
                 .order_by(row_model.requested_at.asc(), row_model.target_key.asc())
                 .limit(20)
@@ -28986,6 +28596,7 @@ class PostgresRecordStore(HumanSessionStore):
             # Same order as bundle writes, which may check context ownership.
             self._lock_product_authority_bundle_write(session)
             self._lock_landing_authority(session, landing_authority.product_profile(record.product))
+            self._validate_preview_profile_writes_in_session(session, (record,))
             session.merge(self._product_profile_row(record))
             session.commit()
 
@@ -29316,6 +28927,7 @@ class PostgresRecordStore(HumanSessionStore):
                     session.delete(reservation_row)
                     session.commit()
                 return ProductProfileCompareWriteResult(status="history_conflict")
+        self._validate_preview_profile_writes_in_session(session, (replacement_record,))
         row.display_name = replacement_record.display_name
         row.repository = replacement_record.repository
         row.driver_id = replacement_record.driver_id
@@ -29753,6 +29365,10 @@ class PostgresRecordStore(HumanSessionStore):
         from control_plane.product_retirement import ProductRetirementBlockedError
 
         profile = bound.profile
+        try:
+            require_postgres_preview_cleanup(profile, bound.previews)
+        except ValueError as error:
+            raise ProductRetirementBlockedError(str(error)) from error
         contexts = (
             {lane.context for lane in profile.lanes}
             | {
@@ -29874,6 +29490,7 @@ class PostgresRecordStore(HumanSessionStore):
                     "source": "service:product-retirement",
                 }
             )
+            self._validate_preview_profile_writes_in_session(session, (retired,))
             session.merge(self._product_profile_row(retired))
             session.add(
                 LaunchplaneProductRetirementRow(
@@ -29891,6 +29508,42 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             )
             session.commit()
+
+    def retained_volume_recovery_payloads(self) -> Generator[PayloadDict, None, None]:
+        from control_plane.application_state_volume import ROUTE, state_volume_allocation_names
+
+        with self._session_factory() as session:
+            for row_type in (
+                LaunchplaneDisposableReplacementPreparationRow,
+                LaunchplaneDisposableTestingResourceAllocationRow,
+                LaunchplaneFreshOdooTestingGenerationRow,
+                LaunchplaneRetainedTestingGenerationRow,
+                LaunchplaneNativeTestingCopyCaptureRow,
+                LaunchplaneOdooUpgradeRehearsalRow,
+                LaunchplanePreviewGenerationRow,
+                LaunchplaneOdooStableTargetReplacementOperationRow,
+                LaunchplaneTestingCandidateRow,
+            ):
+                yield from session.scalars(
+                    select(row_type.payload).execution_options(yield_per=1000)
+                )
+            allocations = session.scalars(
+                select(LaunchplaneIdempotencyRow.payload)
+                .where(LaunchplaneIdempotencyRow.route_path == ROUTE)
+                .execution_options(yield_per=1000)
+            )
+            for allocation in allocations:
+                response = allocation.get("response_payload", {})
+                if not isinstance(response, dict):
+                    raise ValueError("Allocation custody payload is unavailable.")
+                result = response.get("result", response)
+                if not isinstance(result, dict):
+                    raise ValueError("Allocation custody result is unavailable.")
+                if result.get("allocation_state") == "retained_uncertain":
+                    plan_id = result.get("plan_id")
+                    if not isinstance(plan_id, str):
+                        raise ValueError("Retained allocation identity is unavailable.")
+                    yield state_volume_allocation_names(plan_id)
 
     def write_product_retirement_record(self, record: ProductRetirementRecord) -> None:
         with self._session_factory() as session:
@@ -30211,6 +29864,43 @@ class PostgresRecordStore(HumanSessionStore):
     def write_route_binding_record(self, record: EnvironmentRouteBindingRecord) -> None:
         self._write_row(self._route_binding_row(record))
 
+    def _require_locked_testing_hostname_available(
+        self,
+        session: Session,
+        *,
+        product: str,
+        target: DokployTargetRecord,
+        domain: str,
+    ) -> None:
+        from control_plane.dokploy_testing_domain import (
+            require_testing_hostname_claims_available,
+        )
+
+        require_testing_hostname_claims_available(
+            product=product,
+            target=target,
+            domain=domain,
+            targets=(
+                self._read_payload(model_type=DokployTargetRecord, payload=row.payload)
+                for row in session.scalars(
+                    select(LaunchplaneDokployTargetRow).with_for_update()
+                ).all()
+            ),
+            profiles=(
+                self._read_payload(model_type=LaunchplaneProductProfileRecord, payload=row.payload)
+                for row in session.scalars(
+                    select(LaunchplaneProductProfileRow).with_for_update()
+                ).all()
+            ),
+            bindings=(
+                self._read_payload(model_type=EnvironmentRouteBindingRecord, payload=row.payload)
+                for row in session.scalars(
+                    select(LaunchplaneRouteBindingRow).with_for_update()
+                ).all()
+            ),
+            allow_current_binding=True,
+        )
+
     def publish_testing_public_ingress_binding(
         self,
         *,
@@ -30304,11 +29994,153 @@ class PostgresRecordStore(HumanSessionStore):
                 != expected["generation"]
             ):
                 raise ValueError("The reviewed testing generation changed.")
+            self._require_locked_testing_hostname_available(
+                session,
+                product=replacement.product,
+                target=DokployTargetRecord.model_validate(expected["target"]),
+                domain=audit.requested_domains[0],
+            )
             audit_row = session.get(
                 LaunchplaneIngressRouteAuditRow, audit.record_id, with_for_update=True
             )
             if audit_row is None or audit_row.payload != self._payload_dict(audit):
                 raise ValueError("Testing edge audit changed before publication.")
+            session.merge(self._route_binding_row(replacement))
+            session.commit()
+
+    def publish_first_testing_public_ingress_binding(
+        self,
+        *,
+        expected: dict[str, object],
+        replacement: EnvironmentRouteBindingRecord,
+        audit: IngressRouteAuditRecord,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(expected["profile"])
+        target = DokployTargetRecord.model_validate(expected["target"])
+        endpoint = EdgeEndpointRecord.model_validate(expected["endpoint"])
+        if (
+            replacement.instance != "testing"
+            or (replacement.product, replacement.context) != (profile.product, target.context)
+            or target.instance != "testing"
+            or len(target.domains) != 1
+            or tuple(domain.domain_name for domain in replacement.domains) != target.domains
+            or replacement.source.source_kind != "service"
+            or replacement.ingress.provider != "npmplus"
+            or replacement.ingress.termination_kind != "edge"
+            or replacement.ingress.endpoint_key != endpoint.endpoint_key
+            or replacement.ingress.provider_evidence.get("audit_record") != audit.record_id
+            or replacement.tls.owner != "provider"
+            or replacement.tls.provider_evidence.get("provider_certificate_ref")
+            != audit.provider_certificate_ref
+            or audit.product != profile.product
+            or audit.context != target.context
+            or audit.edge_endpoint_key != endpoint.endpoint_key
+            or audit.requested_domains != target.domains
+            or audit.status != "applied"
+            or audit.mode != "apply"
+            or audit.testing_generation_sha256
+            or not audit.testing_authority_sha256
+        ):
+            raise ValueError("First testing edge publication must preserve its exact lane.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_route_binding_write(session, binding_key=replacement.binding_key)
+            require_bundle_context_owner(
+                ProductAuthorityBundle(required_context_owner=(profile.product, target.context)),
+                (
+                    self._read_payload(
+                        model_type=LaunchplaneProductProfileRecord, payload=row.payload
+                    )
+                    for row in session.scalars(
+                        select(LaunchplaneProductProfileRow).with_for_update()
+                    ).all()
+                ),
+            )
+            for orm, model, identity, field in (
+                (
+                    LaunchplaneProductProfileRow,
+                    LaunchplaneProductProfileRecord,
+                    profile.product,
+                    "profile",
+                ),
+                (
+                    LaunchplaneDokployTargetRow,
+                    DokployTargetRecord,
+                    (target.context, "testing"),
+                    "target",
+                ),
+                (
+                    LaunchplaneDokployTargetIdRow,
+                    DokployTargetIdRecord,
+                    (target.context, "testing"),
+                    "target_id",
+                ),
+                (
+                    LaunchplaneProviderTargetRow,
+                    ProviderTargetRecord,
+                    (target.context, "testing"),
+                    "provider",
+                ),
+                (
+                    LaunchplaneRouteBindingRow,
+                    EnvironmentRouteBindingRecord,
+                    (profile.product, target.context, "testing"),
+                    "binding",
+                ),
+                (LaunchplaneEdgeEndpointRow, EdgeEndpointRecord, endpoint.endpoint_key, "endpoint"),
+                (
+                    LaunchplaneDisposableLaneSafetyRow,
+                    DisposableLaneSafety,
+                    (profile.product, target.context, "testing"),
+                    "safety",
+                ),
+            ):
+                row = session.get(orm, identity, with_for_update=True)
+                current = (
+                    None
+                    if row is None
+                    else self._read_payload(
+                        model_type=model, payload=getattr(row, "payload")
+                    ).model_dump(mode="json", exclude_none=True)
+                )
+                if current != expected[field]:
+                    raise ValueError("Initial testing edge authority changed before publication.")
+            if (
+                session.get(
+                    LaunchplaneFreshOdooTestingGenerationRow,
+                    (profile.product, target.context),
+                    with_for_update=True,
+                )
+                is not None
+            ):
+                raise ValueError("A restored testing generation now owns this lane.")
+            self._require_locked_testing_hostname_available(
+                session, product=profile.product, target=target, domain=target.domains[0]
+            )
+            audit_row = session.get(
+                LaunchplaneIngressRouteAuditRow, audit.record_id, with_for_update=True
+            )
+            if audit_row is None or audit_row.payload != self._payload_dict(audit):
+                raise ValueError("The initial testing edge audit changed.")
+            url = "https://" + target.domains[0]
+            updated_profile = profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(
+                            update={
+                                "base_url": url,
+                                "health_url": lane.health_url or url + profile.health_path,
+                            }
+                        )
+                        if (lane.context, lane.instance) == (target.context, "testing")
+                        else lane
+                        for lane in profile.lanes
+                    ),
+                    "updated_at": _utc_now_timestamp(),
+                }
+            )
+            session.merge(self._product_profile_row(updated_profile))
             session.merge(self._route_binding_row(replacement))
             session.commit()
 
@@ -31076,6 +30908,27 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def begin_monitoring_authority_batch(self) -> MonitoringAuthorityBatchStart | None:
+        return monitoring_authority.begin_batch(self._engine)
+
+    def complete_monitoring_authority_batch(
+        self,
+        *,
+        start: MonitoringAuthorityBatchStart,
+        checked_at: str,
+        records: tuple[PublicIngressObservationRecord, ...],
+    ) -> None:
+        monitoring_authority.complete_batch(
+            self._engine, start=start, checked_at=checked_at, records=records
+        )
+
+    def read_monitoring_authority_history(
+        self, *, product: str, limit: int, cursor: str | None
+    ) -> MonitoringAuthorityHistory:
+        return monitoring_authority.read_history(
+            self._engine, product=product, limit=limit, cursor=cursor
+        )
+
     def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> None:
         self._write_row(
             LaunchplanePublicIngressIncidentRow(
@@ -31301,6 +31154,7 @@ class PostgresRecordStore(HumanSessionStore):
             if authority_changed:
                 if expected_provider_hold_snapshot is not None:
                     return PublicIngressTransitionWriteResult(status="provider_source_changed")
+                observation = observation.unaccepted()
                 observation_row = LaunchplanePublicIngressObservationRow(
                     record_id=observation.record_id,
                     product=observation.product,
@@ -31310,14 +31164,7 @@ class PostgresRecordStore(HumanSessionStore):
                     observed_at=observation.observed_at,
                     check_token=check_token,
                     check_kind=observation.check_kind,
-                    payload=self._payload_dict(
-                        observation.model_copy(
-                            update={
-                                "incident_id": "",
-                                "incident_event_id": "",
-                            }
-                        )
-                    ),
+                    payload=self._payload_dict(observation),
                 )
                 observation_row.incident_id = ""
                 session.merge(observation_row)
@@ -31474,6 +31321,7 @@ class PostgresRecordStore(HumanSessionStore):
         check_kind: str = "",
         status: str = "",
         limit: int | None = None,
+        before: tuple[str, str] | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]:
         filters: list[object] = []
         if product:
@@ -31491,6 +31339,16 @@ class PostgresRecordStore(HumanSessionStore):
             )
         if status:
             filters.append(LaunchplanePublicIngressIncidentRow.status == status)
+        if before is not None:
+            filters.append(
+                or_(
+                    LaunchplanePublicIngressIncidentRow.opened_at < before[0],
+                    and_(
+                        LaunchplanePublicIngressIncidentRow.opened_at == before[0],
+                        LaunchplanePublicIngressIncidentRow.incident_id < before[1],
+                    ),
+                )
+            )
         records = self._list_models(
             model_type=PublicIngressIncidentRecord,
             orm_model=LaunchplanePublicIngressIncidentRow,
@@ -31688,7 +31546,7 @@ class PostgresRecordStore(HumanSessionStore):
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
         self._write_row(self._dokploy_target_row(record))
 
-    def complete_dokploy_compose_source(
+    def complete_dokploy_compose_setup(
         self,
         *,
         expected_profile: LaunchplaneProductProfileRecord,
@@ -31697,16 +31555,20 @@ class PostgresRecordStore(HumanSessionStore):
         expected_provider_target: ProviderTargetRecord,
         replacement_record: DokployTargetRecord,
         apply_provider: Callable[[], None],
+        setup_kind: Literal["source", "domain"] = "source",
     ) -> None:
-        """Fence ownership and binding across provider source completion/read-back."""
-        allowed_fields = {
-            "source_type",
-            "custom_git_url",
-            "custom_git_branch",
-            "compose_path",
-            "updated_at",
-            "source_label",
-        }
+        allowed_fields = (
+            {
+                "source_type",
+                "custom_git_url",
+                "custom_git_branch",
+                "compose_path",
+                "updated_at",
+                "source_label",
+            }
+            if setup_kind == "source"
+            else {"domains", "updated_at", "source_label"}
+        )
         if expected_record.model_dump(exclude=allowed_fields) != replacement_record.model_dump(
             exclude=allowed_fields
         ):
@@ -31798,6 +31660,10 @@ class PostgresRecordStore(HumanSessionStore):
                     != (expected_record.context, expected_record.instance)
                 ):
                     raise ValueError("Compose source target is shared with another lane.")
+            if setup_kind == "domain":
+                self._assert_available_target_hosts(
+                    session, replacement_record, target_id=expected_target_id.target_id
+                )
             apply_provider()
             try:
                 target_row.updated_at = replacement_record.updated_at
@@ -32689,7 +32555,11 @@ class PostgresRecordStore(HumanSessionStore):
                 else (),
             )
             self._write_product_authority_bundle(
-                bundle, write_session=session, commit=False, write_transaction_started=True
+                bundle,
+                write_session=session,
+                commit=False,
+                write_transaction_started=True,
+                caller_identity=identity,
             )
             session.flush()
             written_row = session.scalar(

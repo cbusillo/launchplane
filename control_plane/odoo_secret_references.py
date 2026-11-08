@@ -41,6 +41,9 @@ from control_plane.storage.product_authority_bundle import (
     SecretDeliverySetExpectation,
 )
 
+ReferenceAllowanceKind = Literal["dev_store", "read_only_source"]
+_READ_ONLY_SOURCE_BINDING_MESSAGE = "Use this lane's existing qualified read-only source binding; reference creation accepts no credential value."
+
 
 class SecretReferenceStore(SiteSecretDeliveryStore, Protocol):
     def read_dokploy_target_record(
@@ -161,6 +164,7 @@ def selected_config_parameter_bindings(
     keys: tuple[str, ...],
     *,
     create_missing: bool = False,
+    allowance_kind: ReferenceAllowanceKind = "dev_store",
 ) -> dict[str, SecretBinding]:
     parameters = {item.key: item for item in record.config_parameters}
     records = {item.secret_id: item for item in authority.metadata.records}
@@ -196,7 +200,9 @@ def selected_config_parameter_bindings(
                 or (secret.scope == "context") != (not binding.instance)
             ):
                 raise ConfigParameterSecretReferenceError(
-                    f"Configure the lane's managed-secret field {env_key}, enter its value privately, then review this reference again.",
+                    _READ_ONLY_SOURCE_BINDING_MESSAGE
+                    if allowance_kind == "read_only_source"
+                    else f"Configure the lane's managed-secret field {env_key}, enter its value privately, then review this reference again.",
                     env_keys=env_keys,
                 )
         # Delivery has deterministic tie breaking. A repair must not endorse competing
@@ -259,6 +265,7 @@ def _new_testing_reference_authority(
     selected: dict[str, SecretBinding],
     keys: tuple[str, ...],
     added: set[str],
+    allowance_kind: ReferenceAllowanceKind,
 ) -> tuple[DokployTargetRecord, tuple[RuntimeKeySafetyPolicyRecord, ...]]:
     parameters = {item.key: item for item in record.config_parameters}
     for key in added:
@@ -277,21 +284,40 @@ def _new_testing_reference_authority(
                 "This parameter shares a runtime binding name with another parameter. Choose a distinct parameter name.",
             )
         binding = selected[key]
-        if (
-            binding.instance != record.instance
-            or binding.context != record.context
-            or binding.declared_secret_class not in {"testing", "non_prod"}
-            or binding.value_source != "supplied"
-            or not any(
-                requirement.binding_key == env_key
-                and requirement.integration == RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
-                and (requirement.context, requirement.instance) == (record.context, record.instance)
-                for requirement in profile.expected_config.managed_secret_bindings
+        exact_lane = (binding.context, binding.instance) == (record.context, record.instance)
+        if allowance_kind == "dev_store" and (
+            not exact_lane
+            or (
+                binding.declared_secret_class not in {"testing", "non_prod"}
+                or binding.value_source != "supplied"
+                or not any(
+                    requirement.binding_key == env_key
+                    and requirement.integration == RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+                    and (requirement.context, requirement.instance)
+                    == (record.context, record.instance)
+                    for requirement in profile.expected_config.managed_secret_bindings
+                )
             )
         ):
             raise TestingSecretReferenceRefusal(
                 "testing_credential_required",
                 "Declare this exact lane's managed-secret field and enter an independently supplied testing credential. Copied or provider-adopted credentials cannot create a testing reference.",
+            )
+        if allowance_kind == "read_only_source" and (
+            not exact_lane
+            or binding.declared_secret_class not in {"testing", "non_prod", "shared_safe"}
+            or (
+                binding.declared_secret_class == "shared_safe"
+                and (
+                    binding.sharing_reason is None
+                    or binding.sharing_reason.kind != "read_only_source"
+                    or not binding.sharing_reason.evidence.strip()
+                )
+            )
+        ):
+            raise TestingSecretReferenceRefusal(
+                "read_only_source_credential_required",
+                _READ_ONLY_SOURCE_BINDING_MESSAGE,
             )
     try:
         target = store.read_dokploy_target_record(
@@ -308,23 +334,26 @@ def _new_testing_reference_authority(
             "key_safety_policy_required", "An active runtime key-safety policy is required."
         )
     policy = policies[0]
-    required = set().union(
-        *(
-            runtime_key_required_integrations(
-                selected[key].binding_key, extra_markers=policy.integration_key_markers
-            )
-            for key in added
+    required_by_key = tuple(
+        runtime_key_required_integrations(
+            selected[key].binding_key, extra_markers=policy.integration_key_markers
         )
+        for key in added
     )
+    required = set().union(*required_by_key)
     qualified = {
         item.integration
         for item in target.policies.integration_allowances
-        if item.kind == "dev_store" and item.evidence.strip()
+        if item.kind == allowance_kind and item.evidence.strip()
     }
-    if not required.issubset(qualified):
+    if not required.issubset(qualified) or (
+        allowance_kind == "read_only_source" and not all(required_by_key)
+    ):
         raise TestingSecretReferenceRefusal(
             "integration_allowance_required",
-            "Record the independently verified testing account's dev_store allowance with evidence in Testing integration allowances first.",
+            "Record the independently verified testing account's dev_store allowance with evidence in Testing integration allowances first."
+            if allowance_kind == "dev_store"
+            else "The existing source needs a read_only_source allowance with grant evidence for every selected integration.",
         )
     evaluation = evaluate_runtime_key_safety(
         target=RuntimeKeySafetyTarget(
@@ -351,9 +380,12 @@ def plan_secret_reference_reconciliation(
     keys: tuple[str, ...],
     create_missing: bool = False,
     environment: str = "",
+    allowance_kind: ReferenceAllowanceKind = "dev_store",
 ) -> tuple[SecretReferencePlan, ProductAuthorityBundle]:
     if len(keys) != len(set(keys)):
         raise ValueError("Unique existing secret-backed config parameter keys are required.")
+    if allowance_kind not in {"dev_store", "read_only_source"}:
+        raise ValueError("Unsupported reference allowance kind.")
     existing_record = record
     if record is None:
         lanes = [lane for lane in profile.lanes if lane.instance == environment]
@@ -376,13 +408,13 @@ def plan_secret_reference_reconciliation(
             "testing_lane_required", "New private integration references require a testing lane."
         )
     selected = selected_config_parameter_bindings(
-        record, authority, keys, create_missing=create_missing
+        record, authority, keys, create_missing=create_missing, allowance_kind=allowance_kind
     )
     target = None
     policies = None
     if added:
         target, policies = _new_testing_reference_authority(
-            store, profile, record, selected, keys, added
+            store, profile, record, selected, keys, added, allowance_kind
         )
     entries = tuple(
         SecretReferenceEntry(
@@ -415,7 +447,7 @@ def plan_secret_reference_reconciliation(
             "last_apply": record.last_apply.for_override_edit() if added else record.last_apply,
         }
     )
-    digest_input = {
+    digest_input: dict[str, object] = {
         "profile": profile.model_dump(mode="json"),
         "override": existing_record.model_dump(mode="json") if existing_record else None,
         "keys": sorted(keys),
@@ -427,6 +459,8 @@ def plan_secret_reference_reconciliation(
         if policies is not None
         else None,
     }
+    if allowance_kind != "dev_store":
+        digest_input["allowance_kind"] = allowance_kind
     digest = hashlib.sha256(json.dumps(digest_input, sort_keys=True).encode()).hexdigest()
     return SecretReferencePlan(
         product=profile.product,

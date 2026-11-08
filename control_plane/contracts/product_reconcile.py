@@ -82,6 +82,21 @@ class ProductReconcileLeaseLostError(RuntimeError):
     """The caller no longer holds the reconcile request's lease."""
 
 
+def preview_failure_observed_at(request: ProductReconcileRequestRecord) -> str:
+    if not (request.last_error or request.last_plan.get("last_failed_error_summary")):
+        return ""
+    observed_at = request.last_plan.get("last_failed_at")
+    if isinstance(observed_at, str) and observed_at.strip():
+        return observed_at
+    if not request.last_error:
+        return ""
+    timing = request.last_plan.get("timing")
+    decided_at = timing.get("planning_finished_at") if isinstance(timing, dict) else None
+    if isinstance(decided_at, str) and decided_at.strip():
+        return decided_at
+    return request.updated_at if request.state in {"done", "failed"} else ""
+
+
 class GitHubAppWebhookDeliveryRecord(BaseModel):
     """A processed GitHub App delivery, kept so a redelivery is recognized."""
 

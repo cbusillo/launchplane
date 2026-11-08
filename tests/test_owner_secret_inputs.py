@@ -6,16 +6,17 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from typing import Literal
 from httpx2 import Response
-from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+)
 
 from cryptography.fernet import Fernet
 
 from control_plane import secrets
+from control_plane.npmplus import PREVIEW_DNS_INTEGRATION
 from control_plane.artifact_scan import GHCR_ARTIFACT_READ_INTEGRATION
-from control_plane.contracts.owner_control_shadow_verifier import (
-    OwnerControlShadowVerifierConflictError,
-)
 from control_plane.owner_secret_inputs import resolve_owner_secret_submission
+from control_plane.contracts.authz_policy_record import AuthzPolicyConflictError
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
@@ -75,13 +76,76 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def service_read(self, human: GitHubHumanIdentity) -> Response:
+    async def service_read(
+        self, human: GitHubHumanIdentity, environment: str = GHCR_ARTIFACT_READ_INTEGRATION
+    ) -> Response:
         session = self.sessions.issue(human)
         return await _asgi_get(
             self.app,
-            "/v1/owner-secret-inputs?product=launchplane&environment=ghcr_artifact_read",
+            f"/v1/owner-secret-inputs?product=launchplane&environment={environment}",
             headers={"Cookie": self.sessions.session_cookie_header(session)},
         )
+
+    async def test_service_inputs_keep_onboarding_and_maintenance_secrets_separate(self) -> None:
+        self.seed_director()
+        director = _human("director", 9004, "admin")
+        for environment in (
+            "onboarding_github_app",
+            "runner_lifecycle_github_app",
+            "trusted_maintenance_webhook",
+            PREVIEW_DNS_INTEGRATION,
+        ):
+            with self.subTest(environment=environment):
+                read = await self.service_read(director, environment)
+                self.assertEqual(read.status_code, 200, read.text)
+                (field,) = read.json()["fields"]
+                self.assertEqual(field["multiline"], field["binding_key"] == "private_key")
+                value = (
+                    "synthetic-line-one\nsynthetic-line-two\n"
+                    if field["multiline"]
+                    else f"synthetic-{environment}-value"
+                )
+                payload = {
+                    "product": "launchplane",
+                    "environment": environment,
+                    "request_revision": field["request_revision"],
+                    "value": value,
+                }
+                wrong_purpose = await self.post(
+                    {**payload, "environment": GHCR_ARTIFACT_READ_INTEGRATION}, human=director
+                )
+                self.assertEqual(wrong_purpose.status_code, 409, wrong_purpose.text)
+                for human in (_human(), _human("operator", 9002, "admin")):
+                    denied_read = await self.service_read(human, environment)
+                    self.assertEqual(denied_read.status_code, 403, denied_read.text)
+                    denied = await self.post(payload, human=human)
+                    self.assertEqual(denied.status_code, 403, denied.text)
+                response = await self.post(payload, human=director)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertNotIn(value, response.text)
+                (binding,) = self.store.list_secret_bindings(integration=environment)
+                record = self.store.read_secret_record(binding.secret_id)
+                self.assertEqual(
+                    (record.scope, record.context, record.instance), ("context", "launchplane", "")
+                )
+                self.assertEqual(record.integration, environment)
+                self.assertEqual(binding.binding_key, field["binding_key"])
+                version = self.store.read_secret_version(record.current_version_id)
+                self.assertEqual(
+                    secrets._decrypt_secret_value(version.ciphertext, version.key_id), value
+                )
+                self.assertEqual(
+                    secrets.resolve_context_secret_value(
+                        integration=environment,
+                        context_name="launchplane",
+                        binding_key=field["binding_key"],
+                        database_url=self.store.database_url,
+                    ),
+                    value.strip(),
+                )
+                stale = await self.post(payload, human=director)
+                self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(self.store.list_runtime_environment_records(), ())
 
     async def test_director_stores_exact_context_bindings_without_plaintext_readback(self) -> None:
         self.seed_director()
@@ -181,7 +245,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             self.store,
             "_locked_active_authz_policy_record",
-            side_effect=OwnerControlShadowVerifierConflictError("ambiguous policy"),
+            side_effect=AuthzPolicyConflictError("ambiguous policy"),
         ):
             refused = await self.post({**payload, "value": "must-not-be-stored"}, human=director)
         self.assertEqual(refused.status_code, 403, refused.text)

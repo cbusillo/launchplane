@@ -24,7 +24,6 @@ from control_plane.product_read_service import (
     ProductReadModelStoreCapabilityError,
     build_product_environment_list_service_payload,
     build_product_environment_read_service_result,
-    build_product_profile_list_service_payload,
     require_product_environment_read_model_store,
 )
 
@@ -224,15 +223,23 @@ class ProductReadServiceTests(unittest.TestCase):
         self.profile = LaunchplaneProductProfileRecord.model_validate(_profile_payload())
         self.store = _ProductReadStore(self.profile)
 
-    def test_product_profile_list_payload_preserves_driver_filter(self) -> None:
-        payload = build_product_profile_list_service_payload(
-            record_store=self.store,
-            driver_id="generic-web",
-        )
+    def test_live_product_warns_when_host_updates_have_never_been_observed(self) -> None:
+        from unittest.mock import patch
+        from control_plane.host_security_updates import host_security_update_warnings
 
-        self.assertEqual(payload["driver_id"], "generic-web")
-        profiles = cast(list[dict[str, object]], payload["profiles"])
-        self.assertEqual(len(profiles), 1)
+        self.store.profile = self.profile.model_copy(update={"production_use": "live"})
+        lane = next(lane for lane in self.profile.lanes if lane.instance == "prod")
+        with patch.object(self.store, "read_idempotency_record", return_value=None, create=True):
+            expected = host_security_update_warnings(self.store, self.store.profile, lane)
+            result = build_product_environment_list_service_payload(
+                record_store=self.store, action_allowed=lambda *_: True
+            )
+        self.assertTrue(expected)
+        product = cast(list[dict[str, object]], result["products"])[0]
+        environments = cast(list[dict[str, object]], product["environments"])
+        for environment in environments:
+            warnings = cast(list[str], environment["warnings"])
+            self.assertEqual(set(expected).issubset(warnings), environment["environment"] == "prod")
 
     def test_product_read_model_store_requires_db_summary_capabilities(self) -> None:
         class PartialStore:

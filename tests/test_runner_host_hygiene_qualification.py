@@ -116,6 +116,7 @@ class HygieneQualificationTests(unittest.TestCase):
         )
         for state in (
             "healthy_report",
+            "healthy_report_without_retained_images",
             "blocked_report",
             "completed",
             "completed_old",
@@ -128,10 +129,15 @@ class HygieneQualificationTests(unittest.TestCase):
                 spool = RunnerHostHygieneAuditSpool(
                     root=directory / "spool", artifact_file=artifact
                 )
+                request = request_with_budgets(
+                    mutate=state in {"completed", "completed_old", "planned"}
+                )
+                if state == "healthy_report_without_retained_images":
+                    request = RunnerHostHygieneExecutorRequest.model_validate(
+                        {**request.model_dump(), "retained_warm_builders": ()}
+                    )
                 execute_runner_host_hygiene_executor(
-                    request=request_with_budgets(
-                        mutate=state in {"completed", "completed_old", "planned"}
-                    ),
+                    request=request,
                     remote_runner=ReportRunner(
                         runner_service_output=(
                             "launchplane-runner@unexpected.service active running\n"
@@ -196,7 +202,13 @@ class HygieneQualificationTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     response.returncode == 0,
-                    state in {"healthy_report", "completed", "completed_old"},
+                    state
+                    in {
+                        "healthy_report",
+                        "healthy_report_without_retained_images",
+                        "completed",
+                        "completed_old",
+                    },
                     response.stderr,
                 )
                 self.assertTrue(summary.read_text())
@@ -274,6 +286,19 @@ class HygieneQualificationTests(unittest.TestCase):
             idle_observation_sleeper=lambda _: None,
         )
         self.assertEqual(report.warm_builders, changed.retained_warm_builders)
+
+    def test_retired_image_requirements_still_need_named_cache_budgets(self) -> None:
+        request = request_with_budgets()
+        with self.assertRaises(ValueError):
+            RunnerHostHygieneExecutorRequest.model_validate(
+                {
+                    **request.model_dump(),
+                    "retained_warm_builders": (),
+                    "buildkit_cache_budgets": {
+                        "default": request.buildkit_cache_budgets["default"]
+                    },
+                }
+            )
 
     def test_unavailable_and_truncated_builder_measurements_are_not_zero(self) -> None:
         for usage in ("", '[{"id":"partial"}', '[{"id":"partial"}]'):

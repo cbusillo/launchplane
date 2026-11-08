@@ -14,6 +14,33 @@ at the [artifact credential path](artifact-security.md#verified-artifact-scannin
 That fixed service request writes the managed-secret bindings directly; the
 product-requested Client flow below remains a submission for admin application.
 
+The Director's same write-only form also prepares the existing onboarding App
+and trusted-maintenance credentials for service adoption. Select product
+`launchplane` and environment `onboarding_github_app` or
+`trusted_maintenance_webhook` at `/ui/owner-secrets`. The first stores only
+`private_key`; the second stores only `webhook_secret`. Each creates a separate
+write-only, context-scoped binding in its named integration, context
+`launchplane`, with no instance. The current DB policy must identify the signed-in
+human as an administrator, both when reading the form and at the atomic write.
+The private-key field preserves pasted line breaks and masks its text while entered.
+Its purpose is reserved: Delivery App configuration and credential resolution
+refuse the onboarding integration, even if it has a configured private key.
+Other humans, workflows and agents cannot submit through this form. Request
+revisions bind the exact purpose and current secret version; stale submissions
+write nothing. No secret value is returned, added to a runtime environment, or
+delivered to an application.
+
+Enter only an independently held original through the signed-in form. Agents
+must not retrieve an Actions/host copy or supply a value. This preparation does
+not change the existing onboarding workflow or trusted-maintenance receiver,
+mint a token, update an installation, or re-register a webhook. Their current
+Actions and host inputs remain required until the record-backed consumers are
+delivered and qualified under [the migration issue](https://github.com/cbusillo/launchplane/issues/3511).
+The App selector can be recorded separately as the declared non-secret service
+setting `LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID`; use the exact existing
+selector, not a different App. If independent custody is unavailable, retain
+the existing inputs and resolve the migration path on that issue.
+
 An admin can request a credential by setting `owner_input` on one managed-secret
 requirement in the stored product profile. It contains a human-readable `label` and
 `instructions` and requires an explicit product context. An optional instance
@@ -59,6 +86,93 @@ events. Re-encryption changes the encrypted version without changing who supplie
 the value or the displayed receipt time. Superseded requests remain encrypted
 history and are not runtime-bound; automatic removal of retained secret history is
 not part of this input flow.
+
+## Runner lifecycle App credential
+
+The Director alone pastes the independently held runner lifecycle App private
+key into `/ui/owner-secrets?product=launchplane&environment=runner_lifecycle_github_app`.
+The existing masked multiline input preserves internal line breaks, clears
+before submission and returns only a receipt. The purpose/integration is
+`runner_lifecycle_github_app`, binding and name `private_key`, context
+`launchplane`, no instance. Current DB administrator checks, encrypted versions,
+atomic writes and stale-request protection are the same as the onboarding input.
+Agents never retrieve, copy or supply this key. It is excluded from Delivery
+App selection and is never delivered to a product or runner host.
+
+The non-secret numeric App ID and client ID are declared service runtime values
+`LAUNCHPLANE_RUNNER_LIFECYCLE_GITHUB_APP_ID` and
+`LAUNCHPLANE_RUNNER_LIFECYCLE_GITHUB_APP_CLIENT_ID`, written through
+[service runtime settings](service-runtime-settings.md). Both must match the
+App returned by GitHub before an installation token can be issued.
+
+The protected Runner Lane Lifecycle workflow uses
+`POST /v1/service/runner-lanes/operation` for inventory, active-run safety reads,
+registration-token requests and retirement. It reuses its existing
+`runner_lane_registration_audit.write` authorization and remains limited to the
+direct lifecycle workflow with a branch ref and manual dispatch. Other callers
+with `runner_lane_inventory.read` can request inventory only. No new workflow
+grant is needed. Browser calls retain CSRF validation.
+
+Launchplane resolves the target's immutable repository and account IDs from
+tracked repository inventory, verifies the App, client ID, installation account,
+accepted permissions and suspension state, and requests exactly one repository
+with Administration write, Actions read and Metadata read. It verifies the issued
+repository, permission ceiling and expiry and revokes the installation token
+after use, including failures. A failed revocation preserves the provider
+operation's actual outcome, emits a value-free warning and returns
+`credential_revoked: false`; expiry remains the final credential limit. Even an all-repository installation never creates
+an all-repository token. Only ephemeral runner registration configuration can
+reach the authorized workflow; the App key and installation token stay inside
+the service. Responses are not cacheable and provider diagnostics are scrubbed.
+The existing local host/filesystem, dry-run, active-run and audit checks remain.
+
+An untracked target first uses the existing repository inventory dry-run/apply
+path described in [operations](operations.md#repository-inventory).
+Credential failures report only their stage (`repository_inventory`, `identity`
+or `token_mint`), HTTP status, error code and trace ID. Provider text and secret
+values are never included in those diagnostics.
+
+The workflow no longer reads `LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN`.
+Keep that obsolete secret intact until the Director separately checks its
+remaining consumers and deletes/revokes it. First qualification after human key
+entry is a read-only inventory request, with a value-free receipt, not a runner
+registration or retirement.
+
+## Preview wildcard DNS credential
+
+The Director enters the preview-zone-scoped Cloudflare DNS-edit token in the
+existing signed-in write-only form at
+`/ui/owner-secrets?product=launchplane&environment=preview_dns_cloudflare`.
+The purpose/integration is `preview_dns_cloudflare`, binding and secret name
+`api_token`, context `launchplane`, with no instance. The same encrypted version,
+request revision, administrator check and atomic write apply. Agents handle only
+readiness, secret IDs and version IDs during ordinary planning; they never ask
+for the value in a message. Entry does not prove the provider permissions;
+confirm entry with the Director before executing the first product setup unless
+the Director has explicitly authorized a bounded transfer instead.
+
+For an explicitly authorized initial transfer, the Director's authenticated
+agent can fill this same absent slot through `POST /v1/product-config/apply`:
+product and context `launchplane`, no instance, exactly one supplied context
+secret with integration `preview_dns_cloudflare`, name and binding `api_token`.
+Existing `product_config.plan` and `product_config.apply` authorization, matching
+dry-run, idempotency and atomic encryption apply. This fixed service input needs
+no product profile. Mixed runtime bundles, other purposes and Client agents do
+not gain this path. A filled slot refuses another write; use the existing
+signed-in form for rotation. A completed original-key retry replays its receipt.
+Any explicitly authorized transfer keeps the value in private stdin or memory
+and reads back metadata only; this API does not itself authorize source access.
+
+Only the service's product wildcard create resolves this purpose. It is separate
+from NPMplus API authentication and application runtime bindings. It is never
+synced into an app or copied to host configuration. NPMplus receives the token
+in its existing DNS-01 quick-certificate create request and owns certificate
+renewal, including its existing retained certificate credential and renewal
+input. Rotating the Launchplane version alone does not update that provider
+credential; qualify provider renewal before revoking a token it still uses.
+Launchplane retains no provider credential response or diagnostic text.
+The [ingress driver contract](driver-development.md#preview-wildcard-creation)
+owns planning, pinned-version application and unknown-effect reconciliation.
 
 ## Odoo diagnostic identities
 
@@ -207,6 +321,20 @@ that cannot safely appear in a marker retain their earlier readback behavior;
 new reference creation accepts only safe names. No values or secret hashes
 are emitted.
 
+For an existing read-only import source, the same reference route accepts
+`create_missing: true` with `allowance_kind: "read_only_source"`. It selects only
+the already configured exact-testing-lane binding and requires a recorded
+`read_only_source` allowance with grant evidence for each recognized integration.
+Keys with no recognized integration are refused. Shared-safe bindings additionally
+need their own read-only sharing reason and evidence. Active key-safety rules,
+exact review, atomic metadata checks,
+idempotency and readback still apply. This records a pointer without reading,
+copying, reclassifying or creating a credential. It neither installs an importer
+nor syncs runtime settings, probes privileges or starts an import. Actual
+delivered/applied agreement, verified TLS and runtime-origin grants must qualify
+before import execution. The default private-integration path still requires an
+independently supplied testing credential and a `dev_store` allowance.
+
 A typed config-parameter's `secret_binding_id` identifies the binding delivered
 under its neutral `ODOO_OVERRIDE_SECRET__CONFIG_PARAM__*` environment key. The
 payload keeps both fields for adapter compatibility. The adapter consumes the
@@ -351,8 +479,11 @@ authentication before creating a separate private token file.
   only in the executor step. The token is revoked at job completion and is not
   persisted in artifacts, audit records, logs, or Launchplane managed secrets.
   Do not retain a PAT fallback.
-- Conventional product onboarding uses a dedicated read-only GitHub App to
-  resolve immutable repository and repository-owner ids before protected review. Store its
+- Existing caller-rule maintenance in `Generic Web Preview Authorization` uses
+  a dedicated read-only GitHub App to resolve immutable repository and
+  repository-owner ids before protected review. New-product native onboarding
+  uses the configured source-host helper described in
+  [operations](operations.md#native-target-allocation). Store its
   client id in `LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID` and its private key
   in `LAUNCHPLANE_ONBOARDING_GITHUB_APP_PRIVATE_KEY`. Install it only on product
   repositories that admins may onboard and grant only repository Contents
@@ -377,13 +508,6 @@ authentication before creating a separate private token file.
   repository, and permission identity, revokes the token after use, and never
   persists or logs the token.
   Do not reuse onboarding, runner-host-hygiene, PAT, or ordinary service tokens.
-- The GitHub-secret authorization reconcile wrapper and reusable worker are
-  deleted. Their former `LAUNCHPLANE_AUTHZ_*_MANAGED_SET_JSON` inputs are no
-  longer consumed. The Director deletes those repository secrets by hand after
-  the deletion lands; [#2521](https://github.com/cbusillo/launchplane/issues/2521)
-  records the names. Stored managed rules remain DB-backed and are changed only
-  through the reviewed Access policy path. Current Client review uses the
-  product profile's Client identity and has no Client-grant secret prerequisite.
 
 ## DB-Backed Secret Resolution
 
@@ -450,23 +574,12 @@ Every encrypted managed-secret version should record the non-secret
 that version. The active key id is used for new writes. Allowed historical key
 ids may decrypt old versions only during an explicit rotation or recovery window.
 
-The target rotation model is:
-
-1. Introduce a new bootstrap decryption root or platform-secret reference and an
-   active `encryption_key_id` in `LAUNCHPLANE_SECRET_KEYS_JSON`.
-2. Keep the previous decryption root available only as an allowed historical key
-   in the JSON keys map for versions that still carry its key id.
-3. Run the deployed Launchplane service re-encryption endpoint in dry-run mode.
-   The response reports unreadable versions, the active-key usage summary, keys
-   blocked from retirement, and a digest bound to the current secret versions.
-4. Apply through the same service endpoint with the dry-run digest, an admin
-   reason, and an idempotency key. Launchplane atomically writes every new
-   ciphertext version, current-version pointer, audit event, and apply
-   idempotency completion record.
-5. Run dry-run again and verify the previous key id is reported as ready for
-   retirement.
-6. Retire the previous root by removing it from the service bootstrap key ring.
-   Later reads fail closed if any active secret still depends on that id.
+Use the `managed-secret-reencryption` privileged operation through the
+[human plan, approval, and worker flow](privileged-operations.md#approval-and-execution-boundary).
+See [re-encryption planning evidence](#re-encryption-planning-evidence) for its
+redacted result and the [legacy route boundary](privileged-operations.md#legacy-re-encryption-route).
+Keep historical roots available until fresh planning evidence proves they are
+ready for retirement.
 
 `LAUNCHPLANE_SECRET_KEYS_JSON` has this bootstrap-only shape:
 
@@ -905,18 +1018,6 @@ Managed-secret IDs, secret-version IDs, ciphertext, plaintext, and raw error
 strings are neither persisted nor returned in the agent projection. The agent
 projection also excludes key IDs and request/actor details.
 
-`POST /v1/secrets/reencrypt` is legacy-only: its `mode: "dry-run"` response
-refuses with `privileged_operation_planning_required`, and its `mode: "apply"`
-response refuses with `privileged_operation_approval_required`. The legacy
-`secret.reencrypt.dry-run` and `secret.reencrypt.apply` actions are not a
-current authority path. Use the typed browser-human plan and approval flow, then
-the supervised privileged-operation worker; approval may execute immediately,
-and revocation is possible only before worker claim. See
-`docs/privileged-operations.md` for canary activation and worker proof rules.
-
-**Preserved history:** Phase 1 described planning evidence before a deployed
-worker existed; it is not current root-rotation operating guidance.
-
 ## Copying a product's own managed runtime secret
 
 `GET /v1/products/{product}/secret-bindings` returns the product's configured
@@ -1114,7 +1215,7 @@ both refuse, with a fixed message and no value:
 
 - `provider_secret_missing`: the key is absent or empty in the provider env.
 - `provider_secret_already_recorded`: a Launchplane record already supplies the
-  key for the lane (a runtime setting, the tracked target's env, or a managed
+  key for the lane (a runtime setting or a managed
   secret), or the destination secret already exists under another binding key,
   so adoption never replaces a recorded value.
 

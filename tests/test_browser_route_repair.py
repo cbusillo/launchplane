@@ -302,7 +302,6 @@ class _BrowserRouteRepairFixture(unittest.IsolatedAsyncioTestCase):
             route_path="/v1/route-bindings/reconcile",
             idempotency_key="binding-interleaved",
         )
-        self.assertIsNotNone(refusal)
         assert refusal is not None
         self.assertEqual(refusal.response_status_code, 409)
         replay = await self.post("/v1/route-bindings/reconcile", applied, "binding-interleaved")
@@ -396,7 +395,6 @@ class _BrowserRouteRepairFixture(unittest.IsolatedAsyncioTestCase):
         receipt = self.store.read_idempotency_record(
             scope=idempotency_scope(self.session.identity), route_path=route, idempotency_key=key
         )
-        self.assertIsNotNone(receipt)
         assert receipt is not None
         self.assertEqual(receipt.response_status_code, completed.status_code)
         if winner == "stale":

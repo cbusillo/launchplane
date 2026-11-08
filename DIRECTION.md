@@ -123,11 +123,28 @@ fits this file.
   for anything beyond opening an issue, the Director touches Launchplane by
   hand, or the old approval code still decides a merge.
 - `Merge train that just works` proves an agent's merge lands in one pass
-  without a wedge, a hand merge, or main going red on its own; ends if the
-  friction log gains the same entry twice.
+  without a wedge, a hand merge, or main going red on its own, and a Ready
+  change runs on testing within 30 minutes; ends if the friction log gains
+  the same entry twice.
 - `Real prod safe on every live product` proves every promotion of a product
   marked Live is preceded by a verified backup, and each Live product's first
   Client-started release proves rollback with the one-time drill; ends if a
   Live product's promotion happens without one.
 - `Retired machinery deleted` proves the retired designs above are gone from
   the code; ends if a deletion breaks a live product.
+- `Director questions in Launchplane` proves the Director sees, answers and
+  finds every question and decision in Launchplane, while agents keep writing
+  them through the catalog's question record unchanged; ends if a question
+  still has to be asked or found somewhere else, or Launchplane needs more
+  upkeep for questions than the catalog's own store did.
+- `One copy of each fact` proves Launchplane reads current facts a git host
+  or provider owns through its driver, instead of keeping a second copy to
+  reconcile, while it keeps its own decisions and the release evidence they rest
+  on; ends if Launchplane becomes a second authority for a fact a provider owns.
+- `A breaking update stops at a preview` proves a shared update, such as an
+  `odoo-devkit` pin, is checked on one preview before any testing lane takes
+  it; ends if one update turns more than one testing lane red.
+- `Previews work the first time` proves that for a week every pull request's
+  preview builds and serves without an agent repairing Launchplane; a correct
+  refusal of an unverified build still counts as working. Ends if a preview
+  needs an agent's repair to serve.

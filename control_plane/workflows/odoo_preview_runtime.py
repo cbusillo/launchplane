@@ -28,6 +28,7 @@ from control_plane.contracts.dokploy_target_record import (
 )
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.odoo_preview_runtime_plan import (
     OdooPreviewProviderCapabilities,
     OdooPreviewRuntimeBindingEvidence,
@@ -163,6 +164,11 @@ class OdooPreviewApplyInputsRequest(BaseModel):
     source: str = "odoo-preview-apply-inputs"
     timeout_seconds: int = Field(default=300, ge=1)
     no_cache: bool = False
+    preservation_storage_budget: OdooTestingDrillStorageBudget | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     fishbowl_source: ProductSecretCopyFrom | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -1146,6 +1152,9 @@ class OdooPreviewDokployApplyResult(BaseModel):
     domain_id: str = ""
     module_install_update_status: Literal["pass", "fail", "skipped"] = "skipped"
     module_install_update_evidence: dict[str, str] = Field(default_factory=dict)
+    resource_provenance: dict[str, str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
     steps: tuple[OdooPreviewDokployApplyStep, ...] = ()
     rollback_errors: tuple[str, ...] = ()
     error_message: str = ""
@@ -1313,6 +1322,7 @@ def execute_odoo_preview_dokploy_apply(
             provider_lease_check=provider_lease_check,
         )
     return _execute_refresh(
+        record_store=record_store,
         database_url=database_url,
         host=host,
         token=token,
@@ -1474,11 +1484,7 @@ def odoo_preview_target_is_quiescent(
             )
         if any(
             dokploy_api.deployment_status(deployment)
-            not in (
-                dokploy_post_deploy.DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
-                | dokploy_post_deploy.DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
-                | {"error", "failed", "fail"}
-            )
+            not in dokploy_post_deploy.DOKPLOY_TERMINAL_DEPLOYMENT_STATUSES
             for deployment in dokploy_api.list_deployments_for_target(
                 host=host,
                 token=token,
@@ -1734,6 +1740,7 @@ def _preview_refresh_environment_values(
     *, request: OdooPreviewDokployApplyRequest, restore_upstream: bool = False
 ) -> dict[str, str]:
     environment_values = dict(request.environment_values)
+    environment_values.pop("ODOO_KEY", None)
     environment_values["PLATFORM_INSTANCE"] = "preview"
     if restore_upstream:
         environment_values.update(
@@ -1777,6 +1784,7 @@ def _preview_refresh_environment_values(
 
 def _execute_refresh(
     *,
+    record_store: object | None = None,
     host: str,
     token: str,
     request: OdooPreviewDokployApplyRequest,
@@ -1801,6 +1809,7 @@ def _execute_refresh(
     provider_effect_attempted = False
     module_install_update_status: Literal["pass", "fail", "skipped"] = "skipped"
     module_install_update_evidence: dict[str, str] = {}
+    resource_provenance: dict[str, str] = {}
     steps: list[OdooPreviewDokployApplyStep] = []
 
     def checkpoint_provider_effect(phase: str) -> None:
@@ -1817,6 +1826,14 @@ def _execute_refresh(
         environment_values = _preview_refresh_environment_values(
             request=request, restore_upstream=restore_upstream
         )
+        try:
+            preview_workers = int(
+                environment_values.get("ODOO_WORKERS") or dokploy_compose.ODOO_DEFAULT_WORKERS
+            )
+        except ValueError:
+            raise click.ClickException("Preview Odoo workers must be an integer.") from None
+        if preview_workers < 0:
+            raise click.ClickException("Preview Odoo workers cannot be negative.")
         if restore_upstream or restore_clean_snapshot or preserve_existing_data:
             environment_values["ODOO_MAX_CRON_THREADS"] = "0"
             environment_values["ENV_OVERRIDE_DISABLE_CRON"] = "true"
@@ -1831,6 +1848,7 @@ def _execute_refresh(
         )
         source_server_id = str(target_payload.get("serverId") or "").strip()
         compose_id, created_compose = _resolve_or_create_compose(
+            record_store=record_store,
             database_url=database_url,
             host=host,
             token=token,
@@ -1913,13 +1931,14 @@ def _execute_refresh(
             domain_certificate_type=plan.domain_certificate_type,
             preview_filestore=filestore,
             preview_identity=expected_runtime_identity if not restore_upstream else None,
+            preview_workers=preview_workers,
         )
 
         def qualify_resources() -> None:
             if qualify_existing_preview or preserve_existing_data or creating_compose:
                 from control_plane.odoo_preview_resources import require_existing_preview_resources
 
-                require_existing_preview_resources(
+                binding = require_existing_preview_resources(
                     host=host,
                     token=token,
                     compose_id=compose_id,
@@ -1931,6 +1950,11 @@ def _execute_refresh(
                     pending_filestore=restore_clean_snapshot and filestore is not None,
                     unstarted=creating_compose,
                     expected_server_id=source_server_id,
+                )
+                resource_provenance.update(
+                    binding_sha256=binding,
+                    qualified_at=datetime.now(timezone.utc).isoformat(),
+                    recipient_state="unstarted" if creating_compose else "existing",
                 )
 
         qualify_resources()
@@ -2115,6 +2139,7 @@ def _execute_refresh(
             provider_effect_attempted=provider_effect_attempted,
             module_install_update_status=module_install_update_status,
             module_install_update_evidence=module_install_update_evidence,
+            resource_provenance=resource_provenance,
             steps=tuple(steps),
         )
     except NativeSourceAuthorizationDenied:
@@ -2134,6 +2159,7 @@ def _execute_refresh(
             provider_effect_attempted=provider_effect_attempted,
             module_install_update_status=module_install_update_status,
             module_install_update_evidence=module_install_update_evidence,
+            resource_provenance=resource_provenance,
             steps=tuple(steps),
         )
 
@@ -2273,6 +2299,7 @@ def _execute_destroy(
 
 def _resolve_or_create_compose(
     *,
+    record_store: object | None = None,
     host: str,
     token: str,
     plan: OdooPreviewDokployDryRunPlan,
@@ -2305,20 +2332,23 @@ def _resolve_or_create_compose(
         host=host, token=token, server_id=server_id, database_url=database_url
     )
     provider_effect_checkpoint("compose_create")
-    created = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/compose.create",
-        method="POST",
-        payload={
-            "name": plan.compose_name,
-            "appName": plan.compose_name,
-            "description": f"Launchplane Odoo preview {plan.preview_slug}",
-            "environmentId": plan.environment_id,
-            "serverId": server_id,
-            "composeType": "docker-compose",
-        },
-    )
+    from control_plane.production_recipient_retirement_names import provider_name_guard
+
+    with provider_name_guard(record_store, plan.compose_name):
+        created = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/compose.create",
+            method="POST",
+            payload={
+                "name": plan.compose_name,
+                "appName": plan.compose_name,
+                "description": f"Launchplane Odoo preview {plan.preview_slug}",
+                "environmentId": plan.environment_id,
+                "serverId": server_id,
+                "composeType": "docker-compose",
+            },
+        )
     created_compose = dokploy_api.as_json_object(created)
     compose_id = str((created_compose or {}).get("composeId") or "").strip()
     if not compose_id:
@@ -2578,6 +2608,7 @@ def _apply_result(
     provider_effect_attempted: bool = False,
     module_install_update_status: Literal["pass", "fail", "skipped"] = "skipped",
     module_install_update_evidence: dict[str, str] | None = None,
+    resource_provenance: dict[str, str] | None = None,
     steps: tuple[OdooPreviewDokployApplyStep, ...] = (),
     rollback_errors: tuple[str, ...] = (),
     error_message: str = "",
@@ -2598,6 +2629,7 @@ def _apply_result(
         domain_id=domain_id,
         module_install_update_status=module_install_update_status,
         module_install_update_evidence=module_install_update_evidence or {},
+        resource_provenance=resource_provenance or {},
         steps=steps,
         rollback_errors=rollback_errors,
         error_message=error_message,

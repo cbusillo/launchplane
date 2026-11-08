@@ -35,6 +35,12 @@ from tests.support.http import LIFESPAN_HANG_DEADLINE_SECONDS, lifespan_client, 
 
 
 class TestingRebuildHttpFixture(unittest.TestCase):
+    def assert_conditional_plan(self, response: Response, code: str) -> None:
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "pending")
+        self.assertEqual(response.json()["blockers"][0]["code"], code)
+        self.assertTrue(response.json()["steps"])
+
     def setUp(self) -> None:
         self.fixture = worker_tests.NativeTestingWorkerTests()
         self.fixture.setUp()
@@ -75,7 +81,7 @@ class TestingRebuildHttpFixture(unittest.TestCase):
         self.latest = self.enterContext(
             patch.object(
                 routes,
-                "latest_verified_testing_build",
+                "latest_verified_testing_release",
                 return_value=VerifiedBuildArtifact(manifest=self.manifest),
             )
         )
@@ -107,6 +113,57 @@ class TestingRebuildHttpFixture(unittest.TestCase):
 
 
 class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.enterContext(
+            patch(
+                "control_plane.product_reconcile.latest_verified_testing_release",
+                side_effect=self.latest,
+            )
+        )
+
+    def test_invalid_source_and_build_are_refused_before_conditional_planning(self) -> None:
+        replacement = self.fixture.operation.request.model_copy(
+            update={
+                "artifact_id": self.manifest.artifact_id,
+                "source_git_ref": self.manifest.source_commit,
+            }
+        )
+        for changes, expected in (
+            ({"data_source_mode": "existing"}, ValueError),
+            ({"artifact_id": "not-the-verified-build"}, ValueError),
+        ):
+            with (
+                self.subTest(changes=changes),
+                patch.object(preflight, "capture_rebuild_intent") as capture,
+                self.assertRaises(expected),
+            ):
+                preflight.inspect_testing_rebuild(
+                    root=self.fixture.root,
+                    store=self.store,
+                    request=replacement.model_copy(update=changes),
+                    verified_build=VerifiedBuildArtifact(manifest=self.manifest),
+                )
+            capture.assert_not_called()
+        self.assertEqual(self.fixture.effects, [])
+
+    def test_current_rebuild_rejects_non_testing_and_in_place_before_build_reads(self) -> None:
+        for changes in ({"instance": "prod"}, {"strategy": "recreate-in-place"}):
+            with (
+                self.subTest(changes=changes),
+                patch(
+                    "control_plane.product_reconcile.latest_verified_testing_release",
+                    side_effect=AssertionError("Invalid rebuilds must not read a build"),
+                ),
+                self.assertRaises(ValueError),
+            ):
+                preflight.inspect_current_testing_rebuild(
+                    root=self.fixture.root,
+                    store=self.store,
+                    request=self.fixture.operation.request.model_copy(update=changes),
+                    actor="fixture-agent",
+                )
+
     def settlement_payload(self) -> dict[str, object]:
         return {
             **self.payload,
@@ -185,7 +242,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             return current
 
         before = self.store.list_odoo_stable_target_replacement_operation_records()
-        with patch.object(routes, "inspect_testing_rebuild", side_effect=held_inspection):
+        with patch.object(preflight, "inspect_testing_rebuild", side_effect=held_inspection):
             async with lifespan_client(self.app) as client:
                 original = asyncio.create_task(
                     request(client, "POST", self.url, headers=headers(), payload=self.payload)
@@ -217,7 +274,11 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
 
-    async def test_director_operator_can_queue_native_testing_without_an_apply_rule(self) -> None:
+    async def test_director_rebuild_uses_current_verified_build_and_preserves_original_receipt(
+        self,
+    ) -> None:
+        from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+        from tests.test_migrated_testing_source import MigratedTestingRequestTests
         from control_plane.service_auth import (
             BearerIdentityConfig,
             configured_local_operator_identity,
@@ -245,8 +306,36 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             control_plane_root_path=self.fixture.root,
             bearer_identity_config=config,
         )
+        source = MigratedTestingRequestTests().request().migrated_source
+        assert source is not None
+        profile = self.store.read_product_profile_record(self.product)
+        testing = next(lane for lane in profile.lanes if lane.instance == "testing")
+        testing.odoo_testing_drill_storage = OdooTestingDrillStorageBudget(
+            database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
+        )
+        self.store.write_product_profile_record(profile)
+        self.fixture.intent = self.fixture.intent.model_copy(update={"profile": profile})
         replacement = self.fixture.operation.request.model_copy(
-            update={"reason": "Rebuild the disposable testing copy"}
+            update={
+                "reason": "Rebuild the disposable testing copy",
+                "artifact_id": self.manifest.artifact_id,
+                "source_git_ref": self.manifest.source_commit,
+                "data_source_mode": "migrated_restore",
+                "allow_empty_data": False,
+                "migrated_source": source.model_copy(
+                    update={
+                        "product": self.product,
+                        "context": self.fixture.operation.context,
+                        "target_image": self.manifest.image.digest,
+                    }
+                ),
+            }
+        )
+        self.enterContext(
+            patch(
+                "control_plane.product_reconcile.latest_verified_testing_release",
+                return_value=VerifiedBuildArtifact(manifest=self.manifest),
+            )
         )
         identity = configured_local_operator_identity(config)
         assert identity is not None
@@ -257,20 +346,72 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             actor=launchplane_identity_actor(identity),
         )
         intent = self.fixture.intent.model_copy(update={"before": self.fixture.current()})
-        with patch.object(preflight, "capture_rebuild_intent", return_value=intent):
-            inspected = await request(
-                app,
-                "POST",
-                ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
-                headers={"Authorization": "Bearer fixture-operator"},
-                payload={
-                    "product": self.product,
-                    "replacement": replacement.model_dump(
-                        mode="json", include=set(OdooStableTargetReplacementRequest.model_fields)
+        self.enterContext(patch.object(preflight, "capture_rebuild_intent", return_value=intent))
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+        from control_plane.product_reconcile import ProductReconcileError
+
+        for failure, status in (
+            (NativeSourceAuthorizationDenied("Fixture refused the source read"), 403),
+            (ProductReconcileError("Fixture unavailable", code="testing_build_unavailable"), 409),
+        ):
+            for route in (ODOO_TARGET_REPLACEMENT_PLAN_ROUTE, ODOO_TARGET_REPLACEMENT_APPLY_ROUTE):
+                with (
+                    self.subTest(failure=type(failure), route=route),
+                    patch(
+                        "control_plane.product_reconcile.latest_verified_testing_release",
+                        side_effect=failure,
                     ),
-                },
-            )
+                ):
+                    body = replacement.model_dump(
+                        mode="json",
+                        include=set(OdooStableTargetReplacementRequest.model_fields)
+                        if route == ODOO_TARGET_REPLACEMENT_PLAN_ROUTE
+                        else None,
+                    )
+                    refused = await request(
+                        app,
+                        "POST",
+                        route,
+                        headers={
+                            "Authorization": "Bearer fixture-operator",
+                            "Idempotency-Key": "unavailable-build",
+                        },
+                        payload={"product": self.product, "replacement": body},
+                    )
+                    self.assertEqual(refused.status_code, status, refused.text)
+        inspected = await request(
+            app,
+            "POST",
+            ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+            headers={"Authorization": "Bearer fixture-operator"},
+            payload={
+                "product": self.product,
+                "replacement": replacement.model_dump(
+                    mode="json", include=set(OdooStableTargetReplacementRequest.model_fields)
+                ),
+            },
+        )
         self.assertEqual(inspected.status_code, 202, inspected.text)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.manifest.artifact_id)
+        for changed in (
+            {"artifact_id": "unverified-build"},
+            {"source_git_ref": "f" * 40},
+        ):
+            with self.subTest(changed=changed):
+                mismatched = replacement.model_copy(update=changed).model_dump(
+                    mode="json", include=set(OdooStableTargetReplacementRequest.model_fields)
+                )
+                refused = await request(
+                    app,
+                    "POST",
+                    ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+                    headers={"Authorization": "Bearer fixture-operator"},
+                    payload={"product": self.product, "replacement": mismatched},
+                )
+                self.assertEqual(refused.status_code, 400, refused.text)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.manifest.artifact_id)
         ordinary = await request(
             app,
             "POST",
@@ -279,7 +420,12 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             payload={
                 "product": self.product,
                 "replacement": replacement.model_copy(
-                    update={"strategy": "recreate-in-place"}
+                    update={
+                        "strategy": "recreate-in-place",
+                        "data_source_mode": "empty",
+                        "allow_empty_data": True,
+                        "migrated_source": None,
+                    }
                 ).model_dump(mode="json"),
             },
         )
@@ -295,6 +441,9 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             payload={"product": self.product, "replacement": replacement.model_dump(mode="json")},
         )
         self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(
+            self.store.read_artifact_manifest(self.manifest.artifact_id), self.manifest
+        )
         operations = self.store.list_odoo_stable_target_replacement_operation_records()
         saved = next(
             item for item in operations if item.idempotency_key == "native-director-rebuild"
@@ -303,6 +452,24 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertTrue(saved.is_native_testing_rebuild)
         self.assertEqual(self.fixture.effects, [])
         self.assertEqual(self.fixture.current().target.policies.staff_testing_hold, hold)
+        with patch(
+            "control_plane.product_reconcile.latest_verified_testing_release",
+            side_effect=AssertionError("An original request must not rediscover its build"),
+        ):
+            replayed = await request(
+                app,
+                "POST",
+                ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+                headers={
+                    "Authorization": "Bearer fixture-operator",
+                    "Idempotency-Key": "native-director-rebuild",
+                },
+                payload={
+                    "product": self.product,
+                    "replacement": replacement.model_dump(mode="json"),
+                },
+            )
+        self.assertEqual(replayed.status_code, 202, replayed.text)
         cancelled = await request(
             app,
             "POST",
@@ -335,7 +502,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                     payload={
                         "product": self.product,
                         "replacement": replacement.model_copy(
-                            update={"data_source_mode": mode}
+                            update={"data_source_mode": mode, "migrated_source": None}
                         ).model_dump(mode="json"),
                     },
                 )
@@ -372,7 +539,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             "testing_route_compilation_failed",
             "The observed testing ingress cannot be safely compiled for its retained copy.",
         )
-        with patch.object(preflight, "inspect_testing_rebuild", side_effect=failure):
+        with patch.object(preflight, "capture_rebuild_intent", side_effect=failure):
             response = await request(
                 app,
                 "POST",
@@ -380,13 +547,20 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                 headers={"Authorization": "Bearer fixture-operator"},
                 payload={
                     "product": self.product,
-                    "replacement": self.fixture.operation.request.model_dump(
+                    "replacement": self.fixture.operation.request.model_copy(
+                        update={
+                            "artifact_id": self.manifest.artifact_id,
+                            "source_git_ref": self.manifest.source_commit,
+                        }
+                    ).model_dump(
                         mode="json", include=set(OdooStableTargetReplacementRequest.model_fields)
                     ),
                 },
             )
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertEqual(response.json()["error"]["code"], failure.code)
+        self.assertEqual(response.status_code, 202, response.text)
+        result = response.json()["result"]
+        self.assertEqual(result["blockers"][0]["code"], failure.code)
+        self.assertEqual(result["status"], "pending")
         self.assertTrue(response.json()["trace_id"])
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
@@ -409,6 +583,31 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                 )
                 self.assertEqual(response.status_code, 400, response.text)
                 self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_director_agent_cannot_queue_odoo_through_product_native_route(self) -> None:
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=self.policy,
+            bearer_identity_config=_local_operator_bearer_config(),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.fixture.root,
+        )
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        refused = await request(
+            app,
+            "POST",
+            self.url,
+            headers={
+                "Authorization": "Bearer local-operator-token",
+                "Idempotency-Key": "native-odoo-agent",
+            },
+            payload=self.payload,
+        )
+        self.assertEqual(refused.status_code, 403, refused.text)
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
 
@@ -457,14 +656,20 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                 deployment_record_id="lookup-serving-build",
             )
         )
+        read_only_build = self.manifest.model_copy(
+            update={"artifact_id": "read-only-current-build"}
+        )
         for omit_defaults in (False, True):
             with self.subTest(omitted_defaults=omit_defaults):
+                self.latest.return_value = VerifiedBuildArtifact(manifest=self.manifest)
                 key = f"native-lookup-{omit_defaults}"
                 headers = {"Authorization": "Bearer fixture-director", "Idempotency-Key": key}
                 replacement = self.fixture.operation.request.model_copy(
                     update={
                         "reason": "Rebuild the disposable testing copy",
                         "no_cache": True,
+                        "artifact_id": self.manifest.artifact_id,
+                        "source_git_ref": self.manifest.source_commit,
                         "expected_current_artifact_id": artifact.artifact_id,
                     }
                 ).model_dump(mode="json", exclude_defaults=omit_defaults)
@@ -492,6 +697,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                         }
                     )
                 )
+                self.latest.return_value = VerifiedBuildArtifact(manifest=read_only_build)
                 before = self.store.list_odoo_stable_target_replacement_operation_records()
                 operation_path = self.url + "/operations/" + original.operation_id
                 for token, configure, lookup_status in (
@@ -585,16 +791,27 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                     self.store.list_odoo_stable_target_replacement_operation_records(), before
                 )
                 with self.assertRaises(FileNotFoundError):
-                    self.store.read_artifact_manifest(self.manifest.artifact_id)
+                    self.store.read_artifact_manifest(read_only_build.artifact_id)
                 self.assertEqual(self.fixture.effects, [])
 
     async def test_read_only_preflight_does_not_admit_artifact_or_candidate(self) -> None:
+        from control_plane import testing_rebuild_service as service
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+
         before = self.store.list_odoo_stable_target_replacement_operation_records()
         response = await self.call("GET", path=self.url + "/inputs")
         self.assertEqual(response.status_code, 200, response.json())
         self.assertEqual(response.json()["base_url"], "https://" + self.fixture.fixture.route.host)
         self.assertEqual(response.json()["artifact_id"], self.manifest.artifact_id)
         self.assertEqual(response.json()["candidate_verification"], "pending")
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.manifest.artifact_id)
+        with patch.object(
+            service, "read_odoo_testing_usage", return_value=OdooTestingUsage("in_use")
+        ):
+            refused = await self.call("POST", self.payload)
+        self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         with self.assertRaises(FileNotFoundError):
             self.store.read_artifact_manifest(self.manifest.artifact_id)
@@ -638,10 +855,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                         "GET", path=self.url + "/inputs?data_source_mode=" + mode
                     )
                     submitted = await self.call("POST", self.payload, key=mode)
-                    self.assertEqual(inspected.status_code, 409, inspected.text)
-                    self.assertEqual(
-                        inspected.json()["error"]["code"], TESTING_STORAGE_BUDGET_REQUIRED
-                    )
+                    self.assert_conditional_plan(inspected, TESTING_STORAGE_BUDGET_REQUIRED)
                     self.assertEqual(submitted.status_code, 409, submitted.text)
         source.assert_not_called()
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
@@ -659,12 +873,12 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         with patch.object(preflight, "capture_rebuild_intent", side_effect=failure):
             inspected = await self.call("GET", path=self.url + "/inputs")
             submitted = await self.call("POST", self.payload)
-        for response, code in ((inspected, failure.code), (submitted, "testing_rebuild_not_ready")):
-            self.assertEqual(response.status_code, 409, response.text)
-            self.assertEqual(response.json()["error"]["code"], code)
-            self.assertEqual(response.json()["error"]["message"], str(failure))
-            self.assertEqual(response.json()["error"]["reason"], failure.code)
-            self.assertTrue(response.json()["trace_id"])
+        self.assert_conditional_plan(inspected, failure.code)
+        self.assertEqual(submitted.status_code, 409, submitted.text)
+        self.assertEqual(submitted.json()["error"]["code"], "testing_rebuild_not_ready")
+        self.assertEqual(submitted.json()["error"]["message"], str(failure))
+        self.assertEqual(submitted.json()["error"]["reason"], failure.code)
+        self.assertTrue(submitted.json()["trace_id"])
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
 
@@ -718,18 +932,21 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                         self.payload if method == "POST" else None,
                         path=self.url if method == "POST" else self.url + "/inputs",
                     )
-                    self.assertEqual(response.status_code, status, response.text)
-                    self.assertTrue(response.json()["trace_id"])
-                    self.assertEqual(
-                        response.json()["error"]["code"],
+                    code = (
                         "authorization_denied"
                         if status == 403
                         else "testing_rebuild_not_ready"
                         if method == "POST"
                         else "testing_rebuild_observation_unavailable"
                         if isinstance(failure, NativeSourceUnavailable)
-                        else "testing_rebuild_inputs_unverified",
+                        else "testing_rebuild_inputs_unverified"
                     )
+                    if method == "GET" and status != 403:
+                        self.assert_conditional_plan(response, code)
+                    else:
+                        self.assertEqual(response.status_code, status, response.text)
+                        self.assertTrue(response.json()["trace_id"])
+                        self.assertEqual(response.json()["error"]["code"], code)
                     if isinstance(failure, NativeProgramFailed):
                         self.assertIn(failure.code, response.text)
                     self.assertNotIn("private-", response.text)
@@ -838,7 +1055,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             current["Idempotency-Key"] = "original-in-flight"
             return current
 
-        with patch.object(routes, "inspect_testing_rebuild", side_effect=held_inspection):
+        with patch.object(preflight, "inspect_testing_rebuild", side_effect=held_inspection):
             async with lifespan_client(self.app) as client:
                 original = asyncio.create_task(
                     request(client, "POST", self.url, headers=headers(), payload=self.payload)
@@ -900,16 +1117,30 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.latest.assert_not_called()
         self.assertEqual(self.fixture.effects, [])
 
-    async def test_known_use_blocks_both_preflight_and_submission(self) -> None:
+    async def test_known_use_returns_conditional_plan_but_blocks_submission(self) -> None:
+        from datetime import UTC, datetime, timedelta
         from control_plane import testing_rebuild_service as service
         from control_plane.odoo_testing_usage import OdooTestingUsage
 
+        since = datetime.now(UTC) - timedelta(minutes=1)
+        expiry = since + timedelta(minutes=5)
         with patch.object(
-            service, "read_odoo_testing_usage", return_value=OdooTestingUsage("in_use")
+            service,
+            "read_odoo_testing_usage",
+            return_value=OdooTestingUsage(
+                "in_use", actors=("odoo-user:42",), since=since, valid_until=expiry
+            ),
         ):
             inspected = await self.call("GET", path=self.url + "/inputs")
             submitted = await self.call("POST", self.payload)
-        self.assertEqual(inspected.status_code, 409, inspected.json())
+        self.assertEqual(inspected.status_code, 200, inspected.json())
+        plan = inspected.json()
+        self.assertEqual(plan["status"], "pending")
+        self.assertEqual(plan["blockers"][0]["code"], "testing_in_use")
+        for fact in ("odoo-user:42", since.isoformat(), expiry.isoformat()):
+            self.assertIn(fact, plan["blockers"][0]["message"])
+        self.assertTrue(plan["steps"])
+        self.assertEqual(plan["base_url"], self.fixture.intent.profile.lanes[0].base_url)
         self.assertEqual(submitted.status_code, 409, submitted.json())
         with self.assertRaises(FileNotFoundError):
             self.store.read_artifact_manifest(self.manifest.artifact_id)
@@ -979,7 +1210,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         before = self.store.read_secret_record(binding.secret_id)
         self.store.write_secret_binding(binding.model_copy(update={"value_source": "supplied"}))
         response = await self.call("GET", path=self.url + "/inputs")
-        self.assertEqual(response.status_code, 409, response.json())
+        self.assert_conditional_plan(response, "testing_credentials_unverified")
         self.assertEqual(self.store.read_secret_record(binding.secret_id), before)
         self.assertEqual(self.fixture.effects, [])
 
@@ -1006,7 +1237,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             )
         )
         refused = await self.call("GET", path=path)
-        self.assertEqual(refused.status_code, 409, refused.json())
+        self.assert_conditional_plan(refused, "testing_restore_source_unconfigured")
         self.assertEqual(self.fixture.effects, [])
 
     def test_current_build_reader_stops_at_denial_without_selecting_another_build(self) -> None:
@@ -1040,10 +1271,20 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         from control_plane.build_provenance import BuildProvenanceError
         from unittest.mock import Mock
 
-        for url, headers in (
-            ("https://api.github.com/repos/example/actions", {"X-RateLimit-Remaining": "0"}),
-            ("https://api.github.com/repos/example/actions", {"Retry-After": "60"}),
-            ("https://artifacts.example.invalid/archive", {}),
+        for url, headers, retry_at in (
+            ("https://api.github.com/repos/example/actions", {"X-RateLimit-Remaining": "0"}, ""),
+            ("https://api.github.com/repos/example/actions", {"Retry-After": "60"}, ""),
+            ("https://artifacts.example.invalid/archive", {}, ""),
+            (
+                "https://api.github.com/repos/example/actions",
+                {"X-RateLimit-Remaining": "0"},
+                "2026-11-03T21:11:49Z",
+            ),
+            (
+                "https://api.github.com/repos/example/actions",
+                {"Retry-After": ""},
+                "2026-11-03T21:11:49Z",
+            ),
         ):
             calls: list[str] = []
             values = Message()
@@ -1053,12 +1294,12 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             def unavailable(path: str) -> object:
                 calls.append(path)
                 raise BuildProvenanceError(
-                    "fixture temporary read failure", code="github_read_failed"
+                    "fixture temporary read failure", code="github_read_failed", retry_at=retry_at
                 ) from HTTPError(url, 403, "Forbidden", values, None)
 
             reader = product_reconcile._TestingRebuildBuildReads(Mock(get_json=unavailable))
             with (
-                self.subTest(url=url, headers=headers),
+                self.subTest(url=url, headers=headers, retry_at=retry_at),
                 self.assertRaises(product_reconcile.ProductReconcileError),
             ):
                 try:
@@ -1210,4 +1451,270 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         )
         self.assertEqual(operation["status"], saved.status)
         self.assertNotIn("provider_detail", operation)
+        self.assertEqual(self.fixture.effects, [])
+
+
+class GenericWebTestingRebuildHttpTests(
+    TestingRebuildHttpFixture, unittest.IsolatedAsyncioTestCase
+):
+    def setUp(self) -> None:
+        super().setUp()
+        from control_plane import product_reconcile
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from tests import test_product_reconcile as build_tests
+
+        payload = self.fixture.intent.profile.model_dump(mode="json")
+        payload.update(
+            driver_id="generic-web",
+            repository=build_tests.REPOSITORY,
+            repository_id=build_tests.REPOSITORY_ID,
+            repository_owner_id="1",
+            image={"repository": build_tests.IMAGE_REPOSITORY},
+        )
+        self.profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        self.declare_state({"kind": "none"})
+        self.store.write_repository_inventory_record(build_tests._inventory())
+        self.github = build_tests.FakeGenericWebGitHub()
+        self.github.add_run(30, build_tests.NEWEST)
+        self.enterContext(
+            patch.object(
+                product_reconcile, "resolve_build_provenance_transport", return_value=self.github
+            )
+        )
+        self.enterContext(
+            patch.object(
+                routes,
+                "latest_verified_testing_release",
+                product_reconcile.latest_verified_testing_release,
+            )
+        )
+        self.artifact_id = (
+            f"{build_tests.IMAGE_REPOSITORY}@{build_tests._digest(build_tests.NEWEST)}"
+        )
+        self.payload.update(artifact_id=self.artifact_id, source_git_ref=build_tests.NEWEST)
+        self.enterContext(
+            patch.object(
+                preflight,
+                "capture_rebuild_intent",
+                side_effect=self.fixture.capture_driver_function,
+            )
+        )
+        self.provider_config = self.enterContext(
+            patch.object(preflight, "record_verified_build_artifact")
+        )
+
+    def declare_state(self, state: dict[str, str] | None) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+
+        payload = self.profile.model_dump(mode="json")
+        for lane in payload["lanes"]:
+            if lane["instance"] == "testing":
+                lane["generic_web_testing_state"] = state
+        self.profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        self.store.write_product_profile_record(self.profile)
+
+    async def test_none_and_volume_admission_remain_read_only_until_execution_exists(self) -> None:
+        from control_plane.dokploy import source
+        from control_plane.testing_rebuild_driver import TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE
+
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        before_reservations = self.store.list_held_provider_target_reservations()
+        for state in ({"kind": "none"}, {"kind": "volume", "container_path": "/app/data"}):
+            with self.subTest(state=state), patch.object(source, "read_dokploy_config") as provider:
+                self.declare_state(state)
+                response = await self.call("GET", path=self.url + "/inputs")
+                self.assertEqual(response.status_code, 200, response.text)
+                inspected = response.json()
+                self.assertNotEqual(inspected["status"], "pass")
+                self.assertEqual(inspected["artifact_id"], self.payload["artifact_id"])
+                self.assertEqual(inspected["source_git_ref"], self.payload["source_git_ref"])
+                self.assertEqual(inspected["context"], self.fixture.operation.context)
+                submitted = await self.call("POST", self.payload)
+                self.assertEqual(submitted.status_code, 409, submitted.text)
+                self.assertEqual(
+                    submitted.json()["error"]["reason"], TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE
+                )
+                provider.assert_not_called()
+        self.provider_config.assert_not_called()
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), before_reservations)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.artifact_id)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_unknown_postgresql_and_restore_refuse_before_provider_reads(self) -> None:
+        from control_plane.dokploy import source
+
+        for state, source_mode in (
+            (None, "empty"),
+            ({"kind": "postgresql"}, "empty"),
+            ({"kind": "none"}, "production_restore"),
+            ({"kind": "volume", "container_path": "/app/data"}, "upstream_restore"),
+        ):
+            with (
+                self.subTest(state=state, source=source_mode),
+                patch.object(source, "read_dokploy_config") as provider,
+            ):
+                self.declare_state(state)
+                response = await self.call(
+                    "GET", path=self.url + "/inputs?data_source_mode=" + source_mode
+                )
+                if source_mode != "empty":
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["status"], "pending")
+                    self.assertTrue(response.json()["blockers"])
+                else:
+                    self.assertEqual(response.status_code, 409, response.text)
+                provider.assert_not_called()
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_recorded_protection_blocks_generic_web_inspection(self) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        for facts in (
+            {"usage": "in_use", "data": "unknown", "production_resources": "unknown"},
+            {"usage": "unknown", "data": "only_copy", "production_resources": "unknown"},
+            {"usage": "unknown", "data": "unknown", "production_resources": "shared"},
+        ):
+            with self.subTest(facts=facts):
+                record_safety(
+                    self.store, self.product, self.fixture.operation.context, "testing", **facts
+                )
+                response = await self.call("GET", path=self.url + "/inputs")
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["status"], "pending")
+                self.assertTrue(response.json()["blockers"])
+                self.assertEqual((await self.call("POST", self.payload)).status_code, 409)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_application_lane_reports_support_from_declared_state(self) -> None:
+        from control_plane.contracts.product_environment_read_model import (
+            build_product_environment_detail,
+        )
+
+        context = self.fixture.operation.context
+        target = self.store.read_dokploy_target_record(
+            context_name=context, instance_name="testing"
+        )
+        provider = self.store.read_provider_target_record(
+            context_name=context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"target_type": "application"})
+        )
+        self.store.write_provider_target_record(
+            provider.model_copy(update={"target_category": "application"})
+        )
+        response = await self.call("GET", path=self.url + "/inputs")
+        self.assert_conditional_plan(response, "testing_rebuild_state_unverified")
+        for state, supported in (
+            ({"kind": "none"}, True),
+            (None, False),
+            ({"kind": "postgresql"}, False),
+        ):
+            with self.subTest(state=state):
+                self.declare_state(state)
+                with patch(
+                    "control_plane.contracts.product_environment_read_model.split_ingress_monitoring_lane",
+                    side_effect=lambda _profile, lane, _binding: lane.model_copy(
+                        update={"health_url": "https://private.invalid/ready"}
+                    ),
+                ):
+                    detail = build_product_environment_detail(
+                        record_store=self.store,
+                        product=self.product,
+                        environment="testing",
+                        action_allowed=lambda *_: True,
+                    )
+                self.assertEqual(detail.testing_rebuild_supported, supported)
+
+    async def test_missing_product_is_a_bounded_preflight_and_submission_refusal(self) -> None:
+        from control_plane.dokploy import source
+
+        missing = "/v1/products/absent-product/testing-rebuild"
+        with patch.object(source, "read_dokploy_config") as provider:
+            for method, path, payload in (
+                ("GET", missing + "/inputs", None),
+                ("POST", missing, self.payload),
+            ):
+                with self.subTest(method=method):
+                    response = await self.call(method, payload, path=path)
+                    self.assertEqual(response.status_code, 409, response.text)
+            provider.assert_not_called()
+        self.assertEqual(self.fixture.effects, [])
+
+    def test_worker_refuses_generic_web_before_reserving_or_dispatching_effects(self) -> None:
+        from unittest.mock import Mock
+        from control_plane import testing_rebuild_service as service
+        from control_plane.dokploy import source
+        from control_plane.testing_rebuild_driver import TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE
+
+        operation = self.fixture.operation.model_copy(update={"operation_id": "generic-fence"})
+        before = self.store.list_held_provider_target_reservations()
+        with (
+            patch.object(
+                service, "capture_rebuild_intent", side_effect=self.fixture.capture_driver_function
+            ),
+            patch.object(source, "read_dokploy_config") as provider,
+            self.assertRaises(service.TestingRebuildRefused) as refused,
+        ):
+            service.execute_native_testing_rebuild(
+                root=self.fixture.root,
+                store=self.store,
+                operation=operation,
+                authorize=Mock(),
+                lease_owner="test-worker",
+            )
+        self.assertEqual(refused.exception.code, TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE)
+        provider.assert_not_called()
+        self.assertEqual(self.store.list_held_provider_target_reservations(), before)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_real_build_verifier_refuses_wrong_image_repository_without_effects(self) -> None:
+        from control_plane.dokploy import source
+
+        changed = self.profile.model_copy(
+            update={
+                "image": self.profile.image.model_copy(
+                    update={"repository": "ghcr.io/example/different"}
+                )
+            }
+        )
+        self.store.write_product_profile_record(changed)
+        with (
+            patch.object(self.github, "get_bytes", wraps=self.github.get_bytes) as manifest_read,
+            patch.object(source, "read_dokploy_config") as provider,
+        ):
+            response = await self.call("GET", path=self.url + "/inputs")
+        self.assertEqual(response.status_code, 409, response.text)
+        manifest_read.assert_called()
+        provider.assert_not_called()
+        self.provider_config.assert_not_called()
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_director_agent_reads_real_generic_web_build_without_mutation(self) -> None:
+        from control_plane.service_auth import BearerIdentityConfig
+        from control_plane.dokploy import source
+
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=self.policy,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="fixture-director",
+                local_operator_subject="fixture-agent",
+                local_operator_token_label="generic-read",
+            ),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.fixture.root,
+        )
+        with patch.object(source, "read_dokploy_config") as provider:
+            response = await request(
+                app,
+                "GET",
+                self.url + "/inputs",
+                headers={"Authorization": "Bearer fixture-director"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["artifact_id"], self.payload["artifact_id"])
+        provider.assert_not_called()
         self.assertEqual(self.fixture.effects, [])

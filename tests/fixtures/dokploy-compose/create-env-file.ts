@@ -18,15 +18,23 @@ export const getCreateEnvFileCommand = (compose: ComposeNested) => {
 		envContent += `\nCOMPOSE_PREFIX=${compose.suffix}`;
 	}
 
-	const envFileContent = prepareEnvironmentVariables(
-		envContent,
-		compose.environment.project.env,
-		compose.environment.env,
+	const envFileContent = (
+		compose.composeType === "stack"
+			? prepareEnvironmentVariables(
+					envContent,
+					compose.environment.project.env,
+					compose.environment.env,
+				)
+			: prepareEnvironmentVariablesForFile(
+					envContent,
+					compose.environment.project.env,
+					compose.environment.env,
+				)
 	).join("\n");
 
 	const encodedContent = encodeBase64(envFileContent);
 	return `
-touch ${envFilePath};
-echo "${encodedContent}" | base64 -d > "${envFilePath}";
+touch ${quote([envFilePath])};
+echo "${encodedContent}" | base64 -d > ${quote([envFilePath])};
 	`;
 };

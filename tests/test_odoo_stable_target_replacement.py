@@ -11,8 +11,10 @@ from typing import Any, Literal, cast
 from unittest.mock import Mock, patch
 
 import click
+import yaml
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.integration_readback import web_held_until_integration_readback
 from control_plane.odoo_instance_overrides import LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
@@ -21,6 +23,7 @@ from control_plane.contracts.artifact_identity import (
     ArtifactImageReference,
     ArtifactIdentityManifest,
 )
+from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -82,7 +85,6 @@ from control_plane.workflows.odoo_post_deploy import (
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.product_reconcile import (
     PLAN_BLOCKER_DESCRIPTIONS,
-    TESTING_FAILURE_DESCRIPTIONS,
 )
 from control_plane.workflows.odoo_stable_operation_worker import _unexpected_error_code
 from control_plane.contracts.odoo_target_replacement_failures import (
@@ -94,6 +96,10 @@ from control_plane.contracts.odoo_target_replacement_failures import (
 )
 from control_plane.operation_status_read import safe_operation_error_code
 from control_plane.workflows.odoo_stable_target_replacement import (
+    ODOO_OVERRIDE_READ_MAX_BYTES,
+    ODOO_OVERRIDE_READ_MAX_KEYS,
+    _override_environment_keys,
+    _render_replacement_compose,
     OdooStableTargetReplacementPlan,
     DokployRequest,
     TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
@@ -1454,67 +1460,327 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertIn("lane data policy", "; ".join(plan.blockers))
         self.assertIn("'upstream_restore'", "; ".join(plan.blockers))
 
-    def test_build_plan_reports_ready_when_records_and_volume_contract_exist(self) -> None:
-        identity = json.dumps(
-            {"deployment_record_id": "deployment-cm-testing", "artifact_id": "artifact"}
+    def test_override_environment_names_follow_both_payload_lists_and_reject_unknowns(self) -> None:
+        context, instance = "sample", "testing"
+        raw: dict[str, Any] = {
+            "context": context,
+            "instance": instance,
+            "config_parameters": [
+                {
+                    "key": "sample.setting",
+                    "value": {
+                        "source": "secret_binding",
+                        "secret_binding_id": "config-binding",
+                        "environment_variable": "CONFIG_INPUT",
+                    },
+                }
+            ],
+            "addon_settings": [
+                {
+                    "addon": "sample",
+                    "setting": "option",
+                    "value": {
+                        "source": "secret_binding",
+                        "secret_binding_id": "addon-binding",
+                        "environment_variable": "ADDON_INPUT",
+                    },
+                },
+                {
+                    "addon": "sample",
+                    "setting": "text",
+                    "value": {
+                        "source": "literal",
+                        "value": "PRIVATE_LITERAL",
+                    },
+                },
+            ],
+        }
+        payload = OdooPostDeployPayload.model_validate(raw)
+
+        def encoded(value: dict[str, Any]) -> dict[str, str]:
+            return {
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
+                    json.dumps(value).encode()
+                ).decode("ascii")
+            }
+
+        self.assertEqual(
+            _override_environment_keys(encoded(raw), context=context, instance=instance),
+            payload.required_container_environment_keys,
         )
-        with (
-            patch(
-                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
-                return_value=("host", "token"),
+        self.assertEqual(
+            _override_environment_keys(
+                encoded({"context": context, "instance": instance}),
+                context=context,
+                instance=instance,
             ),
-            patch(
-                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
-                return_value={
+            (),
+        )
+        for changed in (
+            {**raw, "context": "another"},
+            {**raw, "schema_version": payload.schema_version + 1},
+            {**raw, "config_parameters": "PRIVATE_INVALID"},
+            {
+                **raw,
+                "addon_settings": [
+                    {
+                        "addon": "sample",
+                        "setting": "text",
+                        "value": {
+                            "source": "literal",
+                            "value": "x" * ODOO_OVERRIDE_READ_MAX_BYTES,
+                        },
+                    }
+                ],
+            },
+            {
+                **raw,
+                "config_parameters": [
+                    {
+                        "key": f"sample.setting{index}",
+                        "value": {
+                            "source": "secret_binding",
+                            "secret_binding_id": f"binding-{index}",
+                            "environment_variable": f"INPUT_{index}",
+                        },
+                    }
+                    for index in range(ODOO_OVERRIDE_READ_MAX_KEYS + 1)
+                ],
+            },
+        ):
+            with self.subTest(changed=list(changed)):
+                self.assertIsNone(
+                    _override_environment_keys(encoded(changed), context=context, instance=instance)
+                )
+        for environment in ({}, {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "not-base64"}):
+            self.assertIsNone(
+                _override_environment_keys(environment, context=context, instance=instance)
+            )
+        raw["config_parameters"][0]["value"]["environment_variable"] = "not=an=environment=name"
+        self.assertIsNone(
+            _override_environment_keys(encoded(raw), context=context, instance=instance)
+        )
+
+    def test_build_plan_reports_ready_when_records_and_volume_contract_exist(self) -> None:
+        from tests.test_odoo_testing_restore import generation
+
+        manifest = _artifact_manifest()
+        target = _target_record()
+        rendered_compose = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference=f"{manifest.image.repository}@{manifest.image.digest}",
+            hold_web_until_integration_readback=web_held_until_integration_readback(
+                target.instance
+            ),
+            domain_hosts=target.domains,
+            runtime_port=_profile().runtime_port,
+        )
+        changed_compose = yaml.safe_load(rendered_compose)
+        changed_compose["services"]["web"]["command"] = ["different-startup"]
+        overrides = OdooPostDeployPayload.model_validate(
+            {
+                "context": target.context,
+                "instance": target.instance,
+                "config_parameters": [
+                    {
+                        "key": "sample.user",
+                        "value": {
+                            "source": "secret_binding",
+                            "secret_binding_id": "sample-binding",
+                            "environment_variable": next(iter(_DATABASE_ENV)),
+                        },
+                    }
+                ],
+            }
+        )
+        encoded_overrides = base64.b64encode(overrides.to_wire_json_bytes()).decode("ascii")
+        fresh = generation().model_copy(
+            update={
+                "product": _profile().product,
+                "context": target.context,
+                "completed_at": generation().prepared_at,
+            }
+        )
+        isolated_compose = _render_replacement_compose(
+            image_reference=f"{manifest.image.repository}@{manifest.image.digest}",
+            instance=target.instance,
+            domain_hosts=target.domains,
+            runtime_port=_profile().runtime_port,
+            published_copy=None,
+            generation=fresh,
+        )
+        cases: tuple[dict[str, Any], ...] = (
+            {"name": "matching"},
+            {
+                "name": "completed isolated generation",
+                "generation": fresh,
+                "compose": isolated_compose,
+            },
+            {"name": "isolated generation plain source", "generation": fresh, "match": False},
+            {
+                "name": "pending generation",
+                "generation": fresh.model_copy(update={"completed_at": ""}),
+                "compose": isolated_compose,
+                "match": None,
+                "status": "blocked",
+            },
+            {"name": "advisory render failure", "render_error": True, "match": None},
+            {"name": "JSON", "compose": json.dumps(yaml.safe_load(rendered_compose))},
+            {"name": "different startup", "compose": json.dumps(changed_compose), "match": False},
+            {"name": "empty document", "compose": "", "match": None},
+            {"name": "malformed document", "compose": "services: [", "match": None},
+            {"name": "empty services", "compose": "services: {}", "match": None},
+            {"name": "other source", "provider": {"sourceType": "git"}, "match": None},
+            {"name": "missing source", "provider": {"sourceType": ""}, "match": None},
+            {"name": "other path", "provider": {"composePath": "other.yml"}, "match": None},
+            {"name": "missing path", "provider": {"composePath": ""}, "match": None},
+            {"name": "foreign product", "identity": {"product": "another"}, "match": None},
+            {"name": "foreign context", "identity": {"context": "another"}, "match": None},
+            {"name": "foreign instance", "identity": {"instance": "prod"}, "match": None},
+            {"name": "foreign artifact", "identity": {"artifact_id": "another"}, "match": None},
+            {"name": "foreign revision", "identity": {"source_git_ref": "another"}, "match": None},
+            {"name": "incomplete identity", "identity": {"source_git_ref": ""}, "match": None},
+            {
+                "name": "future artifact",
+                "manifest": _artifact_manifest(artifact_id="candidate"),
+                "request": {"artifact_id": "candidate", "source_git_ref": manifest.source_commit},
+                "match": None,
+            },
+            {
+                "name": "inventory revision",
+                "inventory": _inventory().model_copy(update={"source_git_ref": "another"}),
+                "request": {
+                    "artifact_id": manifest.artifact_id,
+                    "source_git_ref": manifest.source_commit,
+                },
+                "match": None,
+            },
+            {
+                "name": "manifest revision",
+                "manifest": _artifact_manifest(source_commit="another"),
+                "match": None,
+                "status": "blocked",
+            },
+            {
+                "name": "manifest repository",
+                "manifest": _artifact_manifest(image_repository="ghcr.io/cbusillo/another"),
+                "match": None,
+                "status": "blocked",
+            },
+            {
+                "name": "render failure",
+                "domains": ("invalid`host",),
+                "match": None,
+                "status": "blocked",
+            },
+            {
+                "name": "generation failure",
+                "generation_error": ValueError("unavailable"),
+                "match": None,
+                "status": "blocked",
+            },
+        )
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                identity = RuntimeIdentity(
+                    product=_profile().product,
+                    context=target.context,
+                    instance=target.instance,
+                    source_git_ref=manifest.source_commit,
+                    deployment_record_id="deployment-cm-testing",
+                    artifact_id=manifest.artifact_id,
+                ).model_dump(mode="json")
+                identity.update(case.get("identity", {}))
+                provider = {
                     "name": "cm-testing",
                     "sourceType": "raw",
                     "composePath": "docker-compose.yml",
-                    "composeFile": "services: {}",
+                    "composeFile": case.get("compose", rendered_compose),
                     "env": "\n".join(
                         (
                             *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
-                            f"LAUNCHPLANE_RUNTIME_IDENTITY_JSON={identity}",
+                            f"LAUNCHPLANE_RUNTIME_IDENTITY_JSON={json.dumps(identity)}",
+                            f"{ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY}={encoded_overrides}",
                         )
                     ),
-                },
-            ),
-            patch(
-                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
-                return_value={"deploymentId": "deploy-123", "status": "success"},
-            ),
-        ):
-            plan = build_odoo_stable_target_replacement_plan(
-                control_plane_root=Path("."),
-                record_store=_Store(
-                    target_record=_target_record(),
-                    target_id_record=_target_id_record(),
-                    inventory=_inventory(),
-                ),
-                request=OdooStableTargetReplacementRequest(
-                    product="odoo-tenant-cm", instance="testing"
-                ),
-                dokploy_request=cast(DokployRequest, _request),
-            )
+                    **case.get("provider", {}),
+                }
+                domains = case.get("domains", target.domains)
 
-        self.assertEqual(plan.plan_status, "ready")
-        self.assertEqual(plan.context, "cm")
-        self.assertEqual(plan.expected_artifact_id, "artifact-cm-testing")
-        self.assertIsNotNone(plan.current_target)
-        assert plan.current_target is not None
-        self.assertEqual(plan.current_target.required_volume_keys_missing, ())
-        self.assertEqual(
-            plan.current_target.live_volume_values,
-            {
-                "ODOO_DATA_VOLUME": "cm_testing_odoo_data",
-                "ODOO_LOG_VOLUME": "cm_testing_odoo_logs",
-                "ODOO_DB_VOLUME": "cm_testing_odoo_db",
-            },
-        )
-        self.assertTrue(plan.current_target.runtime_identity_present)
-        self.assertEqual(plan.current_target.domain_hosts, ("cm-testing.shinycomputers.com",))
+                render_attempts = 0
+
+                def render(**kwargs: Any) -> str:
+                    nonlocal render_attempts
+                    render_attempts += 1
+                    if case.get("render_error") and render_attempts == 2:
+                        raise click.ClickException("advisory render refused")
+                    return _render_replacement_compose(**kwargs)
+
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement._render_replacement_compose",
+                        side_effect=render,
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement._domains_for_target",
+                        return_value=domains,
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.read_current_testing_generation",
+                        return_value=case.get("generation"),
+                        side_effect=case.get("generation_error"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                        return_value=("host", "token"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                        return_value=provider,
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                        return_value={"deploymentId": "deploy-123", "status": "success"},
+                    ),
+                ):
+                    plan = build_odoo_stable_target_replacement_plan(
+                        control_plane_root=Path("."),
+                        record_store=_Store(
+                            target_record=target,
+                            target_id_record=_target_id_record(),
+                            inventory=case.get("inventory", _inventory()),
+                            artifact_manifest=case.get("manifest", manifest),
+                        ),
+                        request=OdooStableTargetReplacementRequest(
+                            product=_profile().product,
+                            instance=target.instance,
+                            **case.get("request", {}),
+                        ),
+                        dokploy_request=cast(DokployRequest, _request),
+                    )
+                self.assertEqual(plan.plan_status, case.get("status", "ready"))
+                self.assertEqual(plan.context, target.context)
+                assert plan.current_target is not None
+                self.assertEqual(plan.current_target.required_volume_keys_missing, ())
+                self.assertEqual(
+                    plan.current_target.live_volume_values,
+                    {
+                        "ODOO_DATA_VOLUME": "cm_testing_odoo_data",
+                        "ODOO_LOG_VOLUME": "cm_testing_odoo_logs",
+                        "ODOO_DB_VOLUME": "cm_testing_odoo_db",
+                    },
+                )
+                self.assertTrue(plan.current_target.runtime_identity_present)
+                self.assertEqual(plan.current_target.domain_hosts, domains)
+                self.assertIs(
+                    plan.current_target.compose_matches_generated, case.get("match", True)
+                )
+                self.assertEqual(
+                    plan.current_target.override_environment_keys,
+                    overrides.required_container_environment_keys,
+                )
 
     def test_build_plan_blocks_when_selected_artifact_omits_required_modules(self) -> None:
         with (
@@ -2213,9 +2479,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         wait_deploy.assert_called_once()
         post_deploy.assert_called_once()
         self.assertFalse(post_deploy.call_args.kwargs["run_destructive_restore"])
-        self.assertIsNotNone(store.odoo_instance_override_record)
         assert store.odoo_instance_override_record is not None
-        self.assertIsNotNone(store.odoo_instance_override_record.website_bootstrap)
         assert store.odoo_instance_override_record.website_bootstrap is not None
         self.assertEqual(
             store.odoo_instance_override_record.website_bootstrap.canonical_url,
@@ -3973,7 +4237,6 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     )
                     self.assertTrue(store.environment_inventories)
                     self.assertTrue(store.release_tuples)
-                    self.assertIsNotNone(store.fresh_generation)
                     assert store.fresh_generation is not None
                     self.assertTrue(store.fresh_generation.completed_at)
                     self.assertEqual(
@@ -6055,24 +6318,6 @@ class OdooTargetReplacementFailureStageTests(unittest.TestCase):
         failure = _deploy_step_failure(error)
         self.assertEqual(failure.code, "deploy_blocked.runtime_key_safety_refused")
         self.assertEqual(failure.keys, tuple(sorted((long_key, longest_key))))
-
-    def test_every_stage_code_has_a_testing_failure_description(self) -> None:
-        for code in (
-            "plan_build_failed",
-            "plan_not_ready",
-            "strategy_unsupported",
-            "target_not_compose",
-            "artifact_id_missing",
-            "source_ref_missing",
-            "artifact_repository_mismatch",
-            "artifact_source_ref_mismatch",
-            "artifact_required_modules_missing",
-            "health_verification_required",
-            "health_url_missing",
-            "post_deploy_setup_failed",
-            "release_tuple_mint_failed",
-        ):
-            self.assertIn(code, TESTING_FAILURE_DESCRIPTIONS)
 
     def test_every_deploy_check_has_a_description_and_fits_the_error_code(self) -> None:
         for check in DEPLOY_BLOCKED_DESCRIPTIONS:

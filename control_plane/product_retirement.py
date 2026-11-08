@@ -28,6 +28,7 @@ from control_plane.contracts.product_retirement import (
     product_retirement_secret_authority,
     preview_inclusive_retirement_confirmation,
 )
+from control_plane.contracts.retained_volume import RetainedVolumeBinding
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
     RuntimeEnvironmentRecord,
@@ -45,6 +46,7 @@ from control_plane.provider_operations import (
     ProviderOperationLease,
     build_provider_operation_key,
 )
+from control_plane.retained_volume_capture import capture_retained_volumes
 
 
 _ACTIVE_PREVIEW_STATES = frozenset({"pending", "active", "failed", "paused", "teardown_pending"})
@@ -305,6 +307,7 @@ def observe_tracked_dokploy_application(
     control_plane_root: Path,
     target_id: str,
     observed_at: str,
+    capture_volume_custody: bool = True,
 ) -> ProductRetirementProviderObservation:
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     try:
@@ -335,6 +338,29 @@ def observe_tracked_dokploy_application(
         target_type="application",
         target_id=target_id,
     )
+    try:
+        retained_volumes, retained_volume_inventory_complete = (
+            capture_retained_volumes(host=host, token=token, payload=payload)
+            if capture_volume_custody
+            else ((), False)
+        )
+    except (
+        ValueError,
+        OSError,
+        TypeError,
+        click.ClickException,
+        dokploy_api.DokployRequestFailed,
+    ):
+        retained_volumes, retained_volume_inventory_complete = (), False
+    if retained_volume_inventory_complete:
+        after = dokploy_api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="application",
+            target_id=target_id,
+        )
+        if after != payload:
+            raise ProductRetirementBlockedError("Application changed during volume inspection.")
     return build_provider_observation(
         target_id=target_id,
         payload=payload,
@@ -342,6 +368,8 @@ def observe_tracked_dokploy_application(
         latest_deployment=deployment_history.latest_deployment,
         deployment_history_state=deployment_history.state,
         observed_at=observed_at,
+        retained_volumes=retained_volumes,
+        retained_volume_inventory_complete=retained_volume_inventory_complete,
     )
 
 
@@ -375,6 +403,8 @@ def build_provider_observation(
     latest_deployment: Mapping[str, object] | None,
     deployment_history_state: dokploy_api.DeploymentHistoryState = "present",
     observed_at: str,
+    retained_volumes: tuple[RetainedVolumeBinding, ...] = (),
+    retained_volume_inventory_complete: bool = False,
 ) -> ProductRetirementProviderObservation:
     observed_target_id = _application_id(payload)
     if observed_target_id != target_id.strip():
@@ -460,6 +490,11 @@ def build_provider_observation(
         domain_hosts=tuple(item[1] for item in domain_evidence),
         deployment_status=deployment_status,
         retirable=retirable,
+        retained_volumes=retained_volumes,
+        retained_volume_inventory_complete=retained_volume_inventory_complete,
+        mounts_sha256=canonical_sha256(payload["mounts"])
+        if isinstance(payload.get("mounts"), list)
+        else "",
     )
 
 
@@ -562,6 +597,7 @@ def build_product_retirement_plan_record(
         provider_observation=observation,
         authority_snapshot=snapshot,
         preview_plans=preview_plans,
+        retained_volume_production_use=bound.profile.production_use,
         profile_record=bound.profile if request.include_previews else None,
         application_name=observation.application_name or bound.dokploy_target.target_name,
     )
@@ -645,6 +681,7 @@ class DokployProductRetirementAdapter:
                 control_plane_root=self._control_plane_root,
                 target_id=self._plan.provider_observation.target_id,
                 observed_at=self._requested_at,
+                capture_volume_custody=False,
             )
         except (click.ClickException, OSError, TimeoutError, ValueError):
             return ProviderObservation(outcome="unknown")
@@ -697,6 +734,7 @@ class DokployProductRetirementAdapter:
                 control_plane_root=self._control_plane_root,
                 target_id=self._plan.provider_observation.target_id,
                 observed_at=self._requested_at,
+                capture_volume_custody=False,
             )
             if self._finalization_record is not None:
                 if current_observation.state != "absent":
@@ -858,6 +896,7 @@ class DokployProductRetirementAdapter:
                 control_plane_root=self._control_plane_root,
                 target_id=current_observation.target_id,
                 observed_at=self._requested_at,
+                capture_volume_custody=False,
             )
         except (click.ClickException, OSError, TimeoutError, ValueError) as error:
             raise self._unknown_provider_error(error) from error
@@ -1429,6 +1468,7 @@ class DokployProductRetirementAdapter:
             provider_observation=self._plan.provider_observation,
             authority_snapshot=self._plan.authority_snapshot,
             preview_plans=self._plan.preview_plans,
+            retained_volume_production_use=self._plan.retained_volume_production_use,
             profile_record=self._plan.profile_record,
             application_name=self._plan.application_name,
             mutation_evidence=ProductRetirementMutationEvidence(
@@ -1490,6 +1530,7 @@ def build_started_product_retirement_record(
         provider_observation=plan.provider_observation,
         authority_snapshot=plan.authority_snapshot,
         preview_plans=plan.preview_plans,
+        retained_volume_production_use=plan.retained_volume_production_use,
         profile_record=plan.profile_record,
         application_name=plan.application_name,
         mutation_evidence=ProductRetirementMutationEvidence(
@@ -1674,6 +1715,7 @@ def _observation_allows_reconciliation(
             planned.source_fingerprint_sha256
             and current.source_fingerprint_sha256 != planned.source_fingerprint_sha256
         )
+        or (planned.mounts_sha256 and current.mounts_sha256 != planned.mounts_sha256)
     ):
         return False
     planned_domains = dict(zip(planned.domain_id_sha256, planned.domain_host_sha256, strict=True))
@@ -1700,6 +1742,9 @@ def _same_planned_observation(
             "application_app_name": current.application_app_name
             if planned.application_app_name
             else "",
+            "retained_volumes": planned.retained_volumes,
+            "retained_volume_inventory_complete": planned.retained_volume_inventory_complete,
+            "mounts_sha256": current.mounts_sha256 if planned.mounts_sha256 else "",
         }
     )
     return planned.model_copy(update={"observed_at": current.observed_at}) == normalized

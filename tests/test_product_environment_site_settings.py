@@ -1,6 +1,7 @@
 """The environment settings form records a site's own settings and retires provider keys."""
 
 import unittest
+from typing import Any
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -651,9 +652,9 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(review.status_code, 202, review.text)
         original_write = self.store.write_product_authority_bundle
 
-        def change_then_write(bundle: ProductAuthorityBundle) -> None:
+        def change_then_write(bundle: ProductAuthorityBundle, **write_options: Any) -> None:
             self.store.write_product_profile_record(_profile(production_use="live"))
-            original_write(bundle)
+            original_write(bundle, **write_options)
 
         with patch.object(
             self.store, "write_product_authority_bundle", side_effect=change_then_write
@@ -798,9 +799,9 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(review.status_code, 202, review.text)
         original_write = self.store.write_product_authority_bundle
 
-        def change_then_write(bundle: ProductAuthorityBundle) -> None:
+        def change_then_write(bundle: ProductAuthorityBundle, **write_options: Any) -> None:
             self.store.write_product_profile_record(_profile(production_use="live"))
-            original_write(bundle)
+            original_write(bundle, **write_options)
 
         with patch.object(
             self.store, "write_product_authority_bundle", side_effect=change_then_write

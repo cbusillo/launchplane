@@ -175,6 +175,36 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         self.qualifier = qualifier.start()
         self.addCleanup(qualifier.stop)
 
+    def test_source_capture_does_not_resolve_import_secret_before_reservation(self) -> None:
+        from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
+
+        _write_odoo_preview_template_runtime_environment(store=self.store)
+        self.profile.preview.data_transport_mode = "driver"
+        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        issued = _issued_plan(request)
+        issued.plan_request.fishbowl_source = self.reference
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=request,
+            issued_plan=issued,
+            reservation_scope="source-capture",
+            idempotency_key="source-capture",
+            request_fingerprint="source-capture",
+            trace_id="source-capture",
+        )
+        with patch(
+            "control_plane.odoo_preview_apply_http.resolve_fishbowl_preview_source"
+        ) as deliver:
+            operation.adapter.capture_source_decision()
+        deliver.assert_not_called()
+        assert operation.adapter.source_decision is not None
+        self.assertTrue(operation.adapter.source_decision.fishbowl_import)
+        self.assertIsNone(
+            self.store.read_idempotency_record_by_id(operation.adapter._deployment_record_id)
+        )
+
     def resolve(self, *, include_secret_value: bool = False) -> FishbowlPreviewSource:
         return resolve_fishbowl_preview_source(
             store=self.store,

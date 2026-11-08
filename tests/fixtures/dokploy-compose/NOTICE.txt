@@ -1,14 +1,16 @@
 Public consumer fixtures for the Dokploy Compose environment qualification.
 
 create-env-file.ts is the unmodified getCreateEnvFileCommand export from:
-https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/packages/server/src/utils/builders/compose.ts
+https://github.com/Dokploy/dokploy/blob/073713f0b863eca4285ad24db00550af1b39397a/packages/server/src/utils/builders/compose.ts
 
-prepare-environment.ts is the unmodified prepareEnvironmentVariables export from:
-https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/packages/server/src/utils/docker/utils.ts
+prepare-environment.ts is the unmodified prepareEnvironmentVariables,
+prepareEnvironmentVariablesForFile and parseEnvironmentKeyValuePair exports from:
+https://github.com/Dokploy/dokploy/blob/073713f0b863eca4285ad24db00550af1b39397a/packages/server/src/utils/docker/utils.ts
 
-These are Dokploy v0.29.11 source excerpts, used under Apache-2.0:
-https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/LICENSE
-Copyright 2024 Dokploy.
+These are Dokploy v0.30.10 source excerpts, used under Apache-2.0:
+https://github.com/Dokploy/dokploy/blob/073713f0b863eca4285ad24db00550af1b39397a/LICENSE.MD
+Copyright 2026-present Dokploy Technology, Inc.
+The Apache-2.0 license text is in LICENSE.
 
 dotenv/main.cjs and package.json are unmodified dotenv v16.4.5 sources:
 https://github.com/motdotla/dotenv/blob/v16.4.5/lib/main.js
@@ -20,3 +22,7 @@ types with Node's built-in stripper, and executes the generated file command
 inside the test's temporary directory. No network, provider or application
 containers are used. Docker Compose is provisioned from the repository CI's
 single version declaration; it is not vendored here.
+
+legacy-literal.env is a synthetic saved record from Launchplane's previous
+Compose codec. It proves that reading and rewriting old provider records keeps
+their logical inputs while delivering them through the current provider.

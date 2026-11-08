@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.contracts.retained_volume_sweep import RETAINED_VOLUME_SWEEP_ROUTE
 from control_plane.contracts.integration_attestation import INTEGRATION_ATTESTATION_ROUTE
 from control_plane.contracts.release_request import RELEASE_REQUEST_ROUTE
 from control_plane.testing_retry import TESTING_RETRY_ROUTE
@@ -109,6 +110,42 @@ class OperationSpec:
 OPERATION_SPECS = (
     OperationSpec(
         "GET",
+        "/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source",
+        "Read the original migrated testing pair upload state without publishing bytes or changing a receipt.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "GET",
+        "/v1/products/{product}/preview-evidence",
+        "Read exact original intent, retained provider history and optional exact serving-generation probes without admission publication or effect settlement.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        "/v1/product-profiles/{product}/generic-web-transition",
+        "Review shared-web declarations; Director agents may apply preview-only changes on an existing generic-web product, preserving every stable declaration and existing credential gates.",
+        ("service_api", "browser"),
+        ("dry-run", "apply"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
+    OperationSpec(
+        "GET",
+        "/v1/products/{product}/preview-snapshot-version",
+        "Read only recorded base-module version from an exact original-bound immutable snapshot without restore or database access.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "GET",
         "/v1/products/{product}/environments/{environment}/aggregate-counts",
         "Read bounded aggregate counts from a qualified sanitized disposable testing copy with provenance and no data writes.",
         ("service_api",),
@@ -190,6 +227,15 @@ OPERATION_SPECS = (
     ),
     OperationSpec(
         "GET",
+        "/v1/monitoring-authority-history",
+        "Read settled monitoring revisions and completed batch confirmations within existing product-profile read access; earlier authority stays unknown.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "GET",
         DISCUSSION_TOPICS_ROUTE,
         "Read a product's discussion topics within existing product-profile read access.",
         ("service_api",),
@@ -254,7 +300,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         TESTING_PUBLIC_INGRESS_ROUTE,
-        "Publish the current independent Odoo testing hostname at its recorded edge using an existing covering certificate; preserve its restored copy and retained routes.",
+        "Publish a first-use or restored Odoo testing hostname at its recorded edge with an existing covering certificate; preserve runtime, credentials and retained routes.",
         ("service_api",),
         ("dry-run", "apply", "readback"),
         "apply",
@@ -349,6 +395,15 @@ OPERATION_SPECS = (
         ("dry-run", "apply", "reconcile"),
         "apply",
         ("reviewed_plan_digest", "current_artifact_identity", "release_lane_exclusion"),
+    ),
+    OperationSpec(
+        "POST",
+        RETAINED_VOLUME_SWEEP_ROUTE,
+        "Inspect, apply, or read back one reviewed retained-volume retirement sweep without exposing provider bindings.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256", "retirement_record_id", "minimum_age_seconds"),
     ),
     OperationSpec(
         "GET",

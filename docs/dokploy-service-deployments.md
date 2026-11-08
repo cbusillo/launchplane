@@ -127,8 +127,16 @@ this optional input; use the workflow or the existing authorized service API.
 Historical recipient and activation recovery retains its original parsed-value
 contract, including previously stored runtime identity.
 
-The wire quotes and Compose-supported escapes are transport data, not a product
-storage convention. Metadata survives comment movement and CRLF normalization;
+The adapter matches Dokploy's current generated-file writer, which already
+quotes values. It supplies each logical value once. Transport metadata binds
+literal keys and, when needed, character variables that defer dollar signs,
+apostrophes, backslashes and carriage returns until Compose interpolation.
+The variables are chosen without replacing an existing key or reference and
+are omitted from logical readback. Products need no decoder. Previous
+JSON/octal envelopes remain readable and unchanged values retain their existing
+transport; they no longer qualify current literal delivery. New, changed or
+explicitly requalified values use the current transport.
+Metadata survives comment movement and CRLF normalization;
 new provider-only fields and edits that cease to match the encoding remain
 legacy fields rather than making the record unreadable. Canonical reconciliation
 can then replace or retire them through the existing runtime-input path. Swarm
@@ -148,6 +156,10 @@ contract.
 `scripts/qualify-dokploy-compose-environment.sh` exercises the tracked pinned
 Dokploy generated-file functions and actual Compose `config`, covering both
 interpolation and service `env_file` consumption with synthetic values only.
+Keep the vendor excerpts aligned with the deployed provider before treating
+this qualification as current provider evidence. Saved legacy-record fixtures
+also prove preservation without losing their logical inputs, and explicit
+requalification through the current transport.
 Provision Node through the repository's CI Node setup and Compose through
 `scripts/setup-ci-compose.sh` using the CI-declared version before running it.
 The frontend validation CI job runs this qualification; ordinary unit discovery
@@ -319,38 +331,16 @@ supply retain_allocation: true and expected_allocation_custody_sha256 from the
 reviewed readback. Keep every other setup input unchanged. Apply retains its
 exact confirmation and reason. Other operations do not accept allocation controls.
 
-The protected generic-web onboarding worker accepts an optional allocation_control
-JSON input. Including mode readback or apply selects recovery only: it never
-applies product records or authorization records. The default key stays
-`generic-web-onboarding:target:<product>:<testing_context>:v1`. An explicit
-idempotency_key selects a stable original key for both normal apply and recovery.
-Use a fresh key only after reviewed retention or a confirmed pre-effect refusal;
-the service refuses fresh keys while unresolved custody still holds the lane.
-A key-only envelope runs normal onboarding under that key. Retention additionally requires
-retain_allocation: true and expected_allocation_custody_sha256. The worker verifies
-the original target request artifact digest even during recovery. Recovery needs
-no product or authorization plan artifacts. Successful product registration keeps
-the adopted target and project names, and compares both target and identity
-snapshots atomically before writing records.
-
-Product Onboarding forwards allocation_control to the protected worker pinned to
-the exact [worker-contract landing](https://github.com/cbusillo/launchplane/pull/4590),
-following the two-landing policy in [GitHub Actions security](github-actions-security.md).
-For readback, keep the original dispatch inputs, select outer mode dry_run and
-supply `{"mode":"readback"}`. The caller renders only the original target request,
-skips repository-token creation and all three planning API calls, and invokes the
-protected worker even though the outer mode is dry_run. The worker retains the
-original workflow identity and allocation key; no product or authorization plan
-is required. Ordinary dry_run without a recovery mode still only plans onboarding.
-
-To continue the original allocation, select outer mode apply, provide its exact
-confirmation, and supply `{"mode":"apply"}`. For reviewed retention, add
-retain_allocation: true and expected_allocation_custody_sha256 to that envelope.
-Use the same explicit idempotency_key if the original apply supplied one. A
-key-only envelope still runs normal onboarding with all plan reviews. Neither
-source landing grants access or activates the new worker trust anchor; those
-remain separate operations. A denied worker identity stays denied and follows
-the recorded activation path without switching callers or scopes.
+The retired `Product Onboarding` wrapper and reusable worker are removed.
+New generic-web products use the [native target and record
+path](operations.md#native-target-allocation), including its original-actor/key
+readback, continuation and reviewed custody retention. The general `Dokploy
+Target Setup` recovery controls above remain available. Successful product
+registration preserves adopted target and project names and compares target
+and identity snapshots atomically before writing records. The [workflow
+retirement evidence](operations.md#compatibility-workflow-recovery) records the
+legacy receipt inventory; deleting source does not delete those receipts or
+provider resources.
 
 ### Testing application state volume
 
@@ -497,10 +487,6 @@ build and deploys the image to `testing` itself
 ([event-driven-deploys.md](event-driven-deploys.md)), through the generic-web
 deploy route's provider operation; it resolves lane, provider target, runtime
 environment, managed secrets, and deployment records from DB-backed authority.
-Transitional: `POST /v1/drivers/generic-web/deploy` through the
-`cbusillo/launchplane/.github/actions/launchplane-request` action is the old
-call-in path some product workflows still use until #2606 deletes it; a new
-product repository does not call it.
 
 Publish images to the profile's `image.repository` and preserve digest identity:
 
@@ -524,14 +510,6 @@ non-floating tag in the same repository, uses it only for the provider-facing
 Docker image, and records runtime identity with `artifact_id` as the digest and
 `image_reference` as the provider tag. Compose targets remain backward
 compatible with digest image references in `artifact_id`.
-
-RepairShopr Sync is the first live canary for this stable shape. The
-`cbusillo/repairshopr_api` product workflow built an immutable GHCR image,
-called deployed Launchplane, and received `deploy_status: pass` for deployment
-record `deployment-20260630T034901Z-repairshopr-sync-prod` after Launchplane PR
-#1503 deployed. That run proved image deploy for a service-shaped worker
-without source-ref deploy or direct Dokploy mutation in the product repo; its
-product-repo call into Launchplane is the retired call-in path.
 
 The inherited source-ref deploy bridge is retired. Services that still deploy a
 Dokploy compose target from Git must migrate the provider target to immutable
@@ -612,20 +590,33 @@ typed product policy instead of overloading the generic-web deploy request.
 ## Ports And Health
 
 `runtime_port` is the container port the service listens on when it exposes an
-HTTP endpoint. For Discord Blue, use port `8787` for the Every Code bridge or a
+HTTP endpoint. For Discord Blue, use port `8787` for the agent-session bridge or a
 small health/control endpoint if that is the only HTTP surface.
 
-Stable lanes can verify health in two ways:
+Stable lanes can verify health through:
 
 - set `lane.health_url` to an explicit URL reachable by Launchplane, such as an
   internal bridge health endpoint
 - set `lane.base_url` and rely on `profile.health_path` to derive the health URL
+- enable a `private_http` health check referencing an active endpoint record
+  owned by that exact product, context and instance
 
-If neither value is set, generic-web promotion records skip health verification
-for that lane. Skipping health is acceptable only for an initial migration slice
-with other evidence, such as a successful Dokploy deployment plus product-owned
-log or smoke evidence. The preferred Discord Blue target is a reachable health
-URL on port `8787` so promotion can fail closed on a bad rollout.
+Promotion verifies every enabled private check through the existing private
+transport, including its scoped testing CA or verified testing-edge route when
+configured. Interrupted-release recovery uses that same verifier. Source health must
+match the qualified testing identity. Destination health must match the newly
+deployed identity; failure follows the existing automatic rollback, whose health
+must match the restored identity. Existing public and split-ingress health checks
+still run when a lane also has private checks. Missing, disabled or foreign
+endpoint authority refuses before deployment; private monitoring intent without
+an enabled private check also refuses. A private check is never silently skipped
+because the lane has no public URL. Legacy lanes with no health configuration
+retain their existing skipped result. A private check cannot qualify an older
+rollback record without a recorded runtime identity; recovery remains held until
+the intended runtime can be verified. These checks add no deployment, credential
+or release authority.
+
+The preferred Discord Blue target is its private health endpoint on port `8787`.
 For sync or worker products, the same endpoint should report whether the worker
 is actually fresh. For example, RepairShopr Sync should mark health unhealthy
 when the last successful sync is stale even if the process is running.
@@ -732,27 +723,3 @@ apply path can consume the ready plan and call the normal generic-web deploy
 route, but admins must not roll back by clicking Dokploy to a mutable tag or
 changing product-repo workflow state. The durable rollback source remains the
 Launchplane deployment record and its immutable image digest.
-
-## Discord Blue Target
-
-Discord Blue should target this minimum contract before leaving the hardened
-host-managed deployment:
-
-- product key: `discord-blue`
-- driver: `generic-web`
-- image repository: `ghcr.io/cbusillo/discord-blue`
-- stable lanes: at least `testing`; add `prod` before production cutover
-- Dokploy target type: `application`
-- runtime port: `8787` when the bridge or health service is enabled
-- health path: a stable path such as `/health` or `/v1/health`
-- persistent volume: one Dokploy-mounted state/config path documented in the
-  product repo and represented by the admin-owned target configuration
-- secrets: Discord tokens and other credentials managed through Launchplane
-  secret bindings, never passed in workflow payloads
-- deploy input: immutable image reference, preferably
-  `ghcr.io/cbusillo/discord-blue@sha256:<digest>`
-
-The migration is unblocked when Launchplane can read the product profile and
-target records, deploy a testing image through the generic-web route, and record
-either a passed health check on port `8787` or an explicitly documented skipped
-health check with replacement evidence for the first cutover.

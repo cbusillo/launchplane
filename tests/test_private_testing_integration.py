@@ -15,6 +15,7 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
     DokployTargetPolicies,
     DokployTargetRecord,
+    DokployTargetRecordChanged,
 )
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import (
@@ -26,7 +27,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
 )
-from control_plane.contracts.secret_record import SecretBinding, SecretRecord
+from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretSharingReason
 from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
 from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
 from control_plane.odoo_secret_references import (
@@ -138,7 +139,184 @@ def seed_integration(
     return profile, record
 
 
+def seed_read_only_source(
+    store: FilesystemRecordStore | PostgresRecordStore, *, classification: str, origin: str
+) -> tuple[LaunchplaneProductProfileRecord, OdooInstanceOverrideRecord]:
+    profile, record = seed_integration(store, "fishbowl.password")
+    profile = profile.model_copy(
+        update={
+            "expected_config": profile.expected_config.model_copy(
+                update={"managed_secret_bindings": ()}
+            )
+        }
+    )
+    store.write_product_profile_record(profile)
+    binding = store.list_secret_bindings()[0]
+    store.write_secret_binding(
+        binding.model_copy(
+            update={
+                "declared_secret_class": classification,
+                "value_source": origin,
+                "sharing_reason": SecretSharingReason(
+                    kind="read_only_source",
+                    reason="Existing import reader",
+                    evidence="SELECT-only source grant readback",
+                ),
+            }
+        )
+    )
+    target = store.read_dokploy_target_record(context_name="cm", instance_name="testing")
+    store.write_dokploy_target_record(
+        target.model_copy(
+            update={
+                "policies": target.policies.model_copy(
+                    update={
+                        "integration_allowances": (
+                            DokployTargetIntegrationAllowance(
+                                integration="fishbowl",
+                                kind="read_only_source",
+                                reason="Existing import reader",
+                                evidence="SELECT-only source grant readback",
+                            ),
+                        )
+                    }
+                )
+            }
+        )
+    )
+    return profile, record
+
+
 class PrivateTestingIntegrationTests(unittest.TestCase):
+    def test_existing_read_only_source_reference_needs_no_new_secret(self) -> None:
+        for sql, classification, origin in (
+            (False, "testing", "provider"),
+            (True, "shared_safe", "copy"),
+        ):
+            with self.subTest(sql=sql), TemporaryDirectory() as directory:
+                store = (
+                    PostgresRecordStore(
+                        database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+                    )
+                    if sql
+                    else FilesystemRecordStore(Path(directory))
+                )
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                    self.addCleanup(store.close)
+                profile, before = seed_read_only_source(
+                    store, classification=classification, origin=origin
+                )
+                binding = store.list_secret_bindings()[0]
+                target = store.read_dokploy_target_record(
+                    context_name="cm", instance_name="testing"
+                )
+                with (
+                    patch(
+                        "control_plane.storage.filesystem.FilesystemRecordStore.read_secret_version",
+                        side_effect=AssertionError("No secret reads"),
+                    ),
+                    patch(
+                        "control_plane.storage.postgres.PostgresRecordStore.read_secret_version",
+                        side_effect=AssertionError("No secret reads"),
+                    ),
+                ):
+                    plan, bundle = plan_secret_reference_reconciliation(
+                        store=store,
+                        profile=profile,
+                        record=before,
+                        keys=("fishbowl.password",),
+                        create_missing=True,
+                        allowance_kind="read_only_source",
+                    )
+                    self.assertEqual(plan.entries[0].action, "add_reference")
+                    store.write_product_authority_bundle(bundle)
+                after = store.read_odoo_instance_override_record(
+                    context_name="cm", instance_name="testing"
+                )
+                self.assertEqual(
+                    after.config_parameters[0].value.secret_binding_id, binding.binding_id
+                )
+                self.assertEqual(store.list_secret_bindings()[0], binding)
+                self.assertEqual(
+                    store.read_dokploy_target_record(context_name="cm", instance_name="testing"),
+                    target,
+                )
+                self.assertEqual(after.apply_on, before.apply_on)
+
+    def test_source_reference_preserves_private_credential_and_source_allowance_boundaries(
+        self,
+    ) -> None:
+        for change in ("private", "allowance", "reason", "class", "production", "drift"):
+            with self.subTest(change=change), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(Path(directory))
+                profile, record = seed_read_only_source(
+                    store, classification="shared_safe", origin="copy"
+                )
+                original = record
+                binding = store.list_secret_bindings()[0]
+                target = store.read_dokploy_target_record(
+                    context_name="cm", instance_name="testing"
+                )
+                if change == "allowance":
+                    store.write_dokploy_target_record(
+                        target.model_copy(
+                            update={
+                                "policies": target.policies.model_copy(
+                                    update={"integration_allowances": ()}
+                                )
+                            }
+                        )
+                    )
+                elif change in {"reason", "class"}:
+                    store.write_secret_binding(
+                        binding.model_copy(
+                            update={"sharing_reason": None}
+                            if change == "reason"
+                            else {"declared_secret_class": "prod_only"}
+                        )
+                    )
+                elif change == "production":
+                    record = record.model_copy(update={"instance": "prod"})
+                if change == "drift":
+                    _, bundle = plan_secret_reference_reconciliation(
+                        store=store,
+                        profile=profile,
+                        record=record,
+                        keys=("fishbowl.password",),
+                        create_missing=True,
+                        allowance_kind="read_only_source",
+                    )
+                    store.write_dokploy_target_record(
+                        target.model_copy(
+                            update={
+                                "policies": target.policies.model_copy(
+                                    update={"integration_allowances": ()}
+                                )
+                            }
+                        )
+                    )
+                    with self.assertRaises(DokployTargetRecordChanged):
+                        store.write_product_authority_bundle(bundle)
+                else:
+                    with self.assertRaises(TestingSecretReferenceRefusal):
+                        plan_secret_reference_reconciliation(
+                            store=store,
+                            profile=profile,
+                            record=record,
+                            keys=("fishbowl.password",),
+                            create_missing=True,
+                            allowance_kind="dev_store"
+                            if change == "private"
+                            else "read_only_source",
+                        )
+                self.assertEqual(
+                    store.read_odoo_instance_override_record(
+                        context_name="cm", instance_name="testing"
+                    ),
+                    original,
+                )
+
     def test_supplied_testing_class_does_not_bypass_integration_safety_policy(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
@@ -644,6 +822,38 @@ class PrivateTestingIntegrationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "integration_target_required")
         self.assertNotIn("private-testing-binding", response.text)
+
+    async def test_existing_source_reference_review_apply_and_original_replay(self) -> None:
+        seed_read_only_source(self.store, classification="shared_safe", origin="copy")
+        before = self.store.list_secret_bindings()
+        headers = {"Authorization": "Bearer fixture-token"}
+        body = {
+            "keys": ["fishbowl.password"],
+            "create_missing": True,
+            "allowance_kind": "read_only_source",
+        }
+        with patch.object(
+            self.store, "read_secret_version", side_effect=AssertionError("No secret reads")
+        ):
+            plan = await http_request(self.app, "POST", self.path, headers=headers, payload=body)
+            self.assertEqual(plan.status_code, 200, plan.text)
+            body.update(
+                mode="apply",
+                review_digest=plan.json()["result"]["review_digest"],
+                confirmation=f"APPLY {self.profile.product}/testing",
+            )
+            headers["Idempotency-Key"] = "existing-source-reference"
+            applied = await http_request(self.app, "POST", self.path, headers=headers, payload=body)
+            self.assertEqual(applied.status_code, 200, applied.text)
+            self.assertTrue(applied.json()["result"]["read_back_matches"])
+            replay = await http_request(self.app, "POST", self.path, headers=headers, payload=body)
+            self.assertEqual(replay.status_code, 200, replay.text)
+            self.assertTrue(replay.json()["replayed"])
+            current = await http_request(self.app, "GET", self.path, headers=headers)
+            self.assertEqual(current.status_code, 200, current.text)
+        self.assertEqual(current.json()["result"]["entries"][0]["action"], "already_agrees")
+        self.assertEqual(self.store.list_secret_bindings(), before)
+        self.assertNotIn(before[0].binding_id, applied.text)
 
     async def test_admin_plan_apply_receipt_and_stale_review_preserve_secret_privacy(self) -> None:
         with patch.object(

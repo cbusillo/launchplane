@@ -263,16 +263,17 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
                 read.assert_not_called()
 
     def test_verireel_refuses_before_database_bootstrap(self) -> None:
-        from control_plane.workflows.verireel_preview_driver import execute_verireel_preview_refresh
-        from tests.test_verireel_preview_driver import _template_target, _refresh_request
+        from control_plane.workflows.postgres_preview import execute_postgres_preview_refresh
+        from tests.test_postgres_preview import _template_target, _refresh_request, _preview_store
+        from tests.test_generic_web_preview_extensions import _driver_profile
 
         with (
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
                 return_value=("provider", "fixture"),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                "control_plane.workflows.postgres_preview._template_application_payload",
                 return_value=(
                     _template_target(),
                     {
@@ -282,11 +283,11 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._resolve_preview_url",
+                "control_plane.workflows.postgres_preview._resolve_preview_url",
                 return_value="https://preview.invalid",
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                "control_plane.workflows.postgres_preview._find_application_by_name",
                 return_value=None,
             ),
             patch.object(
@@ -294,14 +295,15 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
                 "require_preview_host_memory_capacity",
                 side_effect=memory_capacity.PreviewMemoryCapacityRefused("short"),
             ) as admit,
-            patch(
-                "control_plane.workflows.verireel_preview_driver._run_application_command"
-            ) as bootstrap,
-            patch("control_plane.workflows.verireel_preview_driver._ensure_application") as create,
+            patch("control_plane.workflows.postgres_preview._run_application_command") as bootstrap,
+            patch("control_plane.workflows.postgres_preview._ensure_application") as create,
         ):
             with self.assertRaises(memory_capacity.PreviewMemoryCapacityRefused):
-                execute_verireel_preview_refresh(
-                    control_plane_root=Path("."), request=_refresh_request()
+                execute_postgres_preview_refresh(
+                    record_store=_preview_store(),
+                    profile=_driver_profile(),
+                    control_plane_root=Path("."),
+                    request=_refresh_request(),
                 )
             bootstrap.assert_not_called()
             create.assert_not_called()

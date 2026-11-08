@@ -149,6 +149,18 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
             )
         )
 
+        for plan, code in (
+            ({"deploy_status": "fail"}, "deploy_failed"),
+            ({"deploy_status": "pass", "post_deploy_status": "fail"}, "post_deploy_failed"),
+        ):
+            with self.subTest(plan=plan):
+                self.now += timedelta(seconds=1)
+                self.reconcile(**plan)
+                self.monitor()
+                latest = self.store.list_public_ingress_incident_records(status="open")
+                self.assertEqual(len(latest), 1)
+                self.assertIn(code, latest[0].summary)
+
     def test_only_later_matching_testing_deployment_recovers(self) -> None:
         self.reconcile(last_failed_error_code="deployment_failed")
         self.monitor()
@@ -200,7 +212,12 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
             error_message="password=private-provider-detail",
         )
         self.store.write_odoo_stable_target_replacement_operation_record(operation)
-        self.reconcile(error="", queued_operation_id=operation.operation_id)
+        self.reconcile(
+            error="",
+            queued_operation_id=operation.operation_id,
+            reason="github_rate_limited",
+            deferred=True,
+        )
         self.monitor()
         incident = self.store.list_public_ingress_incident_records(status="open")[0]
         self.assertIn(operation.error_code, incident.summary)

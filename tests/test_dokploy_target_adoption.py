@@ -1199,6 +1199,7 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                 database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
             )
             store.ensure_schema()
+            display_name = "Discord Blue / Café"
             requests: list[tuple[str, JsonObject]] = []
 
             def mutate_provider(
@@ -1212,6 +1213,7 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                     return {"environmentId": "env-123"}
                 if path == "/api/application.create":
                     self.assertEqual(payload["environmentId"], "env-123")
+                    self.assertNotIn("appName", payload)
                     return {"applicationId": "app-123"}
                 raise AssertionError(path)
 
@@ -1221,7 +1223,7 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                 token="token",
                 context="discord-blue",
                 instance="prod",
-                target_name="discord-blue-prod",
+                target_name=display_name,
                 project_name="Discord Blue",
                 environment_name="prod",
                 server_id="server-123",
@@ -1253,7 +1255,7 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         )
         self.assertEqual(result.project_id, "project-123")
         self.assertEqual(result.environment_id, "env-123")
-        self.assertEqual(target_record.target_name, "discord-blue-prod")
+        self.assertEqual(target_record.target_name, display_name)
         self.assertEqual(target_record.healthcheck_path, "/health")
         self.assertEqual(target_id_record.target_id, "app-123")
 

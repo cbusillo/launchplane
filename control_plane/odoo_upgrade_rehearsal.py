@@ -142,8 +142,7 @@ def _source_values(
                     "testing" if scope == "instance" else ""
                 ):
                     values.update({key: str(value) for key, value in runtime.env.items()})
-        target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
-        values.update({key: str(value) for key, value in target.env.items()})
+        store.read_dokploy_target_record(context_name=context, instance_name="testing")
         copy_source = json.loads(base64.b64decode(encoded_restore_source(values)))
         # SSH material remains on its existing host. It is never delivered to a container.
         for key in ("DATA_WORKFLOW_SSH_DIR", "DATA_WORKFLOW_SSH_KEY"):
@@ -184,9 +183,7 @@ def _source_values(
                     "prod" if scope == "instance" else ""
                 ):
                     shape.update({key: str(value) for key, value in runtime.env.items()})
-        shape.update(
-            store.read_dokploy_target_record(context_name=prod.context, instance_name="prod").env
-        )
+        store.read_dokploy_target_record(context_name=prod.context, instance_name="prod")
         # Only sizing settings are reused. Identity, credentials, integrations,
         # mounts and routing are derived for the rehearsal independently.
         shape = {key: value for key, value in shape.items() if key in REHEARSAL_SHAPE_KEYS}
@@ -1827,6 +1824,7 @@ class OdooRehearsalAdapter:
                 try:
                     create_isolated_placement(
                         self.root,
+                        record_store=self.store,
                         namespace=record.rehearsal_id,
                         server_id=record.server_id,
                         description=REHEARSAL_PROJECT_DESCRIPTION,

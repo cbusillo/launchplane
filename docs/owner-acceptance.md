@@ -89,6 +89,17 @@ returns the change to standing acceptance; a saved Client rejection still vetoes
 Production release remains on the gated path described in [release-review.md](release-review.md), including its checklist-note validation.
 
 The Client named on the product profile reviews a preview at `/ui/owner-review`.
+Accept appears only when the serving preview is verified for the open PR's
+exact current head. The Client opens that preview and confirms “I looked at
+this preview and it is right” beside the short test notes before accepting.
+Changing the serving head, URL or generation resets that confirmation. The
+service rereads the PR head on Accept and retains its existing exact-preview
+lock and notes gates. An unavailable head check or a preview still being
+updated cannot be accepted. Feedback belongs on the pull request, written by
+the Client or their agent; the review page offers only Accept and shows the
+latest comment from the named Client. Opening a link and confirming records the Client's statement;
+it cannot measure their attention. This decision never merges or publishes.
+
 Launchplane requests review when a pull request has real `Client test notes`
 (`Owner test notes` remains a supported heading). No label is needed. The
 product's review label remains an explicit override requiring real test notes.
@@ -135,8 +146,7 @@ The [shared ready-handoff notes contract](https://github.com/cbusillo/codex-skil
 also defines the unanswered-questions subsection and shipping placeholder marker.
 Its validation extends the existing missing-notes gate: preview and release
 Accept stay disabled while questions remain. Preview acceptance rereads and
-validates the notes on the server before saving a decision. Request changes
-remains available. Clearing the questions restores normal notes validation;
+validates the notes on the server before saving a decision. Clearing the questions restores normal notes validation;
 Client repositories also check their committed shipping content in ordinary CI.
 The preview reconciler refreshes the Client-review check independently of
 preview planning and delivery, including a deferred operation, an unknown
@@ -206,6 +216,29 @@ asks whether this one change is exactly right. It links that change's preview
 and explains that Accept approves the change while nothing goes live yet.
 The review page shows the pull request's title and its Client test notes under
 **What to check**, read from the pull request when the page loads.
+An invalid notes gate tells the Client that the preview and notes are being updated;
+it never asks them to edit the pull request or remove answered question items.
+When the Client supplies requested facts, the owning agent immediately acknowledges
+that it is updating the preview and asks the Client to wait for its ready note.
+The agent incorporates the answers and removes resolved question items before
+asking the Client to review again. An acknowledgement does not resolve the request.
+After a saved acceptance, a changed head or new open Client questions sends one
+new comment mentioning the Client when the current-head preview is ready.
+The receipt names the acceptance and version: a later acceptance can receive
+one new notice for that version, while retries within the same pair stay quiet.
+Carrying acceptance through the train does not start a new notification cycle.
+It names the accepted and current revisions, links their comparison, and includes
+the current test notes. Further reconciles of that acceptance and head update the same receipt
+without another notification, including after a lost POST response. An older or
+failed preview waits until its replacement is ready. A recorded failure after
+acceptance also reports once that same version is ready again. The saved
+acceptance still applies; that notice adds no second approval gate. Existing acceptance stays
+bound to its recorded head unless the normal carry proof succeeds.
+Remove the head-only receipt matcher, its shared publisher parameter and its
+legacy fixture when [VeriReel PR 573](https://github.com/cbusillo/verireel/pull/573)
+closes or merges; its [existing notice](https://github.com/cbusillo/verireel/pull/573#issuecomment-6607147415)
+is the compatibility case.
+
 The separate release invitation is described in [release-review.md](release-review.md).
 
 A Client does not need an authorization policy role to sign in. When GitHub
@@ -220,8 +253,8 @@ nothing. The release checklist is a separate decision bound to the testing
 candidate and its change list. See [release-review.md](release-review.md) and the
 Product Review API in [service-boundary.md](service-boundary.md).
 
-Each new preview decision is projected onto its pull request with the complete
-Client reason, immutable Client ID, reviewed commit, and a link to that saved
+Each new preview acceptance is projected onto its pull request with the
+immutable Client ID, reviewed commit, and a link to that saved
 decision in Launchplane. Publication uses the existing preview-feedback
 credential and verifies its GitHub `/user` identity. An unreadable identity or
 failed comment lookup leaves delivery pending; it never selects another credential.
@@ -365,22 +398,6 @@ evaluator, queue, GitHub check projector, event writers, and projection locks.
 They are not fallback paths for review, merge readiness, or release approval.
 The current product-review publisher may still neutralize an old
 `launchplane/owner-acceptance` check on an existing pull request.
-
-Historical `OwnerAcceptanceEventRecord` contracts, filesystem readers, PostgreSQL
-readers, tables, and migrations remain for stored-data compatibility. This change
-neither deletes persisted events nor rewrites their bindings, event ids, replay
-digests, or subject sequences. Importing a filesystem archive containing these
-retired events fails before any writes; it does not silently discard history or
-re-enable event authoring.
-
-The managed authorization set `operator.owner-acceptance` can be reconciled only
-to an empty desired policy, allowing existing grants to be removed. It cannot be
-used to create replacement grants. No deployed authorization records are changed
-by this code deletion.
-
-The `product-owner-policy`, change-impact, manager/delegate, and ordinary-agent
-machinery still have separate remaining deletion work under [DIRECTION.md](../DIRECTION.md).
-Their historical presence grants no authority to the current review flows.
 
 ## Withdrawing a pending request
 

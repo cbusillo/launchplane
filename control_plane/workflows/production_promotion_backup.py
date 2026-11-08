@@ -229,7 +229,7 @@ def require_production_promotion_backup(
         # This is continuation of the already admitted release, not a fresh
         # promotion of today's data under an expired capture. Authority,
         # retention and competing consumption are still checked below.
-        admitted_at = admitted.backup_gate.evidence.get("admission_checked_at", "")
+        admitted_at = admitted.backup_gate.evidence.get("infrastructure_admission_checked_at", "")
         now = datetime.fromisoformat(admitted_at) if admitted_at else cutover_recovery.began_at
     freshness = backup_capture_freshness_refusal(binding, evidence, now=now)
     if freshness == "expired":

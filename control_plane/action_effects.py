@@ -227,6 +227,9 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "product_profile.prelaunch_rebuild.apply": ActionDeclaration("write"),
         "product_profile.prelaunch_rebuild.plan": ActionDeclaration("plan"),
         "product_profile.preview_tls.apply": ActionDeclaration("write"),
+        "product_profile.preview_transition.apply": ActionDeclaration(
+            "write", director_agent_write=True
+        ),
         "product_profile.read": ActionDeclaration("read"),
         "product_profile.write": ActionDeclaration("write"),
         # A pending-request withdrawal records the Director's routing decision.
@@ -260,6 +263,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "runner_host_hygiene_audit.read": ActionDeclaration("read"),
         "runner_host_hygiene_audit.write": ActionDeclaration("write"),
         "runner_lane_registration_audit.write": ActionDeclaration("write"),
+        "runner_lane_inventory.read": ActionDeclaration("read"),
         "runtime_key_safety.write": ActionDeclaration("write"),
         "secret.list": ActionDeclaration("read", "service"),
         "secret.read": ActionDeclaration("read", "service"),

@@ -157,7 +157,7 @@ def current_source(
     prior: QualifiedSourceCycle | None = None,
 ) -> PublishedConsumerSource:
     record = custody(store, product, context)
-    if record is None or record.phase != "published":
+    if record is None or record.phase not in {"published", "retiring_old", "old_retired"}:
         raise ValueError("A current published recipient is required.")
     require_owned_publication_rows(store, record, inventory_timestamp_required=False)
     current = authority_snapshot(store, product, context)
@@ -427,7 +427,7 @@ def read_consumer(
         payload={
             "project": connection.app_name,
             "container": connection.evidence.container_id,
-            "identity": selection.identity.model_dump(mode="json"),
+            "identity": json.loads(before[RUNTIME_IDENTITY_ENV_KEY]),
             "files": files,
             "addons": {
                 **{name: value[0] for name, value in SOURCE_ADDONS.items()},

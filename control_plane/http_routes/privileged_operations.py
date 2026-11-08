@@ -1544,19 +1544,7 @@ def register_privileged_operation_routes(
                 ),
                 "candidate_action_overlap": (
                     "authorization_candidate_action_overlap",
-                    "Agent delivery administration already overlaps another explicit rule.",
-                ),
-                "current_activation_requires_stop": (
-                    "authorization_candidate_activation_current",
-                    "Stop the current agent delivery setup before removing its administration access.",
-                ),
-                "activation_storage_unavailable": (
-                    "authorization_candidate_activation_state_unavailable",
-                    "Agent delivery activation state is unavailable; removal cannot be prepared safely.",
-                ),
-                "activation_history_truncated": (
-                    "authorization_candidate_activation_history_truncated",
-                    "Agent delivery activation history exceeds the safe preparation window.",
+                    "The authorization candidate overlaps another explicit rule.",
                 ),
                 "candidate_principal_unavailable": (
                     "authorization_candidate_principal_unavailable",

@@ -10,7 +10,7 @@ from control_plane.contracts.prepared_public_site import PublicPauseRecord
 from control_plane.prepared_public_site import verify_snapshot
 from control_plane.odoo_cutover_storage import DeploymentStore
 from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromotionOperationRecord
-from control_plane.odoo_cutover_plan import cutover_identity
+from control_plane.odoo_cutover_plan import cutover_identity, rollback_pause_identity
 
 
 class CutoverEntryRefusedError(RuntimeError):
@@ -285,6 +285,50 @@ def rollback_operation_cutover(
     )
 
 
+def rollback_reconciliation_eligible(record: OdooCutoverRecord) -> bool:
+    if (
+        record.step != "rolling_back"
+        or record.plan.compatibility.classification != "compatible"
+        or record.maintenance is None
+        or record.backup is None
+    ):
+        return False
+    pause = record.rollback_pause
+    if not record.website_settings_attempted:
+        return pause is None
+    site = record.public_site
+    if site is None or record.plan.rollback_website_settings is None:
+        return False
+    try:
+        verify_snapshot(site)
+    except ValueError:
+        return False
+    if site.plan.binding != record.plan.old.binding or site.plan.writers != record.plan.writers:
+        return False
+    if pause is None:
+        return True
+    if (
+        pause.pause_id != rollback_pause_identity(record.record_id)
+        or pause.binding != site.plan.binding
+        or pause.content_digest != site.content_digest
+        or pause.recovery_binding not in (None, record.plan.old.binding)
+    ):
+        return False
+    if pause.state == "fencing":
+        return pause.ended_at is None and pause.recovery_binding is None
+    if pause.state in {"resuming", "complete"}:
+        if pause.recovery_binding != record.plan.old.binding or (
+            (pause.ended_at is not None) != (pause.state == "complete")
+        ):
+            return False
+        record = record.model_copy(
+            update={
+                "rollback_pause": pause.model_copy(update={"state": "drained", "ended_at": None})
+            }
+        )
+    return startup_recovery_pause(record) is not None
+
+
 def cutover_reconciliation_eligible(record: OdooCutoverRecord) -> bool:
     if abort_reconciliation_eligible(record) or record.step in {
         "preparing",
@@ -304,14 +348,7 @@ def cutover_reconciliation_eligible(record: OdooCutoverRecord) -> bool:
             RuntimeError.__name__,
             TimeoutError.__name__,
         }
-    return record.step == "rolling_back" and (
-        startup_recovery_pause(record) is not None
-        or record.plan.compatibility.classification == "compatible"
-        and not record.website_settings_attempted
-        and record.rollback_pause is None
-        and record.maintenance is not None
-        and record.backup is not None
-    )
+    return rollback_reconciliation_eligible(record)
 
 
 def cutover_reconciliation_uses_budget(record: OdooCutoverRecord) -> bool:

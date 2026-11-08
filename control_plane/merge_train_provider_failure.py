@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 
 
@@ -17,6 +20,27 @@ class ProviderFailure:
     retry_after: str = ""
     reset: str = ""
     request_id: str = ""
+
+
+def provider_retry_deadline(
+    evidence: ProviderFailure, *, now: datetime, minimum_seconds: int = 60
+) -> datetime:
+    deadlines = [now + timedelta(seconds=minimum_seconds)]
+    if evidence.remaining == "0" and re.fullmatch(r"[0-9]{1,12}", evidence.reset):
+        try:
+            deadlines.append(datetime.fromtimestamp(int(evidence.reset), tz=timezone.utc))
+        except (ValueError, OverflowError, OSError):
+            deadlines.append(now)
+    if re.fullmatch(r"[0-9]{1,8}", evidence.retry_after):
+        deadlines.append(now + timedelta(seconds=int(evidence.retry_after)))
+    elif evidence.retry_after:
+        try:
+            parsed = parsedate_to_datetime(evidence.retry_after)
+        except (ValueError, TypeError, OverflowError):
+            parsed = None
+        if parsed is not None and parsed.tzinfo is not None:
+            deadlines.append(parsed)
+    return max(deadlines)
 
 
 def provider_failure(error: BaseException) -> ProviderFailure:

@@ -77,6 +77,126 @@ def observation(
 
 
 class LaneHealthHistoryHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retained_observations_remain_readable_after_profile_retirement(self) -> None:
+        with TemporaryDirectory() as temporary:
+            url = _sqlite_database_url(Path(temporary) / "records.sqlite")
+            _seed_product_environment_read_records(url)
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            store.write_public_ingress_observation_record(observation("old-pass", 0))
+            profile = store.read_product_profile_record("example-site")
+            store.write_product_profile_record(
+                profile.model_copy(update={"lifecycle_state": "retired"})
+            )
+            for context, expected in (("example-site", 200), ("another", 403)):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_product_environment_read_policy(context=context),
+                    record_store_factory=lambda: store,
+                )
+                path = "/v1/products/example-site/environments/prod/health-history?" + urlencode(
+                    {
+                        "historical_context": "example-site",
+                        "since": stamp(0),
+                        "until": stamp(60),
+                    }
+                )
+                response = await request(
+                    app, "GET", path, headers={"Authorization": "Bearer valid-token"}
+                )
+                self.assertEqual(response.status_code, expected, response.text)
+                if expected == 200:
+                    self.assertEqual(
+                        [row["record_id"] for row in response.json()["history"]["observations"]],
+                        ["old-pass"],
+                    )
+                    preview = await request(
+                        app,
+                        "GET",
+                        path.replace("/environments/prod/", "/environments/preview-42/"),
+                        headers={"Authorization": "Bearer valid-token"},
+                    )
+                    self.assertEqual(preview.status_code, 404, preview.text)
+
+    async def test_incident_history_pages_all_retained_occurrences_across_recovery(self) -> None:
+        self.enterContext(
+            patch.dict(os.environ, {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "incident-test-key"})
+        )
+        with TemporaryDirectory() as temporary:
+            url = _sqlite_database_url(Path(temporary) / "records.sqlite")
+            _seed_product_environment_read_records(url)
+            _seed_product_incident_read_records(url)
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            original = store.read_public_ingress_incident_record("incident-example-site-prod")
+            for index in range(63):
+                store.write_public_ingress_incident_record(
+                    original.model_copy(
+                        update={
+                            "incident_id": f"occurrence-{index:03d}",
+                            "opened_at": stamp(0),
+                            "check_name": f"health-{index}",
+                        }
+                    )
+                )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            expected_ids = {
+                item.incident_id
+                for item in store.list_public_ingress_incident_records(
+                    product="example-site", context_name="example-site", instance_name="prod"
+                )
+            }
+            path = "/v1/products/example-site/environments/prod/public-ingress/incidents"
+            params: dict[str, str | int] = {"order": "opened", "limit": 50}
+            ids: list[str] = []
+            for page_number in range(3):
+                response = await request(
+                    app,
+                    "GET",
+                    path + "?" + urlencode(params),
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                page = response.json()["incident_list"]
+                ids.extend(item["incident_id"] for item in page["incidents"])
+                self.assertEqual(page["has_more"], page["next_cursor"] is not None)
+                if page_number == 0:
+                    self.assertTrue(page["has_more"])
+                    recovered = store.read_public_ingress_incident_record("occurrence-000")
+                    store.write_public_ingress_incident_record(
+                        recovered.model_copy(
+                            update={
+                                "status": "resolved",
+                                "resolved_at": stamp(60),
+                                "resolved_observation_id": "recovered-observation",
+                                "resolution_reason": "recovered",
+                            }
+                        )
+                    )
+                    for changed in (
+                        {"status": "open"},
+                        {"order": "attention"},
+                    ):
+                        invalid = await request(
+                            app,
+                            "GET",
+                            path
+                            + "?"
+                            + urlencode({**params, "cursor": page["next_cursor"], **changed}),
+                            headers={"Authorization": "Bearer valid-token"},
+                        )
+                        self.assertEqual(invalid.status_code, 400, invalid.text)
+                        self.assertEqual(invalid.json()["error"]["code"], "invalid_query")
+                if page["next_cursor"] is None:
+                    break
+                params["cursor"] = page["next_cursor"]
+            self.assertEqual(len(ids), len(set(ids)))
+            self.assertEqual(set(ids), expected_ids)
+
     async def test_retired_context_reads_preserve_scope_and_authorization(self) -> None:
         self.enterContext(
             patch.dict(

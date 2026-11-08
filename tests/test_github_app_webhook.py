@@ -142,6 +142,26 @@ class GitHubAppWebhookTests(unittest.TestCase):
     def assert_nothing_recorded(self) -> None:
         self.assertEqual(self.store.list_product_reconcile_requests(), ())
 
+    def test_only_signed_messages_from_tracked_inventory_publish_identifier_hints(self) -> None:
+        comment = {"id": 42, "body": "private request"}
+        payload: dict[str, object] = {
+            "action": "created",
+            "repository": {"id": _REPOSITORY_ID, "full_name": "forged/name"},
+            "issue": {"number": 7},
+            "comment": comment,
+        }
+        with patch.object(self.store, "notify_request_attention") as notify:
+            self.deliver(payload, event="issue_comment", signature="invalid")
+            notify.assert_not_called()
+            self.deliver(payload, event="issue_comment")
+            hint = json.loads(notify.call_args.args[0])
+            self.assertEqual(hint["repository"], _REPOSITORY)
+            self.assertEqual(hint["source_id"], comment["id"])
+            self.assertNotIn(comment["body"], notify.call_args.args[0])
+            notify.reset_mock()
+            self.deliver({**payload, "repository": {"id": 999999}}, event="issue_comment")
+            notify.assert_not_called()
+
     def test_bad_signature_records_nothing(self) -> None:
         status, _ = self.deliver(
             _workflow_run(trigger="push"), event="workflow_run", signature="sha256=" + "0" * 64

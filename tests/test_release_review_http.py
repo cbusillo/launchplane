@@ -130,6 +130,17 @@ class _ReleaseReviewHttpFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
+    async def test_accept_refuses_dynamic_settings_blockers_before_saving_a_decision(self) -> None:
+        review = build_release_review(store=self.store, profile=profile(), read=github_read)
+        incomplete = review.model_copy(update={"checklist_complete": False})
+        with patch("control_plane.http_app.current_release_review", return_value=incomplete):
+            response = await self.post()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product="example-site"), ()
+        )
+        self.publisher.assert_not_called()
+
     async def test_standing_settings_request_succeeds_without_an_invitation(self) -> None:
         from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
         from control_plane.release_review import checklist_digest
@@ -392,7 +403,7 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
                 self.assertEqual(refused.status_code, 409, refused.text)
                 self.assertIn("release_checklist_incomplete", refused.text)
 
-    async def test_accept_publishes_saved_decision_through_storage_lock(self) -> None:
+    async def test_accept_publishes_the_saved_decision_issue(self) -> None:
         from tests.test_release_review_record import FakeReleaseIssues
 
         github = FakeReleaseIssues()
@@ -407,16 +418,14 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
             patch(
                 "control_plane.release_review_record.github_api_request", side_effect=github.request
             ),
-            patch.object(
-                self.store,
-                "release_review_publication_lock",
-                wraps=self.store.release_review_publication_lock,
-            ) as publication_lock,
+            patch(
+                "control_plane.release_review_record.resolve_delivery_github_app_id",
+                return_value=77,
+            ),
         ):
             response = await self.post()
         self.assertEqual(response.status_code, 200, response.text)
         saved = self.store.list_release_review_decision_records(product="example-site")[0]
-        publication_lock.assert_called_once_with(record_id=saved.record_id)
         self.assertEqual(len(github.issues), 1)
         self.assertEqual(
             response.json()["review"]["latest_decision"]["release_issue_url"],
@@ -451,6 +460,10 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
             patch(
                 "control_plane.release_review_record.github_api_request", side_effect=github.request
             ),
+            patch(
+                "control_plane.release_review_record.resolve_delivery_github_app_id",
+                return_value=77,
+            ),
         ):
             for mode, outcome, start in cases:
                 with self.subTest(mode=mode, outcome=outcome):
@@ -474,7 +487,8 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
                         f"https://github.com/example/site/issues/{issue['number']}",
                     )
                     # Read the body submitted to publication, not a separate rendering.
-                    body = str(issue["body"])
+                    body = github.comments[-1]["body"] if github.comments else issue["body"]
+                    assert isinstance(body, str)
                     effect = _decision_effect(saved)
                     self.assertIn(effect, body)
                     # A universal description must not erase distinct recorded actions.

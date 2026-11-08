@@ -140,6 +140,7 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
+    "/v1/attention/requests": "read_request_attention",
     "/v1/product-config/integration-allowances": "read_integration_allowances",
     "/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile": "read_odoo_secret_reference_plan",
     "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}": "read_promotion_recovery",
@@ -158,6 +159,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/contexts/{context}/driver-view": "read_driver_context_view",
     "/v1/contexts/{context}/instances/{instance}/driver-view": "read_driver_instance_view",
     "/v1/product-profiles": "list_product_profiles",
+    "/v1/monitoring-authority-history": "read_monitoring_authority_history",
     "/v1/product-profiles/{product}": "read_product_profile",
     "/v1/product-profiles/{product}/reconcile-requests": "read_product_reconcile_requests",
     "/v1/previews/{preview_id}/history": "read_preview_history",
@@ -191,6 +193,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation",
     "/v1/governance/projection": "read_governance_projection",
+    "/v1/admin/credential-inventory": "read_credential_inventory",
     "/v1/product-review": "read_product_review",
     "/v1/owner-secret-inputs": "read_owner_secret_inputs",
     "/v1/release-review": "read_release_review",

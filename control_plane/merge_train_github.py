@@ -25,7 +25,11 @@ from control_plane.config_authority_comparison import (
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
-from control_plane.product_review import applicable_product_review_decisions
+from control_plane.product_review import (
+    CurrentHeadPreviewStore,
+    applicable_product_review_decisions,
+    current_head_preview,
+)
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
@@ -71,8 +75,9 @@ from control_plane.contracts.merge_train_structural_provenance import (
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
 from control_plane.contracts.text_fields import require_text
 from control_plane.dependency_update_review import dependency_update_policy, pure_dependency_update
+from control_plane.dependency_reference_update import dependency_digest_moves_forward
 from control_plane.contracts.merge_train_policy import MergeTrainEnqueuePolicy
-from control_plane.release_review_shared import repository_key
+from control_plane.artifact_release_inputs import repository_key
 from control_plane.client_release_repositories import (
     ClientReleaseRepositoryStore,
     client_release_profiles,
@@ -93,7 +98,11 @@ from control_plane.github_payload import required_string_text
 from control_plane.github_response_headers import GitHubResponseHeadersObserver
 from control_plane.github_response_headers import notify_github_quota_response_headers
 from control_plane.github_response_headers import normalized_github_quota_response_headers
-from control_plane.github_request_timing import timed_github_request, record_github_response
+from control_plane.github_request_timing import (
+    timed_github_request,
+    record_github_response,
+    record_github_graphql_cost,
+)
 from control_plane.github_read_cache import GitHubReadCache, MERGE_TRAIN_READ_CACHE
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.merge_train_candidate_failures import CandidateCheckFailures
@@ -103,7 +112,10 @@ from control_plane.merge_train_codeowners import (
     carried_change_requires_individual_landing,
 )
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
-from control_plane.merge_train_dependency_updates import classify_dependency_update
+from control_plane.merge_train_dependency_updates import (
+    classify_dependency_update,
+    UPDATE_FORMAT_PARSERS,
+)
 from control_plane.merge_train_handoff import (
     MergeTrainReadyHandoff,
     handoff_actor_allowed,
@@ -113,6 +125,9 @@ from control_plane.merge_train_handoff import (
     ready_handoff_refusal,
 )
 from control_plane.source_control_change import change_fingerprint
+from control_plane.merge_train import CURRENT_HEAD_PREVIEW_FAILED
+from control_plane.merge_train import CURRENT_HEAD_PREVIEW_NOT_SERVED
+from control_plane.merge_train import CURRENT_HEAD_PREVIEW_UNREADABLE
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainLabelActor
@@ -166,6 +181,7 @@ class MergeTrainBranchRefreshRecorder(Protocol):
 # GitHub makes the refresh commit after it answers; read the head back this often.
 BRANCH_REFRESH_READBACK_ATTEMPTS = 10
 BRANCH_REFRESH_READBACK_INTERVAL_SECONDS = 1.0
+CODE_SCANNING_RESULT_GRACE_SECONDS = 600
 
 
 if TYPE_CHECKING:
@@ -234,7 +250,13 @@ class MergeTrainGitHubCandidateEntryConflictError(MergeTrainGitHubStaleHeadError
 class MergeTrainGitHubMergeRejectedError(MergeTrainGitHubError):
     """A conclusive merge refusal with bounded, separately observed diagnosis."""
 
-    def __init__(self, *, pull_request_number: int, observed_merge_state: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        pull_request_number: int,
+        observed_merge_state: str = "",
+        missing_required_code_scanning: bool = False,
+    ) -> None:
         self.pull_request_number = pull_request_number
         # GitHub's mergeable_state for the same open head, when it could be read.
         self.observed_merge_state = observed_merge_state
@@ -242,7 +264,13 @@ class MergeTrainGitHubMergeRejectedError(MergeTrainGitHubError):
             "behind": "head_behind_base",
             "blocked": "merge_blocked",
         }.get(observed_merge_state, "unconfirmed")
+        if missing_required_code_scanning:
+            self.refusal_diagnosis = "required_code_scanning_missing"
         diagnosis = {
+            "required_code_scanning_missing": (
+                "A required code-scanning result is missing for this PR head. "
+                "Close the batch so the train re-plans before another merge attempt."
+            ),
             "head_behind_base": (
                 "The same PR head is behind its base; refresh the source PR branches and let "
                 "the train build a fresh candidate before another attempt."
@@ -323,6 +351,7 @@ class UrllibMergeTrainGitHubTransport:
         response_headers_observer: GitHubResponseHeadersObserver | None = None,
         read_cache: GitHubReadCache | None = None,
     ) -> None:
+        self._quota_credential = token
         self.token_permissions = (
             token.permissions if isinstance(token, GitHubAppInstallationToken) else None
         )
@@ -371,19 +400,32 @@ class UrllibMergeTrainGitHubTransport:
             ):
                 from control_plane.merge_train_job_logs import read_job_log
 
-                with timed_github_request(method=method, path=path):
+                with timed_github_request(
+                    method=method,
+                    path=path,
+                    token=self._quota_credential,
+                    api_base_url=self.api_base_url,
+                ):
                     return read_job_log(request, observer=self.response_headers_observer)
             with (
-                timed_github_request(method=method, path=path),
+                timed_github_request(
+                    method=method,
+                    path=path,
+                    token=self._quota_credential,
+                    api_base_url=self.api_base_url,
+                ),
                 urlopen(request, timeout=15) as response,
             ):
+                record_github_response(
+                    getattr(response, "status", 200), getattr(response, "headers", None)
+                )
                 response_text = response.read().decode("utf-8")
                 notify_github_quota_response_headers(
                     self.response_headers_observer,
                     getattr(response, "headers", None),
                 )
                 payload = json.loads(response_text) if response_text.strip() else None
-                record_github_response(getattr(response, "status", 200))
+                record_github_graphql_cost(payload)
                 if method == "GET":
                     etag = str(response.headers.get("ETag") or "")
                     if etag or immutable_contents:
@@ -398,7 +440,6 @@ class UrllibMergeTrainGitHubTransport:
                     )
                 return payload
         except HTTPError as error:
-            record_github_response(error.code)
             if error.code == 304 and cached is not None and method == "GET":
                 notify_github_quota_response_headers(self.response_headers_observer, error.headers)
                 return cached.payload
@@ -1080,6 +1121,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             failed_check_names=failed_check_names,
             attribution_requirements=None,
         ).status
+
+    def read_base_branch_sha(self, *, repository: str, base_branch: str) -> str:
+        return _base_branch_sha(
+            transport=self.transport,
+            repository_path=_repository_path(repository),
+            base_branch=base_branch,
+        )
 
     def read_base_check_observation(
         self,
@@ -1788,6 +1836,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 body={
                     "query": """
                     query($owner: String!, $name: String!, $number: Int!) {
+                      rateLimit { cost }
                       repository(owner: $owner, name: $name) {
                         pullRequest(number: $number) {
                           timelineItems(first: 1, itemTypes: [BASE_REF_CHANGED_EVENT,
@@ -2453,12 +2502,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     def cleanup_batch_candidate_ref(
         self,
         *,
-        landing_plan: MergeTrainBatchLandingPlan,
+        landing_plan: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
         effect_executor: MergeTrainSemanticEffectExecutor | None = None,
     ) -> bool:
         resolved_effect_executor = effect_executor or self.semantic_effect_executor
         if (
-            landing_plan.candidate_pull_request_number is None
+            isinstance(landing_plan, MergeTrainBatchLandingPlan)
+            and landing_plan.candidate_pull_request_number is None
             and is_canonical_candidate_ref(landing_plan)
             and self.requires_full_odoo_build(repository=landing_plan.repository)
         ):
@@ -2475,6 +2525,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 raise MergeTrainGitHubError(
                     "Candidate validation PR cleanup could not be verified.", status_code=409
                 ) from error
+        if landing_plan.candidate_ref in merge_train_batch_refs(landing_plan):
+            return self._cleanup_batch_refs(
+                candidate=landing_plan,
+                effect_executor=resolved_effect_executor,
+            )
+        if isinstance(landing_plan, MergeTrainBatchCandidate):
+            raise MergeTrainGitHubError("Retirement requires a train-owned batch ref.")
         return resolved_effect_executor.delete_candidate_ref(
             CandidateRefDeleteEffect(
                 lineage=MergeTrainEffectLineage(
@@ -2486,6 +2543,68 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 candidate_ref=landing_plan.candidate_ref,
             )
         )
+
+    def _cleanup_batch_refs(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+        effect_executor: MergeTrainSemanticEffectExecutor,
+    ) -> bool:
+        references = merge_train_batch_refs(candidate)
+        if candidate.candidate_ref not in references:
+            raise MergeTrainGitHubError("Retirement requires a train-owned batch ref.")
+        repository_path = _repository_path(candidate.repository)
+        owner = candidate.repository.split("/", 1)[0]
+        deleted = False
+        for reference in references:
+            try:
+                payload = _json_object(
+                    self.transport.request(
+                        method="GET",
+                        path=f"/repos/{repository_path}/git/ref/{_reference_path(reference)}",
+                    ),
+                    "Retired candidate ref",
+                )
+            except MergeTrainGitHubError as error:
+                if error.status_code == 404:
+                    continue
+                raise
+            if payload.get("ref") != reference:
+                raise MergeTrainGitHubError("Retired candidate ref identity changed.")
+            branch = _branch_name_from_ref(reference)
+            in_use = False
+            for query in (
+                f"head={quote(f'{owner}:{branch}', safe='')}",
+                f"base={quote(branch, safe='')}",
+            ):
+                pulls = self.transport.request(
+                    method="GET",
+                    path=f"/repos/{repository_path}/pulls?state=open&{query}&per_page=100",
+                )
+                if not isinstance(pulls, list) or len(pulls) >= 100:
+                    raise MergeTrainGitHubError("Open PR ref usage is unavailable or incomplete.")
+                in_use = in_use or bool(pulls)
+            if in_use:
+                continue
+            identity = _json_object(payload.get("object"), "Retired candidate ref object")
+            removed = effect_executor.delete_candidate_ref(
+                CandidateRefDeleteEffect(
+                    lineage=MergeTrainEffectLineage(
+                        repository=candidate.repository,
+                        base_branch=candidate.base_branch,
+                        batch_id=candidate.batch_id,
+                        landing_plan_id=candidate.plan_id
+                        if isinstance(candidate, MergeTrainBatchLandingPlan)
+                        else "",
+                    ),
+                    candidate_ref=reference,
+                    expected_ref_sha=_required_text(
+                        identity.get("sha"), "Retired ref requires SHA."
+                    ),
+                )
+            )
+            deleted = deleted or removed
+        return deleted
 
     def candidate_ref_exists(self, *, repository: str, reference: str) -> bool:
         repository_path = _repository_path(repository)
@@ -3037,6 +3156,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         mutate: bool,
         before_remove: Callable[[], None],
         setup_failure_evidence: Callable[[], MergeTrainSetupFailureRecovery | None] | None = None,
+        new_base_retest_evidence: Callable[[int], object | None] | None = None,
     ) -> bool:
         from control_plane.merge_train_github_block_recovery import recover_candidate_block
 
@@ -3050,6 +3170,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             mutate=mutate,
             before_remove=before_remove,
             setup_failure_evidence=setup_failure_evidence,
+            new_base_retest_evidence=new_base_retest_evidence,
         )
 
     def update_pull_request_branch(
@@ -3219,6 +3340,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             if error.status_code != 405:
                 raise
             observed_merge_state = ""
+            missing_required_code_scanning = False
             try:
                 observed = self.transport.request(
                     method="GET",
@@ -3237,9 +3359,19 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     and isinstance(merge_state, str)
                 ):
                     observed_merge_state = merge_state.strip().lower()
+                    if observed_merge_state == "blocked":
+                        try:
+                            missing_required_code_scanning = _missing_required_code_scanning_result(
+                                transport=self.transport,
+                                repository_path=repository_path,
+                                observed=observed,
+                            )
+                        except MergeTrainGitHubError:
+                            missing_required_code_scanning = False
             raise MergeTrainGitHubMergeRejectedError(
                 pull_request_number=pull_request_number,
                 observed_merge_state=observed_merge_state,
+                missing_required_code_scanning=missing_required_code_scanning,
             ) from error
         if not isinstance(payload, dict):
             raise MergeTrainGitHubError(
@@ -3689,6 +3821,45 @@ class LegacyMergeTrainEffectExecutor:
         )
 
     def delete_candidate_ref(self, effect: CandidateRefDeleteEffect) -> bool:
+        if effect.expected_ref_sha:
+            repository_path = _repository_path(effect.lineage.repository)
+            repository = _json_object(
+                self.client.transport.request(method="GET", path=f"/repos/{repository_path}"),
+                "Candidate ref repository",
+            )
+            payload = _json_object(
+                self.client.transport.request(
+                    method="POST",
+                    path="/graphql",
+                    body={
+                        "query": "mutation($input: UpdateRefsInput!) { updateRefs(input: $input) { clientMutationId } }",
+                        "variables": {
+                            "input": {
+                                "repositoryId": _required_text(
+                                    repository.get("node_id"), "Repository requires node id."
+                                ),
+                                "refUpdates": [
+                                    {
+                                        "name": effect.candidate_ref,
+                                        "beforeOid": effect.expected_ref_sha,
+                                        "afterOid": "0" * 40,
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                ),
+                "Candidate ref deletion",
+            )
+            if payload.get("errors"):
+                if not self.client.candidate_ref_exists(
+                    repository=effect.lineage.repository, reference=effect.candidate_ref
+                ):
+                    return False
+                raise _github_graphql_error(payload["errors"])
+            data = _json_object(payload.get("data"), "Candidate ref deletion data")
+            _json_object(data.get("updateRefs"), "Candidate ref deletion result")
+            return True
         return self.client._delete_reference_if_present(
             repository_path=_repository_path(effect.lineage.repository),
             reference=effect.candidate_ref,
@@ -4091,6 +4262,15 @@ class GitHubMergeTrainSnapshotReader:
             )
             else None
         )
+        preview_hold = (
+            self._preview_hold(
+                repository=base_repository,
+                pull_request_number=pull_request_number,
+                head_sha=head_sha,
+            )
+            if enrich or dependency_update_class == "patch_or_minor"
+            else ""
+        )
         review_intent = self.client_review_intent(
             labels=labels,
             repository=base_repository,
@@ -4191,7 +4371,27 @@ class GitHubMergeTrainSnapshotReader:
             required_checks_observation_error=checks_error,
             branch_update_required=_branch_update_required(source),
             dependency_update_class=dependency_update_class,
+            preview_hold=preview_hold,
         )
+
+    def _preview_hold(self, *, repository: str, pull_request_number: int, head_sha: str) -> str:
+        store: object = self._branch_refresh_store
+        if not callable(getattr(store, "list_product_profile_records", None)):
+            return ""
+        try:
+            preview = current_head_preview(
+                store=cast(CurrentHeadPreviewStore, store),
+                repository=repository,
+                pull_request_number=pull_request_number,
+                head_sha=head_sha,
+            )
+        except (SQLAlchemyError, ValueError, OSError):
+            logger.warning("Pull request preview could not be read.", exc_info=True)
+            return CURRENT_HEAD_PREVIEW_UNREADABLE
+        return {
+            "failed": CURRENT_HEAD_PREVIEW_FAILED,
+            "not_served": CURRENT_HEAD_PREVIEW_NOT_SERVED,
+        }.get(preview, "")
 
     def _recovery_ready_floor(self, repository: str, number: int, head: str) -> int:
         from control_plane.merge_train_setup_recovery_receipt import read_setup_recovery_receipt
@@ -4299,7 +4499,7 @@ class GitHubMergeTrainSnapshotReader:
                 latest_kind = "unreadable"
         return MergeTrainReadyHandoff(
             status="waiting"
-            if latest_kind == "waiting"
+            if latest_kind in {"waiting", "client_wait"}
             else "edited"
             if latest_kind == "edited"
             else "unreadable"
@@ -4311,6 +4511,15 @@ class GitHubMergeTrainSnapshotReader:
             actor_id=actor_id,
             actor_role=role,
             comment_id=comment_id,
+            client_wait=latest_kind == "client_wait",
+            client_accepted=latest_kind == "client_wait"
+            and declared_head == head_sha
+            and self.client_accepted(
+                repository=repository_path,
+                pull_request_number=number,
+                head_sha=head_sha,
+                base_branch=base_branch,
+            ),
         )
 
     def _handoff_refresh_chain(
@@ -4402,7 +4611,7 @@ class GitHubMergeTrainSnapshotReader:
                 method="POST",
                 path="/graphql",
                 body={
-                    "query": "query($id: ID!) { node(id: $id) { ... on IssueComment { id body updatedAt editor { __typename ... on Bot { databaseId } } } } }",
+                    "query": "query($id: ID!) { rateLimit { cost } node(id: $id) { ... on IssueComment { id body updatedAt editor { __typename ... on Bot { databaseId } } } } }",
                     "variables": {"id": node_id},
                 },
             ),
@@ -4616,6 +4825,9 @@ class GitHubMergeTrainSnapshotReader:
             messages,
             metadata_format=bot.metadata_format,
             allowed_update_types=bot.allowed_update_types,
+            digest_moves_forward=lambda update: dependency_digest_moves_forward(
+                update, read=lambda path: self.transport.request(method="GET", path=path)
+            ),
         )
         if update_class != "patch_or_minor":
             return update_class
@@ -4630,6 +4842,11 @@ class GitHubMergeTrainSnapshotReader:
             read=lambda path: self.transport.request(method="GET", path=path),
             store=self._branch_refresh_store,
             repository_policy=self._repository_policy,
+            declared_updates=tuple(
+                update
+                for message in messages
+                for update in UPDATE_FORMAT_PARSERS[bot.metadata_format](message)
+            ),
         ):
             return "needs_review"
         return update_class
@@ -4893,23 +5110,51 @@ class GitHubMergeTrainSnapshotReader:
             labels=labels, repository=repository, body=body
         ).review_required
 
-    def client_veto(self, *, repository: str, pull_request_number: int) -> bool:
+    def _client_decisions(
+        self, *, repository: str, pull_request_number: int
+    ) -> tuple[
+        tuple[LaunchplaneProductProfileRecord, tuple[ProductReviewDecisionRecord, ...]], ...
+    ]:
         store = self._branch_refresh_store
         if not isinstance(store, _ClientVetoReadStore):
-            return False
-        profiles = tuple(
-            profile
+            return ()
+        return tuple(
+            (
+                profile,
+                store.list_product_review_decision_records(
+                    repository=profile.repository, pull_request_number=pull_request_number
+                ),
+            )
             for profile in store.list_product_profile_records()
             if profile.is_active
             and profile.owner.is_set
             and repository_key(profile.repository) == repository_key(repository)
         )
-        if not profiles:
-            return False
-        for profile in profiles:
-            decisions = store.list_product_review_decision_records(
-                repository=profile.repository, pull_request_number=pull_request_number
-            )
+
+    def client_accepted(
+        self, *, repository: str, pull_request_number: int, head_sha: str, base_branch: str
+    ) -> bool:
+        from control_plane.product_review_status import owner_review_status
+
+        clients = self._client_decisions(
+            repository=repository, pull_request_number=pull_request_number
+        )
+        return bool(clients) and all(
+            owner_review_status(
+                profile=profile,
+                pull_request_number=pull_request_number,
+                head_sha=head_sha,
+                decisions=decisions,
+                base_branch=base_branch,
+            ).state
+            == "success"
+            for profile, decisions in clients
+        )
+
+    def client_veto(self, *, repository: str, pull_request_number: int) -> bool:
+        for profile, decisions in self._client_decisions(
+            repository=repository, pull_request_number=pull_request_number
+        ):
             current = next(
                 iter(
                     applicable_product_review_decisions(
@@ -5358,6 +5603,17 @@ def _base_branch_sha(
     return _required_text(commit.get("sha"), "GitHub branch commit requires sha.")
 
 
+def merge_train_batch_refs(
+    candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+) -> tuple[str, str]:
+    canonical = build_merge_train_batch_candidate_ref(
+        repository=candidate.repository,
+        base_branch=candidate.base_branch,
+        batch_id=candidate.batch_id,
+    )
+    return canonical, merge_train_construction_ref(canonical)
+
+
 def merge_train_construction_ref(candidate_ref: str) -> str:
     """Locate native construction evidence from the canonical candidate identity."""
     return "refs/heads/launchplane/construct/" + sha256(candidate_ref.encode("utf-8")).hexdigest()
@@ -5454,6 +5710,58 @@ def _base_branch_identity(
         repository_path=repository_path,
         commit_sha=branch_sha,
     )
+
+
+def _missing_required_code_scanning_result(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    observed: dict[str, object],
+) -> bool:
+    base = observed.get("base")
+    if not isinstance(base, dict) or not isinstance(base_ref := base.get("ref"), str):
+        return False
+    policy = _required_ruleset_check_policy(
+        transport=transport,
+        repository_path=repository_path,
+        encoded_base_branch=quote(base_ref, safe=""),
+        include_code_scanning=True,
+    )
+    if not policy.code_scanning_tools:
+        return False
+    head = _json_object(observed.get("head"), "GitHub rejected PR head")
+    head_sha = _required_text(head.get("sha"), "GitHub rejected PR head SHA is required.")
+    payload = _list_check_runs(
+        transport=transport,
+        repository_path=repository_path,
+        encoded_head_sha=quote(head_sha, safe=""),
+    )
+    if payload.get("actions_observation_error"):
+        return False
+    checks = cast(list[dict[str, object]], payload["check_runs"])
+    if not checks or any(
+        check.get("status") != "completed" or check.get("head_sha") != head_sha for check in checks
+    ):
+        return False
+    try:
+        completed = [
+            datetime.fromisoformat(str(check.get("completed_at") or "")) for check in checks
+        ]
+    except ValueError:
+        return False
+    if any(value.tzinfo is None for value in completed):
+        return False
+    if (
+        datetime.now(timezone.utc) - max(completed)
+    ).total_seconds() < CODE_SCANNING_RESULT_GRACE_SECONDS:
+        return False
+    reported_tools = {
+        _required_text(check.get("name"), "GitHub check run name is required.")
+        for check in checks
+        if isinstance(app := check.get("app"), dict)
+        and app.get("slug") == "github-advanced-security"
+    }
+    return bool(set(policy.code_scanning_tools) - reported_tools)
 
 
 def _required_checks_status(
@@ -5829,6 +6137,7 @@ def _config_comparison(
 
 _CONVERSATION_RESOLUTION_RULE_QUERY = """
 query($owner: String!, $name: String!, $ref: String!) {
+  rateLimit { cost }
   repository(owner: $owner, name: $name) {
     ref(qualifiedName: $ref) { refUpdateRule { requiresConversationResolution } }
   }
@@ -5837,6 +6146,7 @@ query($owner: String!, $name: String!, $ref: String!) {
 
 _REVIEW_THREADS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  rateLimit { cost }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
@@ -6019,6 +6329,7 @@ def _first_comment_author(thread: dict[str, object]) -> str:
 class _BranchCheckPolicy:
     checks: tuple[tuple[str, int | None], ...]
     ruleset_strict: bool = False
+    code_scanning_tools: tuple[str, ...] = ()
 
 
 def _required_branch_checks(
@@ -6172,6 +6483,7 @@ def _required_ruleset_check_policy(
     transport: MergeTrainGitHubTransport,
     repository_path: str,
     encoded_base_branch: str,
+    include_code_scanning: bool = False,
 ) -> _BranchCheckPolicy:
     # This endpoint returns active rules applying to this branch, excluding
     # disabled and evaluate-only rulesets. Repository ruleset catalogs do not.
@@ -6202,8 +6514,20 @@ def _required_ruleset_check_policy(
         page += 1
     checks: dict[tuple[str, int | None], tuple[str, int | None]] = {}
     strict = False
+    code_scanning_tools: set[str] = set()
     for value in rules:
         rule = _json_object(value, "GitHub effective branch rule")
+        if include_code_scanning and rule.get("type") == "code_scanning":
+            parameters = _json_object(rule.get("parameters"), "GitHub code-scanning parameters")
+            tools = parameters.get("code_scanning_tools")
+            if not isinstance(tools, list):
+                raise MergeTrainGitHubError("GitHub required code-scanning tools must be a list.")
+            for tool_value in tools:
+                tool = _json_object(tool_value, "GitHub required code-scanning tool")
+                code_scanning_tools.add(
+                    _required_text(tool.get("tool"), "GitHub code-scanning tool is required.")
+                )
+            continue
         if rule.get("type") != "required_status_checks":
             continue
         parameters = _json_object(rule.get("parameters"), "GitHub required check rule parameters")
@@ -6232,6 +6556,7 @@ def _required_ruleset_check_policy(
     return _BranchCheckPolicy(
         tuple(checks[key] for key in sorted(checks, key=lambda check: (check[0], check[1] or -1))),
         strict,
+        tuple(sorted(code_scanning_tools)),
     )
 
 

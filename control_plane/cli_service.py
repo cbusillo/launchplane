@@ -16,7 +16,6 @@ from control_plane.dokploy.service_cutover import service_odoo_cutover_factory
 from control_plane.agent_operator_contract import write_agent_operator_contract
 from control_plane.github_request_timing import configure_github_request_logging
 from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
-from control_plane.owner_control_contract import write_owner_control_contract
 from control_plane.merge_train_scheduler import (
     DEFAULT_MERGE_TRAIN_SCHEDULER_INTERVAL_SECONDS,
     MergeTrainScheduledTargetResult,
@@ -552,29 +551,61 @@ def service_merge_train_workers_run(
     def _log_pass(
         results: tuple[MergeTrainScheduledTargetResult, ...], wake: MergeTrainWake
     ) -> None:
-        # One line per pass, so the container log shows the train's cadence.
-        click.echo(json.dumps([asdict(result) for result in results], sort_keys=True))
-        observation = asdict(wake)
-        observation["target_keys"] = None if wake.target_keys is None else sorted(wake.target_keys)
-        bindings = [
-            {
-                "target_key": build_merge_train_controller_key(
-                    repository=result.repository, base_branch=result.base_branch
+        def emit(**fields: object) -> None:
+            click.echo(
+                json.dumps(
+                    {
+                        "event": "merge_train_pass",
+                        "started_at": wake.pass_started_at,
+                        **fields,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
                 ),
-                "repository": result.repository,
-                "base_branch": result.base_branch,
-                "status": result.status,
-                "reason_code": result.reason_code,
-                "controller_action": result.controller_action,
-                "trace_id": result.trace_id,
-                "records": result.records,
-            }
-            for result in results
-        ]
-        click.echo(
-            json.dumps({"event": "merge_train_pass", "results": bindings, "wake": observation}),
-            err=True,
+                err=True,
+            )
+
+        observation = asdict(wake)
+        observation.pop("pass_started_at")
+        observation["error_code"] = observation.pop("pass_error_code")
+        observation.pop("target_keys")
+        observation["targets"] = None if wake.target_keys is None else []
+        observation["receipts"] = []
+        emit(
+            wake=observation,
+            counts={
+                "results": len(results),
+                "targets": None if wake.target_keys is None else len(wake.target_keys),
+                "receipts": len(wake.receipts),
+            },
         )
+        for target_key in sorted(wake.target_keys or ()):
+            emit(wake={"targets": [target_key]})
+        for receipt in wake.receipts:
+            emit(
+                wake={
+                    "receipts": [
+                        {"routing_key": receipt.target_key, "receipt": asdict(receipt.receipt)}
+                    ]
+                }
+            )
+        for result in results:
+            emit(
+                results=[
+                    {
+                        "routing_key": build_merge_train_controller_key(
+                            repository=result.repository, base_branch=result.base_branch
+                        ),
+                        "repository": result.repository,
+                        "base_branch": result.base_branch,
+                        "status": result.status,
+                        "reason_code": result.reason_code,
+                        "controller_action": result.controller_action,
+                        "trace_id": result.trace_id,
+                        "records": result.records,
+                    }
+                ]
+            )
 
     previous_sigterm = signal.signal(signal.SIGTERM, _request_stop)
     previous_sigint = signal.signal(signal.SIGINT, _request_stop)
@@ -1743,16 +1774,4 @@ def service_export_openapi(output: Path) -> None:
 )
 def service_export_agent_contract(output: Path, source_sha: str | None) -> None:
     written_path = write_agent_operator_contract(output, source_commit_sha=source_sha)
-    click.echo(str(written_path))
-
-
-@service.command("export-owner-control-contract")
-@click.option(
-    "--output",
-    type=click.Path(path_type=Path),
-    required=True,
-    help="Write the public owner-control conformance contract to this path.",
-)
-def service_export_owner_control_contract(output: Path) -> None:
-    written_path = write_owner_control_contract(output)
     click.echo(str(written_path))

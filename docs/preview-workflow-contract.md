@@ -28,6 +28,11 @@ the new-product contract rather than duplicating it here.
 
 ## Retained Preview Safety
 
+Odoo preview creation and refresh omit `ODOO_KEY`, the optional workflow
+service-user provisioning input, from the application environment. An existing
+preview drops it through its normal guarded refresh; runtime sync does not
+remove it.
+
 Generic-web lifecycle cleanup uses the repository-name anchor from the product
 profile for stored-preview lookup and terminal evidence; the product key need
 not equal the repository name. Historical callers without a profile retain
@@ -78,8 +83,11 @@ API clients alongside the service when deploying this contract change.
 
 When the stored product profile declares `preview.data_transport_mode="driver"`,
 the generic-web lifecycle route delegates refresh and destroy execution to the
-registered product-driver extension. This keeps product-specific database,
-secret, migration, seed, and cleanup behavior inside Launchplane. Missing driver
+registered shared capability. The `postgres` capability provides an isolated
+database and role, profile-declared generated secrets and application lifecycle
+commands for any generic-web product with a PostgreSQL testing template. Its
+configuration and the supported legacy transition are described in
+[driver development](driver-development.md). Missing driver
 extensions fail closed instead of falling back to generic environment copying.
 Driver-owned application commands must invoke executables already present in the
 immutable image instead of relying on package-runner download or discovery
@@ -99,6 +107,24 @@ both values into the expected runtime identity, requires the live health endpoin
 to echo them, and persists that observed identity on the same explicit generation.
 Product-local preview slugs are not substitutes for Launchplane's canonical
 preview and generation identities.
+
+PostgreSQL refresh and destroy use the same product-operation serialization as
+plain previews, rechecking the profile after acquiring it. A profile write cannot
+change resource declarations during a product operation; retained previews keep
+those declarations fixed between operations. This also applies to plain previews:
+clean them up before changing resource names, source or template. Inert refresh
+configuration failures preserve serving evidence. Destroy never creates a record
+for an unrecorded preview; an already destroyed record is an idempotent success.
+PostgreSQL destroy also accepts complete historical declarations for active or
+retiring products, including disabled previews, while refresh still requires an
+active canonical profile. Cleanup preserves the stored profile and retirement
+hash fence; retired products cannot execute cleanup.
+PostgreSQL environments use the same explicit template copy list, managed preview
+configuration and credential-safety checks as plain previews, with additional
+copied query-value checks limited to PostgreSQL. Generated database/application
+declarations take precedence over managed values and retired entries; removing a
+generator declaration is the supported way to change that ownership. Template connection identity and
+credential query overrides fail before provider effects.
 
 Because product callers pin reusable workflows while the service deploys
 independently, add any future destroy outcome to the `reusable-preview-feedback-status.yml` allowlist
@@ -190,6 +216,30 @@ false, or unavailable schedule-log evidence fails the refresh. A terminal
 provider deployment alone remains an unknown recovery outcome because it does
 not prove that database-backed views were upgraded.
 
+An Odoo preview driver failure after a provider effect retains its original
+reconciliation fence. Before converting that result to an unknown provider
+outcome, execution logs the original operation and trace with validated schedule
+and job identifiers and closed copy/readback failure markers returned by the driver.
+It omits raw driver
+results, error messages and unknown marker values. This diagnostic does not
+authorize another effect or settle the original.
+
+For a source-free preview that never published a lifecycle, ordinary reconciliation
+and the existing original-bound preview apply can continue its retained recipient.
+This includes driver transport only when the retained original and the current
+resolved source decision both prove no restore or import. Driver configuration
+alone does not establish the source, and unknown source history remains protected.
+They reuse the existing original-bound and [disposable preview](disposable-lanes.md)
+checks; recorded or destroyed previews keep their existing refresh path.
+A creation original without a concrete receipt requires complete exact-original
+provider inventory; missing reads remain unknown. A held original must have expired
+past its recovery grace. Existing executor exclusion and original schedule quiescence
+then gate atomic supersession, which retains the original intent and records its
+effects as unverified. It does not turn a successful provider job into successful
+Odoo or serving evidence. The original-intent and lane binding stays stable across
+that settlement, while changed authority still refuses. Only the refresh's actual
+verified success publishes a serving generation.
+
 When the preview template instance has a deploy-enabled website-bootstrap
 record, refresh also renders a preview-scoped copy of that website intent,
 replaces its canonical URL with the exact preview URL, and passes it through the
@@ -258,6 +308,53 @@ They do not report successful preparation or authorize a restore. Generic failed
 frames, incomplete streams and unknown dispositions remain unavailable evidence.
 The missing-start disposition keeps the original reservation fenced.
 
+A recorded plain-volume preview with unknown historical source can continue on
+the same PR through the existing service-issued refresh plan and preview-apply
+route. Set `preserve_original_reservation_id` to its authentic completed serving
+original. Admission binds the recorded serving generation, original intent,
+provider recipient and execution server; an unrelated or superseded original
+cannot authorize continuation. It does not fill in the historical source.
+The same original-bound capture also supports a service-issued destroy plan
+for that recorded recipient. It preserves the database and complete data
+directory before guarded retirement, without refreshing its artifact. Retirement
+keeps stopped-writer and physical-volume verification until teardown; it never
+uses refresh's post-apply allowance for reopened writers or changed source.
+The retained archive remains verifiable after the provider recipient is absent
+and after its own destroyed lifecycle record is published. Nonempty logs retain
+their existing additional-custody refusal before capture and teardown.
+
+The preview-apply-inputs request accepts `preservation_storage_budget`, using
+the existing reviewed database, file-store, staging and reserve byte limits.
+The issued plan fingerprints that budget and retains it for preflight, capture
+and original-key recovery. It applies only to that plan's preservation; it
+does not enable clean testing snapshots or change product/lane settings. An
+opted-in snapshot lane's stored reviewed budget remains authoritative; the plan
+budget supplies capacity only when no snapshot budget applies. Native capacity
+and captured-size checks still run before any refresh, and already captured
+receipts remain verifiable without a new budget.
+
+Before capture, the service freshly qualifies non-use, resource isolation and
+production credential separation. Under the existing preview execution exclusion,
+the host stops the application writers, captures the database and complete data
+directory, verifies the archive contents and restores the database into isolated
+verification storage. Only a completed private receipt permits refresh. Logs and
+all recipient volumes remain in place. Refresh retains the current database and
+file store and never restores upstream or imports replacement data. Nonempty
+snapshot overlays remain unsupported and are retained without capture or refresh.
+
+Interrupted captures retain their original operation key, pending copy and
+provider checkpoint. Read-only native custody and capacity preflight runs before
+reserving the operation. After stopping, a failure keeps the recipient stopped and its
+data in place under that same operation's reconciliation fence; inspection is
+read-only and continuation resumes on the original key once its blocker clears.
+It does not restart the old application. Before the first refresh effect,
+receipt verification still
+requires stopped writers and unchanged data. After refresh starts, verification
+checks the immutable archive and exact physical volumes while allowing the new
+application's writes. Unknown refresh effects retain the ordinary reconciliation
+fence. A successful continuation records its new source decision as retained;
+later ordinary refreshes retain that recipient without rewriting older originals.
+
 For that qualified case, the reconciler issues the ordinary destroy plan/apply and
 rechecks native custody under the execution lock. Current usage, needed-copy,
 staff-testing and shared-resource protections are checked at every provider effect.
@@ -287,6 +384,52 @@ profile's naming policy. The latter stops fresh planning for that target when
 the original intent is unavailable; unrelated previews remain independent. It
 does not recover the original action or plan, permit provider observation, or
 settle the reservation. Original availability flags remain false.
+
+## Inert exact-original evidence
+
+`GET /v1/products/{product}/preview-evidence` uses the existing `preview.read`
+scope. Supply `pr_number`, `source_git_ref`, `image_digest` and exactly one of
+`original_reservation_id` or `plan_id`. The latter looks up the existing
+controller reservation by its issued plan in that product's reconciliation
+scope. The reader validates the retained original intent and exact requested
+tuple before reading provider evidence. Missing original intent refuses;
+current naming, a held-list row or a newer controller plan cannot replace it.
+
+The response exposes the original's opaque reservation/reference, attempt,
+checkpoint, lease expiry and recorded terminal response status.
+The retained effective-source decision is returned as closed source/import
+metadata, or null when unavailable; it does not establish current data custody.
+Executor exclusion remains unknown: this read takes no executor lock and changes no
+lease. Completed originals remain readable after they disappear from the held
+reservation list. That list remains a discovery/classification surface.
+
+Optional `preview_id` and `generation_id` select current probes together. They
+must select the current serving generation and its exact completed original.
+The reader reuses the same inspection authority and inert qualification read
+as the safety publisher, including the production credential comparison and
+post-read authority checks. It returns process/runtime verification, use and
+resource separation only when those existing probes establish them. Missing
+probe evidence stays unknown with a bounded reason; positively observed sharing
+remains explicit. Credential comparison is limited to managed and provider
+production values. Database-only production credentials remain unavailable.
+Provider refusals remain
+authorization refusals. No normal visitor request, wake or login occurs.
+
+Provider histories use only a retained concrete target or a matching completed
+result, and the original's retained schedule binding. A generated target name
+cannot reconstruct a missing historical target ID. Complete retained history
+is distinguished from historical completeness and exact native-job attribution;
+missing/ambiguous schedules remain unavailable, and an empty retained list
+proves no historical absence. Provider job IDs are hashed; payloads, logs,
+coordinates and credentials are withheld. A provider terminal status is not
+native-workflow success or original settlement. An exact operation-title match
+is reported as a marker, independently of the stored original result status
+and HTTP response code.
+
+The response is noncacheable and publishes no disposable safety/admission
+record, reconciliation, effect, receipt, lease or resource change. Data origin,
+sanitization, needed-copy custody and missing historic proof remain unknown.
+The existing publishing and recovery paths retain their own gates.
 
 ## Client Review Handoff
 
@@ -331,13 +474,9 @@ webhook leave the pull request alone; Client review is shown by
 `launchplane/owner-review` (see Client Review Request). When Launchplane next
 writes a ready preview comment, a leftover `manager-preview-approval` status on
 the current head is closed once as `success` with
-`Retired. Owner review is recorded in Launchplane.`, and a leftover
+`Retired. Client review is recorded in Launchplane.`, and a leftover
 `launchplane/owner-acceptance` check run created by Launchplane's advisory app
 is updated once to `neutral` with the title "Retired". Neither signal is created where it does not already exist.
-
-Manager preview approval is retired. Its evaluator, webhook commands, reconcile
-route, and store methods are deleted; existing manager events stay in the
-database unread. Current approval uses product review and the release checklist.
 
 The `tenant-admission` status is a separate Launchplane projection of the current
 repository classification and candidate identity. It no longer evaluates manager,

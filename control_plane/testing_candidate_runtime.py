@@ -14,6 +14,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideValue,
 )
 from control_plane.contracts.odoo_stable_target_replacement import (
+    apply_artifact_odoo_version,
     missing_required_odoo_modules_from_artifact,
 )
 from control_plane.contracts.odoo_testing_source import NativeOdooTestingSource
@@ -25,10 +26,12 @@ from control_plane.clean_testing_snapshot import snapshot_storage_budget
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.odoo_testing_source import NativeOdooSourceAuthority
+from control_plane.contracts.odoo_testing_source import MigratedOdooTestingSource
 from control_plane.contracts.testing_candidate_application import TestingCandidateApplicationPlan
 from control_plane.dokploy import compose, post_deploy
 from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.integration_readback import INTEGRATION_FAMILIES
+from control_plane.live_target_runtime import declared_runtime_keys
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
 from control_plane.odoo_instance_overrides import build_post_deploy_environment
 from control_plane.odoo_testing_native_source import (
@@ -56,7 +59,7 @@ from control_plane.testing_replacement_bootstrap import (
     require_testing_credential_safety,
 )
 
-CandidateSource = Literal["empty", "production", "upstream"]
+CandidateSource = Literal["empty", "production", "upstream", "migrated"]
 
 
 class CandidateRuntimeInputsChanged(ValueError):
@@ -71,15 +74,32 @@ class TestingCandidateRuntimeInputs:
     runtime_environment: dict[str, str] = field(repr=False)
     workflow_environment: dict[str, str] = field(repr=False)
     required_workflow_keys: tuple[str, ...]
-    native_source: NativeOdooTestingSource | None = field(default=None, repr=False)
+    native_source: NativeOdooTestingSource | MigratedOdooTestingSource | None = field(
+        default=None, repr=False
+    )
 
 
 def candidate_application_intent(
-    *, product: str, context: str, artifact_id: str, source: CandidateSource
+    *,
+    product: str,
+    context: str,
+    artifact_id: str,
+    source: CandidateSource,
+    migrated_source: MigratedOdooTestingSource | None = None,
 ) -> str:
     """The worker binds its selected build and source before allocating storage."""
     return canonical_json_sha256(
-        {"product": product, "context": context, "artifact": artifact_id, "source": source}
+        {
+            "product": product,
+            "context": context,
+            "artifact": artifact_id,
+            "source": source,
+            **(
+                {"migrated_source": migrated_source.model_dump(mode="json")}
+                if migrated_source is not None
+                else {}
+            ),
+        }
     )
 
 
@@ -204,6 +224,7 @@ def candidate_runtime_inputs(
     allocation: TestingCandidateAllocation,
     artifact_id: str,
     source: CandidateSource,
+    migrated_source: MigratedOdooTestingSource | None = None,
     admitted_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> TestingCandidateRuntimeInputs:
     """Read managed inputs only; no secret write, target adoption or live mutation."""
@@ -212,6 +233,7 @@ def candidate_runtime_inputs(
         context=allocation.context,
         artifact_id=artifact_id,
         source=source,
+        migrated_source=migrated_source,
     ):
         raise CandidateRuntimeInputsChanged(
             "Candidate build/source differs from its original admitted operation."
@@ -240,6 +262,22 @@ def candidate_runtime_inputs(
         for lane in profile.lanes
         if (lane.context, lane.instance) == (allocation.context, "testing")
     )
+    if isinstance(migrated_source, MigratedOdooTestingSource):
+        if lane.odoo_testing_drill_storage is None:
+            raise CandidateRuntimeInputsChanged(
+                "The migrated copy needs the lane's existing testing storage headroom."
+            )
+        snapshot_budget = lane.odoo_testing_drill_storage.model_copy(
+            update={
+                "database_bytes": max(
+                    lane.odoo_testing_drill_storage.database_bytes, migrated_source.database.size
+                ),
+                "filestore_bytes": max(
+                    lane.odoo_testing_drill_storage.filestore_bytes,
+                    migrated_source.filestore_expanded_bytes,
+                ),
+            }
+        )
     artifact = store.read_artifact_manifest(artifact_id)
     if not artifact_manifest_matches_image_repository(
         artifact, expected_repository=profile.image.repository
@@ -279,8 +317,8 @@ def candidate_runtime_inputs(
         modules=modules,
         encoded_payload=workflow.inline_environment.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", ""),
     )
-    native: NativeOdooTestingSource | None = None
-    authority = None
+    native: NativeOdooTestingSource | MigratedOdooTestingSource | None = None
+    authority: NativeOdooSourceAuthority | MigratedOdooTestingSource | None = None
     upstream: dict[str, str] = {}
     previous = allocation.application.plan if allocation.application is not None else None
     if source == "production":
@@ -302,8 +340,18 @@ def candidate_runtime_inputs(
             )
     elif source == "upstream":
         upstream = post_deploy.resolve_upstream_restore_workflow_environment(
-            desired_env_map={**runtime.values, **target.env}
+            desired_env_map=runtime.values
         )
+    elif source == "migrated":
+        if migrated_source is None or (
+            migrated_source.product,
+            migrated_source.context,
+            migrated_source.target_image,
+        ) != (allocation.product, allocation.context, artifact.image.digest):
+            raise CandidateRuntimeInputsChanged(
+                "Migrated output differs from its admitted product or build."
+            )
+        native = authority = migrated_source
     source_binding = authority.binding_sha256 if authority is not None else ""
     generation = (
         None
@@ -320,8 +368,9 @@ def candidate_runtime_inputs(
             request_sha256=allocation.intent_sha256,
             omitted_runtime_keys=tuple(sorted(omitted)),
             prepared_at=allocation.created_at.isoformat(),
-            source_mode="container-export" if source == "production" else "ssh",
+            source_mode="container-export" if source in {"production", "migrated"} else "ssh",
             source_binding_sha256=source_binding,
+            migrated_source=migrated_source,
             clean_snapshot_enabled=profile.preview.clean_testing_snapshot,
             drill_storage_budget=snapshot_budget,
         )
@@ -383,6 +432,13 @@ def candidate_runtime_inputs(
         for key, value in runtime.values.items()
         if key not in omitted and key not in post_deploy.ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS
     }
+    apply_artifact_odoo_version(
+        values,
+        artifact_manifest=artifact,
+        declared_keys=declared_runtime_keys(
+            profile=profile, context_name=allocation.context, instance_name="testing"
+        ),
+    )
     addons_path = merge_required_odoo_addons_path(values.get("ODOO_ADDONS_PATH", ""))
     if addons_path:
         values["ODOO_ADDONS_PATH"] = addons_path
@@ -431,7 +487,7 @@ def candidate_authority_sha256(
     target: DokployTargetRecord,
     runtime_records: Iterable[RuntimeEnvironmentRecord],
     credential_binding: str,
-    native: NativeOdooSourceAuthority | None,
+    native: NativeOdooSourceAuthority | MigratedOdooTestingSource | None,
     upstream: dict[str, str],
     overrides: OdooInstanceOverrideRecord,
 ) -> str:

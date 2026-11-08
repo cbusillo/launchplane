@@ -38,7 +38,10 @@ from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     fresh_testing_override_record,
 )
-from control_plane.contracts.odoo_testing_source import NativeOdooTestingSource
+from control_plane.contracts.odoo_testing_source import (
+    NativeOdooTestingSource,
+    MigratedOdooTestingSource,
+)
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
 
@@ -255,7 +258,7 @@ def execute_odoo_post_deploy(
     connection_isolation_product: str = "",
     fresh_testing_generation: FreshOdooTestingGeneration | None = None,
     fresh_restore_source_environment: dict[str, str] | None = None,
-    fresh_native_source: NativeOdooTestingSource | None = None,
+    fresh_native_source: NativeOdooTestingSource | MigratedOdooTestingSource | None = None,
     artifact_id: str = "",
     release_website_settings: OdooWebsiteSettingsIntent | None = None,
     restore_release_website_settings: bool = False,

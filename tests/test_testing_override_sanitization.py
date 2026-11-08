@@ -115,16 +115,7 @@ class TestingOverrideSanitizationScenario(FreshTestingBootstrapScenario):
             context_name=self.fixture.context, instance_name="testing"
         )
         self.store.write_dokploy_target_record(
-            target.model_copy(
-                update={
-                    "domains": (self.generation.domain_host,),
-                    "env": {
-                        **target.env,
-                        "ODOO_PROJECT_NAME": self.generation.namespace,
-                        "ODOO_STACK_NAME": self.generation.namespace,
-                    },
-                }
-            )
+            target.model_copy(update={"domains": (self.generation.domain_host,)})
         )
         for record in self.store.list_runtime_environment_records(
             context_name=self.fixture.context
@@ -135,6 +126,11 @@ class TestingOverrideSanitizationScenario(FreshTestingBootstrapScenario):
                         update={
                             "schema_version": 2,
                             "retired_provider_keys": (pointer,),
+                            "env": {
+                                **record.env,
+                                "ODOO_PROJECT_NAME": self.generation.namespace,
+                                "ODOO_STACK_NAME": self.generation.namespace,
+                            },
                         }
                     )
                 )
@@ -277,7 +273,6 @@ class TestingOverrideSanitizationTests(TestingOverrideSanitizationScenario):
         )
         self.assertEqual(outcome, "written")
         audit = read_sanitization_audit(self.store, self.profile.product, body)
-        self.assertIsNotNone(audit)
         assert audit is not None
         self.assertEqual(audit.before, self.original_overrides)
         self.assertFalse(audit.after.addon_settings)

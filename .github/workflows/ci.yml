@@ -13,7 +13,7 @@ name: CI
 
 env:
   DOCKER_COMPOSE_VERSION: v5.3.1
-  LAUNCHPLANE_CI_POSTGRES_IMAGE: &postgres_test_image postgres:17@sha256:0af65001d05296a2ead57ac4a6412433d8913d1bb5d0c88435a7d1e1ee5cb04b
+  LAUNCHPLANE_CI_POSTGRES_IMAGE: &postgres_test_image postgres:17@sha256:3b0cda93be7c8dba2ed484d19393d93845dc3dafb88973e248ba8e6d99d784e1
   # Local smoke writes outside the checkout; CI keeps it in the workspace to
   # upload. Relative paths resolve against the checkout, also in the container.
   BROWSER_SMOKE_ARTIFACT_DIR: tmp/browser-smoke
@@ -547,6 +547,17 @@ jobs:
             --exit-code 1 \
             "$LAUNCHPLANE_CI_IMAGE_TAG"
 
+      # Trivy runs as root; a root-owned cache stops the runner emptying its temp folder after every job.
+      - name: Return Trivy cache to the runner user
+        if: always()
+        env:
+          LAUNCHPLANE_TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
+          [ -d "$LAUNCHPLANE_TRIVY_CACHE_DIR" ] || exit 0
+          docker run --rm --entrypoint chown \
+            -v "${LAUNCHPLANE_TRIVY_CACHE_DIR}:/root/.cache" \
+            ghcr.io/aquasecurity/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
+            -R "$(id -u):$(id -g)" /root/.cache
 
       - name: Report image audit outcome
         if: always()
@@ -631,6 +642,17 @@ jobs:
             --exit-code 1 \
             "$LAUNCHPLANE_CI_IMAGE_TAG"
 
+      # Trivy runs as root; a root-owned cache stops the runner emptying its temp folder after every job.
+      - name: Return Trivy cache to the runner user
+        if: always()
+        env:
+          LAUNCHPLANE_TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
+          [ -d "$LAUNCHPLANE_TRIVY_CACHE_DIR" ] || exit 0
+          docker run --rm --entrypoint chown \
+            -v "${LAUNCHPLANE_TRIVY_CACHE_DIR}:/root/.cache" \
+            ghcr.io/aquasecurity/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
+            -R "$(id -u):$(id -g)" /root/.cache
 
       - name: Report image audit outcome
         if: always()

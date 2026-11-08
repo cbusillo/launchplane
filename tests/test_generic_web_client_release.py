@@ -216,10 +216,17 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 return_value=transport,
             )
         )
+
+        def publish_saved(*, decision: ReleaseReviewDecisionRecord, **_kwargs: object) -> str:
+            return self.store.record_release_review_decision_publication(
+                record_id=decision.record_id,
+                release_issue_url="https://github.com/example/site/issues/99",
+            ).release_issue_url
+
         self.publish = self.enterContext(
             patch(
                 "control_plane.client_release.publish_release_decision",
-                return_value="https://github.com/example/site/issues/99",
+                wraps=publish_saved,
             )
         )
         self.enterContext(
@@ -2336,6 +2343,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.assertEqual(decision.actor_github_id, self.profile.owner.github_id)
         self.assertEqual(decision.checklist.candidate.source_commit, HEAD)
         self.publish.assert_called_once()
+
         self.assertEqual(self.advance(), ())
         self.publish.assert_called_once()
         self.capture()
@@ -2343,6 +2351,16 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.assertEqual(
             self.provider.deployed_artifacts, [decision.checklist.candidate.artifact_id]
         )
+
+    def test_incomplete_standing_checklist_never_records_acceptance(self) -> None:
+        self.switch("director_standing")
+        review = self.review().model_copy(update={"checklist_complete": False})
+        with patch("control_plane.client_release.current_release_review", return_value=review):
+            self.assertEqual(self.advance(), ())
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product), ()
+        )
+        self.publish.assert_not_called()
 
     def test_private_standing_release_needs_no_website_and_still_waits_for_backup(self) -> None:
         private = self.profile.model_copy(
@@ -2608,7 +2626,6 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.assertEqual(
             self.store.list_release_review_decision_records(product=self.profile.product), (winner,)
         )
-        self.assertIsNotNone(winner)
         assert winner is not None
         self.assertEqual(self.provider.deployed_artifacts, [winner.checklist.candidate.artifact_id])
 
@@ -2651,10 +2668,11 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             saved = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+            read.reset_mock()
             advance_client_releases(
                 store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
-            read.assert_called_once()
+            read.assert_not_called()
             self.publish.assert_called_once()
             self.assertEqual(self.store.list_verireel_prod_backup_gate_operation_records(), ())
             clock.return_value = backoff.blocked[self.profile.product][1] + 1
@@ -2833,7 +2851,8 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         assert incomplete.checklist is not None
         incomplete = incomplete.model_copy(
             update={
-                "checklist": incomplete.checklist.model_copy(update={"untracked_commits": (HEAD,)})
+                "checklist": incomplete.checklist.model_copy(update={"untracked_commits": (HEAD,)}),
+                "checklist_complete": False,
             }
         )
         with patch("control_plane.client_release.current_release_review", return_value=incomplete):
@@ -3013,7 +3032,8 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         assert incomplete.checklist is not None
         incomplete = incomplete.model_copy(
             update={
-                "checklist": incomplete.checklist.model_copy(update={"untracked_commits": (HEAD,)})
+                "checklist": incomplete.checklist.model_copy(update={"untracked_commits": (HEAD,)}),
+                "checklist_complete": False,
             }
         )
         backoff = ClientReleaseBackoff()

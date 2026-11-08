@@ -2288,6 +2288,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
                 side_effect=lambda spec, root, containers, database: containers
             ),
             rehearsal_storage_capacity=Mock(return_value=True),
+            migration_copy_supported=Mock(return_value=True),
             capture=Mock(side_effect=AssertionError("No source recapture")),
         )
         host["rehearsal_storage_capacity"].side_effect = [False, True]

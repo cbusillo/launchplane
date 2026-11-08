@@ -5,10 +5,12 @@ from tests.support.auth import scoped_agent_test
 import asyncio
 from contextlib import redirect_stderr
 from contextlib import contextmanager
+from contextlib import closing
 from collections.abc import Callable, Iterator
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
+from functools import cache
 import json
 import hashlib
 import io
@@ -67,6 +69,17 @@ from tests.support.down_lanes import record_lane_health
 from tests.test_service import create_launchplane_fastapi_test_app
 from control_plane.http_app import LaunchplaneAuthzPolicyRuntime
 from tests.test_odoo_prod_promotion_operation import _operation
+
+
+@cache
+def _empty_sqlite_schema() -> bytes:
+    with TemporaryDirectory() as directory:
+        database = Path(directory) / "schema.db"
+        with closing(
+            PostgresRecordStore(database_url="sqlite+pysqlite:///" + str(database))
+        ) as store:
+            store.ensure_schema()
+        return database.read_bytes()
 
 
 def seed_lane(
@@ -243,10 +256,9 @@ class ServiceRestartTests(unittest.TestCase):
         self.scratch = TemporaryDirectory()
         self.addCleanup(self.scratch.cleanup)
         self.root = Path(self.scratch.name)
-        self.store = PostgresRecordStore(
-            database_url="sqlite+pysqlite:///" + str(self.root / "state.db")
-        )
-        self.store.ensure_schema()
+        database = self.root / "state.db"
+        database.write_bytes(_empty_sqlite_schema())
+        self.store = PostgresRecordStore(database_url="sqlite+pysqlite:///" + str(database))
         self.addCleanup(self.store.close)
         self.expected = seed_lane(self.store)
         record_safety(self.store, self.expected.product, self.expected.context, "testing")
@@ -1070,15 +1082,74 @@ class ServiceRestartTests(unittest.TestCase):
 
     def test_production_requires_acceptance_of_the_current_artifact(self) -> None:
         expected = seed_lane(self.store, instance="prod")
+        profile = self.store.read_product_profile_record(expected.product)
         self.provider.config["Config"]["Env"] = [
             f"{k}={v}" for k, v in runtime_identity_env(expected).items()
         ]
         self.payload["instance"] = "prod"
-        self.assertEqual(self.invoke()[0], 409)
+        for production_use in ("unknown", "live"):
+            with self.subTest(production_use=production_use):
+                self.store.write_product_profile_record(
+                    profile.model_copy(update={"production_use": production_use})
+                )
+                self.assertEqual(self.invoke()[0], 409)
         decision = self.record_acceptance(expected)
         status, response = self.invoke()
         self.assertEqual(status, 200, response)
         self.assertEqual(response["result"]["plan"]["acceptance_record_id"], decision.record_id)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_prelaunch_production_restart_needs_no_prior_release_acceptance(self) -> None:
+        expected = seed_lane(self.store, instance="prod")
+        self.provider.config["Config"]["Env"] = [
+            f"{key}={value}" for key, value in runtime_identity_env(expected).items()
+        ]
+        self.payload["instance"] = "prod"
+        profile = self.store.read_product_profile_record(expected.product)
+        for driver in ("odoo", "generic-web"):
+            with self.subTest(driver=driver):
+                self.store.write_product_profile_record(
+                    profile.model_copy(update={"driver_id": driver, "production_use": "prelaunch"})
+                )
+                self.provider.config["State"]["StartedAt"] = "2026-10-10T00:01:00Z"
+                self.payload = {
+                    key: value
+                    for key, value in self.payload.items()
+                    if key != "reviewed_plan_sha256"
+                }
+                self.payload["mode"] = "dry-run"
+                reviewed = self.review()
+                self.assertEqual(reviewed["result"]["plan"]["acceptance_record_id"], "")
+                status, response = self.invoke(key=f"prelaunch-{driver}")
+                self.assertEqual(status, 200, response)
+                self.assertEqual(response["result"]["status"], "pass")
+        self.assertEqual(len(self.provider.writes), 2)
+        decision = self.record_acceptance(expected)
+        self.store.write_release_review_decision_record(
+            decision.model_copy(update={"release_start": "promote"})
+        )
+        self.payload["mode"] = "dry-run"
+        self.payload.pop("reviewed_plan_sha256")
+        status, response = self.invoke()
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["reason"], "client_release_holds_lane")
+        self.assertEqual(len(self.provider.writes), 2)
+
+    def test_agent_prelaunch_classification_cannot_exempt_production_restart(self) -> None:
+        expected = seed_lane(self.store, instance="prod")
+        profile = self.store.read_product_profile_record(expected.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={"production_use": "prelaunch", "production_use_authority": "director_agent"}
+            )
+        )
+        self.provider.config["Config"]["Env"] = [
+            f"{key}={value}" for key, value in runtime_identity_env(expected).items()
+        ]
+        self.payload["instance"] = "prod"
+        status, response = self.invoke()
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["reason"], "production_acceptance_unrecorded")
         self.assertEqual(self.provider.writes, [])
 
     def test_ambiguous_start_time_and_missing_http_identity_refuse_before_effect(self) -> None:
@@ -1123,7 +1194,6 @@ class ServiceRestartTests(unittest.TestCase):
             ).events
             if event.event_type == "service_restart"
         )
-        self.assertIsNotNone(event.restart_recovery)
         assert event.restart_recovery is not None
         self.payload = event.restart_recovery.request.model_dump(mode="json")
         self.payload["mode"] = "reconcile"

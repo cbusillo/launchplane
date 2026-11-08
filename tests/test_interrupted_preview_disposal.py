@@ -60,6 +60,19 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
                 plan["clean_snapshot"] = self.clean_snapshot.model_dump(mode="json")
             return result
 
+        def original_target(**kwargs: Any) -> str:
+            plan = kwargs["request"].dry_run_plan
+            if not plan.compose_ref.startswith("${created."):
+                return str(plan.compose_ref)
+            return self.provider.targets.get((self.profile.preview.context, plan.compose_name), "")
+
+        self.enterContext(
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
+                side_effect=original_target,
+            )
+        )
+
         def native(**kwargs: Any) -> bool:
             original = original_preview_intent(
                 kwargs["reservation"], profile=self.profile, store=self.store
@@ -72,6 +85,7 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
             if operation == "refresh" and (
                 self.fail_rebuild or not self.store.list_preview_records()
             ):
+                self.provider.allocate_target(kwargs["issued_plan"])
                 self.native_interrupted = True
                 raise ProviderMutationUnknownError("fixture interrupted restore")
             result = execute(**kwargs)
@@ -160,10 +174,13 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
         self.request("preview", 5)
         result = self.run_once()
         self.assertEqual(result.state, "failed")
-        self.assertEqual(result.last_plan["preview_operation_status"], "reconcile_required")
+        self.assertEqual(
+            result.last_plan["preview_result_error_code"], "disposable_lane_safety_unknown"
+        )
         self.assertFalse(self.provider.applied)
         held = self.store.list_held_odoo_preview_reservations(product="site")
         self.assertEqual([item.record_id for item in held], [self.original.record_id])
+        self.assertEqual(held[0].state, "reconcile_required")
 
     def test_native_custody_is_rechecked_under_execution_before_disposal(self) -> None:
         self.native.side_effect = [True, False, False]
@@ -254,6 +271,8 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
                 data="only_copy",
             )
             kwargs["provider_effect_checkpoint"]("compose_destroy")
+            issued = kwargs["issued_plan"]
+            self.provider.targets.pop((issued.context, issued.dry_run_plan.compose_name), None)
             self.fail("Needed data must prevent the provider effect")
 
         with patch.object(self.provider, "execute_apply", side_effect=protected):
@@ -268,6 +287,8 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
 
         def lost_reply(**kwargs: Any) -> dict[str, object]:
             kwargs["provider_effect_checkpoint"]("compose_destroy")
+            issued = kwargs["issued_plan"]
+            self.provider.targets.pop((issued.context, issued.dry_run_plan.compose_name), None)
             effects.append("destroy")
             self.native_interrupted = False
             raise ProviderMutationUnknownError("fixture lost destroy reply")
@@ -304,6 +325,7 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
             failed = self.run_once()
         disposal = self.store.list_held_odoo_preview_reservations(product="site")[0]
         carried = failed.last_plan["disposal_original_reservation_id"]
+        self.github.runs[50]["conclusion"] = "failure"
         self.advance_preview_recovery_grace = False
         self.native.reset_mock()
         for pr_state in ("open", None):
@@ -313,6 +335,15 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
                 waiting = self.run_once()
                 self.assertTrue(waiting.last_plan["held"])
                 self.assertEqual(waiting.last_plan["disposal_original_reservation_id"], carried)
+                if pr_state == "open":
+                    self.assertEqual(waiting.last_plan["reason"], "held_preview_recovery_required")
+                    self.assertEqual(
+                        waiting.last_plan["last_failed_error_code"], "preview_build_failed"
+                    )
+                    self.assertEqual(
+                        waiting.last_plan["destroy_failed_attempts"],
+                        failed.last_plan["destroy_failed_attempts"],
+                    )
         self.github.pull_request["state"] = "open"
         self.advance_preview_recovery_grace = True
         self.request("preview", 5)

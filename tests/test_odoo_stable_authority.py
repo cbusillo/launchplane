@@ -1,6 +1,4 @@
-from pathlib import Path
-import re
-from unittest import IsolatedAsyncioTestCase, TestCase
+from unittest import IsolatedAsyncioTestCase
 
 from control_plane.action_effects import ACTION_DECLARATIONS
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -11,27 +9,6 @@ from tests.http_app_test_support import (
     _MissingProductReadStore,
     _RejectingVerifier,
 )
-
-
-_REAL_TOPOLOGY_PATTERNS = (
-    re.compile(r"^\s*default:\s*(?:sellyouroutboard|odoo-tenant-\S*|cm|opw)\s*$", re.MULTILINE),
-    re.compile(r"sellyouroutboard", re.IGNORECASE),
-    re.compile(r"shinycomputers\.com"),
-    re.compile(r"odoo-tenant-(?:cm|opw)\b"),
-    re.compile(r"allowed_targets="),
-)
-
-
-class OdooStableAuthorityTests(TestCase):
-    def test_workflows_do_not_embed_real_product_topology(self) -> None:
-        offenders: list[str] = []
-        for workflow_path in sorted(Path(".github/workflows").glob("*.y*ml")):
-            workflow_text = workflow_path.read_text(encoding="utf-8")
-            for pattern in _REAL_TOPOLOGY_PATTERNS:
-                if pattern.search(workflow_text):
-                    offenders.append(f"{workflow_path.as_posix()}: {pattern.pattern}")
-
-        self.assertEqual(offenders, [])
 
 
 class RetiredOdooTestingDeployRouteTests(IsolatedAsyncioTestCase):

@@ -18,6 +18,7 @@ from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRA
 from control_plane.testing_address_settings_program import CANONICAL_ADDRESS_HOST_LIBRARY
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
+from control_plane.contracts.odoo_testing_source import MigratedOdooTestingSource
 from control_plane.contracts.product_profile_record import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS as FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
     LaunchplaneProductProfileRecord,
@@ -67,6 +68,9 @@ class FreshOdooTestingGeneration(BaseModel):
     reconcile_requested_at: str = ""
     source_mode: Literal["ssh", "container-export"] = "ssh"
     source_binding_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
+    migrated_source: MigratedOdooTestingSource | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     drill_storage_budget: OdooTestingDrillStorageBudget | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -89,10 +93,21 @@ class FreshOdooTestingGeneration(BaseModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> "FreshOdooTestingGeneration":
-        if self.clean_snapshot_enabled and self.drill_storage_budget is None:
-            raise ValueError("Clean testing snapshots require reviewed storage headroom.")
+        if (
+            self.clean_snapshot_enabled or self.migrated_source is not None
+        ) and self.drill_storage_budget is None:
+            raise ValueError(
+                "Clean snapshots and migrated copies require existing testing storage headroom."
+            )
         if (self.source_mode == "container-export") != bool(self.source_binding_sha256):
             raise ValueError("A native source needs its exact binding; SSH generations carry none.")
+        if self.migrated_source is not None and (
+            self.source_mode != "container-export"
+            or (self.migrated_source.product, self.migrated_source.context)
+            != (self.product, self.context)
+            or self.migrated_source.binding_sha256 != self.source_binding_sha256
+        ):
+            raise ValueError("Migrated output differs from its testing generation.")
         if bool(self.discard_drill_database) != bool(self.discard_copy_binding) or (
             self.discard_drill_database and self.discard_drill_database == self.drill_database
         ):
@@ -178,6 +193,8 @@ for key in tuple(os.environ):
 os.environ["ODOO_RESTORE_KEPT_INTEGRATIONS"] = ""
 os.environ["ENV_OVERRIDE_DISABLE_CRON"] = "true"
 os.environ["NO_SANITIZE"] = "false"
+if expected_copy_instance == "rehearsal":
+    os.environ["ODOO_COPY_PURPOSE"] = "migration"
 
 
 class CopyRunner(OdooDataWorkflowRunner):
@@ -238,6 +255,11 @@ class CopyRunner(OdooDataWorkflowRunner):
 if not callable(getattr(OdooDataWorkflowRunner, "prepare_credentials_before_registry", None)):
     raise SystemExit("Artifact lacks the pre-registry credential boundary")
 settings = LocalServerSettings()
+if expected_copy_instance == "rehearsal" and (
+    getattr(settings, "copy_purpose", None) != "migration"
+    or not callable(getattr(OdooDataWorkflowRunner, "verify_isolated_copy_before_registry", None))
+):
+    raise SystemExit("Artifact lacks migration-purpose copy safety; refresh the selected artifact from current odoo-devkit and qualify it before a new rehearsal")
 if settings.host != "database" or settings.db_name != sys.argv[2] or settings.platform_instance != expected_copy_instance:
     raise SystemExit("Testing copy settings no longer name the isolated database")
 runner = CopyRunner(settings, None, None)
@@ -630,6 +652,9 @@ identity=capture['capture_id']
 if not re.fullmatch(r'[a-f0-9]{32}',identity):
     raise RuntimeError('Invalid capture identity')
 mode=spec['mode']
+if capture.get('source_observation',{}).get('kind')=='migrated':
+    exec(__LP_MIGRATED_FILES_PROGRAM__)
+    sys.exit(0)
 chunk_size=__LP_NATIVE_CHUNK_BYTES__
 def path_for(part,index):
     return Path('/tmp')/('lp-native-'+identity+'-'+part+'-'+str(index))
@@ -768,9 +793,15 @@ finally:
 
 
 def render_native_testing_files_program() -> str:
-    return _NATIVE_TESTING_FILES_PROGRAM_TEMPLATE.replace(
-        "__LP_NATIVE_CHUNK_BYTES__", str(NATIVE_TESTING_COPY_CHUNK_BYTES)
-    ).replace("__LP_NATIVE_ARTIFACT_BYTES__", str(NATIVE_TESTING_COPY_ARTIFACT_BYTES))
+    from control_plane._migrated_testing_files_program import MIGRATED_TESTING_FILES_PROGRAM
+
+    return (
+        _NATIVE_TESTING_FILES_PROGRAM_TEMPLATE.replace(
+            "__LP_NATIVE_CHUNK_BYTES__", str(NATIVE_TESTING_COPY_CHUNK_BYTES)
+        )
+        .replace("__LP_NATIVE_ARTIFACT_BYTES__", str(NATIVE_TESTING_COPY_ARTIFACT_BYTES))
+        .replace("__LP_MIGRATED_FILES_PROGRAM__", repr(MIGRATED_TESTING_FILES_PROGRAM))
+    )
 
 
 NATIVE_TESTING_FILES_PROGRAM = render_native_testing_files_program()
@@ -802,11 +833,13 @@ def command(arguments, *, stdin=None, stdout=None, diagnose_failure=False):
     if result.returncode:
         if arguments[0]=='docker' and docker_daemon_authorization_denied(result.stderr):
             raise TestingProviderDenied('The testing runtime refused this identity')
-        if diagnose_failure:
-            emit_copy_command_failure(result, spec)
+        identity = emit_copy_command_failure(result, spec) if diagnose_failure else ''
         if arguments[0]=='docker' and ('readback_failed_predicate='+ReadbackPredicate.ATTACHMENTS).encode() in (result.stdout or b'').splitlines():
-            raise CopyReadbackRefused(ReadbackPredicate.ATTACHMENTS)
-        raise RuntimeError("Fresh testing copy command did not pass")
+            error = CopyReadbackRefused(ReadbackPredicate.ATTACHMENTS)
+        else:
+            error = RuntimeError("Fresh testing copy command did not pass")
+        setattr(error, COPY_FAILURE_EVIDENCE_MARKER, identity)
+        raise error
     return result.stdout or b""
 
 
@@ -1077,6 +1110,16 @@ def restore_main():
                 return
             print(prefix+json.dumps({'type':'complete','recent_signins':used=='t'}),flush=True)
             return
+        migrated=gen.get('migrated_source')
+        if migrated is not None and present=='0':
+            inspection_predicate = ReadbackPredicate.BACKING_STORAGE
+            data_backing=Path(json.loads(docker('volume','inspect',namespace+'-data'))[0]['Mountpoint']).resolve(strict=True)
+            if not storage_capacity(spec,containers,gen['drill_storage_budget'],
+                    runner_staging_bytes=migrated['database']['size'],
+                    filestore_existing_bytes=populated_filestore_bytes(data_backing/'filestore'/database),
+                    data_staging_bytes=remaining_migrated_staging(data_backing,gen['source_binding_sha256'][:32],migrated),
+                    probe_clones=False):
+                raise RuntimeError('Testing storage capacity is insufficient before migrated delivery')
         capture=spec.get('native_capture')
         artifacts={}
         if capture is not None and present=='0':
@@ -1102,14 +1145,21 @@ def restore_main():
         capture = spec.get('native_capture')
         if capture is None:
             raise RuntimeError('Native copy lacks its original capture receipt')
-        files = json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
-        staged_bytes = sum(item['size'] for item in files['chunks'])
-        assembly_bytes = sum(capture[part]['size'] for part in ('database', 'filestore'))
+        if capture.get('source_observation',{}).get('kind') != 'migrated':
+            files = json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
+            staged_bytes = sum(item['size'] for item in files['chunks'])
+            assembly_bytes = sum(capture[part]['size'] for part in ('database','filestore'))
     data_backing = Path(json.loads(docker("volume", "inspect", namespace + "-data"))[0]["Mountpoint"]).resolve(strict=True)
     restore_staging = restore_staging_path(data_backing)
     discard_interrupted_restore_staging(restore_staging)
     clones = {}
-    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes, clone_decisions=clones):
+    migrated_staging = {}
+    if not resume and gen.get('migrated_source') is not None:
+        migrated_staging = {
+            'runner_staging_bytes': gen['migrated_source']['database']['size'],
+            'filestore_existing_bytes': populated_filestore_bytes(data_backing / 'filestore' / database),
+        }
+    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes, clone_decisions=clones, **migrated_staging):
         raise RuntimeError('Testing storage capacity is insufficient')
     docker("exec", "-u", "root", runner, "rm", "-f", spec["web_gate_path"])
     docker("stop", web)
@@ -1124,7 +1174,7 @@ def restore_main():
             capture=spec.get('native_capture')
             if capture is None or capture['generation_binding_sha256']!=spec['copy_binding_sha256'] or capture['source_binding_sha256']!=gen['source_binding_sha256']:
                 raise RuntimeError('Native copy lacks its original capture receipt')
-            docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'prepare','database_name':database,'dump_path':dump_path}).encode()).decode(),stdin=spec['native_files_program'].encode())
+            docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'prepare','database_name':database,'dump_path':dump_path,'reserve_bytes':(gen.get('drill_storage_budget') or {}).get('reserve_bytes',0)}).encode()).decode(),stdin=spec['native_files_program'].encode())
         elif not resume:
             source = spec["source"]
             for key in ("ODOO_UPSTREAM_HOST", "ODOO_UPSTREAM_USER", "ODOO_UPSTREAM_DB_USER", "ODOO_UPSTREAM_DB_NAME"):
@@ -1198,6 +1248,8 @@ def restore_main():
         readback = docker("exec", "-i", runner, "python3", "-", database, spec["readback_spec"], stdin=spec["readback_program"].encode()).decode()
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
+        if spec.get('native_capture') is not None:
+            docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':spec['native_capture'],'mode':'cleanup'}).encode()).decode(),stdin=spec['native_files_program'].encode())
         if gen.get('clean_snapshot_enabled'):
             snapshot = capture_clean_snapshot(spec, containers, clones.get('snapshot'))
             print('clean_testing_snapshot_completed=true')
@@ -1211,8 +1263,6 @@ def restore_main():
         docker("exec", runner, "python3", "-c",
             "import hashlib,os;from pathlib import Path;Path(" + repr(marker) + ").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+'\\n'+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
         docker("exec", "-u", "root", runner, "rm", "-f", dump_path)
-        if spec.get('native_capture') is not None:
-            docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':spec['native_capture'],'mode':'cleanup'}).encode()).decode(),stdin=spec['native_files_program'].encode())
         docker("start", web)
         # Disposal is reconciled by the service against fresh use/custody facts,
         # independently of the new copy's health and its long-running admission.
@@ -1264,7 +1314,9 @@ except TestingProviderDenied:
     sys.exit(1)
 except Exception as error:
     if len(sys.argv)>2:
-        frame = copy_readback_failure_frame(error, inspection_predicate) if inspection_only or isinstance(error, CopyReadbackRefused) else {'type':'failed'}
+        frame = copy_readback_failure_frame(error, inspection_predicate)
+        if not inspection_only and not isinstance(error, CopyReadbackRefused):
+            frame = {key:value for key,value in frame.items() if key in {'type',COPY_FAILURE_EVIDENCE_MARKER}}
         print(sys.argv[2]+json.dumps(frame),flush=True)
         sys.exit(1)
     if isinstance(error, CopyReadbackRefused):
@@ -1376,7 +1428,6 @@ def read_current_testing_generation(
                 "testing" if scope == "instance" else ""
             ):
                 values.update(runtime.env)
-    values.update(target.env)
     from control_plane.odoo_testing_resources import OdooTestingResources
 
     resources = OdooTestingResources(
@@ -1572,7 +1623,7 @@ def fresh_testing_authority_sha256(
     from control_plane.contracts.canonical_json import canonical_json_sha256
 
     profile = getattr(store, "read_product_profile_record")(generation.product)
-    if generation.source_mode == "container-export":
+    if generation.source_mode == "container-export" and generation.migrated_source is None:
         from control_plane.odoo_testing_native_source import (
             native_testing_source_authority,
             recorded_native_testing_capture,

@@ -1,4 +1,8 @@
 from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
+from control_plane.http_routes.runner_lanes import register_runner_lane_service_routes
+from control_plane.http_routes.runner_host_hygiene_configuration import (
+    register_runner_host_hygiene_configuration_routes,
+)
 from control_plane import odoo_business_hours_config
 from control_plane import browser_route_repair
 from control_plane.access_policy_review import github_account_login, github_account_for_login
@@ -125,6 +129,11 @@ from control_plane.generic_web_onboarding import (
     generic_web_onboarding_plan_sha256,
     validate_generic_web_onboarding_is_new_product,
 )
+from control_plane.odoo_onboarding import (
+    OdooOnboardingIntent,
+    build_odoo_onboarding_manifest,
+    odoo_onboarding_plan_sha256,
+)
 from control_plane.generic_web_preview_authz import (
     GenericWebPreviewAuthzPlanResult,
     GenericWebPreviewAuthzPlanRequest,
@@ -159,6 +168,10 @@ from control_plane import live_target_runtime as control_plane_live_target_runti
 from control_plane.http_routes.lane_service_restart import (
     ServiceRestartDependencies,
     register_service_restart_route,
+)
+from control_plane.http_routes.retained_volume_sweep import (
+    RetainedVolumeSweepDependencies,
+    register_retained_volume_sweep_route,
 )
 from control_plane.http_routes.odoo_walkthrough import (
     WalkthroughDependencies,
@@ -590,6 +603,7 @@ from control_plane.odoo_post_deploy_http import (
 from control_plane import odoo_addon_settings_override as control_plane_odoo_addon_settings
 from control_plane import integration_allowances as control_plane_integration_allowances
 from control_plane.odoo_preview_import_source import PreviewImportSourceError
+from control_plane.odoo_preview_qualification import PreviewQualificationMissing
 from control_plane import testing_lane_hold as control_plane_testing_lane_hold
 from control_plane.odoo_app_maintenance_http import (
     ODOO_APP_MAINTENANCE_ROUTE as _ODOO_APP_MAINTENANCE_ROUTE,
@@ -857,8 +871,7 @@ from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
     disposable_lane_configuration,
     require_disposable_lane,
-    require_lane_target_ownership,
-    resolve_disposable_preview,
+    require_disposable_preview_operation,
     resolve_disposable_observation_binding,
     disposable_lane_observation_sha256,
 )
@@ -910,6 +923,7 @@ from control_plane.storage.product_authority_bundle import (
     SecretRecordConflictError,
     ProductAuthorityBundle,
     ProductContextOwnershipError,
+    ServiceIdentityAuthorityError,
     ProductProfileConflictError,
     RuntimeEnvironmentConflictError,
 )
@@ -947,7 +961,12 @@ from control_plane.workflows.ingress_provider import (
     NpmplusIngressProvider,
     default_ingress_provider,
 )
+from control_plane.npmplus_wildcard_ingress import (
+    NpmplusWildcardIngressOperation,
+    preview_dns_secret_record,
+)
 from control_plane.workflows.npmplus_ingress import (
+    NpmplusExistingCertificateRequired,
     NpmplusIngressApplyRequest,
     NpmplusIngressApplyResult,
     NpmplusIngressClient,
@@ -982,6 +1001,7 @@ from control_plane.preview_pr_feedback_remediation import (
     observe_managed_preview_pr_feedback,
     resolve_remediation_token,
 )
+from control_plane.preview_retirement import verified_preview_retirement_digest
 from control_plane.workflows.launchplane_self_deploy import (
     LaunchplaneSelfDeployResult,
     execute_launchplane_self_deploy,
@@ -992,6 +1012,8 @@ from control_plane.http_routes.product_generic_web_transition import (
 )
 from control_plane.http_routes.product_display_name import register_product_display_name_routes
 from control_plane.http_routes.discussion_topics import register_discussion_topic_routes
+from control_plane.http_routes.request_attention import register_request_attention_routes
+from control_plane.request_attention_github import GitHubOpenRequestReader
 from control_plane.http_routes.product_testing_restore_policy import (
     register_testing_restore_policy_routes,
 )
@@ -1045,7 +1067,7 @@ def _run_merge_train_controller_with_github_tally(
     *, operation: str, **kwargs: Any
 ) -> MergeTrainControllerRunOnceResult:
     # Runs in the worker thread, so the tally sees this call's GitHub requests only.
-    with github_request_tally(operation):
+    with github_request_tally(operation, credential=kwargs.get("token")):
         return execute_merge_train_controller_run_once(**kwargs)
 
 
@@ -1290,7 +1312,6 @@ _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
 _EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE = "/v1/route-bindings/external/reconcile"
 _ROUTE_BINDING_RECONCILE_ROUTE = "/v1/route-bindings/reconcile"
 _ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE = "/v1/route-bindings/odoo-testing/controller/run-once"
-_ODOO_STABLE_ROUTE_BINDING_REFRESH_ROUTE = "/v1/route-bindings/odoo-stable/controller/run-once"
 _ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT = 25
 _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/apply"
@@ -1327,6 +1348,7 @@ _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES = frozenset(
 )
 _AUTHZ_NO_STORE_ROUTES = frozenset(
     {
+        "/v1/admin/credential-inventory",
         _AUTHZ_POLICY_OPERATION_ACTIVATION_DRY_RUN_ROUTE,
         _AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE,
         _AUTHZ_POLICY_RECOVERY_CANDIDATE_DRY_RUN_ROUTE,
@@ -1979,6 +2001,7 @@ class ProductOnboardingApplyEnvelope(BaseModel):
     reviewed_plan_sha256: str = ""
     manifest: ProductOnboardingManifest | None = None
     generic_web: GenericWebOnboardingIntent | None = None
+    odoo: OdooOnboardingIntent | None = None
     resolved_target_id: str = ""
     allocation_id: str = ""
 
@@ -1990,8 +2013,10 @@ class ProductOnboardingApplyEnvelope(BaseModel):
         self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
         self.resolved_target_id = self.resolved_target_id.strip()
         self.allocation_id = self.allocation_id.strip()
-        if (self.manifest is None) == (self.generic_web is None):
-            raise ValueError("Product onboarding requires exactly one of manifest or generic_web.")
+        if sum(intent is not None for intent in (self.manifest, self.generic_web, self.odoo)) != 1:
+            raise ValueError(
+                "Product onboarding requires exactly one of manifest, generic_web or odoo."
+            )
         if self.manifest is not None:
             if self.mode != "apply":
                 raise ValueError("Legacy product onboarding manifests support apply mode only.")
@@ -2000,6 +2025,8 @@ class ProductOnboardingApplyEnvelope(BaseModel):
                     "Legacy product onboarding manifests reject generic-web plan fields."
                 )
             return self
+        if self.odoo is not None and (self.resolved_target_id or self.allocation_id):
+            raise ValueError("Odoo onboarding records precede their testing target.")
         if self.mode == "dry_run":
             if self.reviewed_plan_sha256 or self.resolved_target_id or self.allocation_id:
                 raise ValueError(
@@ -2007,8 +2034,8 @@ class ProductOnboardingApplyEnvelope(BaseModel):
                 )
             return self
         if re.fullmatch(r"[0-9a-f]{64}", self.reviewed_plan_sha256) is None:
-            raise ValueError("Generic-web onboarding apply requires reviewed_plan_sha256.")
-        if not self.resolved_target_id:
+            raise ValueError("Native onboarding apply requires reviewed_plan_sha256.")
+        if self.generic_web is not None and not self.resolved_target_id:
             raise ValueError("Generic-web onboarding apply requires resolved_target_id.")
         return self
 
@@ -2708,33 +2735,6 @@ class OdooTestingRouteBindingRefreshEnvelope(BaseModel):
             )
         if self.mode == "dry-run" and self.confirmation:
             raise ValueError("Odoo testing route binding refresh dry-run rejects confirmation")
-        return self
-
-
-class OdooStableRouteBindingRefreshEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    mode: Literal["dry-run", "apply"] = "dry-run"
-    reason: str = ""
-    confirmation: str = ""
-
-    @model_validator(mode="after")
-    def _validate_envelope(self) -> "OdooStableRouteBindingRefreshEnvelope":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported Odoo stable route binding refresh schema version")
-        self.reason = self.reason.strip()
-        self.confirmation = self.confirmation.strip()
-        if not self.reason:
-            raise ValueError("Odoo stable route binding refresh requires a reason")
-        if self.mode == "apply" and (
-            self.confirmation != "APPLY ODOO STABLE ROUTE BINDING REFRESH"
-        ):
-            raise ValueError(
-                "Odoo stable route binding refresh apply requires exact confirmation text"
-            )
-        if self.mode == "dry-run" and self.confirmation:
-            raise ValueError("Odoo stable route binding refresh dry-run rejects confirmation")
         return self
 
 
@@ -4173,7 +4173,7 @@ def create_launchplane_fastapi_app(
     engineering_review_target_resolver: EngineeringReviewTargetResolver | None = None,
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
     product_review_notes_reader: (
-        Callable[[LaunchplaneProductProfileRecord, int, str], PullRequestNotes] | None
+        Callable[[LaunchplaneProductProfileRecord, int, str, bool], PullRequestNotes] | None
     ) = None,
     health_monitor_scheduler: HealthMonitorScheduler | None = None,
     testing_drill_scheduler: OdooTestingDrillScheduler | None = None,
@@ -6717,6 +6717,13 @@ def create_launchplane_fastapi_app(
                 code="odoo_preview_source_" + error.code,
                 message=str(error),
             ) from error
+        except OdooPreviewPlanProvenanceError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+            ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
                 status_code=400,
@@ -6951,60 +6958,24 @@ def create_launchplane_fastapi_app(
                         issued_plan=issued_plan,
                         original_reservation_id=service_apply_request.unrecorded_original_reservation_id,
                         operation_record_id=operation_record_id,
+                        control_plane_root=resolved_control_plane_root,
                     )
                     if preview_binding and binding != preview_binding:
                         raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
                     preview_binding = binding
                     return
-                preview = resolve_disposable_preview(
-                    lane_store,
-                    current_profile,
-                    issued_plan.context,
-                    issued_plan.preview_slug,
-                    allow_destroyed=issued_plan.operation == "refresh",
+                from control_plane.preview_source import require_source_free_preview_history
+
+                require_source_free_preview_history(
+                    record_store,
+                    profile=current_profile,
+                    issued_plan=issued_plan,
+                    operation_record_id=operation_record_id,
                 )
-                compose_id = issued_plan.dry_run_plan.compose_ref
-                creating_recipient = (
-                    issued_plan.operation == "refresh"
-                    and preview.state == "destroyed"
-                    and compose_id.startswith("${created.composeId:")
-                )
-                if not creating_recipient and (
-                    not compose_id or compose_id.startswith("${created.")
-                ):
-                    raise DisposableLaneSafetyUnknown(
-                        "The existing preview target is not resolved."
-                    )
-                try:
-                    target_id = lane_store.read_dokploy_target_id_record(
-                        context_name=issued_plan.context, instance_name=issued_plan.preview_slug
-                    )
-                except FileNotFoundError:
-                    target_id = None
-                if (creating_recipient and target_id is not None) or (
-                    target_id is not None and compose_id != target_id.target_id
-                ):
-                    raise DisposableLaneSafetyUnknown(
-                        "The discovered preview target changed or aliases another lane."
-                    )
-                require_lane_target_ownership(
-                    (
-                        *lane_store.list_dokploy_target_id_records(),
-                        *cast(
-                            PostgresRecordStore, record_store
-                        ).list_physical_provider_target_records(),
-                    ),
-                    context=issued_plan.context,
-                    instance=issued_plan.preview_slug,
-                    target_id="" if creating_recipient else compose_id,
-                )
-                binding = require_disposable_lane(
-                    lane_store,
-                    product=product_profile.product,
-                    context=issued_plan.context,
-                    instance=issued_plan.preview_slug,
-                    preview=preview,
-                    preview_operation=issued_plan.operation,
+                binding = require_disposable_preview_operation(
+                    cast(PostgresRecordStore, record_store),
+                    profile=current_profile,
+                    issued_plan=issued_plan,
                 )
                 if preview_binding and binding != preview_binding:
                     raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
@@ -7437,6 +7408,119 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
+        from control_plane.contracts.preview_fixture import PreviewFixtureRequest
+
+        if isinstance(maintenance_request.maintenance, PreviewFixtureRequest):
+            from control_plane.preview_fixture import PreviewFixtureAdapter
+            from control_plane.contracts.preview_execution import preview_execution_lock_name
+            from control_plane.http_routes.support import run_in_worker_thread
+
+            fixture = maintenance_request.maintenance
+            fixture_allowed = director_agent_identity(
+                identity
+            ) or resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="odoo_preview_apply.execute",
+                product=maintenance_request.product,
+                context=fixture.context,
+                target=AuthorizationTarget(scope="preview"),
+            )
+            if not fixture_allowed:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="The caller cannot apply a fixture to this product preview.",
+                )
+            fixture_store = require_provider_operation_store(
+                record_store=record_store, trace_id=trace_id
+            )
+            key = idempotency_key.strip()
+            if fixture.mode == "apply" and (not key or len(key) > 200):
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="idempotency_key_required",
+                    message="Fixture apply requires a bounded Idempotency-Key.",
+                )
+            adapter = PreviewFixtureAdapter(
+                fixture_store,
+                resolved_control_plane_root,
+                maintenance_request.product,
+                fixture,
+                trace_id,
+            )
+
+            def execute_fixture() -> AcceptedEvidenceResponse:
+                with fixture_store.testing_replacement_execution_lock(
+                    preview_execution_lock_name(adapter.target_key())
+                ) as check:
+                    if check is None:
+                        raise _launchplane_http_error(
+                            status_code=409,
+                            trace_id=trace_id,
+                            code="preview_busy",
+                            message="Another operation holds this preview.",
+                        )
+                    check()
+                    if fixture.mode != "apply":
+                        if fixture.mode == "dry-run":
+                            receipt, digest = adapter.plan()
+                        else:
+                            receipt, digest = adapter.invoke("readback"), ""
+                        observed_response = accepted_evidence_response(
+                            trace_id=trace_id,
+                            records={"preview_id": fixture.preview_id},
+                            result={
+                                "receipt": receipt.model_dump(mode="json"),
+                                "plan_sha256": digest,
+                            },
+                        )
+                        return observed_response
+                    existing = fixture_store.read_idempotency_record(
+                        scope=idempotency_scope(identity),
+                        route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                        idempotency_key=key,
+                    )
+                    retained_intent = (
+                        fixture_store.read_original_mutation_intent(existing) if existing else None
+                    )
+                    result = run_durable_provider_operation(
+                        store=fixture_store,
+                        scope=idempotency_scope(identity),
+                        route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                        idempotency_key=key,
+                        request_fingerprint=idempotency_request_fingerprint(
+                            route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                            payload=raw_payload,
+                        ),
+                        lease_owner=trace_id,
+                        response_trace_id=trace_id,
+                        adapter=adapter,
+                        original_intent=adapter.original_intent(retained_intent),
+                    )
+                    return provider_mutation_http_response(
+                        result=result,
+                        trace_id=trace_id,
+                        route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                        in_progress_message="The original fixture operation is running.",
+                        reconcile_message="Read back the original fixture operation before retrying.",
+                    )
+
+            try:
+                return await run_in_worker_thread(execute_fixture)
+            except LaunchplaneHTTPException as error:
+                if adapter.failure_reason is not None:
+                    error.structured_detail["reason"] = adapter.failure_reason
+                raise
+            except (ValueError, FileNotFoundError, click.ClickException) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="preview_fixture_unavailable",
+                    reason=adapter.failure_reason,
+                    message="The fixture or its preview evidence is unavailable; inspect the original operation.",
+                ) from error
         try:
             product_profile = resolve_odoo_app_maintenance_product_route(
                 record_store=record_store,
@@ -7537,6 +7621,29 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    def director_testing_override_intent_allowed(
+        *,
+        identity: LaunchplaneIdentity,
+        profile: LaunchplaneProductProfileRecord,
+        context: str,
+        instance: str,
+        record_store: object,
+    ) -> bool:
+        if (
+            not director_agent_identity(identity)
+            or not profile.is_active
+            or instance != "testing"
+            or profile.production_use == "live"
+        ):
+            return False
+        try:
+            owners = product_context_owners(record_store, config_scopes=True)
+        except (TypeError, FileNotFoundError, ValueError):
+            return False
+        return is_exclusive_product_lane_context(
+            context=context, product=profile.product, owners=owners
+        )
+
     async def write_odoo_config_parameter_override(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
@@ -7597,13 +7704,23 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes.native_driver_route_authorization_allows(
-            endpoint=write_odoo_config_parameter_override,
-            authorization_allows=resolved_authz_policy_runtime.allows,
+        director_testing_intent = director_testing_override_intent_allowed(
             identity=identity,
-            product=authorization_product,
+            profile=product_profile,
             context=override_request.override.context,
-            instances=(override_request.override.instance,),
+            instance=override_request.override.instance,
+            record_store=record_store,
+        )
+        if (
+            not director_testing_intent
+            and not native_routes.native_driver_route_authorization_allows(
+                endpoint=write_odoo_config_parameter_override,
+                authorization_allows=resolved_authz_policy_runtime.allows,
+                identity=identity,
+                product=authorization_product,
+                context=override_request.override.context,
+                instances=(override_request.override.instance,),
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -7635,7 +7752,15 @@ def create_launchplane_fastapi_app(
             driver_result = write_odoo_config_parameter_override_result(
                 record_store=cast(OdooInstanceOverrideStore, record_store),
                 request=override_request,
+                expected_product_profile=product_profile if director_testing_intent else None,
             )
+        except ProductContextOwnershipError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The context must belong to the named product only.",
+            ) from error
         except OdooInstanceOverrideConflictError as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -7676,9 +7801,10 @@ def create_launchplane_fastapi_app(
 
     async def write_odoo_website_bootstrap_override(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_bearer_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
     ) -> AcceptedEvidenceResponse | JSONResponse:
         trace_id = next_trace_id()
         try:
@@ -7707,6 +7833,9 @@ def create_launchplane_fastapi_app(
                 message="Request payload failed validation.",
             ) from error
         preview_bootstrap = bool(override_request.override.preview_original_reservation_id)
+        dry_run = override_request.override.mode == "dry-run"
+        if preview_bootstrap or not dry_run:
+            identity = read_write_identity(authorization=authorization)
         if preview_bootstrap and not director_agent_identity(identity):
             raise _launchplane_http_error(
                 status_code=403,
@@ -7751,26 +7880,52 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not preview_bootstrap and not native_routes.native_driver_route_authorization_allows(
-            endpoint=write_odoo_website_bootstrap_override,
-            authorization_allows=resolved_authz_policy_runtime.allows,
-            identity=identity,
-            product=authorization_product,
-            context=override_request.override.context,
-            instances=(override_request.override.instance,),
-        ):
+        director_testing_intent = (
+            not preview_bootstrap
+            and not dry_run
+            and director_testing_override_intent_allowed(
+                identity=identity,
+                profile=product_profile,
+                context=override_request.override.context,
+                instance=override_request.override.instance,
+                record_store=record_store,
+            )
+        )
+        if not preview_bootstrap and dry_run:
+            authorized = resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="operations.read",
+                product=_LAUNCHPLANE_SERVICE_CONTEXT,
+                context=override_request.override.context,
+                target=AuthorizationTarget(
+                    scope="instance", instances=(override_request.override.instance,)
+                ),
+            )
+        else:
+            authorized = (
+                preview_bootstrap
+                or director_testing_intent
+                or native_routes.native_driver_route_authorization_allows(
+                    endpoint=write_odoo_website_bootstrap_override,
+                    authorization_allows=resolved_authz_policy_runtime.allows,
+                    identity=identity,
+                    product=authorization_product,
+                    context=override_request.override.context,
+                    instances=(override_request.override.instance,),
+                )
+            )
+        if not authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
                 message=(
-                    "Workflow cannot write Odoo website-bootstrap overrides for the requested"
+                    "Workflow cannot prepare Odoo website-bootstrap overrides for the requested"
                     " product/context."
                 ),
             )
 
-        preview_dry_run = preview_bootstrap and override_request.override.mode == "dry-run"
-        if preview_bootstrap and not preview_dry_run:
+        if preview_bootstrap and not dry_run:
             if not idempotency_key.strip():
                 raise _launchplane_http_error(
                     status_code=400,
@@ -7780,7 +7935,7 @@ def create_launchplane_fastapi_app(
                 )
 
         normalized_idempotency_key = payload_fingerprint = ""
-        if not preview_dry_run:
+        if not dry_run:
             (
                 normalized_idempotency_key,
                 payload_fingerprint,
@@ -7801,7 +7956,15 @@ def create_launchplane_fastapi_app(
             driver_result = write_odoo_website_bootstrap_override_result(
                 record_store=cast(OdooInstanceOverrideStore, record_store),
                 request=override_request,
+                expected_product_profile=product_profile if director_testing_intent else None,
             )
+        except ProductContextOwnershipError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The context must belong to the named product only.",
+            ) from error
         except OdooInstanceOverrideConflictError as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -7829,7 +7992,7 @@ def create_launchplane_fastapi_app(
             records={},
             result=driver_result,
         )
-        if preview_dry_run:
+        if dry_run:
             return response
         store_apply_idempotency(
             record_store=record_store,
@@ -10545,11 +10708,11 @@ def create_launchplane_fastapi_app(
 
         try:
             if plan_request.replacement.strategy == "replace-and-cutover":
-                from control_plane.testing_rebuild_preflight import inspect_testing_rebuild
+                from control_plane.testing_rebuild_preflight import inspect_current_testing_rebuild
 
                 if not isinstance(record_store, PostgresRecordStore):
                     raise ValueError("Native testing preflight requires database storage.")
-                native_preflight = inspect_testing_rebuild(
+                native_preflight, _ = inspect_current_testing_rebuild(
                     root=resolved_control_plane_root,
                     store=record_store,
                     request=plan_request.replacement,
@@ -10724,6 +10887,19 @@ def create_launchplane_fastapi_app(
                 code="authorization_provenance_unavailable",
                 message="Durable operation authorization provenance is unavailable.",
             ) from error
+
+        def native_testing_preflight() -> None:
+            from control_plane.testing_rebuild_preflight import admit_current_testing_rebuild
+
+            if not isinstance(record_store, PostgresRecordStore):
+                raise ValueError("Native testing preflight requires database storage.")
+            admit_current_testing_rebuild(
+                root=resolved_control_plane_root,
+                store=record_store,
+                request=apply_request.replacement,
+                actor=launchplane_identity_actor(identity),
+            )
+
         try:
             records, driver_result = enqueue_odoo_target_replacement_apply_operation(
                 record_store=record_store,
@@ -10734,7 +10910,15 @@ def create_launchplane_fastapi_app(
                 request_fingerprint=build_request_fingerprint(raw_payload),
                 created_at=created_at,
                 authorization=operation_authorization,
+                native_preflight=native_testing_preflight if director_rebuild else None,
             )
+        except NativeSourceAuthorizationDenied as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The provider refused the native testing preflight read.",
+            ) from error
         except OdooTargetReplacementApplyCurrentArtifactChangedError as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -12656,7 +12840,7 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message=(
                     "Director agents may conditionally change only scan activation, preview "
-                    "snapshot policy, testing storage requirements or health fallback corrections. "
+                    "snapshot policy, testing state or storage requirements, or health fallback corrections. "
                     "Use product-config for preview settings."
                 ),
             )
@@ -13550,7 +13734,8 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not isinstance(
+        director_client_metadata = director_agent_identity(identity)
+        if not director_client_metadata and not isinstance(
             identity,
             GitHubHumanIdentity
             | LocalOperatorIdentity
@@ -13580,12 +13765,14 @@ def create_launchplane_fastapi_app(
                 message="Product owner request failed validation.",
             ) from error
         normalized_product = product.strip()
-        if not resolved_authz_policy_runtime.allows(
+        policy_profile_write = resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_profile.write",
             product=normalized_product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ) and not (
+        )
+        director_client_metadata = director_client_metadata and not policy_profile_write
+        if not (policy_profile_write or director_client_metadata) and not (
             owner_request.mode != "apply"
             and resolved_authz_policy_runtime.allows(
                 identity=identity,
@@ -13616,6 +13803,24 @@ def create_launchplane_fastapi_app(
                 message="Product owner changes require Launchplane database storage.",
             )
         database_store = record_store
+        profile: LaunchplaneProductProfileRecord | None = None
+        if director_client_metadata and owner_request.mode == "apply":
+            try:
+                profile = database_store.read_product_profile_record(normalized_product)
+            except FileNotFoundError as error:
+                raise _launchplane_http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="not_found",
+                    message="Product profile was not found.",
+                ) from error
+            if profile.lifecycle_state != "active" or profile.production_use != "prelaunch":
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Director agents can record a Client only for a known non-live product.",
+                )
         payload_fingerprint = ""
         if owner_request.mode == "apply":
             payload_fingerprint = idempotency_request_fingerprint(
@@ -13668,7 +13873,8 @@ def create_launchplane_fastapi_app(
                     f"Unsupported product owner mutation preflight status: {preflight.status}"
                 )
         try:
-            profile = database_store.read_product_profile_record(normalized_product)
+            if profile is None:
+                profile = database_store.read_product_profile_record(normalized_product)
         except FileNotFoundError as error:
             raise _launchplane_http_error(
                 status_code=404,
@@ -14569,6 +14775,13 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message=str(error),
             ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_product_profile",
+                message="Updated product profile failed validation.",
+            ) from error
         if (
             prelaunch_rebuild_request.mode == "apply"
             and prelaunch_rebuild_request.reviewed_plan_sha256 != plan.plan_sha256
@@ -14589,19 +14802,11 @@ def create_launchplane_fastapi_app(
             replacement_profile = profile
             profile_updated_at_after = profile.updated_at
             if plan.changed:
-                try:
-                    replacement_profile = control_plane_product_prelaunch_rebuild_policy.updated_product_prelaunch_rebuild_policy_profile(
-                        profile=profile,
-                        request=prelaunch_rebuild_request,
-                        updated_at=utc_now_timestamp(),
-                    )
-                except ValueError as error:
-                    raise _launchplane_http_error(
-                        status_code=400,
-                        trace_id=trace_id,
-                        code="invalid_product_profile",
-                        message="Updated product profile failed validation.",
-                    ) from error
+                replacement_profile = control_plane_product_prelaunch_rebuild_policy.updated_product_prelaunch_rebuild_policy_profile(
+                    profile=profile,
+                    request=prelaunch_rebuild_request,
+                    updated_at=utc_now_timestamp(),
+                )
                 profile_updated_at_after = replacement_profile.updated_at
             result_plan = plan.model_copy(
                 update={
@@ -14856,8 +15061,8 @@ def create_launchplane_fastapi_app(
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,
-                code="invalid_request",
-                message="Product preview TLS request does not match the stored profile.",
+                code="invalid_product_profile",
+                message="Updated product profile failed validation.",
             ) from error
         if (
             preview_tls_request.mode == "apply"
@@ -14876,21 +15081,13 @@ def create_launchplane_fastapi_app(
             replacement_profile = profile
             profile_updated_at_after = profile.updated_at
             if plan.changed:
-                try:
-                    replacement_profile = (
-                        control_plane_product_preview_tls.updated_product_preview_tls_profile(
-                            profile=profile,
-                            request=preview_tls_request,
-                            updated_at=utc_now_timestamp(),
-                        )
+                replacement_profile = (
+                    control_plane_product_preview_tls.updated_product_preview_tls_profile(
+                        profile=profile,
+                        request=preview_tls_request,
+                        updated_at=utc_now_timestamp(),
                     )
-                except ValueError as error:
-                    raise _launchplane_http_error(
-                        status_code=400,
-                        trace_id=trace_id,
-                        code="invalid_product_profile",
-                        message="Updated product profile failed validation.",
-                    ) from error
+                )
                 profile_updated_at_after = replacement_profile.updated_at
             result_plan = plan.model_copy(
                 update={
@@ -15140,6 +15337,13 @@ def create_launchplane_fastapi_app(
                 code=error.code,
                 message=str(error),
             ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_product_profile",
+                message="Updated product profile failed validation.",
+            ) from error
         records = {
             "product_profile": identity_request.product,
             "repository_inventory": plan.inventory_record_id,
@@ -15170,19 +15374,11 @@ def create_launchplane_fastapi_app(
         replacement_profile = profile
         profile_updated_at_after = profile.updated_at
         if plan.changed:
-            try:
-                replacement_profile = control_plane_product_repository_identity.updated_product_repository_identity_profile(
-                    profile=profile,
-                    plan=plan,
-                    updated_at=utc_now_timestamp(),
-                )
-            except ValueError as error:
-                raise _launchplane_http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="invalid_product_profile",
-                    message="Updated product profile failed validation.",
-                ) from error
+            replacement_profile = control_plane_product_repository_identity.updated_product_repository_identity_profile(
+                profile=profile,
+                plan=plan,
+                updated_at=utc_now_timestamp(),
+            )
             profile_updated_at_after = replacement_profile.updated_at
         applied_plan = plan.model_copy(
             update={"applied": True, "profile_updated_at_after": profile_updated_at_after}
@@ -16231,6 +16427,11 @@ def create_launchplane_fastapi_app(
         operator_identity = isinstance(
             identity, GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity
         )
+        service_dns_input = (
+            isinstance(identity, LocalOperatorIdentity)
+            and director_agent_identity(identity)
+            and product_config_request.is_preview_dns_service_input()
+        )
         action = (
             "product_config.apply"
             if product_config_request.mode == "apply"
@@ -16300,8 +16501,10 @@ def create_launchplane_fastapi_app(
                         code="authorization_denied",
                         message=f"Caller cannot perform {required_action} for calendar configuration.",
                     )
-        if isinstance(identity, LocalOperatorIdentity) and (
-            product_config_request.mode == "apply" or not director_agent_identity(identity)
+        if (
+            not service_dns_input
+            and isinstance(identity, LocalOperatorIdentity)
+            and (product_config_request.mode == "apply" or not director_agent_identity(identity))
         ):
             scope_refusal = _local_operator_product_config_scope_refusal(
                 record_store=record_store,
@@ -16409,13 +16612,17 @@ def create_launchplane_fastapi_app(
             )
 
         try:
-            config_profile = control_plane_product_config_service.resolve_product_config_profile(
-                database_store,
-                product=product_config_request.product,
-                context=product_config_request.context,
-                instance=product_config_request.instance,
-                context_wide=context_wide_config,
-                diagnostic_preview=is_diagnostic_preview_config(request_payload),
+            config_profile = (
+                None
+                if service_dns_input
+                else control_plane_product_config_service.resolve_product_config_profile(
+                    database_store,
+                    product=product_config_request.product,
+                    context=product_config_request.context,
+                    instance=product_config_request.instance,
+                    context_wide=context_wide_config,
+                    diagnostic_preview=is_diagnostic_preview_config(request_payload),
+                )
             )
         except control_plane_product_config.ProductConfigError as error:
             profile_error = control_plane_product_config_service.product_config_service_error(error)
@@ -16457,6 +16664,7 @@ def create_launchplane_fastapi_app(
         if (
             isinstance(identity, LocalOperatorIdentity)
             and (product_config_request.mode == "apply" or not director_agent_identity(identity))
+            and config_profile is not None
             and config_profile.production_use == "live"
             # The profile's live status describes production, not its owned
             # testing lane. Target ownership and instance scope are checked above.
@@ -16502,6 +16710,25 @@ def create_launchplane_fastapi_app(
                 code="matching_dry_run_required",
                 message="Product-config apply requires a prior matching dry-run.",
             )
+        if service_dns_input:
+            from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION
+
+            if (
+                database_store.find_secret_record(
+                    scope="context",
+                    integration=PREVIEW_DNS_INTEGRATION,
+                    name=PREVIEW_DNS_BINDING,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    instance="",
+                )
+                is not None
+            ):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="service_secret_already_configured",
+                    message="The DNS credential is already configured. Use the signed-in form to rotate it.",
+                )
 
         def secret_copy_source_readable(*, context: str, instance: str) -> bool:
             # Secret-value copies retain their existing explicit source grants.
@@ -16542,6 +16769,7 @@ def create_launchplane_fastapi_app(
         calendar_replacement = None
         try:
             if product_config_request.odoo_business_hours is not None:
+                assert config_profile is not None
                 try:
                     calendar_plan, calendar_replacement = await asyncio.to_thread(
                         odoo_business_hours_config.plan_business_hours_config,
@@ -16709,15 +16937,16 @@ def create_launchplane_fastapi_app(
             authority_bundle = authority_bundle.model_copy(
                 update={"expected_product_profiles": (expected_product_profile,)}
             )
-        authority_bundle = authority_bundle.model_copy(
-            update={
-                "required_product_config_target": (
-                    product_config_request.product,
-                    product_config_request.context,
-                    "" if context_wide_config else product_config_request.instance,
-                )
-            }
-        )
+        if not service_dns_input:
+            authority_bundle = authority_bundle.model_copy(
+                update={
+                    "required_product_config_target": (
+                        product_config_request.product,
+                        product_config_request.context,
+                        "" if context_wide_config else product_config_request.instance,
+                    )
+                }
+            )
         driver_result: dict[str, object] = {
             **planned_driver_result,
             "reason": product_config_request.reason,
@@ -16787,7 +17016,11 @@ def create_launchplane_fastapi_app(
                 response=product_config_response,
             )
         else:
-            if isinstance(identity, LocalOperatorIdentity) and product_config_request.context:
+            if (
+                not service_dns_input
+                and isinstance(identity, LocalOperatorIdentity)
+                and product_config_request.context
+            ):
                 # Re-checked under the profile-write lock when the bundle commits.
                 authority_bundle = authority_bundle.model_copy(
                     update={
@@ -16807,8 +17040,14 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     response=product_config_response,
                 )
-                if public_hosts_plan is None:
-                    database_store.write_product_authority_bundle(completed_bundle)
+                if service_dns_input:
+                    database_store.write_preview_dns_secret_bundle(
+                        completed_bundle, identity=identity
+                    )
+                elif public_hosts_plan is None:
+                    database_store.write_product_authority_bundle(
+                        completed_bundle, identity=identity
+                    )
                 else:
                     await asyncio.to_thread(
                         database_store.write_product_public_hosts_bundle,
@@ -16833,6 +17072,13 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     code="public_hosts_target_changed",
                     message="The public-host target changed. Review a fresh dry-run.",
+                ) from error
+            except ServiceIdentityAuthorityError as error:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message=str(error),
                 ) from error
             except ProductContextOwnershipError as error:
                 raise _launchplane_http_error(
@@ -16912,12 +17158,17 @@ def create_launchplane_fastapi_app(
                 message="The secret copy source changed. Read metadata and review a fresh dry-run.",
             ) from error
         except SecretRecordConflictError as error:
+            dns_input = product_config_request.is_preview_dns_service_input()
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
-                code="provider_secret_already_recorded",
+                code="service_secret_already_configured"
+                if dns_input
+                else "provider_secret_already_recorded",
                 message=(
-                    "A secret named for provider adoption was recorded before commit. "
+                    "The DNS credential was configured before commit. Use the signed-in form to rotate it."
+                    if dns_input
+                    else "A secret named for provider adoption was recorded before commit. "
                     "Review a fresh dry-run."
                 ),
             ) from error
@@ -17705,14 +17956,13 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
+        native_intent = onboarding_request.generic_web or onboarding_request.odoo
         onboarding_action = (
             "generic_web_onboarding.plan"
-            if onboarding_request.generic_web is not None and onboarding_request.mode == "dry_run"
+            if native_intent is not None and onboarding_request.mode == "dry_run"
             else "product_onboarding.apply"
         )
-        director_onboarding = (
-            onboarding_request.generic_web is not None and director_agent_identity(identity)
-        )
+        director_onboarding = native_intent is not None and director_agent_identity(identity)
         if not director_onboarding and not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=onboarding_action,
@@ -17725,7 +17975,7 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Workflow cannot plan or apply Launchplane product onboarding.",
             )
-        native_onboarding = onboarding_request.generic_web is not None and (
+        native_onboarding = native_intent is not None and (
             director_onboarding or isinstance(identity, GitHubHumanIdentity)
         )
         if native_onboarding and onboarding_request.mode == "apply" and not idempotency_key.strip():
@@ -17768,9 +18018,77 @@ def create_launchplane_fastapi_app(
             )
 
         onboarding_manifest = onboarding_request.manifest
-        generic_web_plan_sha256 = ""
+        native_plan_sha256 = ""
         adopted_onboarding_target = None
         adopted_onboarding_target_id = None
+        if onboarding_request.odoo is not None:
+            odoo_intent = onboarding_request.odoo
+            try:
+                existing_odoo_profile = database_store.read_product_profile_record(
+                    odoo_intent.product
+                )
+            except (FileNotFoundError, KeyError):
+                existing_odoo_profile = None
+            if existing_odoo_profile is not None:
+                replay_response = replay_committed_onboarding()
+                if replay_response is not None:
+                    return replay_response
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_product_onboarding_manifest",
+                    message=(
+                        "Odoo onboarding only creates new products; existing product "
+                        f"{odoo_intent.product} must use a bounded product-profile path."
+                    ),
+                )
+            native_plan_sha256 = odoo_onboarding_plan_sha256(odoo_intent)
+            try:
+                onboarding_manifest = build_odoo_onboarding_manifest(odoo_intent)
+                from control_plane.onboarding_target import (
+                    require_unallocated_onboarding_contexts,
+                )
+
+                require_unallocated_onboarding_contexts(database_store, odoo_intent)
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_product_onboarding_manifest",
+                    message=str(error),
+                ) from error
+            if onboarding_request.mode == "dry_run":
+                return accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={
+                        "provider_target_count": "0",
+                        "runtime_environment_record_count": str(
+                            len(onboarding_manifest.runtime_environments)
+                        ),
+                        "secret_binding_count": "0",
+                    },
+                    result={
+                        "mode": "dry_run",
+                        "product": odoo_intent.product,
+                        "driver_id": "odoo",
+                        "repository": odoo_intent.repository,
+                        "repository_id": odoo_intent.repository_id,
+                        "repository_owner_id": odoo_intent.repository_owner_id,
+                        "default_branch": odoo_intent.default_branch,
+                        "testing_context": odoo_intent.context,
+                        "preview_context": odoo_intent.context,
+                        "preview_base_url": odoo_intent.preview_base_url,
+                        "target_operation": "create-compose",
+                        "plan_sha256": native_plan_sha256,
+                    },
+                )
+            if onboarding_request.reviewed_plan_sha256 != native_plan_sha256:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_onboarding_plan_mismatch",
+                    message="Odoo onboarding inputs no longer match the reviewed dry-run.",
+                )
         if onboarding_request.generic_web is not None:
             try:
                 existing_profile = database_store.read_product_profile_record(
@@ -17793,9 +18111,7 @@ def create_launchplane_fastapi_app(
                     code="invalid_product_onboarding_manifest",
                     message=str(error),
                 ) from error
-            generic_web_plan_sha256 = generic_web_onboarding_plan_sha256(
-                onboarding_request.generic_web
-            )
+            native_plan_sha256 = generic_web_onboarding_plan_sha256(onboarding_request.generic_web)
             if onboarding_request.mode == "dry_run":
                 try:
                     planned_manifest = build_generic_web_onboarding_manifest(
@@ -17830,10 +18146,10 @@ def create_launchplane_fastapi_app(
                         "preview_context": onboarding_request.generic_web.preview_context,
                         "preview_base_url": onboarding_request.generic_web.preview_base_url,
                         "target_operation": "create-application",
-                        "plan_sha256": generic_web_plan_sha256,
+                        "plan_sha256": native_plan_sha256,
                     },
                 )
-            if onboarding_request.reviewed_plan_sha256 != generic_web_plan_sha256:
+            if onboarding_request.reviewed_plan_sha256 != native_plan_sha256:
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
@@ -17935,11 +18251,11 @@ def create_launchplane_fastapi_app(
                 onboarding_result
             )
         )
-        if generic_web_plan_sha256:
+        if native_plan_sha256:
             driver_result = {
                 **driver_result,
                 "mode": "apply",
-                "plan_sha256": generic_web_plan_sha256,
+                "plan_sha256": native_plan_sha256,
             }
         onboarding_response = accepted_evidence_response(
             trace_id=trace_id,
@@ -17965,12 +18281,19 @@ def create_launchplane_fastapi_app(
                 response=onboarding_response,
             )
             if native_onboarding:
-                assert onboarding_request.generic_web is not None
+                assert native_intent is not None
                 database_store.write_new_product_onboarding_bundle(
-                    committed_bundle, intent=onboarding_request.generic_web
+                    committed_bundle, intent=native_intent
                 )
             else:
                 database_store.write_product_authority_bundle(committed_bundle)
+        except ServiceIdentityAuthorityError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=str(error),
+            ) from error
         except (
             RuntimeEnvironmentConflictError,
             ProductProfileConflictError,
@@ -21559,6 +21882,7 @@ def create_launchplane_fastapi_app(
         request: NpmplusIngressApplyRequest,
         result: NpmplusIngressApplyResult,
         idempotency_key: str,
+        record_id: str = "",
     ) -> IngressRouteAuditRecord:
         provider_host_id = result.proxy_host.id if result.proxy_host is not None else None
         certificate_id = (
@@ -21569,7 +21893,8 @@ def create_launchplane_fastapi_app(
         tls_owner: IngressRouteTlsOwner = "none" if certificate_id == 0 else "provider"
         provider_certificate_ref = "" if certificate_id == 0 else str(certificate_id)
         record = IngressRouteAuditRecord(
-            record_id=build_ingress_route_audit_record_id(
+            record_id=record_id
+            or build_ingress_route_audit_record_id(
                 trace_id=trace_id,
                 product=product,
                 context=context,
@@ -21608,12 +21933,14 @@ def create_launchplane_fastapi_app(
         provider: str,
         request: NpmplusIngressApplyRequest,
         idempotency_key: str,
+        record_id: str = "",
     ) -> IngressRouteAuditRecord:
         certificate_id = request.route.certificate_id
         tls_owner: IngressRouteTlsOwner = "none" if certificate_id == 0 else "provider"
         provider_certificate_ref = "" if certificate_id == 0 else str(certificate_id)
         record = IngressRouteAuditRecord(
-            record_id=build_ingress_route_audit_record_id(
+            record_id=record_id
+            or build_ingress_route_audit_record_id(
                 trace_id=trace_id,
                 product=product,
                 context=context,
@@ -22170,6 +22497,27 @@ def create_launchplane_fastapi_app(
             ),
         )
 
+    def refresh_native_binding(
+        record_store: object,
+        current: EnvironmentRouteBindingRecord,
+        trace_id: str,
+    ) -> control_plane_route_binding_reconcile.RouteBindingReconcilePlan:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise TypeError("Native testing route refresh requires database-backed custody.")
+        try:
+            return plan_native_testing_route_refresh(
+                record_store,
+                root=resolved_control_plane_root,
+                current=current,
+            )
+        except NativeSourceAuthorizationDenied as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The managed testing route observation was denied.",
+            ) from error
+
     async def reconcile_route_binding(
         request: Request,
         binding_request: RouteBindingReconcileEnvelope,
@@ -22329,6 +22677,36 @@ def create_launchplane_fastapi_app(
                 and isinstance(identity, GitHubHumanIdentity),
             ),
         )
+        if (
+            binding_request.browser_review is None
+            and binding_request.external_ingress is None
+            and reconcile_plan.current_record is not None
+            and any(
+                finding.code
+                == control_plane_route_binding_reconcile.NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER
+                for finding in reconcile_plan.findings
+            )
+            and isinstance(record_store, PostgresRecordStore)
+        ):
+            if director_agent_identity(identity) and not resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="route_binding.read",
+                product=binding_request.product,
+                context=binding_request.context,
+                target=AuthorizationTarget(scope="instance", instances=(binding_request.instance,)),
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="The native testing route observation was denied.",
+                )
+            reconcile_plan = await run_in_threadpool(
+                refresh_native_binding,
+                record_store,
+                reconcile_plan.current_record,
+                trace_id,
+            )
 
         if binding_request.mode == "apply" and any(
             finding.code == "split_ingress_authority_change_requires_review"
@@ -22342,6 +22720,7 @@ def create_launchplane_fastapi_app(
             )
         if (
             director_evidence_refresh
+            and reconcile_plan.native_review_sources is None
             and reconcile_plan.status in {"ready", "unchanged"}
             and not control_plane_route_binding_reconcile.is_evidence_only_route_binding_refresh(
                 reconcile_plan
@@ -22446,6 +22825,7 @@ def create_launchplane_fastapi_app(
         if (
             binding_request.browser_review is not None
             or director_evidence_refresh
+            or reconcile_plan.native_review_sources is not None
             or reconcile_plan.record.external_ingress is not None
         ):
             assert isinstance(record_store, PostgresRecordStore)
@@ -22456,12 +22836,13 @@ def create_launchplane_fastapi_app(
                     mutation=mutation,
                     reviewed_sources=reconcile_plan.review_sources,
                     reviewed_product=binding_request.product,
+                    native_sources=reconcile_plan.native_review_sources,
                 )
             except (
                 control_plane_route_binding_reconcile.RouteBindingSourceChanged,
                 ProductContextOwnershipError,
             ) as error:
-                if director_evidence_refresh:
+                if director_evidence_refresh or reconcile_plan.native_review_sources is not None:
                     raise _launchplane_http_error(
                         status_code=409,
                         trace_id=trace_id,
@@ -22543,26 +22924,15 @@ def create_launchplane_fastapi_app(
             ),
         )
 
-    async def run_odoo_route_binding_refresh(
+    async def run_odoo_testing_route_binding_refresh(
         request: Request,
-        refresh_request: OdooTestingRouteBindingRefreshEnvelope
-        | OdooStableRouteBindingRefreshEnvelope,
-        identity: LaunchplaneIdentity,
-        record_store: object,
-        idempotency_key: str,
-        *,
-        remaining: bool,
+        refresh_request: OdooTestingRouteBindingRefreshEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
-        route_path = (
-            _ODOO_STABLE_ROUTE_BINDING_REFRESH_ROUTE
-            if remaining
-            else _ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE
-        )
-        action_prefix = (
-            "route_binding.odoo_stable_refresh"
-            if remaining
-            else "route_binding.odoo_testing_refresh"
-        )
+        route_path = _ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE
+        action_prefix = "route_binding.odoo_testing_refresh"
         trace_id = next_trace_id()
         controller_action = (
             f"{action_prefix}.apply" if refresh_request.mode == "apply" else f"{action_prefix}.plan"
@@ -22601,8 +22971,6 @@ def create_launchplane_fastapi_app(
         )
         try:
             controller_store = require_route_binding_refresh_controller_read_store(record_store)
-            if remaining:
-                require_external_route_binding_reconcile_store(record_store)
             mutation_store = (
                 require_route_binding_refresh_controller_store(record_store)
                 if refresh_request.mode == "apply"
@@ -22616,39 +22984,9 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
 
-        def refresh_native_binding(
-            current: EnvironmentRouteBindingRecord,
-        ) -> control_plane_route_binding_reconcile.RouteBindingReconcilePlan:
-            if not isinstance(record_store, PostgresRecordStore):
-                raise TypeError("Native testing route refresh requires database-backed custody.")
-            try:
-                return plan_native_testing_route_refresh(
-                    record_store,
-                    root=resolved_control_plane_root,
-                    current=current,
-                )
-            except NativeSourceAuthorizationDenied as error:
-                raise _launchplane_http_error(
-                    status_code=403,
-                    trace_id=trace_id,
-                    code="authorization_denied",
-                    message="The managed testing route observation was denied.",
-                ) from error
-
         def binding_refresh_action(binding_record: EnvironmentRouteBindingRecord | None) -> str:
             if (
-                remaining
-                and binding_record is not None
-                and binding_record.ingress.provider == "external"
-            ):
-                return (
-                    "route_binding.external.apply"
-                    if refresh_request.mode == "apply"
-                    else "route_binding.external.plan"
-                )
-            if (
-                not remaining
-                and director_agent_identity(identity)
+                director_agent_identity(identity)
                 and binding_record is not None
                 and is_native_testing_binding(binding_record)
             ):
@@ -22674,24 +23012,12 @@ def create_launchplane_fastapi_app(
             return evaluation.decision == "allowed"
 
         try:
-            if remaining:
-                stable_store = cast(
-                    control_plane_route_binding_refresh_controller.StableRouteBindingRefreshControllerStore,
-                    controller_store,
-                )
-                controller_plan = control_plane_route_binding_refresh_controller.plan_remaining_odoo_stable_route_binding_refresh(
-                    record_store=stable_store,
-                    evaluated_at=utc_now_timestamp(),
-                    target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
-                    include_record=include_refresh_binding,
-                )
-            else:
-                controller_plan = control_plane_route_binding_refresh_controller.plan_odoo_testing_route_binding_refresh(
-                    record_store=controller_store,
-                    evaluated_at=utc_now_timestamp(),
-                    target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
-                    include_record=include_refresh_binding,
-                )
+            controller_plan = control_plane_route_binding_refresh_controller.plan_odoo_testing_route_binding_refresh(
+                record_store=controller_store,
+                evaluated_at=utc_now_timestamp(),
+                target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
+                include_record=include_refresh_binding,
+            )
         except (
             control_plane_route_binding_refresh_controller.RouteBindingRefreshTargetLimitExceeded
         ) as error:
@@ -22882,7 +23208,9 @@ def create_launchplane_fastapi_app(
                     outcome.reconcile_plan.current_record if outcome.reconcile_plan else None
                 )
                 if native_current is not None and is_native_testing_binding(native_current):
-                    native_plan = await run_in_threadpool(refresh_native_binding, native_current)
+                    native_plan = await run_in_threadpool(
+                        refresh_native_binding, record_store, native_current, trace_id
+                    )
                     outcome = control_plane_route_binding_refresh_controller.route_binding_refresh_outcome(
                         native_current, native_plan
                     )
@@ -22932,12 +23260,7 @@ def create_launchplane_fastapi_app(
                 mutation_result = mutation_store.reconcile_route_binding_record(
                     expected_record=reconcile_plan.current_record,
                     replacement_record=reconcile_plan.record,
-                    native_sources=reconcile_plan.native_review_sources
-                    if isinstance(
-                        reconcile_plan,
-                        control_plane_route_binding_reconcile.RouteBindingReconcilePlan,
-                    )
-                    else None,
+                    native_sources=reconcile_plan.native_review_sources,
                     mutation=DbOnlyMutationRequest(
                         scope=idempotency_scope(identity),
                         route_path=route_path,
@@ -23084,38 +23407,6 @@ def create_launchplane_fastapi_app(
                 except Exception:
                     _LOGGER.exception("Route refresh parent cleanup failed; trace_id=%s", trace_id)
 
-    async def run_odoo_testing_route_binding_refresh(
-        request: Request,
-        refresh_request: OdooTestingRouteBindingRefreshEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        return await run_odoo_route_binding_refresh(
-            request,
-            refresh_request,
-            identity,
-            record_store,
-            idempotency_key,
-            remaining=False,
-        )
-
-    async def run_odoo_stable_route_binding_refresh(
-        request: Request,
-        refresh_request: OdooStableRouteBindingRefreshEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        return await run_odoo_route_binding_refresh(
-            request,
-            refresh_request,
-            identity,
-            record_store,
-            idempotency_key,
-            remaining=True,
-        )
-
     async def apply_ingress_route(
         request: Request,
         route_request: NpmplusIngressApplyEnvelope,
@@ -23130,6 +23421,12 @@ def create_launchplane_fastapi_app(
             else native_routes.native_driver_route_alternate_authz_action(apply_ingress_route)
         )
         instance_name = route_request.instance.strip()
+        director_wildcard_create = (
+            isinstance(identity, LocalOperatorIdentity)
+            and director_agent_identity(identity)
+            and not instance_name
+            and route_request.ingress.is_preview_wildcard_create()
+        )
         # The audit permission reaches only the guarded exact-instance no-op
         # below. General provider mutation still requires ingress_route.apply.
         if (
@@ -23155,7 +23452,7 @@ def create_launchplane_fastapi_app(
             == "allowed"
         ):
             authz_action = "ingress_route.audit"
-        if not resolved_authz_policy_runtime.allows(
+        if not director_wildcard_create and not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=authz_action,
             product=route_request.product,
@@ -23175,7 +23472,7 @@ def create_launchplane_fastapi_app(
                     + ("product/context/instance." if instance_name else "product/context.")
                 ),
             )
-        role_only = not resolved_authz_policy_runtime.allows(
+        role_only = not director_wildcard_create and not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=authz_action,
             product=route_request.product,
@@ -23185,7 +23482,13 @@ def create_launchplane_fastapi_app(
             else AuthorizationTarget(scope="context"),
             inherit_agent_read_role=False,
         )
-        if instance_name or role_only:
+        wildcard_context_plan = (
+            route_request.ingress.mode == "dry-run"
+            and director_agent_identity(identity)
+            and not instance_name
+            and bool(route_request.ingress.route.dns_challenge)
+        )
+        if instance_name or (role_only and not wildcard_context_plan):
             try:
                 profile_store = require_product_profile_read_store(record_store)
                 profile = profile_store.read_product_profile_record(route_request.product)
@@ -23272,7 +23575,8 @@ def create_launchplane_fastapi_app(
             route_path=_INGRESS_ROUTE_APPLY_ROUTE,
             idempotency_key=idempotency_key,
             trace_id=trace_id,
-            check_replay=route_request.ingress.mode == "apply",
+            check_replay=route_request.ingress.mode == "apply"
+            and not route_request.ingress.route.dns_challenge,
         )
         if replayed_response is not None:
             return replayed_response
@@ -23300,6 +23604,93 @@ def create_launchplane_fastapi_app(
         guarded_instance_apply = False
         try:
             ingress_provider = resolved_ingress_provider_factory()
+            if resolved_ingress_request.route.dns_challenge:
+                if (
+                    instance_name
+                    or not isinstance(record_store, PostgresRecordStore)
+                    or not isinstance(ingress_provider, NpmplusIngressProvider)
+                ):
+                    raise ValueError(
+                        "Wildcard creation requires a context-scoped database service operation."
+                    )
+
+                def finish_wildcard(
+                    result: NpmplusIngressApplyResult, provider_key: str = ""
+                ) -> dict[str, object]:
+                    record_id = build_ingress_route_audit_record_id(
+                        trace_id=provider_key or trace_id,
+                        product=route_request.product,
+                        context=route_request.context,
+                        domains=audit_ingress_request.route.domain_names,
+                    )
+                    try:
+                        audit = record_store.read_ingress_route_audit_record(record_id)
+                    except FileNotFoundError:
+                        audit = None
+                    if audit is None or audit.status == "pending":
+                        audit = write_ingress_route_audit_record(
+                            ingress_store=ingress_store,
+                            trace_id=trace_id,
+                            product=route_request.product,
+                            context=route_request.context,
+                            provider=ingress_provider.provider_id,
+                            request=audit_ingress_request,
+                            result=result,
+                            idempotency_key=normalized_key,
+                            record_id=record_id,
+                        )
+                    record = preview_dns_secret_record(record_store)
+                    return accepted_evidence_response(
+                        trace_id=trace_id,
+                        records={
+                            "ingress_provider": ingress_provider.provider_id,
+                            "ingress_route_audit_record_id": audit.record_id,
+                            "dns_secret_ready": record is not None,
+                            "dns_secret_id": record.secret_id if record else "",
+                            "dns_secret_version_id": record.current_version_id if record else "",
+                        },
+                        result=result.model_dump(mode="json"),
+                    ).model_dump(mode="json", exclude_none=True)
+
+                def pending_wildcard(provider_key: str) -> None:
+                    write_ingress_route_pending_audit_record(
+                        ingress_store=ingress_store,
+                        trace_id=trace_id,
+                        product=route_request.product,
+                        context=route_request.context,
+                        provider=ingress_provider.provider_id,
+                        request=audit_ingress_request,
+                        idempotency_key=normalized_key,
+                        record_id=build_ingress_route_audit_record_id(
+                            trace_id=provider_key,
+                            product=route_request.product,
+                            context=route_request.context,
+                            domains=audit_ingress_request.route.domain_names,
+                        ),
+                    )
+
+                wildcard = NpmplusWildcardIngressOperation(
+                    record_store,
+                    ingress_provider.wildcard_client(),
+                    route_request.product,
+                    route_request.context,
+                    resolved_ingress_request,
+                    finish_wildcard,
+                    pending_wildcard,
+                )
+                if resolved_ingress_request.mode == "apply":
+                    return await run_provider_mutation(
+                        record_store=record_store,
+                        identity=identity,
+                        route_path=_INGRESS_ROUTE_APPLY_ROUTE,
+                        idempotency_key=normalized_key,
+                        request_fingerprint=payload_fingerprint,
+                        trace_id=trace_id,
+                        adapter=wildcard,
+                        in_progress_message="The wildcard create is running under its original key.",
+                        reconcile_message="Wildcard certificate or host effects are unknown; retain the original key for reconciliation.",
+                    )
+                return AcceptedEvidenceResponse.model_validate(finish_wildcard(wildcard.plan()))
             if instance_name and resolved_ingress_request.mode == "apply":
                 if resolved_ingress_request.expected_host_id is None:
                     raise _launchplane_http_error(
@@ -23366,6 +23757,10 @@ def create_launchplane_fastapi_app(
                     }
                 )
             if resolved_ingress_request.mode == "apply":
+                if resolved_ingress_request.route.certificate_id == "new":
+                    ingress_provider.apply_route(
+                        request=provider_ingress_request.model_copy(update={"mode": "dry-run"})
+                    )
                 write_ingress_route_pending_audit_record(
                     ingress_store=ingress_store,
                     trace_id=trace_id,
@@ -23380,6 +23775,10 @@ def create_launchplane_fastapi_app(
                 ingress_result = preflight_result
             else:
                 ingress_result = ingress_provider.apply_route(request=provider_ingress_request)
+        except NpmplusExistingCertificateRequired as error:
+            raise _launchplane_http_error(
+                status_code=400, trace_id=trace_id, code=error.code, message=str(error)
+            ) from None
         except (ValueError, click.ClickException) as error:
             if guarded_instance_apply:
                 raise _launchplane_http_error(
@@ -23892,8 +24291,18 @@ def create_launchplane_fastapi_app(
                         "mode": "inspect",
                         "observation_sha256": disposable_lane_observation_sha256(recorded),
                         "observation": {
-                            key: getattr(recorded, key)
-                            for key in ("usage", "data", "production_resources")
+                            **recorded.model_dump(
+                                mode="json",
+                                include={
+                                    "usage",
+                                    "data",
+                                    "production_resources",
+                                    "usage_actor",
+                                    "usage_since",
+                                    "usage_valid_until",
+                                },
+                            ),
+                            "current_usage": recorded.current_usage(),
                         }
                         if recorded is not None
                         else None,
@@ -23933,7 +24342,45 @@ def create_launchplane_fastapi_app(
                         ) from None
                     application_resources = application_resource_observation.model_dump(mode="json")
                 observed_at = store.disposable_lane_observation_time()
-                if profile.driver_id != "odoo" or observation.instance != "testing":
+                from control_plane.odoo_preview_qualification import (
+                    PreviewQualification,
+                    read_odoo_preview_qualification,
+                )
+
+                preview_reference = ""
+                preview_shared = (
+                    profile.driver_id == "odoo"
+                    and preview is not None
+                    and collect_disposable_lane_facts(
+                        store,
+                        context=observation.context,
+                        instance=observation.instance,
+                        target=target,
+                        target_id=target_id,
+                        binding_sha256=fingerprint,
+                    ).production_resources
+                    == "shared"
+                )
+                if preview_shared:
+                    odoo_usage = OdooTestingUsage(reason_code="target_alias")
+                elif profile.driver_id == "odoo" and preview is not None:
+                    try:
+                        preview_qualification: PreviewQualification = await run_in_threadpool(
+                            read_odoo_preview_qualification,
+                            store,
+                            preview=preview,
+                            root=resolved_control_plane_root,
+                        )
+                    except NativeSourceAuthorizationDenied:
+                        raise _launchplane_http_error(
+                            status_code=403,
+                            trace_id=trace_id,
+                            code="authorization_denied",
+                            message="The provider refused the Odoo preview qualification read.",
+                        ) from None
+                    odoo_usage = preview_qualification.usage
+                    preview_reference = preview_qualification.reference
+                elif profile.driver_id != "odoo" or observation.instance != "testing":
                     odoo_usage = OdooTestingUsage(reason_code="unsupported_lane")
                 elif target is None or target_id is None:
                     odoo_usage = OdooTestingUsage(reason_code="target_unavailable")
@@ -24007,6 +24454,13 @@ def create_launchplane_fastapi_app(
                     odoo_usage=odoo_usage,
                 )
                 resource_facts: dict[str, str] | None = None
+                if preview_reference and facts.production_resources == "shared":
+                    raise ValueError("preview_production_resources_shared")
+                if preview_reference:
+                    resource_facts = {
+                        "production_resources": "isolated",
+                        "isolation_evidence": preview_reference,
+                    }
                 if (
                     profile.driver_id in {"odoo", "generic-web"}
                     and observation.instance == "testing"
@@ -24029,20 +24483,15 @@ def create_launchplane_fastapi_app(
                             code="authorization_denied",
                             message="The provider refused the testing resource inspection.",
                         ) from None
-                if fingerprint != disposable_lane_binding_sha256(
-                    store.read_product_profile_record(profile.product),
-                    store.read_dokploy_target_record(
-                        context_name=observation.context, instance_name=observation.instance
-                    )
-                    if target is not None
-                    else None,
-                    store.read_dokploy_target_id_record(
-                        context_name=observation.context, instance_name=observation.instance
-                    )
-                    if target_id is not None
-                    else None,
-                    preview,
-                    disposable_lane_configuration(store, observation.context, observation.instance),
+                if (
+                    fingerprint
+                    != resolve_disposable_observation_binding(
+                        store,
+                        product=profile.product,
+                        context=observation.context,
+                        instance=observation.instance,
+                        preview_id=observation.preview_id,
+                    ).binding_sha256
                 ):
                     raise ValueError("The lane changed during resource collection; collect again.")
                 previous = store.read_disposable_lane_safety(
@@ -24064,6 +24513,14 @@ def create_launchplane_fastapi_app(
                         "observed_at": observed_at,
                         "expires_at": observed_at + timedelta(seconds=observation.lifetime_seconds),
                         **facts.payload(),
+                        "usage_valid_until": (
+                            min(
+                                facts.usage_valid_until,
+                                observed_at + timedelta(seconds=observation.lifetime_seconds),
+                            )
+                            if facts.usage_valid_until is not None
+                            else None
+                        ),
                         # Each fresh positive read is distinct from retained
                         # historical use when only the row's resource TTL changes.
                         "usage_evidence": (
@@ -24084,6 +24541,8 @@ def create_launchplane_fastapi_app(
                 if published is None or published.binding_sha256 != fingerprint:
                     raise ValueError("The collected lane binding changed; collect again.")
                 evidence = published
+                if preview_shared:
+                    raise ValueError("preview_production_resources_shared")
                 return accepted_evidence_response(
                     trace_id=trace_id,
                     records={"product_profile": profile.product},
@@ -24203,6 +24662,7 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="disposable_observation_refused",
                 message=str(error),
+                reason=error.reason if isinstance(error, PreviewQualificationMissing) else None,
             ) from error
 
     async def execute_product_retirement(
@@ -24962,12 +25422,28 @@ def create_launchplane_fastapi_app(
                     if remediation_request.mode == "dry-run"
                     else "preview_pr_feedback_remediation.apply"
                 )
-                if not resolved_authz_policy_runtime.allows(
+                policy_allowed = resolved_authz_policy_runtime.allows(
                     identity=identity,
                     action=action,
                     product=remediation_request.product,
                     context=remediation_request.context,
-                ):
+                )
+                standing_retirement = (
+                    isinstance(identity, LocalOperatorIdentity)
+                    and director_agent_identity(identity)
+                    and remediation_request.terminal_status == "destroyed"
+                )
+                policy_apply_allowed = (
+                    policy_allowed
+                    if remediation_request.mode == "apply"
+                    else resolved_authz_policy_runtime.allows(
+                        identity=identity,
+                        action="preview_pr_feedback_remediation.apply",
+                        product=remediation_request.product,
+                        context=remediation_request.context,
+                    )
+                )
+                if not policy_allowed and not standing_retirement:
                     raise _launchplane_http_error(
                         status_code=403,
                         trace_id=trace_id,
@@ -24981,6 +25457,22 @@ def create_launchplane_fastapi_app(
                         code="idempotency_key_required",
                         message="Preview PR feedback remediation requires Idempotency-Key.",
                     )
+                if remediation_request.mode == "apply":
+                    (
+                        normalized_key,
+                        payload_fingerprint,
+                        replayed_response,
+                    ) = replay_apply_idempotency_payload(
+                        record_store=record_store,
+                        identity=identity,
+                        route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
+                        idempotency_key=idempotency_key,
+                        trace_id=trace_id,
+                        check_replay=True,
+                        request_payload=request_payload,
+                    )
+                    if replayed_response is not None:
+                        return replayed_response
                 try:
                     remediation_store = require_preview_pr_feedback_remediation_write_store(
                         record_store
@@ -25004,6 +25496,23 @@ def create_launchplane_fastapi_app(
                             feedback_credentials.actor_id,
                             feedback_credentials.actor_login,
                         ),
+                    )
+                    retirement_digest = (
+                        verified_preview_retirement_digest(
+                            record_store, profile=target.profile, number=target.pr_number
+                        )
+                        if standing_retirement and not policy_apply_allowed
+                        else ""
+                    )
+                    if not policy_allowed and not retirement_digest:
+                        raise _launchplane_http_error(
+                            status_code=403,
+                            trace_id=trace_id,
+                            code="authorization_denied",
+                            message="Terminal feedback requires verified native retirement evidence.",
+                        )
+                    observation = observation.model_copy(
+                        update={"retirement_sha256": retirement_digest}
                     )
                 except FileNotFoundError as error:
                     raise _launchplane_http_error(
@@ -25043,21 +25552,6 @@ def create_launchplane_fastapi_app(
                         result=remediation_record.model_dump(mode="json"),
                     )
 
-                (
-                    normalized_key,
-                    payload_fingerprint,
-                    replayed_response,
-                ) = replay_apply_idempotency_payload(
-                    record_store=record_store,
-                    identity=identity,
-                    route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
-                    idempotency_key=idempotency_key,
-                    trace_id=trace_id,
-                    check_replay=True,
-                    request_payload=request_payload,
-                )
-                if replayed_response is not None:
-                    return replayed_response
                 dry_run_record = matching_dry_run(
                     record_store=remediation_store,
                     actor=actor,
@@ -25070,6 +25564,13 @@ def create_launchplane_fastapi_app(
                         trace_id=trace_id,
                         code="matching_dry_run_required",
                         message="Preview PR feedback remediation apply requires a prior matching dry-run.",
+                    )
+                if dry_run_record.observation.retirement_sha256 != retirement_digest:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="preview_pr_feedback_remediation_observation_changed",
+                        message="Native preview retirement changed after the reviewed dry-run.",
                     )
                 if (
                     dry_run_record.observation.state == "absent" and observation.state != "absent"
@@ -26192,12 +26693,20 @@ def create_launchplane_fastapi_app(
             and setup_request.instance == "testing"
             and bool(lane_owner)
         )
+        director_testing_domain = (
+            director_agent_identity(identity)
+            and setup_request.mode == "apply"
+            and setup_request.operation == "reconcile-compose-domain"
+            and setup_request.instance == "testing"
+            and bool(lane_owner)
+        )
         if (
             isinstance(identity, TerminalAgentIdentity)
             and setup_request.mode == "apply"
             and not disposable_rebuild_setup
             and not first_testing_setup
             and not director_source_completion
+            and not director_testing_domain
             and not native_onboarding
         ):
             raise _launchplane_http_error(
@@ -26232,12 +26741,16 @@ def create_launchplane_fastapi_app(
         director_source_completion = director_source_completion and (
             isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
         )
+        director_testing_domain = director_testing_domain and (
+            isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
+        )
         can_setup_target = (
             service_scoped
             or lane_scoped_only
             or disposable_rebuild_setup
             or first_testing_setup
             or director_source_completion
+            or director_testing_domain
             or native_onboarding
         )
         can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (
@@ -26572,6 +27085,7 @@ def create_launchplane_fastapi_app(
                     record_store=database_store,
                     request=execution_request,
                     director_source_completion=director_source_completion,
+                    director_testing_domain=director_testing_domain,
                     # A lane-scoped caller's owner is re-checked when records commit.
                     required_context_owner=(
                         (lane_owner, setup_request.context)
@@ -28540,24 +29054,6 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
-        _ODOO_STABLE_ROUTE_BINDING_REFRESH_ROUTE,
-        run_odoo_stable_route_binding_refresh,
-        methods=["POST"],
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        status_code=202,
-        operation_id="run_odoo_stable_route_binding_refresh",
-        summary="Plan or apply bounded remaining Odoo stable route-binding evidence refresh",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
         _INGRESS_CANARY_ROUTE_APPLY_ROUTE,
         apply_ingress_canary_route,
         methods=["POST"],
@@ -28578,6 +29074,14 @@ def create_launchplane_fastapi_app(
     register_topology_read_routes(app, dependencies=read_route_dependencies)
     register_ingress_read_routes(app, dependencies=read_route_dependencies)
     register_runner_host_hygiene_read_routes(app, dependencies=read_route_dependencies)
+    register_runner_lane_service_routes(
+        app,
+        dependencies=replace(read_route_dependencies, read_identity=read_browser_mutation_identity),
+    )
+    register_runner_host_hygiene_configuration_routes(
+        app,
+        dependencies=replace(read_route_dependencies, read_identity=read_browser_mutation_identity),
+    )
     register_deployment_promotion_read_routes(app, dependencies=read_route_dependencies)
 
     app.add_api_route(
@@ -28709,11 +29213,14 @@ def create_launchplane_fastapi_app(
             ),
             read_pull_request_notes=product_review_notes_reader
             or (
-                lambda profile, pull_request_number, trace_id: read_pull_request_notes(
-                    control_plane_root=resolved_control_plane_root,
-                    profile=profile,
-                    pull_request_number=pull_request_number,
-                    trace_id=trace_id,
+                lambda profile, pull_request_number, trace_id, include_client_comment: (
+                    read_pull_request_notes(
+                        control_plane_root=resolved_control_plane_root,
+                        profile=profile,
+                        pull_request_number=pull_request_number,
+                        trace_id=trace_id,
+                        include_client_comment=include_client_comment,
+                    )
                 )
             ),
         ),
@@ -28721,6 +29228,11 @@ def create_launchplane_fastapi_app(
     register_privileged_operation_routes(
         app,
         dependencies=privileged_operation_route_dependencies,
+    )
+    register_request_attention_routes(
+        app,
+        dependencies=read_route_dependencies,
+        read=GitHubOpenRequestReader(resolved_control_plane_root),
     )
     register_governance_projection_routes(
         app,
@@ -28749,7 +29261,9 @@ def create_launchplane_fastapi_app(
         register_preview_reservation_read_routes,
     )
 
-    register_preview_reservation_read_routes(app, dependencies=read_route_dependencies)
+    register_preview_reservation_read_routes(
+        app, dependencies=read_route_dependencies, root=resolved_control_plane_root
+    )
 
     register_inventory_operation_read_routes(app, dependencies=read_route_dependencies)
 
@@ -29962,6 +30476,18 @@ def create_launchplane_fastapi_app(
             error_response_model=LaunchplaneErrorResponse,
         ),
     )
+    register_retained_volume_sweep_route(
+        app,
+        dependencies=RetainedVolumeSweepDependencies(
+            read_identity=read_browser_mutation_identity,
+            get_record_store=get_record_store,
+            next_trace_id=next_trace_id,
+            authorization_allows=resolved_authz_policy_runtime.allows,
+            http_error=_launchplane_http_error,
+            control_plane_root=resolved_control_plane_root,
+            error_response_model=LaunchplaneErrorResponse,
+        ),
+    )
     register_walkthrough_route(
         app,
         dependencies=WalkthroughDependencies(
@@ -30078,6 +30604,13 @@ def create_launchplane_fastapi_app(
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,
     )
+    from control_plane.http_routes.credential_inventory import register_credential_inventory_routes
+
+    register_credential_inventory_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_monitoring_mutation_identity,
+    )
     register_service_runtime_settings_routes(
         app,
         dependencies=read_route_dependencies,
@@ -30154,6 +30687,15 @@ def create_launchplane_fastapi_app(
         mutation_identity=read_browser_mutation_identity,
         root=resolved_control_plane_root,
         run_provider_mutation=run_provider_mutation,
+    )
+    from control_plane.http_routes.migrated_testing_source import (
+        register_migrated_testing_source_routes,
+    )
+
+    register_migrated_testing_source_routes(
+        app,
+        dependencies=read_route_dependencies,
+        bearer_identity=resolve_bearer_identity,
     )
     from control_plane.http_routes.odoo_upgrade_rehearsal import (
         register_odoo_upgrade_rehearsal_routes,

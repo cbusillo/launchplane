@@ -1,19 +1,26 @@
 import io
+from datetime import datetime, timedelta, timezone
+from email.message import Message
+from email.utils import format_datetime
 import json
 import unittest
 import zipfile
 from unittest.mock import MagicMock, Mock, patch
+from typing import cast
+from urllib.error import HTTPError, URLError
 
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
     MAX_MANIFEST_BYTES,
     BuildProvenanceError,
+    GitHubBuildProvenanceTransport,
     VerifiedBuildArtifact,
     record_verified_build_artifact,
     verify_build_artifact,
     verify_generic_web_build,
 )
 from control_plane.contracts.artifact_identity import BuildPurpose
+from control_plane.github_read_cache import GitHubReadCache
 from tests.support.artifact_manifests import artifact_manifest_v2
 
 REPOSITORY = "example/site"
@@ -111,6 +118,236 @@ def _verify(
 
 
 class BuildProvenanceTests(unittest.TestCase):
+    def test_quota_deadline_honors_reset_and_retry_after(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        reset = now + timedelta(minutes=10)
+        later = now + timedelta(minutes=20)
+        for retry_after, expected in (
+            ("1200", later),
+            (format_datetime(later), later),
+            ("60", reset),
+            ("", reset),
+        ):
+            headers = Message()
+            headers["X-RateLimit-Remaining"] = "0"
+            headers["X-RateLimit-Reset"] = str(int(reset.timestamp()))
+            headers["Retry-After"] = retry_after
+            failure = HTTPError("https://api.github.com", 403, "Limited", headers, None)
+            self.addCleanup(failure.close)
+            with (
+                self.subTest(retry_after=retry_after),
+                patch("control_plane.build_provenance.datetime", wraps=datetime) as clock,
+                patch("control_plane.build_provenance.urlopen", side_effect=failure),
+                self.assertRaises(BuildProvenanceError) as caught,
+            ):
+                clock.now.return_value = now
+                GitHubBuildProvenanceTransport(token="deadline").get_json(
+                    "/repos/example/site/commits"
+                )
+            self.assertEqual(datetime.fromisoformat(caught.exception.retry_at), expected)
+
+    def test_secondary_quota_body_defers_without_exposing_provider_text(self) -> None:
+        body = io.BytesIO(
+            b'{"message":"You have exceeded a secondary rate limit. private-response"}'
+        )
+        failure = HTTPError("https://api.github.com", 403, "Forbidden", Message(), body)
+        self.addCleanup(failure.close)
+        with (
+            patch("control_plane.build_provenance.urlopen", side_effect=failure),
+            self.assertRaises(BuildProvenanceError) as caught,
+        ):
+            GitHubBuildProvenanceTransport(token="private").get_json("/repos/example/site/commits")
+        self.assertTrue(caught.exception.retry_at)
+        self.assertNotIn("private-response", str(caught.exception))
+
+    def test_cached_history_never_substitutes_for_forbidden_or_unvalidated_responses(self) -> None:
+        path = "/repos/example/site/commits"
+        for status, primed in ((403, True), (304, False)):
+            cache = GitHubReadCache()
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = b"[]"
+            response.__enter__.return_value.headers = {"ETag": '"history"'}
+            failure = HTTPError(path, status, "Unavailable", Message(), None)
+            self.addCleanup(failure.close)
+            with (
+                self.subTest(status=status),
+                patch(
+                    "control_plane.build_provenance.urlopen",
+                    side_effect=[response, failure] if primed else [failure],
+                ),
+            ):
+                transport = GitHubBuildProvenanceTransport(token="read", read_cache=cache)
+                if primed:
+                    transport.get_json(path)
+                with self.assertRaises(BuildProvenanceError) as caught:
+                    transport.get_json(path)
+                self.assertEqual(caught.exception.retry_at, "")
+
+    def test_conditional_history_reads_revalidate_and_keep_credentials_separate(self) -> None:
+        cache = GitHubReadCache()
+        path = "/repos/example/site/commits?sha=main&per_page=100&page=1"
+        first = MagicMock()
+        first.__enter__.return_value.read.return_value = b'[{"sha":"old"}]'
+        first.__enter__.return_value.headers = {"ETag": '"history-old"'}
+        changed = MagicMock()
+        changed.__enter__.return_value.read.return_value = b'[{"sha":"new"}]'
+        changed.__enter__.return_value.headers = {"ETag": '"history-new"'}
+        unchanged = HTTPError(path, 304, "Not Modified", Message(), None)
+        self.addCleanup(unchanged.close)
+        with patch(
+            "control_plane.build_provenance.urlopen", side_effect=[first, unchanged, changed, first]
+        ) as read:
+            result = cast(
+                list[dict[str, str]],
+                GitHubBuildProvenanceTransport(token="one", read_cache=cache).get_json(path),
+            )
+            result[0]["sha"] = "caller edit"
+            self.assertEqual(
+                GitHubBuildProvenanceTransport(token="one", read_cache=cache).get_json(path),
+                [{"sha": "old"}],
+            )
+            self.assertEqual(
+                GitHubBuildProvenanceTransport(token="one", read_cache=cache).get_json(path),
+                [{"sha": "new"}],
+            )
+            GitHubBuildProvenanceTransport(token="other", read_cache=cache).get_json(path)
+        requests = [call.args[0] for call in read.call_args_list]
+        self.assertIsNone(requests[0].get_header("If-none-match"))
+        self.assertEqual(requests[1].get_header("If-none-match"), '"history-old"')
+        self.assertEqual(requests[2].get_header("If-none-match"), '"history-old"')
+        self.assertIsNone(requests[3].get_header("If-none-match"))
+
+    def test_http_metadata_is_bounded_and_exception_cause_survives_all_read_paths(self) -> None:
+        for stage in ("json", "archive", "redirect"):
+            for unsafe in ("private-secret\nInjected: value", "9" * 200, "60"):
+                with self.subTest(stage=stage, unsafe=unsafe):
+                    headers = Message()
+                    for name in (
+                        "X-GitHub-Request-Id",
+                        "X-RateLimit-Remaining",
+                        "X-RateLimit-Reset",
+                        "Retry-After",
+                    ):
+                        headers[name] = unsafe
+                    body = Mock()
+                    failure = HTTPError(
+                        "https://storage.test/private-secret", 403, unsafe, headers, body
+                    )
+                    self.addCleanup(failure.close)
+                    opener = MagicMock()
+                    if stage == "redirect":
+                        redirect_headers = Message()
+                        redirect_headers["Location"] = "https://storage.test/private-secret"
+                        redirect = HTTPError(
+                            "https://api.github.com", 302, "Found", redirect_headers, None
+                        )
+                        self.addCleanup(redirect.close)
+                        opener.open.side_effect = redirect
+                    else:
+                        opener.open.side_effect = failure
+                    transport = GitHubBuildProvenanceTransport(token="private-secret")
+                    path = "/repos/private/secret/actions/artifacts/1/zip?token=private-secret"
+                    with (
+                        patch(
+                            "control_plane.build_provenance.urlopen", side_effect=failure
+                        ) as download,
+                        patch("control_plane.build_provenance.build_opener", return_value=opener),
+                        self.assertRaises(BuildProvenanceError) as caught,
+                    ):
+                        if stage == "json":
+                            transport.get_json(path)
+                        else:
+                            transport.get_bytes(path)
+                    self.assertIs(caught.exception.__cause__, failure)
+                    evidence = json.loads(str(caught.exception).split(": ", 1)[1])
+                    self.assertEqual(evidence["status"], 403)
+                    self.assertEqual(evidence["route"], "artifact_download")
+                    self.assertEqual(evidence["stage"], "storage" if stage == "redirect" else "api")
+                    self.assertEqual(evidence["error_type"], "HTTPError")
+                    self.assertEqual(
+                        evidence["classification"],
+                        "forbidden" if stage == "redirect" else "rate_limited",
+                    )
+                    for value in ("private-secret", "Injected", "9" * 200):
+                        self.assertNotIn(value, str(caught.exception))
+                    body.read.assert_not_called()
+                    if stage == "redirect":
+                        self.assertNotIn("rate_limit_remaining", evidence)
+                        self.assertNotIn("retry_after_seconds", evidence)
+                        self.assertNotIn("request_id", evidence)
+                        self.assertNotIn("Authorization", download.call_args.args[0].headers)
+
+    def test_missing_http_headers_and_connection_failures_keep_unknown_evidence(self) -> None:
+        failure = HTTPError(
+            "https://api.github.com/private-secret", 403, "private-secret", Message(), None
+        )
+        setattr(failure, "headers", None)
+        self.addCleanup(failure.close)
+        for error in (
+            failure,
+            URLError(TimeoutError("private-secret")),
+            URLError("private-secret"),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch("control_plane.build_provenance.urlopen", side_effect=error),
+                self.assertRaises(BuildProvenanceError) as caught,
+            ):
+                GitHubBuildProvenanceTransport(token="private-secret").get_json("/private-secret")
+            evidence = json.loads(str(caught.exception).split(": ", 1)[1])
+            self.assertEqual(evidence["route"], "unknown")
+            self.assertEqual(
+                evidence["classification"], "forbidden" if error is failure else "transport_error"
+            )
+            self.assertEqual(evidence["error_type"], type(error).__name__)
+            if isinstance(error, URLError) and not isinstance(error, HTTPError):
+                self.assertEqual(evidence["reason_type"], type(error.reason).__name__)
+            self.assertNotIn("request_id", evidence)
+            self.assertNotIn("private-secret", str(caught.exception))
+            self.assertIs(caught.exception.__cause__, error)
+
+    def test_http_classification_keeps_retry_evidence_without_header_text(self) -> None:
+        for status, fields, classification in (
+            (
+                403,
+                {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1793502000"},
+                "rate_limited",
+            ),
+            (403, {"Retry-After": "60"}, "rate_limited"),
+            (403, {"Retry-After": "Wed, 21 Oct 2030 07:28:00 GMT"}, "rate_limited"),
+            (403, {"X-RateLimit-Remaining": " 0"}, "rate_limited"),
+            (403, {}, "forbidden"),
+            (401, {}, "unauthorized"),
+            (429, {}, "rate_limited"),
+            (503, {}, "transient"),
+        ):
+            with self.subTest(status=status, fields=fields):
+                headers = Message()
+                for name, value in fields.items():
+                    headers[name] = value
+                failure = HTTPError(
+                    "https://api.github.com/private", status, "private", headers, None
+                )
+                self.addCleanup(failure.close)
+                with (
+                    patch("control_plane.build_provenance.urlopen", side_effect=failure),
+                    self.assertRaises(BuildProvenanceError) as caught,
+                ):
+                    GitHubBuildProvenanceTransport(token="private").get_json(
+                        "/repos/test/test/commits"
+                    )
+                evidence = json.loads(str(caught.exception).split(": ", 1)[1])
+                self.assertEqual(evidence["classification"], classification)
+                self.assertEqual(bool(caught.exception.retry_at), classification == "rate_limited")
+                for header, field in (
+                    ("X-RateLimit-Remaining", "rate_limit_remaining"),
+                    ("X-RateLimit-Reset", "rate_limit_reset"),
+                    ("Retry-After", "retry_after_seconds"),
+                ):
+                    value = fields.get(header, "").strip()
+                    self.assertEqual(evidence.get(field), int(value) if value.isdecimal() else None)
+                self.assertNotIn("Wed,", str(caught.exception))
+
     def test_json_and_manifest_body_connection_drops_are_wrapped(self) -> None:
         from http.client import IncompleteRead
         from control_plane.build_provenance import GitHubBuildProvenanceTransport
@@ -138,7 +375,6 @@ class BuildProvenanceTests(unittest.TestCase):
         manifest = _verify(FakeGitHub(runs=[_run()])).manifest
 
         self.assertEqual(manifest.artifact_id, "artifact-site-run-7-1")
-        self.assertIsNotNone(manifest.source_build)
         assert manifest.source_build is not None
         self.assertEqual(manifest.source_build.purpose, "release")
         self.assertEqual(manifest.source_build.github_artifact_id, 70)
@@ -170,6 +406,31 @@ class BuildProvenanceTests(unittest.TestCase):
         ):
             with self.subTest(run=run), self.assertRaises(BuildProvenanceError):
                 _verify(FakeGitHub(runs=[run]))
+
+    def test_failed_preview_build_retains_its_run_instead_of_looking_missing(self) -> None:
+        failed = _run(event="pull_request", conclusion="failure")
+        with self.assertRaises(BuildProvenanceError) as caught:
+            _verify(FakeGitHub(runs=[failed]), purpose="preview", pull_request_number=5)
+        self.assertEqual(caught.exception.code, "build_run_failed")
+        self.assertEqual(caught.exception.run_id, failed["id"])
+        running = {**failed, "id": 8, "status": "in_progress"}
+        with self.assertRaises(BuildProvenanceError) as caught:
+            _verify(FakeGitHub(runs=[failed, running]), purpose="preview", pull_request_number=5)
+        self.assertEqual(caught.exception.code, "build_run_failed")
+        self.assertEqual(caught.exception.run_id, failed["id"])
+        for change in (
+            {"status": "in_progress"},
+            {"head_repository": {"id": 999}},
+            {"conclusion": "cancelled"},
+            {"conclusion": "action_required"},
+        ):
+            with self.subTest(change=change), self.assertRaises(BuildProvenanceError) as caught:
+                _verify(
+                    FakeGitHub(runs=[{**failed, **change}]),
+                    purpose="preview",
+                    pull_request_number=5,
+                )
+            self.assertEqual(caught.exception.code, "build_run_missing")
 
     def test_refuses_manifest_for_another_commit_or_image(self) -> None:
         for manifest in (

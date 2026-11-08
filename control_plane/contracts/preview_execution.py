@@ -23,6 +23,19 @@ def preview_execution_lock_name(target_key: str) -> str:
 ODOO_PREVIEW_DESTROY_REASON_PREFIX = "odoo_preview_destroy"
 
 
+def odoo_preview_operation_token(plan_id: str) -> str:
+    normalized_plan_id = plan_id.strip()
+    if not normalized_plan_id:
+        raise ValueError("Odoo preview lifecycle evidence requires plan_id.")
+    return hashlib.sha256(normalized_plan_id.encode()).hexdigest()[:20]
+
+
+def odoo_preview_destroy_reason(*, plan_id: str, issued_at: str) -> str:
+    return (
+        f"{ODOO_PREVIEW_DESTROY_REASON_PREFIX}:{odoo_preview_operation_token(plan_id)}:{issued_at}"
+    )
+
+
 def odoo_preview_destroy_issued_at(reason: str) -> str:
     prefix = ODOO_PREVIEW_DESTROY_REASON_PREFIX + ":"
     return reason[len(prefix) :].partition(":")[2] if reason.startswith(prefix) else ""

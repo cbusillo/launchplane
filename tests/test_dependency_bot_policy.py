@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import base64
 import unittest
 
 from pydantic import ValidationError
@@ -16,7 +17,154 @@ from tests.test_merge_train_dependency_updates import INDIRECT_PATCH, renovate_m
 from tests.test_merge_train_github import _github_commit, _github_pull_request
 
 
+class DependencyReferenceReadTransport:
+    def __init__(self, responses: dict[str, object]) -> None:
+        self.responses = responses
+
+    def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
+        if method != "GET" or body is not None:
+            raise ValueError("dependency proof is read-only")
+        return self.responses[path]
+
+
+def _base64_document(content: str) -> dict[str, object]:
+    return {
+        "encoding": "base64",
+        "content": base64.b64encode(content.encode()).decode(),
+        "size": len(content.encode()),
+    }
+
+
+def _digest_pin_class(
+    *,
+    filename: str,
+    old: str,
+    new: str,
+    dep_name: str,
+    current_value: str,
+    upstream_status: str,
+    verified: bool = True,
+) -> str:
+    identity = 711
+    policy = dependency_repository_policy(identity, metadata_format="renovate_metadata")
+    policy.enqueue.dependency_update_bots = (
+        policy.enqueue.dependency_update_bots[0].model_copy(
+            update={"allowed_update_types": ("digest",)}
+        ),
+    )
+    pull = _github_pull_request(16)
+    pull["user"] = {"id": identity, "login": "configured-bot", "type": "Bot"}
+    message = renovate_message(
+        depName=dep_name,
+        updateType="digest",
+        currentValue=current_value,
+        newValue=current_value,
+    )
+    prefix = f"/repos/{policy.repository}"
+    transport = DependencyReferenceReadTransport(
+        {
+            f"{prefix}/pulls/16/commits?per_page=100": [
+                _github_commit(identity, message, sha="head-16", verified=verified)
+            ],
+            f"{prefix}/issues/16/timeline?per_page=100": [],
+            f"{prefix}/compare/base-16...head-16": {
+                "files": [{"filename": filename, "status": "modified"}],
+                "base_commit": {"sha": "base-16"},
+                "merge_base_commit": {"sha": "original-parent"},
+            },
+            f"{prefix}/contents/{filename}?ref=original-parent": _base64_document(old),
+            f"{prefix}/contents/{filename}?ref=head-16": _base64_document(new),
+            f"/repos/{dep_name}/compare/{'a' * 40}...{'b' * 40}": {
+                "status": upstream_status,
+                "base_commit": {"sha": "a" * 40},
+                "merge_base_commit": {"sha": "a" * 40},
+                "commits": [{"sha": "b" * 40}],
+            },
+        }
+    )
+    reader = GitHubMergeTrainSnapshotReader(transport=transport, repository_policy=policy)
+    # noinspection PyProtectedMember
+    return reader._safe_dependency_update_class(
+        repository_path=policy.repository,
+        pull_request_number=16,
+        author_id=identity,
+        pull_request=pull,
+        head_sha="head-16",
+        base_branch="main",
+        base_sha="base",
+    )
+
+
 class DependencyBotPolicyTests(unittest.TestCase):
+    def test_verified_action_pins_need_forward_proof_and_no_unrelated_edits(self) -> None:
+        renovate_subpath_action_pin = (
+            "jobs:\n  test:\n    steps:\n"
+            "      - uses: example/action/.github/actions/test@" + "a" * 40 + "\n"
+        )
+        for current_value, extra, verified, upstream_status, filename, expected in (
+            ("v2", "", True, "ahead", ".github/workflows/ci.yml", "patch_or_minor"),
+            ("main", "", True, "ahead", ".github/workflows/ci.yml", "patch_or_minor"),
+            ("main", "", True, "behind", ".github/workflows/ci.yml", "needs_review"),
+            ("main", "", True, "diverged", ".github/workflows/ci.yml", "needs_review"),
+            ("a" * 40, "", True, "ahead", ".github/workflows/ci.yml", "needs_review"),
+            (
+                "v2",
+                "permissions: write-all\n",
+                True,
+                "ahead",
+                ".github/workflows/ci.yml",
+                "needs_review",
+            ),
+            ("v2", "", False, "ahead", ".github/workflows/ci.yml", "needs_review"),
+            ("v2", "", True, "behind", "package.json", "needs_review"),
+            ("v2", "", True, "diverged", "package.json", "needs_review"),
+            ("v2", "", True, "identical", "package.json", "needs_review"),
+            ("v2", "", True, "", "package.json", "needs_review"),
+        ):
+            with self.subTest(
+                current_value=current_value,
+                extra=extra,
+                verified=verified,
+                upstream_status=upstream_status,
+                filename=filename,
+            ):
+                self.assertEqual(
+                    _digest_pin_class(
+                        filename=filename,
+                        old=renovate_subpath_action_pin,
+                        new=renovate_subpath_action_pin.replace("a" * 40, "b" * 40) + extra,
+                        dep_name="example/action",
+                        current_value=current_value,
+                        upstream_status=upstream_status,
+                        verified=verified,
+                    ),
+                    expected,
+                )
+
+    def test_workspace_devkit_pins_need_forward_proof_of_the_pinned_commits(self) -> None:
+        old = "".join(
+            f'[repos.{slot}]\nrepository = "example/devkit"\nref = "' + "a" * 40 + '"\n'
+            for slot in ("devkit", "runtime")
+        )
+        for pinned, upstream_status, expected in (
+            ("b" * 40, "ahead", "patch_or_minor"),
+            ("b" * 40, "behind", "needs_review"),
+            ("b" * 40, "diverged", "needs_review"),
+            ("c" * 40, "ahead", "needs_review"),
+        ):
+            with self.subTest(pinned=pinned, upstream_status=upstream_status):
+                self.assertEqual(
+                    _digest_pin_class(
+                        filename="workspace.toml",
+                        old=old,
+                        new=old.replace("a" * 40, pinned),
+                        dep_name="example/devkit",
+                        current_value="main",
+                        upstream_status=upstream_status,
+                    ),
+                    expected,
+                )
+
     def test_add_remove_identity_and_change_allowed_types_without_code_changes(self) -> None:
         identity = 711
         for metadata_format, message in (

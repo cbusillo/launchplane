@@ -17,17 +17,20 @@ from control_plane.dokploy import api, source as provider_source, post_deploy
 from control_plane.contracts.testing_candidate_application import TestingCandidatePrepared
 from control_plane.provider_operations import ProviderOperationLease
 from control_plane.contracts.artifact_identity import (
+    ArtifactBuildFlags,
     ArtifactIdentityManifest,
     ArtifactImageReference,
 )
 from control_plane.contracts.odoo_stable_target_replacement import LAUNCHPLANE_REQUIRED_ODOO_MODULES
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.product_profile_record import ProductRuntimeConfigRequirement
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 from control_plane.contracts.testing_candidate_application import TestingCandidateApplication
 from control_plane.contracts.odoo_testing_source import (
     NativeOdooTestingSource,
     NativeOdooSourceAuthority,
     NativeTestingCopyCapture,
+    MigratedOdooTestingSource,
 )
 from control_plane import testing_candidate_runtime as compiler
 from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
@@ -42,6 +45,7 @@ from tests import test_testing_candidate_allocation as allocation_tests
 from tests.support.stores import _write_runtime_key_safety_policy
 from tests.test_dokploy_compose_environment import (
     VALUES,
+    ROOT,
     consumer_commands_available,
     consume_compose_environment,
 )
@@ -102,7 +106,11 @@ class CandidateApplicationTests(unittest.TestCase):
             context_name=self.fixture.context, instance_name="testing"
         )
 
-    def allocate(self, source: CandidateSource = "empty") -> TestingCandidateAllocation:
+    def allocate(
+        self,
+        source: CandidateSource = "empty",
+        migrated_source: MigratedOdooTestingSource | None = None,
+    ) -> TestingCandidateAllocation:
         self.fixture.allocation = self.fixture.allocation.model_copy(
             update={
                 "intent_sha256": candidate_application_intent(
@@ -110,13 +118,17 @@ class CandidateApplicationTests(unittest.TestCase):
                     context=self.fixture.context,
                     artifact_id=self.artifact.artifact_id,
                     source=source,
+                    migrated_source=migrated_source,
                 )
             }
         )
         return self.fixture.prepare()
 
     def inputs(
-        self, allocation: TestingCandidateAllocation, source: CandidateSource = "empty"
+        self,
+        allocation: TestingCandidateAllocation,
+        source: CandidateSource = "empty",
+        migrated_source: MigratedOdooTestingSource | None = None,
     ) -> TestingCandidateRuntimeInputs:
         return candidate_runtime_inputs(
             root=self.root,
@@ -124,7 +136,83 @@ class CandidateApplicationTests(unittest.TestCase):
             allocation=allocation,
             artifact_id=self.artifact.artifact_id,
             source=source,
+            migrated_source=migrated_source,
         )
+
+    def test_migrated_pair_binds_candidate_image_and_receipt_before_restore(self) -> None:
+        from tests.test_migrated_testing_source import MigratedTestingRequestTests
+        from control_plane.odoo_testing_restore import generation_binding
+
+        original = MigratedTestingRequestTests().request().migrated_source
+        assert original is not None
+        migrated = original.model_copy(
+            update={
+                "product": self.fixture.product,
+                "context": self.fixture.context,
+                "target_image": self.artifact.image.digest,
+            }
+        )
+        from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+
+        budget = OdooTestingDrillStorageBudget(
+            database_bytes=1024, filestore_bytes=1, staging_bytes=1024, reserve_bytes=1024
+        )
+        self.profile = self.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"odoo_testing_drill_storage": budget})
+                    if lane.instance == "testing"
+                    else lane
+                    for lane in self.profile.lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(self.profile)
+        self.fixture.before = self.fixture.authority()
+        allocation = self.allocate("migrated", migrated)
+        inputs = self.inputs(allocation, "migrated", migrated)
+        app = TestingCandidateApplication(plan=inputs.plan)
+        recorded = allocation.model_copy(update={"application": app})
+        self.store.compare_and_write_testing_candidate(allocation, recorded)
+        generation = inputs.plan.generation
+        assert generation is not None and generation.drill_storage_budget is not None
+        self.assertEqual(
+            generation.drill_storage_budget.filestore_bytes, migrated.filestore_expanded_bytes
+        )
+        self.assertEqual(generation.drill_storage_budget.reserve_bytes, budget.reserve_bytes)
+        capture = NativeTestingCopyCapture(
+            product=migrated.product,
+            context=migrated.context,
+            generation_binding_sha256=generation_binding(generation),
+            source_binding_sha256=migrated.binding_sha256,
+            capture_id="f" * 32,
+            database=migrated.database,
+            filestore=migrated.filestore,
+            captured_at=datetime.now(UTC).isoformat(),
+            source_observation=migrated,
+        )
+        self.store.write_native_testing_copy_capture(
+            capture, candidate_namespace=recorded.namespace
+        )
+        self.assertEqual(
+            self.store.read_native_testing_copy_capture(generation_binding(generation)), capture
+        )
+        changed = capture.model_copy(
+            update={
+                "database": capture.database.model_copy(update={"size": capture.database.size + 1})
+            }
+        )
+        with self.assertRaises(ValueError):
+            self.store.write_native_testing_copy_capture(
+                changed, candidate_namespace=recorded.namespace
+            )
+        with self.assertRaises(compiler.CandidateRuntimeInputsChanged):
+            self.inputs(
+                recorded,
+                "migrated",
+                migrated.model_copy(update={"target_image": "sha256:" + "c" * 64}),
+            )
+        self.fixture.assert_serving_unchanged()
 
     def test_private_candidate_uses_the_managed_application_port(self) -> None:
         self.profile = self.profile.model_copy(update={"runtime_port": 8072})
@@ -135,6 +223,107 @@ class CandidateApplicationTests(unittest.TestCase):
             inputs.runtime_environment["ODOO_HTTP_PORT"], str(self.profile.runtime_port)
         )
         self.fixture.assert_serving_unchanged()
+
+    def test_candidate_runtime_version_follows_its_artifact_and_preserves_legacy_inputs(
+        self,
+    ) -> None:
+        allocation = self.allocate("upstream")
+        runtime = next(
+            record
+            for record in self.store.list_runtime_environment_records()
+            if (record.scope, record.context, record.instance)
+            == ("instance", self.fixture.context, "testing")
+        )
+        for index, (artifact_version, lane_version, declared_instance) in enumerate(
+            (
+                ("20.0", "19.0", ""),
+                ("19.0", "19.0", ""),
+                ("20.0", "20.0", ""),
+                ("18.0", "19.0", ""),
+                ("", "19.0", ""),
+                ("20.0", "", ""),
+                ("", "", ""),
+                ("20.0", "", "testing"),
+                ("20.0", "", "prod"),
+                ("", "", "testing"),
+            )
+        ):
+            with self.subTest(
+                artifact=artifact_version, lane=lane_version, declared=declared_instance
+            ):
+                expected_config = self.profile.expected_config
+                if declared_instance:
+                    expected_config = expected_config.model_copy(
+                        update={
+                            "runtime_environment_keys": (
+                                *expected_config.runtime_environment_keys,
+                                ProductRuntimeConfigRequirement(
+                                    key="ODOO_VERSION",
+                                    context=self.fixture.context,
+                                    instance=declared_instance,
+                                ),
+                            )
+                        }
+                    )
+                self.store.write_product_profile_record(
+                    self.profile.model_copy(update={"expected_config": expected_config})
+                )
+                artifact = self.artifact.model_copy(
+                    update={
+                        "artifact_id": f"versioned-candidate-{index}",
+                        "build_flags": ArtifactBuildFlags(
+                            values={"odoo_version": artifact_version}
+                        ),
+                    }
+                )
+                self.store.write_artifact_manifest(artifact)
+                environment = dict(runtime.env)
+                if lane_version:
+                    environment["ODOO_VERSION"] = lane_version
+                self.store.write_runtime_environment_record(
+                    runtime.model_copy(update={"env": environment})
+                )
+                self.fixture.before = self.fixture.authority()
+                inputs = candidate_runtime_inputs(
+                    root=self.root,
+                    store=self.store,
+                    allocation=allocation.model_copy(
+                        update={
+                            "intent_sha256": candidate_application_intent(
+                                product=self.fixture.product,
+                                context=self.fixture.context,
+                                artifact_id=artifact.artifact_id,
+                                source="upstream",
+                            )
+                        }
+                    ),
+                    artifact_id=artifact.artifact_id,
+                    source="upstream",
+                )
+                expected_version = lane_version
+                if artifact_version and (lane_version or declared_instance == "testing"):
+                    expected_version = artifact.build_flags.values["odoo_version"]
+                if expected_version:
+                    self.assertEqual(
+                        inputs.runtime_environment["ODOO_VERSION"],
+                        expected_version,
+                    )
+                else:
+                    self.assertNotIn("ODOO_VERSION", inputs.runtime_environment)
+                self.assertEqual(inputs.plan.artifact, artifact)
+                self.assertEqual(
+                    inputs.plan.runtime_identity.source_git_ref, artifact.source_commit
+                )
+                self.assertEqual(inputs.plan.runtime_identity.artifact_id, artifact.artifact_id)
+                self.assertEqual(
+                    inputs.runtime_environment["ODOO_DB_NAME"], runtime.env["ODOO_DB_NAME"]
+                )
+                self.assertEqual(
+                    inputs.plan.upstream_source["ODOO_UPSTREAM_HOST"],
+                    runtime.env["ODOO_UPSTREAM_HOST"],
+                )
+                self.assertNotIn("ODOO_UPSTREAM_HOST", inputs.runtime_environment)
+                self.fixture.assert_serving_unchanged()
 
     def test_managed_port_reaches_private_probe_and_recorded_endpoint(self) -> None:
         real_readiness = application.candidate_private_readiness
@@ -472,6 +661,17 @@ class CandidateApplicationTests(unittest.TestCase):
         self.assertNotEqual(
             application.candidate_configuration_sha256({"env": legacy}),
             application.candidate_configuration_sha256({"env": encoded}),
+        )
+        saved = (ROOT / "tests/fixtures/dokploy-compose/legacy-literal.env").read_text()
+        with self.assertRaises(ValueError):
+            application.require_candidate_configuration(
+                self.allocation,
+                replace(self.compiled, runtime_environment=api.parse_dokploy_env_text(saved)),
+                {**self.provider_state, "env": saved},
+            )
+        self.assertNotEqual(
+            application.candidate_configuration_sha256({"env": saved}),
+            application.candidate_configuration_sha256({"env": "# provider comment\n" + saved}),
         )
         if consumer_commands_available():
             consumed, _ = consume_compose_environment(wire, tuple(VALUES))

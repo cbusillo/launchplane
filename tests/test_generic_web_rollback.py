@@ -394,7 +394,6 @@ class GenericWebRollbackPlanTests(unittest.TestCase):
 
         plan = build_generic_web_rollback_plan(record_store=store, request=_request())
 
-        self.assertIsNotNone(plan.planned_deploy)
         assert plan.planned_deploy is not None
         self.assertEqual(plan.planned_deploy.artifact_id, artifact_id)
         self.assertEqual(plan.planned_deploy.deploy_reference, deploy_reference)

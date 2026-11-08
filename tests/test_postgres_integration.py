@@ -15,9 +15,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
 import time
-from typing import Any
+from typing import Any, Literal, cast
 import unittest
 from tests import test_odoo_business_hours_config as calendar_config_tests
+from control_plane.storage.migrations.versions import (
+    e2b6c8d0a4f7_monitoring_authority_history as monitoring_history_migration,
+)
 from tests import test_product_retirement_previews as integrated_retirement_tests
 from tests import test_legacy_preview_sibling_ownership as generic_sibling_tests
 from tests import test_odoo_secret_transport as secret_transport_tests
@@ -34,6 +37,7 @@ from tests import test_testing_retry as testing_retry_tests
 from tests import test_browser_route_repair as browser_repair_tests
 from tests import test_release_review_http as release_review_http_tests
 from tests import test_production_recipient_release_settings as recipient_settings_tests
+from tests import test_production_recipient_retirement as recipient_retirement_tests
 from tests import test_accepted_recipient_delivery_recovery as recipient_delivery_tests
 from tests import test_generic_web_compose_refusal as compose_refusal_tests
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
@@ -43,9 +47,8 @@ from uuid import uuid4
 
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import create_engine, delete, event, insert, inspect, select, text, update
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -123,6 +126,7 @@ from tests.test_every_code_feedback_resume_storage import (
 )
 from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapPrerequisiteScenario
 from tests import test_testing_public_ingress as public_ingress_tests
+from tests import test_first_testing_public_ingress as first_public_ingress_tests
 from tests import test_testing_verification as testing_verification_tests
 from tests.test_merge_train_historical_completion import (
     _HistoricalCompletionFixture,
@@ -141,22 +145,6 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceEventRecord,
     OwnerAcceptancePreviewBinding,
     owner_acceptance_runtime_identity_binding,
-)
-from control_plane.contracts.owner_control import (
-    ApprovalRequest,
-    ChannelBindingRecord,
-    ChallengeResponse,
-    OwnerControlConfirmationEnvelope,
-    owner_control_approval_request_digest,
-    owner_control_channel_binding_sha256,
-    owner_control_signature_payload_bytes,
-)
-from control_plane.contracts.owner_control_shadow_verifier import (
-    OwnerControlChallengeIssueRequest,
-    OwnerControlIssuedChallengeRecord,
-)
-from control_plane.contracts.owner_control_enrollment_provenance import (
-    OwnerControlHostPrincipalClaim,
 )
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
@@ -186,17 +174,6 @@ from control_plane.contracts.privileged_operation_identity import (
 )
 from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PrivilegedOperationWorkerHeartbeatRecord,
-)
-from control_plane.contracts.privileged_operation import (
-    ManagedSecretReencryptionHumanEvidence,
-    ManagedSecretReencryptionPlanInput,
-    PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
-    PrivilegedOperationActor,
-    PrivilegedOperationEventRecord,
-    PrivilegedOperationRecord,
-    privileged_operation_evidence_digest,
-    privileged_operation_record_digest,
-    privileged_operation_request_digest,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -255,7 +232,6 @@ from control_plane.service_auth import (
 from control_plane.storage.postgres import (
     LaunchplaneMergeTrainBatchLandingPlanRow,
     DbOnlyMutationRequest,
-    LaunchplaneOwnerControlIssuedChallengeRow,
     MutationReservationResult,
     OrdinaryAgentPersistenceError,
     OutboxWithIdempotencyRequest,
@@ -323,6 +299,639 @@ from tests.test_trusted_maintenance import (
 
 POSTGRES_TEST_URL_ENV = "LAUNCHPLANE_TEST_POSTGRES_URL"
 LOCK_WAIT_TIMEOUT = "1000ms"
+
+
+class RealPostgresMonitoringAuthorityTests(unittest.TestCase):
+    def test_authority_rejection_keeps_its_retained_negative_binding(self) -> None:
+        from control_plane.monitoring_authority_history import MonitoringAuthorityLaneEvidence
+        from control_plane.lane_health_history import project_observation
+
+        profile = _public_ingress_profile()
+        self.store.write_product_profile_record(profile)
+        self.initialize_history()
+        changed = False
+
+        def fail_after_change(url: str, _timeout: int) -> HttpObservation:
+            nonlocal changed
+            if not changed:
+                changed = True
+                self.store.write_product_profile_record(
+                    profile.model_copy(update={"health_path": "/changed"})
+                )
+            return HttpObservation(status_code=503, final_url=url, redirect_count=0)
+
+        result = run_public_ingress_monitor_once(
+            record_store=self.store, http_get=fail_after_change, notify=False
+        )
+        self.assertEqual(result.authority_changed_count, 1)
+        self.assertEqual(result.records[0].status, "fail")
+        page = self.store.read_monitoring_authority_history(
+            product=profile.product, limit=500, cursor=None
+        )
+        lanes = page.revisions[-1].payload["lanes"]
+        assert isinstance(lanes, list)
+        evidence = MonitoringAuthorityLaneEvidence.model_validate(lanes[0])
+        retained = tuple(
+            project_observation(row) for row in self.store.list_public_ingress_observation_records()
+        )
+        self.assertEqual(
+            evidence.confirmed_observations(retained),
+            tuple(project_observation(row) for row in result.records),
+        )
+        self.assertEqual(self.store.list_public_ingress_incident_records(), ())
+
+    def test_provider_source_refusal_is_a_lane_binding_gap_without_poisoning_capture(self) -> None:
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+        from control_plane.monitoring_authority_history import MonitoringAuthorityLaneEvidence
+        from tests.test_public_ingress_monitor import _profile
+
+        profile = _profile(lane=ProductLaneProfile(instance="prod", context="example-site"))
+        self.store.write_product_profile_record(profile)
+        self.initialize_history()
+        origin = ProviderTargetOrigin(
+            product=profile.product,
+            context="example-site",
+            instance="prod",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id="original",
+        )
+
+        def reserve(key: str, target: ProviderTargetOrigin, now: str) -> None:
+            with patch.object(self.store, "_database_mutation_timestamp", return_value=now):
+                self.store.reserve_mutation(
+                    scope="fixture",
+                    route_path="/fixture",
+                    idempotency_key=key,
+                    request_fingerprint=key,
+                    lease_owner="fixture",
+                    lease_seconds=60,
+                    reconciliation_key="fixture",
+                    provider_target_key=target.target_key(),
+                    provider_target_origin=target,
+                )
+
+        reserve("first", origin, "2026-10-01T00:00:00Z")
+        transition = self.store.write_public_ingress_transition_with_outbox
+
+        def change_source(**kwargs: Any) -> Any:
+            reserve(
+                "second",
+                origin.model_copy(update={"target_id": "replacement"}),
+                "2026-10-01T01:00:00Z",
+            )
+            outcome = transition(**kwargs)
+            self.assertEqual(outcome.status, "provider_source_changed")
+            return outcome
+
+        with (
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value="2026-10-01T01:00:00Z"
+            ),
+            patch.object(
+                self.store, "write_public_ingress_transition_with_outbox", side_effect=change_source
+            ),
+        ):
+            result = run_public_ingress_monitor_once(
+                record_store=self.store, checked_at="2026-10-01T01:00:00Z", notify=False
+            )
+        self.assertEqual(result.skipped_count, 1)
+        self.assertEqual(self.store.list_public_ingress_observation_records(), ())
+        page = self.store.read_monitoring_authority_history(
+            product=profile.product, limit=500, cursor=None
+        )
+        self.assertEqual(page.capture_errors, ())
+        lanes = page.revisions[-1].payload["lanes"]
+        assert isinstance(lanes, list)
+        evidence = MonitoringAuthorityLaneEvidence.model_validate(lanes[0])
+        self.assertEqual(evidence.observation_ids, (result.records[0].record_id,))
+        with self.assertRaises(ValueError):
+            evidence.confirmed_observations(())
+
+    def test_ordinary_startup_from_the_live_join_installs_capture_once(self) -> None:
+        from control_plane.storage.migrations.versions import (
+            d1a5b7c9d2e4_join_attestations_compatibility as previous,
+            f3c7d9e1b5a8_join_monitoring_history as joined,
+        )
+
+        alembic_command.upgrade(_alembic_config(self.url), previous.revision)
+        before = set(inspect(self.engine).get_table_names())
+        self.assertEqual(migrate_schema(database_url=self.url), joined.revision)
+        self.store.verify_schema()
+        self.assertEqual(
+            set(inspect(self.engine).get_table_names()) - before, {self.history.TABLE_NAME}
+        )
+        self.assertTrue(before <= set(inspect(self.engine).get_table_names()))
+        self.assertEqual(migrate_schema(database_url=self.url), joined.revision)
+        self.assertEqual(
+            len([row for row in self.rows(include_epoch=True) if row["operation"] == "epoch"]), 1
+        )
+        batch = self.store.begin_monitoring_authority_batch()
+        assert batch is not None
+        self.assertEqual(batch.capture_errors, ())
+
+    def test_monitor_incident_and_recovery_batches_bind_the_retained_records(self) -> None:
+        from control_plane.monitoring_authority_history import MonitoringAuthorityLaneEvidence
+        from control_plane.lane_health_history import project_observation
+
+        self.store.write_product_profile_record(_public_ingress_profile())
+        self.initialize_history()
+        results = []
+        for second, status in enumerate((503, 503, 200)):
+
+            def fetch(url: str, _timeout: int) -> HttpObservation:
+                return HttpObservation(status_code=status, final_url=url, redirect_count=0)
+
+            results.append(
+                run_public_ingress_monitor_once(
+                    record_store=self.store,
+                    checked_at=f"2026-07-27T12:00:0{second}Z",
+                    notify=False,
+                    http_get=fetch,
+                )
+            )
+        self.assertEqual(results[0].open_incident_count, 1)
+        self.assertEqual(results[-1].resolved_incident_count, 1)
+        retained = tuple(
+            project_observation(row) for row in self.store.list_public_ingress_observation_records()
+        )
+        page = self.store.read_monitoring_authority_history(product="", limit=500, cursor=None)
+        confirmations = [row for row in page.revisions if row.operation == "confirmation"]
+        self.assertEqual(len(confirmations), len(results))
+        for row, result in zip(confirmations, results, strict=True):
+            lanes = row.payload["lanes"]
+            assert isinstance(lanes, list)
+            evidence = MonitoringAuthorityLaneEvidence.model_validate(lanes[0])
+            self.assertEqual(
+                evidence.confirmed_observations(retained),
+                tuple(project_observation(record) for record in result.records),
+            )
+
+    def test_monitor_confirms_once_only_after_a_completed_batch(self) -> None:
+        from control_plane.workflows.public_ingress_monitor import (
+            MonitorRunCancelled,
+            run_public_ingress_monitor_once,
+        )
+
+        self.initialize_history()
+        result = run_public_ingress_monitor_once(record_store=self.store, notify=False)
+        confirmations = [row for row in self.rows() if row["operation"] == "confirmation"]
+        self.assertEqual(len(confirmations), 1)
+        self.assertEqual(confirmations[0]["payload"]["checked_at"], result.checked_at)
+        with self.assertRaises(MonitorRunCancelled):
+            run_public_ingress_monitor_once(record_store=self.store, should_stop=lambda: True)
+        self.assertEqual(len([row for row in self.rows() if row["operation"] == "confirmation"]), 1)
+
+    def test_bookkeeping_failures_do_not_abort_the_monitor(self) -> None:
+        from control_plane.workflows.public_ingress_monitor import run_public_ingress_monitor_once
+
+        self.initialize_history()
+        for method in ("begin_monitoring_authority_batch", "complete_monitoring_authority_batch"):
+            with patch.object(self.store, method, side_effect=RuntimeError("private detail")):
+                with self.assertLogs(
+                    "control_plane.workflows.public_ingress_monitor", level="WARNING"
+                ) as logs:
+                    result = run_public_ingress_monitor_once(record_store=self.store, notify=False)
+                self.assertNotIn("private detail", str(logs.output))
+                self.assertEqual(result.target_count, 0)
+            self.assertEqual(
+                len([row for row in self.rows() if row["operation"] == "confirmation"]), 0
+            )
+
+    def test_confirmation_binds_the_exact_retained_observations_for_the_accountant(self) -> None:
+        from control_plane.monitoring_authority_history import MonitoringAuthorityLaneEvidence
+        from control_plane.lane_health_history import project_observation, summarize_observations
+        from tests.test_lane_health_history import observation, START
+
+        self.initialize_history()
+        record = observation("same-second", 0)
+        self.store.write_public_ingress_observation_record(record)
+        start = self.store.begin_monitoring_authority_batch()
+        assert start is not None
+        self.store.complete_monitoring_authority_batch(
+            start=start, checked_at=record.observed_at, records=(record,)
+        )
+        page = self.store.read_monitoring_authority_history(
+            product=record.product, limit=500, cursor=None
+        )
+        lanes = page.revisions[-1].payload["lanes"]
+        assert isinstance(lanes, list)
+        evidence = MonitoringAuthorityLaneEvidence.model_validate(lanes[0])
+        stored = self.store.list_public_ingress_history_records(
+            product=record.product,
+            context_name=record.context,
+            instance_name=record.instance,
+            since=START,
+            until=START + timedelta(seconds=60),
+            before=None,
+            limit=500,
+        )
+        confirmed = evidence.confirmed_observations(project_observation(row) for row in stored)
+        accounting = summarize_observations(
+            confirmed,
+            since=START,
+            until=START + timedelta(seconds=60),
+            instance=record.instance,
+            required_checks=((record.check_kind, record.check_name),),
+            identity_checks=((record.check_kind, record.check_name),),
+        )
+        self.assertEqual(accounting.lane_health_and_identity_seconds, 60)
+        changed = observation(record.record_id, 0, status="fail")
+        self.store.write_public_ingress_observation_record(changed)
+        with self.assertRaises(ValueError):
+            evidence.confirmed_observations((project_observation(changed),))
+        with self.assertRaises(ValueError):
+            evidence.confirmed_observations(())
+
+    def test_completed_batches_confirm_capture_without_backdating(self) -> None:
+        self.store.write_product_profile_record(_public_ingress_profile())
+        self.initialize_history()
+        initial = self.store.read_monitoring_authority_history(product="", limit=500, cursor=None)
+        self.assertIsNone(initial.confirmed_since)
+        self.assertEqual(initial.coverage.status, "complete")
+        start = self.store.begin_monitoring_authority_batch()
+        assert start is not None
+        self.store.complete_monitoring_authority_batch(
+            start=start,
+            checked_at="2026-01-01T00:00:00Z",
+            records=(),
+        )
+        page = self.store.read_monitoring_authority_history(product="", limit=500, cursor=None)
+        confirmation = page.revisions[-1]
+        self.assertEqual(confirmation.operation, "confirmation")
+        self.assertGreaterEqual(confirmation.recorded_at, start.started_at)
+        self.assertEqual(page.confirmed_since, confirmation.recorded_at)
+        self.assertEqual(confirmation.payload["checked_at"], "2026-01-01T00:00:00Z")
+        self.assertEqual(page.capture_errors, ())
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE launchplane_route_bindings DISABLE TRIGGER launchplane_route_bindings_monitoring_capture"
+                )
+            )
+        self.store.complete_monitoring_authority_batch(start=start, checked_at="later", records=())
+        incomplete = self.store.read_monitoring_authority_history(
+            product="", limit=500, cursor=None
+        )
+        self.assertEqual(incomplete.coverage.status, "unknown")
+        self.assertIsNone(incomplete.confirmed_since)
+        self.assertFalse(incomplete.revisions[-1].payload["capture_valid"])
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE launchplane_route_bindings ENABLE TRIGGER launchplane_route_bindings_monitoring_capture"
+                )
+            )
+        restored_start = self.store.begin_monitoring_authority_batch()
+        assert restored_start is not None
+        self.store.complete_monitoring_authority_batch(
+            start=restored_start, checked_at="restored", records=()
+        )
+        restored = self.store.read_monitoring_authority_history(product="", limit=500, cursor=None)
+        self.assertTrue(restored.revisions[-1].payload["capture_valid"])
+        self.assertEqual(restored.coverage.status, "unknown")
+        self.assertIsNone(restored.confirmed_since)
+
+    def test_frozen_pages_exclude_late_commits_even_below_the_page_sequence(self) -> None:
+        from control_plane.monitoring_authority_history import MonitoringAuthorityQueryError
+
+        self.initialize_history()
+        with self.engine.connect() as slow:
+            transaction = slow.begin()
+            self.write_profile(slow, "slow")
+            with self.engine.begin() as fast:
+                self.write_profile(fast, "fast")
+            first = self.store.read_monitoring_authority_history(product="", limit=1, cursor=None)
+            self.assertIsNone(first.next_cursor)
+            self.assertEqual([row.operation for row in first.revisions], ["epoch"])
+            transaction.commit()
+        first = self.store.read_monitoring_authority_history(product="", limit=1, cursor=None)
+        self.assertIsNotNone(first.next_cursor)
+        assert first.epoch is not None
+        backdated = base64.urlsafe_b64encode(
+            json.dumps(
+                [
+                    first.product,
+                    first.cluster_id,
+                    first.settled_before_transaction,
+                    "2000-01-01T00:00:00+00:00",
+                    first.revisions[-1].sequence,
+                    first.epoch.sequence,
+                ]
+            ).encode()
+        ).decode()
+        with self.assertRaises(MonitoringAuthorityQueryError):
+            self.store.read_monitoring_authority_history(product="", limit=500, cursor=backdated)
+        self.store.write_product_profile_record(
+            _public_ingress_profile().model_copy(update={"product": "later"})
+        )
+        page = self.store.read_monitoring_authority_history(
+            product="", limit=500, cursor=first.next_cursor
+        )
+        self.assertEqual({row.product for row in page.revisions}, {"slow", "fast"})
+        self.assertIsNone(page.next_cursor)
+        self.assertGreaterEqual(page.read_at, first.read_at)
+        with self.assertRaises(MonitoringAuthorityQueryError):
+            self.store.read_monitoring_authority_history(
+                product="other", limit=500, cursor=first.next_cursor
+            )
+
+    def test_private_endpoint_departure_is_scoped_and_redacted(self) -> None:
+        from control_plane.contracts.private_health_endpoint_record import (
+            PrivateHealthEndpointRecord,
+        )
+
+        self.initialize_history()
+        endpoint = PrivateHealthEndpointRecord(
+            endpoint_key="moving",
+            product="example-site",
+            context="example-site",
+            instance="testing",
+            url="https://private.invalid/health",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        self.store.write_private_health_endpoint_record(endpoint)
+        self.store.write_private_health_endpoint_record(
+            endpoint.model_copy(update={"product": "another", "context": "private-other"})
+        )
+        self.store.write_private_health_endpoint_record(
+            endpoint.model_copy(
+                update={"product": "another", "context": "private-other", "status": "disabled"}
+            )
+        )
+        page = self.store.read_monitoring_authority_history(
+            product="example-site", limit=500, cursor=None
+        )
+        revisions = [row for row in page.revisions if row.source]
+        self.assertEqual(len(revisions), 2)
+        self.assertNotIn("private.invalid", page.model_dump_json())
+        self.assertNotIn("private-other", page.model_dump_json())
+        self.assertTrue(revisions[0].material_sha256)
+        self.assertFalse(revisions[1].scope_visible)
+        self.assertEqual(revisions[1].payload, {})
+        self.assertEqual(page.coverage.status, "scoped")
+
+    def test_disabled_capture_cannot_validate_a_history_schema(self) -> None:
+        alembic_command.upgrade(_alembic_config(self.url), monitoring_history_migration.revision)
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE launchplane_product_profiles "
+                    "DISABLE TRIGGER launchplane_product_profiles_monitoring_capture"
+                )
+            )
+        with self.assertRaises(RuntimeError):
+            self.store.verify_schema()
+
+    def setUp(self) -> None:
+        from control_plane.storage.migrations import monitoring_authority_v1 as history
+
+        self.url = self.enterContext(_isolated_postgres_database())
+        alembic_command.upgrade(
+            _alembic_config(self.url), monitoring_history_migration.down_revision
+        )
+        self.engine = create_engine(self.url)
+        self.addCleanup(self.engine.dispose)
+        self.store = PostgresRecordStore(database_url=self.url)
+        self.addCleanup(self.store.close)
+        self.history = history
+
+    def initialize_history(self) -> None:
+        with self.engine.begin() as connection:
+            self.history.initialize(connection)
+
+    def rows(self, *, include_epoch: bool = False) -> list[dict[str, Any]]:
+        statement = select(self.history.history).order_by(self.history.history.c.sequence)
+        if not include_epoch:
+            statement = statement.where(self.history.history.c.operation != "epoch")
+        with self.engine.connect() as connection:
+            return [
+                cast(dict[str, Any], dict(row)) for row in connection.execute(statement).mappings()
+            ]
+
+    @staticmethod
+    def write_profile(connection: Connection, product: str, state: str = "active") -> None:
+        from control_plane.storage.postgres import LaunchplaneProductProfileRow
+
+        template = _public_ingress_profile()
+        profile = template.model_copy(
+            update={
+                "product": product,
+                "lifecycle_state": state,
+                "lanes": tuple(
+                    lane.model_copy(update={"context": product}) for lane in template.lanes
+                ),
+            }
+        )
+        connection.execute(
+            insert(LaunchplaneProductProfileRow).values(
+                product=product,
+                display_name=profile.display_name,
+                repository=profile.repository,
+                driver_id=profile.driver_id,
+                updated_at=profile.updated_at,
+                payload=profile.model_dump(mode="json"),
+            )
+        )
+
+    def test_epoch_seeds_inactive_profiles_and_monitoring_facts_without_backdating(self) -> None:
+        profile = _public_ingress_profile()
+        self.store.write_product_profile_record(profile)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "product": "retired-site",
+                    "lifecycle_state": "retired",
+                }
+            )
+        )
+        self.initialize_history()
+        rows = self.rows(include_epoch=True)
+        self.assertEqual({row["product"] for row in rows}, {"", profile.product, "retired-site"})
+        self.assertEqual({row["operation"] for row in rows}, {"epoch", "seed"})
+        self.assertTrue(all(row["recorded_at"] > profile.updated_at for row in rows))
+        seed = next(row for row in rows if row["product"] == profile.product)
+        self.assertEqual(json.loads(seed["source_key"]), [profile.product])
+        self.assertEqual(
+            seed["payload"],
+            {
+                "schema_version": profile.schema_version,
+                "lifecycle_state": profile.lifecycle_state,
+                "production_use": profile.production_use,
+                "public_website": profile.model_dump(mode="json").get("public_website"),
+                "driver_id": profile.driver_id,
+                "health_path": profile.health_path,
+                "lanes": [
+                    {
+                        "context": profile.lanes[0].context,
+                        "instance": profile.lanes[0].instance,
+                        "base_url": profile.lanes[0].base_url,
+                        "health_url": profile.lanes[0].health_url,
+                        "health_monitoring": profile.lanes[0].health_monitoring.model_dump(
+                            mode="json"
+                        ),
+                    }
+                ],
+            },
+        )
+
+    def test_relevant_profile_changes_delete_and_rollback_are_atomic(self) -> None:
+        self.initialize_history()
+        profile = _public_ingress_profile()
+        self.store.write_product_profile_record(profile)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "display_name": "unrelated display change",
+                    "updated_at": "2026-08-01T00:00:00Z",
+                }
+            )
+        )
+        self.assertEqual(len(self.rows()), 1)
+        changed = profile.model_copy(update={"driver_id": "odoo", "health_path": "/new-health"})
+        self.store.write_product_profile_record(changed)
+        before = self.rows()
+        self.assertEqual(len(before), 2)
+        self.assertEqual(before[-1]["payload"]["driver_id"], changed.driver_id)
+        self.assertEqual(before[-1]["payload"]["health_path"], changed.health_path)
+        self.assertNotIn("unrelated display change", str(before))
+        with self.engine.connect() as connection:
+            transaction = connection.begin()
+            connection.execute(text("DELETE FROM launchplane_product_profiles"))
+            transaction.rollback()
+        self.assertEqual(self.rows(), before)
+        with self.engine.begin() as connection:
+            connection.execute(text("DELETE FROM launchplane_product_profiles"))
+        self.assertEqual([row["operation"] for row in self.rows()], ["insert", "update", "delete"])
+        self.assertEqual(self.rows()[-1]["payload"], before[-1]["payload"])
+
+    def test_route_and_private_target_trust_changes_retain_exact_facts(self) -> None:
+        from control_plane.contracts.private_health_endpoint_record import (
+            PrivateHealthEndpointRecord,
+        )
+        from tests.test_route_binding_record import _route_binding_record
+        from tests.test_private_testing_trust import certificate_fixture
+
+        self.initialize_history()
+        binding = _route_binding_record(instance="testing")
+        self.store.write_route_binding_record(binding)
+        self.store.write_route_binding_record(
+            binding.model_copy(update={"updated_at": "2026-08-01T00:00:00Z"})
+        )
+        self.assertEqual(len(self.rows()), 1)
+        changed_binding = binding.model_copy(update={"status": "disabled"})
+        self.store.write_route_binding_record(changed_binding)
+        changed_domain = changed_binding.model_copy(
+            update={
+                "domains": (
+                    binding.domains[0].model_copy(update={"domain_name": "new.example.test"}),
+                ),
+            }
+        )
+        self.store.write_route_binding_record(changed_domain)
+        endpoint = PrivateHealthEndpointRecord(
+            endpoint_key="private-health",
+            product=binding.product,
+            context=binding.context,
+            instance="testing",
+            url="https://testing.internal/health",
+            updated_at=binding.updated_at,
+        )
+        self.store.write_private_health_endpoint_record(endpoint)
+        self.store.write_private_health_endpoint_record(
+            endpoint.model_copy(update={"source_label": "unrelated note"})
+        )
+        self.assertEqual(len(self.rows()), 4)
+        ca, _, _ = certificate_fixture()
+        replacement = PrivateHealthEndpointRecord.model_validate(
+            {
+                **endpoint.model_dump(),
+                "url": "https://other.internal/health",
+                "tls_ca_pem": ca,
+            }
+        )
+        self.store.write_private_health_endpoint_record(replacement)
+        rows = self.rows()
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(
+            json.loads(rows[0]["source_key"]), [binding.product, binding.context, binding.instance]
+        )
+        self.assertEqual(
+            rows[0]["payload"],
+            {
+                "status": binding.status,
+                "domains": [domain.model_dump(mode="json") for domain in binding.domains],
+                "external_ingress": None,
+            },
+        )
+        self.assertEqual(rows[1]["payload"]["status"], changed_binding.status)
+        self.assertEqual(
+            rows[2]["payload"]["domains"],
+            [domain.model_dump(mode="json") for domain in changed_domain.domains],
+        )
+        self.assertEqual(json.loads(rows[-1]["source_key"]), [replacement.endpoint_key])
+        self.assertEqual(
+            rows[-1]["payload"],
+            {
+                key: replacement.model_dump(mode="json").get(key)
+                for key in (
+                    "endpoint_key",
+                    "product",
+                    "context",
+                    "instance",
+                    "status",
+                    "url",
+                    "tls_ca_pem",
+                )
+            },
+        )
+        self.assertNotEqual(rows[-1]["payload"], rows[-2]["payload"])
+
+    def test_transaction_groups_are_shared_within_one_commit_and_distinct_after_it(self) -> None:
+        self.initialize_history()
+        with self.engine.begin() as connection:
+            self.write_profile(connection, "one")
+            self.write_profile(connection, "two")
+        with self.engine.begin() as connection:
+            self.write_profile(connection, "three")
+        first, second, third = self.rows()
+        self.assertTrue(first["transaction_id"])
+        self.assertEqual(first["transaction_id"], second["transaction_id"])
+        self.assertNotEqual(first["transaction_id"], third["transaction_id"])
+
+    def test_retained_history_cannot_be_changed_or_deleted(self) -> None:
+        self.initialize_history()
+        before = self.rows(include_epoch=True)
+        for statement in (
+            f"DELETE FROM {self.history.TABLE_NAME}",
+            f"UPDATE {self.history.TABLE_NAME} SET product='forged'",
+        ):
+            with self.assertRaises(DBAPIError):
+                with self.engine.begin() as connection:
+                    connection.execute(text(statement))
+            self.assertEqual(self.rows(include_epoch=True), before)
+
+    def test_epoch_waits_for_preexisting_writer_and_records_only_committed_sources(self) -> None:
+        from control_plane.storage.migrations import monitoring_authority_v1 as history
+
+        with self.engine.connect() as writer, self.engine.connect() as installer:
+            transaction = writer.begin()
+            self.write_profile(writer, "committed-before-epoch")
+            with self.assertRaises(OperationalError):
+                with installer.begin():
+                    installer.execute(text("SET LOCAL lock_timeout = '100ms'"))
+                    history.initialize(installer)
+            transaction.commit()
+            with installer.begin():
+                history.initialize(installer)
+                products = (
+                    installer.execute(
+                        text(f"SELECT product FROM {history.TABLE_NAME} WHERE operation='seed'")
+                    )
+                    .scalars()
+                    .all()
+                )
+            self.assertEqual(products, ["committed-before-epoch"])
 
 
 def _postgres_root_database_url() -> str:
@@ -1279,8 +1888,9 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
 
         with _isolated_postgres_database() as database_url:
             url = database_url.replace("postgresql+psycopg://", "postgresql://")
-            spec = {
+            spec: dict[str, Any] = {
                 "mode": "quiescence",
+                "identity": {"environment_kind": "stable"},
                 "binding": "fixture-binding",
                 "copy_binding": "fixture-copy",
                 "task_id": "1" * 32,
@@ -2099,6 +2709,81 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_postgres_preview_transport_holds_product_lease_through_provider_execution(
+        self,
+    ) -> None:
+        from control_plane.drivers.postgres_preview_transport import (
+            PostgresPreviewDestroyEnvelope,
+            apply_postgres_preview_destroy_result,
+        )
+        from control_plane.workflows.postgres_preview import (
+            PostgresPreviewDestroyRequest,
+            PostgresPreviewDestroyResult,
+        )
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        with _store_for_fresh_head_database() as store:
+            profile = _driver_profile()
+            store.write_product_profile_record(profile)
+            renamed = profile.model_copy(
+                update={"preview": profile.preview.model_copy(update={"app_name_suffix": "-new"})}
+            )
+
+            def execute(**_: object) -> PostgresPreviewDestroyResult:
+                with self.assertRaises(ValueError):
+                    store.write_product_profile_record(renamed)
+                return PostgresPreviewDestroyResult(
+                    destroy_status="pass",
+                    destroy_started_at="2026-10-29T00:00:00Z",
+                    destroy_finished_at="2026-10-29T00:00:00Z",
+                    application_name="",
+                    application_id="",
+                    preview_url="",
+                )
+
+            with patch(
+                "control_plane.drivers.postgres_preview_transport.execute_postgres_preview_destroy",
+                side_effect=execute,
+            ):
+                apply_postgres_preview_destroy_result(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    execution_profile=profile,
+                    request=PostgresPreviewDestroyEnvelope(
+                        product=profile.product,
+                        destroy=PostgresPreviewDestroyRequest(
+                            context=profile.preview.context,
+                            anchor_repo=profile.repository.partition("/")[2],
+                            anchor_pr_number=1,
+                            preview_slug="pr-1",
+                            destroy_reason="closed",
+                        ),
+                    ),
+                )
+            store.write_product_profile_record(renamed)
+            self.assertEqual(store.read_product_profile_record(profile.product), renamed)
+
+    def test_preview_operation_excludes_resource_renaming_until_it_finishes(self) -> None:
+        from control_plane.preview_namespaces import preview_product_operation_key
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        with _store_for_fresh_head_database() as store:
+            profile = _driver_profile()
+            store.write_product_profile_record(profile)
+            renamed = profile.model_copy(
+                update={"preview": profile.preview.model_copy(update={"app_name_suffix": "-new"})}
+            )
+            with store.serialize_preview_refresh(
+                preview_id=preview_product_operation_key(profile.product),
+                dedicated=True,
+                shared=True,
+            ):
+                with self.assertRaises(ValueError):
+                    store.write_product_profile_record(renamed)
+                self.assertEqual(store.read_product_profile_record(profile.product), profile)
+            store.write_product_profile_record(renamed)
+            self.assertEqual(store.read_product_profile_record(profile.product), renamed)
+
     def test_schema_column_catalog_reads_do_not_grow_per_required_table(self) -> None:
         from control_plane.storage.postgres import Base
 
@@ -3234,7 +3919,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     decoded = validate_preview_scope(
                         restored_settings.env, context=restored_profile.preview.context
                     )
-                    self.assertIsNotNone(decoded)
                     assert decoded is not None
                     self.assertEqual(
                         len(decoded.addon_settings), len(encoded_payload["addon_settings"])
@@ -3318,6 +4002,14 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 self.assertEqual(latest[0].feedback_id, newer.feedback_id)
 
     def test_compose_source_completion_holds_ownership_across_provider_update(self) -> None:
+        self._assert_compose_setup_holds_ownership("source")
+
+    def test_compose_domain_setup_holds_ownership_across_provider_update(self) -> None:
+        self._assert_compose_setup_holds_ownership("domain")
+
+    def _assert_compose_setup_holds_ownership(
+        self, setup_kind: Literal["source", "domain"]
+    ) -> None:
         with _store_for_fresh_head_database() as store:
             profile = _public_ingress_profile().model_copy(
                 update={
@@ -3363,6 +4055,11 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 }
             )
 
+            if setup_kind == "domain":
+                replacement = target.model_copy(
+                    update={"domains": ("first-testing.example.invalid",)}
+                )
+
             def apply_provider() -> None:
                 entered_provider.set()
                 if not release_provider.wait(timeout=5):
@@ -3370,13 +4067,14 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
             def complete_source() -> None:
                 try:
-                    store.complete_dokploy_compose_source(
+                    store.complete_dokploy_compose_setup(
                         expected_profile=profile,
                         expected_record=target,
                         expected_target_id=target_id,
                         expected_provider_target=provider,
                         replacement_record=replacement,
                         apply_provider=apply_provider,
+                        setup_kind=setup_kind,
                     )
                 except BaseException as error:
                     errors.append(error)
@@ -4090,7 +4788,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertTrue(reached_lock)
         self.assertEqual([record.operation_id for record in completed], [operation_id])
         self.assertEqual(operation.status, "execution_failed")
-        self.assertIsNotNone(operation.execution)
         assert operation.execution is not None
         self.assertEqual(
             operation.execution.failure_code,
@@ -4099,7 +4796,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertFalse(operation.execution.reconciliation_required)
         self.assertEqual(current_after_denial, (active_record,))
         self.assertEqual(inner_lookup.status, "missing")
-        self.assertIsNotNone(outer_lookup.record)
         assert outer_lookup.record is not None
         self.assertEqual(outer_lookup.record.state, "completed")
         self.assertEqual(outer_lookup.record.response_status_code, 409)
@@ -5314,7 +6010,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.schema_version, 1)
         self.assertEqual(loaded.state, "completed")
@@ -5396,7 +6091,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.provider_target_key, reconciliation_key)
         self.assertEqual(blocked.status, "target_busy")
@@ -5649,130 +6343,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     store.verify_schema()
             finally:
                 store.close()
-
-
-def _owner_control_shadow_base64url(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
-
-
-def _owner_control_shadow_binding(private_key: Ed25519PrivateKey) -> ChannelBindingRecord:
-    return ChannelBindingRecord(
-        channel_session_id="owner-control-postgres-session",
-        owner_github_id=100001,
-        signature_algorithm="ed25519",
-        owner_public_key=_owner_control_shadow_base64url(
-            private_key.public_key().public_bytes_raw()
-        ),
-        session_issued_at="2025-01-01T00:00:00+00:00",
-        session_expires_at="2035-01-01T00:00:00+00:00",
-    )
-
-
-def _owner_control_host_principal_claim() -> OwnerControlHostPrincipalClaim:
-    return OwnerControlHostPrincipalClaim(
-        host_instance_id="owner-control-postgres-host",
-        principal_id="owner-control-postgres-principal",
-        principal_separation="not_claimed",
-        key_custody="not_claimed",
-        gesture_source="not_claimed",
-    )
-
-
-def _seed_owner_control_shadow_issue_provenance(
-    store: PostgresRecordStore,
-) -> PrivilegedOperationRecord:
-    request = ManagedSecretReencryptionPlanInput(reason="Rotate retained keys", source_label="test")
-    evidence = ManagedSecretReencryptionHumanEvidence(
-        result_status="ok",
-        plan_digest="a" * 64,
-        configured_secret_count=3,
-        rotation_candidate_count=2,
-        unchanged_count=1,
-        unreadable_secret_count=0,
-        active_key_id="redacted-key",
-        retirement_blocked_key_ids=(),
-        retirement_ready_key_ids=(),
-        legacy_compatibility_key_loaded=False,
-    )
-    actor = PrivilegedOperationActor(identity_type="github_human", github_id=44, login="requester")
-    record = PrivilegedOperationRecord(
-        operation_id="privileged-operation-0123456789abcdef0123456789abcdef",
-        descriptor_id="managed-secret-reencryption",
-        descriptor_version=1,
-        safety_class="secret_backed",
-        status="planned",
-        source_event_id="owner-control-test",
-        requested_by=actor,
-        request=request,
-        request_digest=privileged_operation_request_digest(request),
-        evidence=evidence,
-        evidence_digest=privileged_operation_evidence_digest(evidence),
-        created_at="2026-08-28T00:00:00+00:00",
-        updated_at="2026-08-28T00:00:00+00:00",
-        expires_at="2030-01-01T00:00:00+00:00",
-    )
-    store.write_privileged_operation_plan(
-        record,
-        PrivilegedOperationEventRecord(
-            operation_id=record.operation_id,
-            sequence=1,
-            action="planned",
-            occurred_at=record.created_at,
-            source_kind="browser_api",
-            source_event_id=record.source_event_id,
-            actor=actor,
-            resulting_record_digest=privileged_operation_record_digest(record),
-        ),
-    )
-    policy = LaunchplaneAuthzPolicy(
-        schema_version=2,
-        github_humans=(
-            GitHubHumanPolicyRule(
-                managed_set_id="owner-control-tests",
-                managed_rule_id="approve",
-                github_ids=(100001,),
-                products=("launchplane",),
-                contexts=("launchplane",),
-                actions=(PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,),
-            ),
-        ),
-    )
-    digest = authz_policy_sha256(policy)
-    store.seed_authz_policy_if_absent(
-        LaunchplaneAuthzPolicyRecord(
-            record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
-            revision=1,
-            status="active",
-            source="owner-control-tests",
-            updated_at="2026-08-28T00:00:00Z",
-            policy_sha256=digest,
-            policy=policy,
-        )
-    )
-    return record
-
-
-def _owner_control_shadow_envelope(
-    private_key: Ed25519PrivateKey,
-    *,
-    binding: ChannelBindingRecord,
-    request: ApprovalRequest,
-) -> OwnerControlConfirmationEnvelope:
-    response = ChallengeResponse(
-        approval_request=request,
-        approval_request_digest=owner_control_approval_request_digest(request),
-        decision="approved",
-        channel_binding_sha256=owner_control_channel_binding_sha256(binding),
-        confirmed_at=request.issued_at,
-    )
-    return OwnerControlConfirmationEnvelope(
-        channel_binding=binding,
-        challenge_response=response,
-        signature_algorithm="ed25519",
-        signature=_owner_control_shadow_base64url(
-            private_key.sign(owner_control_signature_payload_bytes(response))
-        ),
-    )
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
@@ -6908,7 +7478,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         from tests.test_release_review import decision, profile, seed
         from tests.test_release_review_record import FakeReleaseIssues
 
-        for phase in ("read", "acknowledgement"):
+        for phase in ("lookup", "create"):
             with self.subTest(phase=phase), _head_postgres_database() as url:
                 engine = create_engine(url, pool_size=3, max_overflow=0, pool_timeout=0.2)
                 with patch("control_plane.storage.postgres._build_engine", return_value=engine):
@@ -6922,15 +7492,11 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     holder_ready, resume_holder = threading.Event(), threading.Event()
                     original_read = store.read_release_review_decision_record
 
-                    def read(**kwargs: Any) -> ReleaseReviewDecisionRecord:
-                        if phase == "read" and not holder_ready.is_set():
-                            holder_ready.set()
-                            if not resume_holder.wait(10):
-                                raise AssertionError("Lock holder was not resumed")
-                        return original_read(**kwargs)
-
                     def request(**kwargs: Any) -> object:
-                        if kwargs.get("method", "GET") == "GET" and phase == "acknowledgement":
+                        if (
+                            kwargs.get("method", "GET") == ("GET" if phase == "lookup" else "POST")
+                            and not holder_ready.is_set()
+                        ):
                             holder_ready.set()
                             if not resume_holder.wait(10):
                                 raise AssertionError("Lock holder was not resumed")
@@ -6945,9 +7511,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         )
 
                     with (
-                        patch.object(
-                            store, "read_release_review_decision_record", side_effect=read
-                        ),
                         patch(
                             "control_plane.release_review_record.github_api_request",
                             side_effect=request,
@@ -6955,6 +7518,10 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         patch(
                             "control_plane.release_review_record.resolve_launchplane_github_token",
                             return_value="test-token",
+                        ),
+                        patch(
+                            "control_plane.release_review_record.resolve_delivery_github_app_id",
+                            return_value=github.app_id,
                         ),
                         ThreadPoolExecutor(max_workers=3) as workers,
                     ):
@@ -7033,6 +7600,10 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                                 patch(
                                     "control_plane.release_review_record.resolve_launchplane_github_token",
                                     return_value="test-token",
+                                ),
+                                patch(
+                                    "control_plane.release_review_record.resolve_delivery_github_app_id",
+                                    return_value=github.app_id,
                                 ),
                             ):
                                 with self.assertRaises(ValueError):
@@ -7325,216 +7896,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             finally:
                 for store in stores:
                     store.close()
-
-    def test_owner_control_challenge_issuance_serializes_one_active_operation(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            private_key = Ed25519PrivateKey.generate()
-            binding = _owner_control_shadow_binding(private_key)
-            store.enroll_owner_control_channel_session(
-                binding,
-                host_principal_claim=_owner_control_host_principal_claim(),
-            )
-            operation = _seed_owner_control_shadow_issue_provenance(store)
-            issue_request = OwnerControlChallengeIssueRequest(
-                channel_session_id=binding.channel_session_id,
-                operation_id=operation.operation_id,
-                expires_in_seconds=300,
-            )
-            second_store = PostgresRecordStore(database_url=store.database_url)
-            barrier = threading.Barrier(2)
-
-            def issue_once(active_store: PostgresRecordStore) -> object:
-                barrier.wait(timeout=10)
-                return active_store.issue_owner_control_challenge(issue_request)
-
-            try:
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    issued_records = tuple(executor.map(issue_once, (store, second_store)))
-                engine = create_engine(store.database_url)
-                try:
-                    with engine.connect() as connection:
-                        active_count = connection.scalar(
-                            text(
-                                "select count(*) from "
-                                "launchplane_owner_control_issued_challenges "
-                                "where operation_id = :operation_id and state = 'issued'"
-                            ),
-                            {"operation_id": operation.operation_id},
-                        )
-                finally:
-                    engine.dispose()
-            finally:
-                second_store.close()
-
-        self.assertEqual(issued_records[0], issued_records[1])
-        self.assertEqual(active_count, 1)
-
-    def test_owner_control_reissuance_terminalizes_expired_challenge_once(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            private_key = Ed25519PrivateKey.generate()
-            binding = _owner_control_shadow_binding(private_key)
-            store.enroll_owner_control_channel_session(
-                binding,
-                host_principal_claim=_owner_control_host_principal_claim(),
-            )
-            operation = _seed_owner_control_shadow_issue_provenance(store)
-            issue_request = OwnerControlChallengeIssueRequest(
-                channel_session_id=binding.channel_session_id,
-                operation_id=operation.operation_id,
-                expires_in_seconds=1,
-            )
-            with patch.object(
-                store,
-                "_owner_control_shadow_timestamp",
-                return_value="2026-08-28T12:00:00+00:00",
-            ):
-                expired_candidate = store.issue_owner_control_challenge(issue_request)
-            second_store = PostgresRecordStore(database_url=store.database_url)
-            barrier = threading.Barrier(2)
-
-            def reissue_once(
-                active_store: PostgresRecordStore,
-            ) -> OwnerControlIssuedChallengeRecord:
-                with patch.object(
-                    active_store,
-                    "_owner_control_shadow_timestamp",
-                    return_value="2026-08-28T12:00:02+00:00",
-                ):
-                    barrier.wait(timeout=10)
-                    return active_store.issue_owner_control_challenge(issue_request)
-
-            try:
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    issued_records = tuple(executor.map(reissue_once, (store, second_store)))
-                engine = create_engine(store.database_url)
-                try:
-                    with engine.connect() as connection:
-                        active_count = connection.scalar(
-                            text(
-                                "select count(*) from "
-                                "launchplane_owner_control_issued_challenges "
-                                "where operation_id = :operation_id and state = 'issued'"
-                            ),
-                            {"operation_id": operation.operation_id},
-                        )
-                        lifecycle_count = connection.scalar(
-                            text(
-                                "select count(*) from "
-                                "launchplane_owner_control_challenge_lifecycle_events "
-                                "where challenge_id = :challenge_id"
-                            ),
-                            {"challenge_id": expired_candidate.challenge_id},
-                        )
-                        shadow_count = connection.scalar(
-                            text(
-                                "select count(*) from "
-                                "launchplane_owner_control_shadow_verification_events "
-                                "where challenge_id = :challenge_id"
-                            ),
-                            {"challenge_id": expired_candidate.challenge_id},
-                        )
-                finally:
-                    engine.dispose()
-            finally:
-                second_store.close()
-
-            expired = store.read_owner_control_issued_challenge(
-                challenge_nonce=expired_candidate.challenge_nonce
-            )
-
-        self.assertEqual(issued_records[0], issued_records[1])
-        self.assertNotEqual(issued_records[0].challenge_id, expired_candidate.challenge_id)
-        self.assertEqual(expired.state, "expired")
-        self.assertEqual(expired.attempt_count, 0)
-        self.assertEqual(active_count, 1)
-        self.assertEqual(lifecycle_count, 1)
-        self.assertEqual(shadow_count, 0)
-
-    def test_owner_control_shadow_verification_consumes_one_challenge_once(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            private_key = Ed25519PrivateKey.generate()
-            binding = _owner_control_shadow_binding(private_key)
-            store.enroll_owner_control_channel_session(
-                binding,
-                host_principal_claim=_owner_control_host_principal_claim(),
-            )
-            operation = _seed_owner_control_shadow_issue_provenance(store)
-            issued = store.issue_owner_control_challenge(
-                OwnerControlChallengeIssueRequest(
-                    channel_session_id=binding.channel_session_id,
-                    operation_id=operation.operation_id,
-                    expires_in_seconds=300,
-                )
-            )
-            envelope = _owner_control_shadow_envelope(
-                private_key,
-                binding=binding,
-                request=issued.approval_request(),
-            )
-            second_store = PostgresRecordStore(database_url=store.database_url)
-            loser_prelock_read_complete = threading.Event()
-            allow_loser_locking_read = threading.Event()
-            original_challenge_read = second_store._owner_control_issued_challenge_row
-
-            def controlled_challenge_read(
-                session: Any,
-                *,
-                challenge_nonce: str,
-                for_update: bool = False,
-            ) -> LaunchplaneOwnerControlIssuedChallengeRow | None:
-                row = original_challenge_read(
-                    session,
-                    challenge_nonce=challenge_nonce,
-                    for_update=for_update,
-                )
-                if not for_update:
-                    loser_prelock_read_complete.set()
-                    if not allow_loser_locking_read.wait(timeout=10):
-                        raise TimeoutError("Timed out waiting to release the losing verification.")
-                return row
-
-            executor = ThreadPoolExecutor(max_workers=1)
-            try:
-                with patch.object(
-                    second_store,
-                    "_owner_control_issued_challenge_row",
-                    side_effect=controlled_challenge_read,
-                ):
-                    losing_future = executor.submit(
-                        second_store.verify_owner_control_confirmation_shadow,
-                        envelope,
-                    )
-                    self.assertTrue(loser_prelock_read_complete.wait(timeout=10))
-                    winning_status = store.verify_owner_control_confirmation_shadow(
-                        envelope
-                    ).verification_status
-                    allow_loser_locking_read.set()
-                    losing_status = losing_future.result(timeout=10).verification_status
-                stored_challenge = store.read_owner_control_issued_challenge(
-                    challenge_nonce=issued.challenge_nonce
-                )
-                events = store.list_owner_control_shadow_verification_events(
-                    challenge_nonce=issued.challenge_nonce
-                )
-            finally:
-                allow_loser_locking_read.set()
-                executor.shutdown(wait=True)
-                second_store.close()
-
-        self.assertEqual([winning_status, losing_status], ["verified", "rejected"])
-        self.assertEqual(stored_challenge.state, "consumed")
-        self.assertEqual(stored_challenge.attempt_count, 2)
-        self.assertIsNotNone(stored_challenge.consumed_at)
-        self.assertEqual(
-            sorted(
-                (event.sequence, event.verification_status, event.rejection_reason)
-                for event in events
-            ),
-            [(1, "verified", None), (2, "rejected", "challenge_replayed")],
-        )
-        self.assertTrue(all(event.verifier_mode == "shadow" for event in events))
-        self.assertTrue(all(event.authorizes_execution is False for event in events))
-        self.assertTrue(all(event.authority_state == "inert" for event in events))
 
     def test_concurrent_detached_application_retirement_plans_reuse_one_reservation(
         self,
@@ -8314,7 +8675,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         {"delivery_id": failure.delivery_id},
                     )
                     claimed = store.claim_next_outbox_delivery_record(lease_owner="worker-b")
-                    self.assertIsNotNone(claimed.record)
                     assert claimed.record is not None
                     self.assertEqual(claimed.record.delivery_id, unrelated.delivery_id)
                     waiting = store.read_outbox_delivery_record(recovery.delivery_id)
@@ -8399,13 +8759,11 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             finally:
                 second_store.close()
 
-        self.assertIsNotNone(first_claim)
         assert first_claim is not None
         self.assertEqual(first_claim.lease_owner, "worker-a")
         self.assertIsNone(second_claim)
         self.assertFalse(stale_owner_heartbeat)
         self.assertEqual(recovered_ids, (first_claim.operation_id,))
-        self.assertIsNotNone(recovered_claim)
         assert recovered_claim is not None
         self.assertEqual(recovered_claim.lease_owner, "worker-b")
         self.assertEqual(recovered_claim.attempt, 2)
@@ -8761,7 +9119,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         self.assertFalse(worker.is_alive())
                         self.assertEqual(len(stale_owner_result), 1)
                         lock_error = stale_owner_result[0]
-                        self.assertIsInstance(lock_error, OperationalError)
                         assert isinstance(lock_error, OperationalError)
                         self.assertEqual(getattr(lock_error.orig, "sqlstate", ""), "55P03")
                     finally:
@@ -8805,7 +9162,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             finally:
                 second_store.close()
 
-        self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.request_fingerprint, "fingerprint-first")
 
@@ -8851,7 +9207,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(sorted(statuses), ["acquired", "in_progress"])
         self.assertEqual(conflict.status, "conflict")
-        self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual(stored.state, "running")
         self.assertEqual(stored.attempt, 1)
@@ -8989,7 +9344,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(sorted(statuses), ["replayed", "written"])
         self.assertEqual(stored_profile, profile)
-        self.assertIsNotNone(stored_reservation)
         assert stored_reservation is not None
         self.assertEqual(stored_reservation.state, "completed")
         self.assertEqual(stored_reservation.attempt, 1)
@@ -9028,7 +9382,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(acquired.status, "acquired")
         self.assertEqual(result.status, "written")
-        self.assertIsNotNone(stored_reservation)
         assert stored_reservation is not None
         self.assertEqual(stored_reservation.state, "completed")
         self.assertEqual(stored_reservation.attempt, 2)
@@ -11472,7 +11825,6 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             self.addCleanup(first.close)
             self.addCleanup(second.close)
             with first.testing_replacement_execution_lock("operation-a") as check:
-                self.assertIsNotNone(check)
                 assert check is not None
                 check()
                 with second.testing_replacement_execution_lock("operation-a") as competing:
@@ -11600,6 +11952,27 @@ class RealPostgresTestingRetryTests(testing_retry_tests.TestingRetryTests):
             return_value=generation,
         ):
             self.test_concurrent_same_key_commits_one_rearm_and_one_wakeup()
+
+
+class RealPostgresFirstTestingPublicIngressTests(
+    first_public_ingress_tests.FirstTestingPublicIngressTests
+):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
+        policy = LaunchplaneAuthzPolicy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                revision=1,
+                status="active",
+                source="test:first-testing-public-ingress",
+                updated_at=self.profile.updated_at,
+                policy=policy,
+            )
+        )
 
 
 class RealPostgresTestingPublicIngressTests(public_ingress_tests.TestingPublicIngressTests):
@@ -12896,6 +13269,59 @@ class RealPostgresRecipientRecoveryTests(unittest.TestCase):
 
     def test_committed_receipt_survives_later_provider_drift(self) -> None:
         self.fixture.test_committed_receipt_survives_later_provider_drift()
+
+
+@unittest.skipUnless(os.environ.get(POSTGRES_TEST_URL_ENV), "PostgreSQL integration URL required")
+class RealPostgresRecipientRetirementTests(recipient_retirement_tests.RecipientRetirementTests):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
+
+    def test_waiting_creation_rechecks_committed_retirement_reservation(self) -> None:
+        from control_plane.production_recipient_retirement_names import provider_name_guard
+
+        record, manifest, _, _ = self.adapter.current()
+
+        def create() -> None:
+            with provider_name_guard(self.store, manifest["project"]):
+                self.fail("Creation reused the retired project")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with provider_name_guard(self.store, manifest["project"]):
+                waiting = pool.submit(create)
+                blocked = False
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with self.store._engine.connect() as connection:
+                        blocked = bool(
+                            connection.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+                                )
+                            )
+                        )
+                    if blocked:
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(blocked, "Creation did not wait for retirement admission")
+                retiring = record.model_copy(
+                    update={
+                        "phase": "retiring_old",
+                        "execution": {
+                            **record.execution,
+                            "retirement_started_at": datetime.now(timezone.utc).isoformat(),
+                            "retirement_manifest": manifest,
+                        },
+                    }
+                )
+                self.store.write_production_recipient(
+                    expected=record.model_dump(mode="json"),
+                    replacement=retiring.model_dump(mode="json"),
+                )
+            with self.assertRaises(ValueError):
+                waiting.result(timeout=5)
+        with provider_name_guard(self.store, "an-independent-new-project"):
+            pass
 
 
 class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
@@ -14586,6 +15012,108 @@ class RealPostgresSecretReferenceTests(unittest.TestCase):
                 "odoo_config_parameter_missing=acme.empty,acme.missing", output.getvalue()
             )
             self.assertNotIn("private-readback-sentinel", output.getvalue())
+
+            from unittest.mock import mock_open
+            from control_plane import odoo_parameter_presence as presence
+            from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
+            from psycopg.errors import ReadOnlySqlTransaction
+
+            identity = {"instance": "testing", "context": "fixture"}
+            config = b"[options]\ndb_name=fixture\ndb_host=database\ndb_user=fixture\ndb_password=fixture\n"
+            program = presence.CONTAINER_PROGRAM.replace(
+                "__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY)
+            ).replace("__CONFIG_PATH__", repr("/fixture/odoo.conf"))
+            for key, count, nonempty in (
+                ("acme.present", 1, True),
+                ("acme.empty", 1, False),
+                ("acme.missing", 0, False),
+            ):
+                with self.subTest(parameter=key):
+                    raw = store._engine.raw_connection()
+                    write_refused = []
+
+                    @contextlib.contextmanager
+                    def readonly_cursor() -> Iterator[Any]:
+                        cursor = raw.cursor()
+                        try:
+
+                            def fetched_rows() -> Any:
+                                rows = cursor.fetchall()
+                                cursor.execute("SAVEPOINT presence_readonly_probe")
+                                try:
+                                    with self.assertRaises(ReadOnlySqlTransaction):
+                                        cursor.execute(
+                                            "UPDATE ir_config_parameter SET value = 'forbidden'"
+                                        )
+                                    write_refused.append(True)
+                                finally:
+                                    cursor.execute("ROLLBACK TO SAVEPOINT presence_readonly_probe")
+                                return rows
+
+                            yield SimpleNamespace(
+                                execute=cursor.execute,
+                                fetchone=cursor.fetchone,
+                                fetchall=fetched_rows,
+                            )
+                        finally:
+                            cursor.close()
+
+                    output = io.StringIO()
+                    errors = io.StringIO()
+                    with (
+                        patch.dict(
+                            sys.modules,
+                            {
+                                "psycopg2": SimpleNamespace(
+                                    connect=lambda **kwargs: SimpleNamespace(
+                                        cursor=readonly_cursor,
+                                        rollback=raw.rollback,
+                                        close=raw.close,
+                                    )
+                                )
+                            },
+                        ),
+                        patch.dict(
+                            os.environ,
+                            {
+                                "PLATFORM_INSTANCE": "testing",
+                                "ODOO_DB_NAME": "fixture",
+                                RUNTIME_IDENTITY_ENV_KEY: json.dumps(identity),
+                            },
+                            clear=True,
+                        ),
+                        patch("builtins.open", mock_open(read_data=config)),
+                        patch.object(
+                            sys,
+                            "stdin",
+                            io.StringIO(json.dumps({"identity": identity, "parameter": key})),
+                        ),
+                        contextlib.redirect_stdout(output),
+                        contextlib.redirect_stderr(errors),
+                    ):
+                        exec(program, {})
+                    result = json.loads(output.getvalue())
+                    self.assertEqual(result["runtime"], "verified", result)
+                    self.assertEqual(
+                        result["presence"],
+                        {
+                            "parameter": key,
+                            "exists": bool(count),
+                            "nonempty": nonempty,
+                            "count": count,
+                        },
+                    )
+                    self.assertEqual(write_refused, [True])
+                    self.assertNotIn(
+                        "private-readback-sentinel", output.getvalue() + errors.getvalue()
+                    )
+            with store._engine.connect() as connection:
+                self.assertEqual(
+                    connection.execute(
+                        text("SELECT value FROM ir_config_parameter WHERE key = 'acme.present'")
+                    ).scalar_one(),
+                    "private-readback-sentinel",
+                )
 
     def test_selection_cas_rollback_and_late_completion_preservation(self) -> None:
         from tests.test_odoo_secret_references import seed, KEY
@@ -16396,6 +16924,10 @@ class RealPostgresReleaseReviewHttpTests(release_review_http_tests._ReleaseRevie
                 return_value="test-token",
             ),
             patch(
+                "control_plane.release_review_record.resolve_delivery_github_app_id",
+                return_value=github.app_id,
+            ),
+            patch(
                 "control_plane.http_app.publish_release_decision",
                 wraps=publish_release_decision,
             ),
@@ -16590,7 +17122,7 @@ class RealPostgresLegacyOdooPreviewReconciliationTests(
         await self.closed_preview(completed_at=(now - timedelta(seconds=3)).isoformat())
         self.reads.clear()
         fake = FakePreviewProvider()
-        operation = self.prepared_operation(fake, "actual-custom-executor", now)
+        operation = self.prepared_operation(fake, "actual-custom-executor", now, creating=True)
         entered = threading.Event()
         release = threading.Event()
         execute = fake.execute_apply
@@ -17390,7 +17922,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                         )
                 migrate.assert_not_called()
 
-    def test_held_migration_joins_current_attestations_without_losing_retained_rows(self) -> None:
+    def test_held_migration_preserves_attestations_at_the_runtime_target(self) -> None:
         from control_plane.database_maintenance_host import RecoveryRequired
         from control_plane.database_maintenance import (
             apply_retirement,
@@ -17402,11 +17934,12 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
             retained_snapshot,
         )
         from control_plane.storage.schema_migration import (
+            SCHEMA_MIGRATION_TARGET_REVISION,
             migrate_schema_on_connection,
             schema_migration_target,
         )
         from control_plane.storage.migrations.versions import (
-            c8d2e4f6a9b1_add_integration_attestations as current,
+            c8d2e4f6a9b1_add_integration_attestations as attestations,
         )
         from control_plane.storage.migrations.versions import (
             e7c1d5e9a3b6_drop_retired_delivery_tables as retired,
@@ -17416,12 +17949,12 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
         from sqlalchemy import Table, MetaData
 
         with _isolated_postgres_database() as url:
-            alembic_command.upgrade(_alembic_config(url), current.revision)
+            alembic_command.upgrade(_alembic_config(url), SCHEMA_MIGRATION_TARGET_REVISION)
             engine = create_engine(url, poolclass=NullPool)
             self.addCleanup(engine.dispose)
             seed_retired_history(engine)
             with engine.begin() as seed:
-                table = Table(current.TABLE_NAME, MetaData(), autoload_with=seed)
+                table = Table(attestations.TABLE_NAME, MetaData(), autoload_with=seed)
                 seed.execute(
                     table.insert().values(
                         record_id="retained-attestation",
@@ -17442,7 +17975,8 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                     self.assertEqual(
                         final,
                         schema_migration_target(
-                            current_revision=current.revision, target_revision=retired.revision
+                            current_revision=SCHEMA_MIGRATION_TARGET_REVISION,
+                            target_revision=retired.revision,
                         ),
                     )
                     after = database_snapshot(connection)
@@ -17451,8 +17985,8 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                     self.assertEqual(set(before) - set(after), set(retired.RETIRED_TABLES))
                     self.assertEqual(retained_snapshot(after), retained_snapshot(before))
                     self.assertEqual(
-                        after[current.TABLE_NAME],
-                        before[current.TABLE_NAME],
+                        after[attestations.TABLE_NAME],
+                        before[attestations.TABLE_NAME],
                     )
                     preview.rollback()
                     rehearsal = {
@@ -17495,7 +18029,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                     }
             with engine.connect() as observer:
                 self.assertEqual(verify_committed_database(observer, proof), final)
-                table = Table(current.TABLE_NAME, MetaData(), autoload_with=observer)
+                table = Table(attestations.TABLE_NAME, MetaData(), autoload_with=observer)
                 observer.execute(table.update().values(pull_request_number=99))
                 with self.assertRaises(RecoveryRequired):
                     verify_committed_database(observer, proof)

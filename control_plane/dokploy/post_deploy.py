@@ -1,3 +1,4 @@
+from control_plane._preview_fixture_program import PREVIEW_FIXTURE_RESULT_MARKER
 from control_plane.host_package_runtime import (
     HOST_PACKAGE_VERSION_MARKER,
     HOST_PROGRAM_VERSION_MARKER,
@@ -152,6 +153,11 @@ DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES = {
     "finished",
     "healthy",
 }
+DOKPLOY_TERMINAL_DEPLOYMENT_STATUSES = (
+    DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
+    | DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
+    | {"error", "failed", "fail"}
+)
 POST_DEPLOY_UPDATE_IGNORED_ENV_KEYS = {
     "DOKPLOY_HOST",
     "DOKPLOY_TOKEN",
@@ -266,6 +272,7 @@ ODOO_POST_DEPLOY_READBACK_MARKERS = (
         "clean_snapshot_database_sha256",
         "clean_snapshot_filestore_sha256",
         "clean_preview_snapshot_id",
+        PREVIEW_FIXTURE_RESULT_MARKER,
     }
     | READBACK_FAILURE_MARKERS
     | INTEGRATION_READBACK_NAME_LIST_MARKERS
@@ -440,7 +447,12 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
         )
     if readback_marker_is_safe(key, value) or copy_failure_marker_is_safe(key, value):
         return True
-    if key in {"rehearsal_result", "rehearsal_child_failure", "recipient_recovery_retained"}:
+    if key in {
+        "rehearsal_result",
+        "rehearsal_child_failure",
+        "recipient_recovery_retained",
+        PREVIEW_FIXTURE_RESULT_MARKER,
+    }:
         return bool(
             re.fullmatch(
                 r"(?:[a-f0-9]{2}){1," + str(NATIVE_OPERATION_RESULT_MAX_BYTES) + "}", value
@@ -2808,12 +2820,12 @@ def compose_data_workflow_binding(
     )
 
 
-def bound_data_workflow_is_quiescent(
+def read_bound_data_workflow_deployments(
     *,
     host: str,
     token: str,
     binding: ComposeDataWorkflowBinding,
-) -> bool:
+) -> list[list[api.JsonObject]] | None:
     payload = api.dokploy_request(
         host=host,
         token=token,
@@ -2823,27 +2835,35 @@ def bound_data_workflow_is_quiescent(
     try:
         schedules = api.extract_schedules(payload)
     except click.ClickException:
-        return False
-    terminal = (
-        DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
-        | DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
-        | {"error", "failed", "fail"}
-    )
+        return None
+    bound = []
     for schedule in schedules:
         if not schedule.get("appName") or not schedule.get("name"):
-            return False
+            return None
         if schedule["appName"] != binding.app_name:
             continue
         deployments = schedule.get("deployments")
-        if not isinstance(deployments, list):
-            return False
-        history = api.parse_deployment_history(deployments)
-        if history.state == "unknown" or any(
-            api.deployment_status(deployment) not in terminal
-            for deployment in api.collect_dokploy_object_items(deployments)
+        if (
+            not isinstance(deployments, list)
+            or api.parse_deployment_history(deployments).state == "unknown"
         ):
-            return False
-    return True
+            return None
+        bound.append(api.collect_dokploy_object_items(deployments))
+    return bound
+
+
+def bound_data_workflow_is_quiescent(
+    *,
+    host: str,
+    token: str,
+    binding: ComposeDataWorkflowBinding,
+) -> bool:
+    rows = read_bound_data_workflow_deployments(host=host, token=token, binding=binding)
+    return rows is not None and all(
+        api.deployment_status(deployment) in DOKPLOY_TERMINAL_DEPLOYMENT_STATUSES
+        for row in rows
+        for deployment in row
+    )
 
 
 def compose_data_workflow_is_quiescent(

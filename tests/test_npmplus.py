@@ -1,6 +1,11 @@
+import io
 import json
+import traceback
 import unittest
+from email.message import Message
 from typing import cast
+from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 import click
@@ -87,6 +92,8 @@ class _Opener:
             return _Response(self.proxy_hosts_payload)
         if method == "GET" and path in ("/api/nginx/redirection-hosts", "/api/nginx/dead-hosts"):
             return _Response(self.other_hosts_payload)
+        if method == "GET" and path == "/api/nginx/certificates":
+            return _Response([self.certificate_payload])
         if method == "GET" and path == f"/api/nginx/certificates/{self.certificate_payload['id']}":
             return _Response(self.certificate_payload)
         if method == "GET" and path == "/api/nginx/access-lists/1":
@@ -350,7 +357,6 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
 
         api_payload = payload.to_api_payload()
         locations = api_payload["locations"]
-        self.assertIsInstance(locations, list)
         assert isinstance(locations, list)
         location = cast(dict[str, object], locations[0])
         self.assertNotIn("id", location)
@@ -372,6 +378,70 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
 
 
 class NpmplusClientTests(unittest.TestCase):
+    def test_provider_failures_cannot_render_secret_response_or_exception_input(self) -> None:
+        private = "fictional-provider-secret-sentinel"
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        client.authenticate()
+        failures = (
+            HTTPError(
+                "https://edge.example.test", 400, private, Message(), io.BytesIO(private.encode())
+            ),
+            URLError(private),
+            TimeoutError(private),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                with patch.object(opener, "open", side_effect=failure):
+                    try:
+                        client.get_proxy_host(78)
+                    except click.ClickException as error:
+                        self.assertNotIn(private, "".join(traceback.format_exception(error)))
+                    else:
+                        self.fail("A failed provider response must be rejected")
+
+    def test_malformed_provider_response_never_becomes_error_input(self) -> None:
+        private = "fictional-provider-secret-sentinel"
+        opener = _Opener()
+        opener.host_details["id"] = private
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        try:
+            client.get_proxy_host(78)
+        except ValueError as error:
+            self.assertNotIn(private, "".join(traceback.format_exception(error)))
+        else:
+            self.fail("Invalid provider identity must be rejected")
+
+    def test_host_read_discards_provider_metadata_before_serialization(self) -> None:
+        private = "fictional-provider-secret-sentinel"
+        opener = _Opener()
+        opener.host_details["meta"] = {"dns_provider_credentials": private}
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        host = client.get_proxy_host(78)
+        self.assertNotIn(private, host.model_dump_json())
+        self.assertNotIn(private, repr(host))
+
+    def test_credentials_repr_does_not_disclose_authentication_secret(self) -> None:
+        private = "fictional-provider-secret-sentinel"
+        credentials = NpmplusCredentials(
+            base_url="https://edge.example.test", identity="automation@example.test", secret=private
+        )
+        self.assertNotIn(private, repr(credentials))
+
+    def test_non_json_authentication_response_is_rejected_without_retaining_body(self) -> None:
+        private = "fictional-provider-secret-sentinel"
+        for body in (private.encode(), b"\xff" + private.encode()):
+            with self.subTest(body=type(body).__name__):
+                opener = _Opener()
+                opener.token_payload = body
+                client = NpmplusClient(credentials=_credentials(), opener=opener)
+                try:
+                    client.authenticate()
+                except click.ClickException as error:
+                    self.assertNotIn(private, "".join(traceback.format_exception(error)))
+                else:
+                    self.fail("Malformed authentication responses must be rejected")
+
     def test_selected_host_read_maps_related_access_lists(self) -> None:
         for access_type, access_lists in (("public", []), ("custom", [{"id": 42}])):
             with self.subTest(access_type=access_type):
@@ -474,7 +544,7 @@ class NpmplusClientTests(unittest.TestCase):
         client = NpmplusClient(credentials=_credentials(), opener=opener)
         domains = client.list_other_host_domains()
         self.assertIn("claimed.example.test", domains)
-        self.assertNotIn("disabled.example.test", domains)
+        self.assertIn("disabled.example.test", domains)
         self.assertFalse(
             any(
                 method != "GET" and path.endswith("proxy-hosts")
@@ -520,6 +590,14 @@ class NpmplusClientTests(unittest.TestCase):
         )
         self.assertNotIn("meta", certificate.model_dump())
         self.assertNotIn("fixture-secret", certificate.model_dump_json())
+
+    def test_certificate_inventory_keeps_only_public_metadata(self) -> None:
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        certificates = client.list_certificates()
+        self.assertEqual(certificates, (client.get_certificate(certificates[0].id),))
+        self.assertNotIn("fixture-secret", certificates[0].model_dump_json())
+        self.assertNotIn("meta", certificates[0].model_dump())
 
     def test_create_proxy_host_authenticates_and_posts_payload(self) -> None:
         opener = _Opener()
@@ -571,7 +649,6 @@ class NpmplusClientTests(unittest.TestCase):
         method, url, request_payload = opener.requests[-1]
         self.assertEqual(method, "PUT")
         self.assertEqual(url, "https://npmplus.example.test/api/nginx/proxy-hosts/78")
-        self.assertIsInstance(request_payload, dict)
         assert isinstance(request_payload, dict)
         self.assertTrue(request_payload["npmplus_noindex"])
 

@@ -12,6 +12,7 @@ from uuid import uuid4
 import logging
 from sqlalchemy.exc import SQLAlchemyError
 
+from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -19,7 +20,7 @@ from control_plane.contracts.product_review import (
     ProductReviewDecision,
     ProductReviewDecisionRecord,
 )
-from control_plane.release_review_shared import repository_key
+from control_plane.artifact_release_inputs import repository_key
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from control_plane.product_reconcile_read import product_preview_request, preview_refresh_failure
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
@@ -49,6 +50,14 @@ class ProductReviewStore(Protocol):
 
     def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord: ...
 
+    def list_preview_pr_feedback_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackRecord, ...]: ...
+
     def write_product_review_decision_record(
         self, record: ProductReviewDecisionRecord
     ) -> object: ...
@@ -68,6 +77,7 @@ _REQUIRED_STORE_METHODS = (
     "list_preview_records",
     "read_preview_generation_record",
     "write_product_review_decision_record",
+    "list_preview_pr_feedback_records",
     "list_product_review_decision_records",
 )
 
@@ -100,6 +110,10 @@ class ProductReviewPreviewChanged(ValueError):
 def source_control_pull_request_url(*, repository: str, pull_request_number: int) -> str:
     # GitHub is the current source-control adapter; this is the one place that knows it.
     return f"https://github.com/{repository}/pull/{pull_request_number}"
+
+
+def source_control_compare_url(*, repository: str, before: str, after: str) -> str:
+    return f"https://github.com/{repository}/compare/{before}...{after}"
 
 
 def product_profiles_for_repository(
@@ -193,6 +207,92 @@ def resolve_serving_preview(
     return serving[0]
 
 
+CurrentHeadPreview = Literal["served", "failed", "not_served", "no_previews"]
+
+
+class CurrentHeadPreviewStore(Protocol):
+    def list_product_profile_records(
+        self, *, driver_id: str = ""
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewRecord, ...]: ...
+
+    def list_preview_generation_records(
+        self, *, preview_id: str = "", limit: int | None = None
+    ) -> tuple[PreviewGenerationRecord, ...]: ...
+
+
+def current_head_preview(
+    *, store: CurrentHeadPreviewStore, repository: str, pull_request_number: int, head_sha: str
+) -> CurrentHeadPreview:
+    previewed_profiles = tuple(
+        profile
+        for profile in store.list_product_profile_records()
+        if repository_key(profile.repository) == repository_key(repository)
+        and profile.is_active
+        and profile.preview.enabled
+        and profile.preview.context.strip()
+    )
+    if not previewed_profiles:
+        return "no_previews"
+    states = {
+        _profile_current_head_preview(
+            store=store,
+            profile=profile,
+            pull_request_number=pull_request_number,
+            head_sha=head_sha.strip().lower(),
+        )
+        for profile in previewed_profiles
+    }
+    return "failed" if "failed" in states else "not_served" if "not_served" in states else "served"
+
+
+def _profile_current_head_preview(
+    *,
+    store: CurrentHeadPreviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+    head_sha: str,
+) -> CurrentHeadPreview:
+    repository = profile.repository.strip().casefold()
+    anchor_repositories = {repository, repository.split("/", 1)[-1]}
+    head_generations = tuple(
+        generation
+        for preview in store.list_preview_records(
+            context_name=profile.preview.context, anchor_pr_number=pull_request_number
+        )
+        if preview.anchor_repo.strip().casefold() in anchor_repositories
+        for generation in store.list_preview_generation_records(preview_id=preview.preview_id)
+        if head_sha and generation.anchor_summary.head_sha.strip().lower() == head_sha
+    )
+    if any(
+        generation.state in {"ready", "superseded"}
+        and generation.ready_at.strip()
+        and generation.deploy_status == "pass"
+        and generation.verify_status == "pass"
+        for generation in head_generations
+    ):
+        return "served"
+    if any(generation.state == "failed" for generation in head_generations):
+        return "failed"
+    request = product_preview_request(
+        store, product=profile.product, pull_request_number=pull_request_number
+    )
+    if request is None or not preview_refresh_failure(request, store=store):
+        return "not_served"
+    failed_head = request.last_plan.get(
+        "last_failed_head_sha", request.last_plan.get("head_sha", "")
+    )
+    return "failed" if str(failed_head).strip().lower() == head_sha else "not_served"
+
+
 def preview_review_unavailability(
     *,
     store: ProductReviewStore,
@@ -200,6 +300,7 @@ def preview_review_unavailability(
     pull_request_number: int,
     head_sha: str = "",
     request: ProductReconcileRequestRecord | None = None,
+    refresh_failure: str | None = None,
 ) -> str:
     if not profile.preview.enabled:
         return ""
@@ -210,6 +311,7 @@ def preview_review_unavailability(
             pull_request_number=pull_request_number,
             head_sha=head_sha,
             request=request,
+            refresh_failure=refresh_failure,
         )
     except (SQLAlchemyError, ValueError, OSError):
         logging.getLogger(__name__).warning(
@@ -225,6 +327,7 @@ def _preview_review_unavailability(
     pull_request_number: int,
     head_sha: str,
     request: ProductReconcileRequestRecord | None,
+    refresh_failure: str | None,
 ) -> str:
     if request is None:
         request = product_preview_request(
@@ -235,7 +338,9 @@ def _preview_review_unavailability(
     )
     if serving.preview_url and head_sha and serving.head_sha == head_sha.lower():
         return ""
-    failure = preview_refresh_failure(request) if request is not None else ""
+    failure = refresh_failure
+    if failure is None:
+        failure = preview_refresh_failure(request, store=store) if request is not None else ""
     if failure:
         if not head_sha:
             return f"Preview refresh failed: {failure}; current review availability is unknown"

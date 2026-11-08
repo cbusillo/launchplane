@@ -31,6 +31,7 @@ from control_plane.testing_activation_compose import (
 )
 from tests import test_testing_separation_resources as preparation
 from control_plane.testing_separation_resources import preparation_binding
+from control_plane.published_generation_resources import published_generation_resources
 
 
 COMPOSE = {
@@ -73,6 +74,11 @@ def activation_hold_policy(product: str, context: str) -> Any:
 
 
 class ComposeQualificationTests(unittest.TestCase):
+    def test_nested_and_variable_bearing_defaults_remain_unqualified(self) -> None:
+        for expression in ("${FIRST:-${SECOND}}", "${FIRST:-$SECOND}"):
+            with self.subTest(expression=expression), self.assertRaises(TestingActivationRefusal):
+                interpolate({"environment": {"SETTING": expression}}, {"SECOND": "alternate"})
+
     def setUp(self) -> None:
         self.values = {
             "DOCKER_IMAGE_REFERENCE": "example@sha256:" + "a" * 64,
@@ -1584,6 +1590,10 @@ class ActivationTests(unittest.TestCase):
             set(self.planned_record.host_ports),
         )
         self.assertNotIn("OLD_RECIPIENT_ONLY", current.env)
+        self.assertEqual(
+            published_generation_resources(self.store, context=self.context, instance="testing"),
+            current.env,
+        )
         self.assertEqual(current.domains, ())
         self.assertEqual(current.public_hosts, ())
         self.assertEqual(current.pending_public_host_effects, ())
@@ -2321,7 +2331,7 @@ class ActivationTests(unittest.TestCase):
         )
         self.assertTrue(require_activation_hold_lift(self.store, request, self.actor, self.root))
 
-    def test_safe_target_edits_keep_old_fence_attributed_but_resource_drift_does_not(self) -> None:
+    def test_inert_target_edits_keep_old_fence_attributed_but_identity_drift_does_not(self) -> None:
         self.assertEqual(self.run_activation().response_status_code, 202)
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
@@ -2331,6 +2341,13 @@ class ActivationTests(unittest.TestCase):
         self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
         target.env[self.request.port_keys[0]] = "3307"
         self.store.write_dokploy_target_record(target)
+        self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
+        identity = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_id_record(
+            identity.model_copy(update={"target_id": "foreign-target"})
+        )
         self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
 
     def test_provider_monitor_source_recheck_refuses_published_separation_drift(self) -> None:
@@ -2363,11 +2380,12 @@ class ActivationTests(unittest.TestCase):
             tls_get=Mock(),
         )
         self.assertEqual(observation.status, "pass")
-        current = self.store.read_dokploy_target_record(
+        identity = self.store.read_dokploy_target_id_record(
             context_name=self.context, instance_name="testing"
         )
-        current.env[self.request.port_keys[0]] = "3307"
-        self.store.write_dokploy_target_record(current)
+        self.store.write_dokploy_target_id_record(
+            identity.model_copy(update={"target_id": "foreign-target"})
+        )
         self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
         result = self.store.write_public_ingress_transition_with_outbox(
             observation=observation,

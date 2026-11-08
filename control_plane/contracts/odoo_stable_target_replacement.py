@@ -6,6 +6,7 @@ from typing import Literal, get_args
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.odoo_testing_source import MigratedOdooTestingSource
 from control_plane.workflows.odoo_verification import OdooVerificationEvidence
 
 
@@ -114,8 +115,11 @@ class OdooStableTargetReplacementRequest(BaseModel):
     instance: str
     strategy: Literal["recreate-in-place", "replace-and-cutover"] = "recreate-in-place"
     allow_empty_data: bool = False
-    data_source_mode: Literal["existing", "empty", "upstream_restore", "production_restore"] = (
-        "existing"
+    data_source_mode: Literal[
+        "existing", "empty", "upstream_restore", "production_restore", "migrated_restore"
+    ] = "existing"
+    migrated_source: MigratedOdooTestingSource | None = Field(
+        default=None, exclude_if=lambda value: value is None
     )
     confirmation: str = ""
     artifact_id: str = ""
@@ -137,6 +141,14 @@ class OdooStableTargetReplacementRequest(BaseModel):
             raise ValueError("Odoo stable target replacement requires product.")
         if not self.instance:
             raise ValueError("Odoo stable target replacement requires instance.")
+        if (self.data_source_mode == "migrated_restore") != (self.migrated_source is not None):
+            raise ValueError("A migrated restore requires exactly its declared output pair.")
+        if self.migrated_source is not None and (
+            self.instance != "testing"
+            or self.strategy != "replace-and-cutover"
+            or self.migrated_source.product != self.product
+        ):
+            raise ValueError("Migrated output is only a same-product independent testing input.")
         if bool(self.artifact_id) != bool(self.source_git_ref):
             raise ValueError(
                 "Odoo target replacement requires artifact_id and source_git_ref together."

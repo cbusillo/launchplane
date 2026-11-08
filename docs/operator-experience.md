@@ -867,7 +867,11 @@ and active edge join. A blocked plan offers no Apply. A ready decision shows
 both custodians and binds their exact evidence; it changes no live route.
 Review a changed custodian or configuration report in the same card. Current
 health, runtime identity and TLS checks qualify every hostname without monthly
-re-attestation. Unchanged stored managed sources are rechecked on reads.
+re-attestation. Unchanged stored managed sources are rechecked on reads for
+both managed-only and split ingress, without rewriting the binding or its TLS
+snapshot. Changed or missing source evidence still warns; current TLS probes
+keep their own freshness deadline. Route changes retain their reviewed safety
+checks.
 Saving also enables strict runtime-identity HTTP checks and TLS checks for
 every hostname. The lane stays unverified until those observations are current.
 Evidence refreshes reload untouched custody fields. If saved custody changes
@@ -1073,3 +1077,30 @@ Database-backed declaration apply also refuses a concurrent product-profile
 change rather than overwriting it with an earlier profile snapshot.
 Existing workflow callers receive the same concurrent-change refusal; review
 current metadata and run a new dry run before retrying a stale apply.
+
+## Lane status for the sidebar and agents
+
+Product overviews and environment reads include `lane_status`, derived by the
+service from health checks, open incidents, runtime identity, TLS, warnings and
+evidence freshness. The sidebar and other lane signals render its `current`
+result. Its ordered `transitions` contain only changes caused by evidence expiry;
+clients select the last transition whose `after` timestamp has passed. An open
+page therefore expires cached evidence without a second health algorithm.
+
+Live products also warn when a production host has no successful security-update
+completion, or its last completion is over two days old. The delivery worker
+reads Debian's `upgrade-stamp` through the existing host transport; apt writes
+that stamp after a successful unattended run, including one with no upgrades.
+The host reports the stamp's age, avoiding clock-offset assumptions. Results
+are reused for an hour, including failures; receipts expire after two hours on
+Launchplane's clock. Shared hosts are read once per pass. Each lane's result replaces a
+completion receipt in the existing store, outside uptime history. Missing,
+expired, denied, moved-target or invalid evidence remains unverified. A fresh
+read clears the warning. Launchplane does not run updates or reboot the host.
+
+The catalog's `product-status-read` reads the same product
+inventory once and returns each caller-visible product and every recorded lane's sidebar tone and description,
+sidebar reasons and attention and warning reasons, plus the product's warnings. Missing lane status
+fails the read rather than implying healthy. Omitted lanes are not recorded,
+as shown by the sidebar's absent-lane icon. The read does not change a lane,
+resolve an incident or authorize a deployment.

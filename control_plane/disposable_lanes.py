@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -18,6 +18,9 @@ from control_plane.contracts.odoo_instance_override_record import OdooInstanceOv
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.lane_usage import evaluate_lane_usage
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+
+if TYPE_CHECKING:
+    from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsResult
 
 LaneConfigurationRecord = (
     RuntimeEnvironmentRecord
@@ -314,7 +317,7 @@ def require_disposable_lane(
         target=target,
         target_id=target_id,
         instance=instance,
-        usage=evidence.usage if evidence else "unknown",
+        usage=evidence.current_usage(now) if evidence else "unknown",
         require_unused=not (preview_operation or retirement),
         now=now,
         runtime_stopped=runtime_stopped,
@@ -419,13 +422,105 @@ def require_disposable_lane(
     return evidence.binding_sha256
 
 
+class DisposablePreviewOperationStore(DisposableLaneStore, Protocol):
+    def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]: ...
+
+
+def require_disposable_preview_operation(
+    store: DisposablePreviewOperationStore,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    issued_plan: "OdooPreviewApplyInputsResult",
+    allow_unrecorded_creation: bool = False,
+) -> str:
+    if store.read_product_profile_record(profile.product) != profile:
+        raise DisposableLaneSafetyUnknown("The preview profile changed; plan again.")
+    compose_id = issued_plan.dry_run_plan.compose_ref
+    unrecorded_creation = (
+        allow_unrecorded_creation
+        and issued_plan.operation == "refresh"
+        and compose_id.startswith("${created.composeId:")
+        and not _owned_preview_candidates(
+            store, profile, issued_plan.context, issued_plan.preview_slug
+        )
+    )
+    preview = (
+        None
+        if unrecorded_creation
+        else resolve_disposable_preview(
+            store,
+            profile,
+            issued_plan.context,
+            issued_plan.preview_slug,
+            allow_destroyed=issued_plan.operation in {"refresh", "destroy"},
+        )
+    )
+    creating_recipient = (
+        issued_plan.operation == "refresh"
+        and (unrecorded_creation or preview is not None and preview.state == "destroyed")
+        and compose_id.startswith("${created.composeId:")
+    )
+    if not creating_recipient and (not compose_id or compose_id.startswith("${created.")):
+        raise DisposableLaneSafetyUnknown("The existing preview target is not resolved.")
+    try:
+        target_id = store.read_dokploy_target_id_record(
+            context_name=issued_plan.context, instance_name=issued_plan.preview_slug
+        )
+    except FileNotFoundError:
+        target_id = None
+    if (creating_recipient and target_id is not None) or (
+        target_id is not None and compose_id != target_id.target_id
+    ):
+        raise DisposableLaneSafetyUnknown(
+            "The discovered preview target changed or aliases another lane."
+        )
+    require_lane_target_ownership(
+        (
+            *store.list_dokploy_target_id_records(),
+            *store.list_physical_provider_target_records(),
+        ),
+        context=issued_plan.context,
+        instance=issued_plan.preview_slug,
+        target_id="" if creating_recipient else compose_id,
+    )
+    if unrecorded_creation:
+        try:
+            target = store.read_dokploy_target_record(
+                context_name=issued_plan.context, instance_name=issued_plan.preview_slug
+            )
+        except FileNotFoundError:
+            target = None
+        require_unprotected_preview(
+            target,
+            store.read_disposable_lane_safety(
+                profile.product, issued_plan.context, issued_plan.preview_slug
+            ),
+        )
+        return disposable_lane_binding_sha256(
+            profile,
+            target,
+            target_id,
+            configuration=disposable_lane_configuration(
+                store, issued_plan.context, issued_plan.preview_slug
+            ),
+        )
+    return require_disposable_lane(
+        store,
+        product=profile.product,
+        context=issued_plan.context,
+        instance=issued_plan.preview_slug,
+        preview=preview,
+        preview_operation=issued_plan.operation,
+    )
+
+
 def require_unprotected_preview(
     target: DokployTargetRecord | None, evidence: DisposableLaneSafety | None
 ) -> None:
     if (target is not None and target.policies.staff_testing_hold is not None) or (
         evidence is not None
         and (
-            evidence.usage == "in_use"
+            evidence.current_usage() == "in_use"
             or evidence.data == "only_copy"
             or evidence.production_resources in {"shared", "separation_ready"}
         )
@@ -442,24 +537,7 @@ def resolve_disposable_preview(
     allow_destroyed: bool = False,
 ) -> PreviewRecord:
     """Resolve an actual uniquely owned preview; a slug alone is never authority."""
-    if instance == "prod" or context != profile.preview.context:
-        raise DisposableLaneSafetyUnknown("The requested lane is not this product's preview.")
-    if any(
-        other.product != profile.product
-        and context
-        in {
-            other.preview.context,
-            *other.historical_contexts,
-            *(lane.context for lane in other.lanes),
-        }
-        for other in store.list_product_profile_records()
-    ):
-        raise DisposableLaneSafetyUnknown("The preview context has shared or uncertain ownership.")
-    matches = [
-        item
-        for item in store.list_preview_records(context_name=context)
-        if profile.preview.slug_template.format(number=item.anchor_pr_number) == instance
-    ]
+    matches = _owned_preview_candidates(store, profile, context, instance)
     if (
         len(matches) != 1
         or matches[0].anchor_repo
@@ -473,6 +551,32 @@ def resolve_disposable_preview(
             "The preview is absent, ambiguous or owned by another product."
         )
     return matches[0]
+
+
+def _owned_preview_candidates(
+    store: DisposableLaneStore,
+    profile: LaunchplaneProductProfileRecord,
+    context: str,
+    instance: str,
+) -> list[PreviewRecord]:
+    if instance == "prod" or context != profile.preview.context:
+        raise DisposableLaneSafetyUnknown("The requested lane is not this product's preview.")
+    if any(
+        other.product != profile.product
+        and context
+        in {
+            other.preview.context,
+            *other.historical_contexts,
+            *(lane.context for lane in other.lanes),
+        }
+        for other in store.list_product_profile_records()
+    ):
+        raise DisposableLaneSafetyUnknown("The preview context has shared or uncertain ownership.")
+    return [
+        item
+        for item in store.list_preview_records(context_name=context)
+        if profile.preview.slug_template.format(number=item.anchor_pr_number) == instance
+    ]
 
 
 def disposable_lane_configuration(

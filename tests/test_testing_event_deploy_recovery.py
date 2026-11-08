@@ -350,7 +350,6 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
         # must not pretend a filtered container list proves an absent effect.
         self.responses["/api/docker.getContainers"] = None
         audit = self.recover(record)
-        self.assertIsNotNone(audit)
         assert audit is not None
         evidence = audit["provider_evidence"]
         assert isinstance(evidence, dict)

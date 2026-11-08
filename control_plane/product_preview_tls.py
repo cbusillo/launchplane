@@ -72,6 +72,10 @@ def build_product_preview_tls_plan(
     if profile.driver_id != "odoo":
         raise ProductPreviewTlsDriverError("Product preview TLS policy requires the Odoo driver.")
     current_value = profile.preview.domain_certificate_type
+    if current_value != request.domain_certificate_type:
+        updated_product_preview_tls_profile(
+            profile=profile, request=request, updated_at=profile.updated_at
+        )
     plan_evidence = {
         "schema_version": 1,
         "product": profile.product,

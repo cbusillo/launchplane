@@ -60,7 +60,13 @@ def read_compose_source(
     return json.dumps(load(path), sort_keys=True, separators=(",", ":"))
 
 
-_SUBSTITUTION = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?])(.*?))?\}")
+_SUBSTITUTION = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?])([^${}]*))?\}")
+
+
+def compose_interpolation_keys(value: str) -> set[str]:
+    if "$" in _SUBSTITUTION.sub("", value):
+        raise TestingActivationRefusal("Unsupported Compose interpolation.")
+    return {match[1] for match in _SUBSTITUTION.finditer(value)}
 
 
 def interpolate(value: Any, environment: dict[str, str]) -> Any:
@@ -84,8 +90,7 @@ def interpolate(value: Any, environment: dict[str, str]) -> Any:
             raise TestingActivationRefusal("A required Compose input is unavailable.")
         return ""
 
-    if "$" in _SUBSTITUTION.sub("", value):
-        raise TestingActivationRefusal("Unsupported Compose interpolation.")
+    compose_interpolation_keys(value)
     return _SUBSTITUTION.sub(replace, value)
 
 

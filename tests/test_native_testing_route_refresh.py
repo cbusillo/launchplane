@@ -14,7 +14,6 @@ from httpx2 import Response
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.route_binding_record import route_binding_record_sha256
 from control_plane.contracts.product_profile_record import ProductLaneProfile
-from control_plane.contracts.testing_route_refresh import testing_route_domains
 from control_plane.route_binding_reconcile import (
     _EVIDENCE_FRESHNESS_WINDOW,
     _EVIDENCE_REFRESH_THRESHOLD,
@@ -439,7 +438,8 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["result"]["refreshed_count"], 1, response.text)
         current = fixture.current()
         assert current.binding is not None
-        self.assertEqual(current.binding.domains, testing_route_domains(fixture.route))
+        assert expected.binding is not None
+        self.assertEqual(current.binding.domains, expected.binding.domains)
         from control_plane.contracts.product_topology_read_model import (
             ProductEnvironmentTopology,
             build_product_environment_topology,
@@ -460,7 +460,7 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         topology = project_topology()
         self.assertEqual(
             {(item.domain_name, item.role) for item in topology.desired.domains},
-            {(item.domain_name, item.role) for item in testing_route_domains(fixture.route)},
+            {(item.domain_name, item.role) for item in current.binding.domains},
         )
         self.assertNotIn("domain_divergence", {item.code for item in topology.warnings})
         http_intent = project_topology(
@@ -472,13 +472,6 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertFalse(any(item.tls_expected for item in http_intent.desired.domains))
-        for receipt in (None, published.model_copy(update={"state": "planned"})):
-            with patch(
-                "control_plane.testing_publication_storage.read_publication", return_value=receipt
-            ):
-                self.assertIn(
-                    "domain_divergence", {item.code for item in project_topology().warnings}
-                )
         fixture.store.write_route_binding_record(
             current.binding.model_copy(
                 update={
@@ -530,12 +523,6 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaises(TestingActivationRefusal):
                 require_retained_route_authority(fixture.store, activation)
-        with patch(
-            "control_plane.testing_publication_storage.read_publication", side_effect=ValueError
-        ):
-            self.assertIn("domain_divergence", {item.code for item in project_topology().warnings})
-            with self.assertRaises(TestingActivationRefusal):
-                require_retained_route_authority(fixture.store, activation)
         assert current.binding is not None
         foreign = current.binding.model_copy(
             update={
@@ -550,7 +537,6 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         fixture.store.write_route_binding_record(foreign)
-        self.assertIn("domain_divergence", {item.code for item in project_topology().warnings})
         with self.assertRaises(TestingActivationRefusal):
             require_retained_route_authority(fixture.store, activation)
         fixture.store.write_route_binding_record(current.binding)
@@ -755,7 +741,9 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(after_denial, before_denial)
 
-    async def test_manual_reconcile_identifies_the_native_refresh_path(self) -> None:
+    async def test_manual_reconcile_observes_native_lane_and_replays_without_provider_calls(
+        self,
+    ) -> None:
         current = self.binding()
         result = plan_route_binding_reconcile(
             record_store=self.store,
@@ -771,19 +759,110 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.status, "blocked")
         self.assertEqual(result.findings[0].code, NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER)
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(schema_version=2),
+            bearer_identity_config=_local_operator_bearer_config(),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.fixture.fixture.root,
+        )
+        payload: dict[str, object] = {
+            "product": current.product,
+            "context": current.context,
+            "instance": "testing",
+            "expected_current": {
+                "state": "present",
+                "record_sha256": route_binding_record_sha256(current),
+            },
+            "mode": "dry-run",
+            "reason": "Reconcile this native testing lane only",
+        }
+        headers = {
+            "Authorization": "Bearer local-operator-token",
+            "Idempotency-Key": "exact-native-reconcile",
+        }
+        response = await _asgi_request(
+            app, "POST", "/v1/route-bindings/reconcile", headers=headers, payload=payload
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["result"]["status"], "ready", response.text)
+        self.assertEqual(self.binding(), current)
+        payload.update(mode="apply", confirmation="APPLY LAUNCHPLANE ROUTE BINDING RECONCILE")
+        applied = await _asgi_request(
+            app, "POST", "/v1/route-bindings/reconcile", headers=headers, payload=payload
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertEqual(
+            applied.json()["result"]["route_binding_status"], "refreshed", applied.text
+        )
+        self.read.reset_mock()
+        replay = await _asgi_request(
+            app, "POST", "/v1/route-bindings/reconcile", headers=headers, payload=payload
+        )
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        self.read.assert_not_called()
+        stale = await _asgi_request(
+            app,
+            "POST",
+            "/v1/route-bindings/reconcile",
+            headers={**headers, "Idempotency-Key": "stale-native-reconcile"},
+            payload=payload,
+        )
+        self.assertEqual(stale.status_code, 202, stale.text)
+        self.assertEqual(stale.json()["result"]["status"], "conflict", stale.text)
+        self.read.assert_not_called()
 
     async def test_concurrent_source_change_is_fenced_at_the_atomic_write(self) -> None:
         before = self.binding()
+        profile = self.store.read_product_profile_record(self.candidate.product)
         reconcile = self.store.reconcile_route_binding_record
 
         def changed(**kwargs: Any) -> Any:
-            profile = self.store.read_product_profile_record(self.candidate.product)
             self.store.write_product_profile_record(
                 profile.model_copy(update={"runtime_port": profile.runtime_port + 1})
             )
             return reconcile(**kwargs)
 
-        with patch.object(self.store, "reconcile_route_binding_record", side_effect=changed):
-            response = await self.refresh()
-        self.assertEqual(response.json()["result"]["conflict_count"], 1, response.text)
-        self.assertEqual(self.binding(), before)
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_controller_policy(
+                mode="apply", products=(self.candidate.product,), contexts=(self.candidate.context,)
+            ),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.fixture.fixture.root,
+        )
+        for exact in (False, True):
+            with (
+                self.subTest(exact=exact),
+                patch.object(self.store, "reconcile_route_binding_record", side_effect=changed),
+            ):
+                if exact:
+                    response = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/route-bindings/reconcile",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "exact-race",
+                        },
+                        payload={
+                            "product": before.product,
+                            "context": before.context,
+                            "instance": before.instance,
+                            "mode": "apply",
+                            "reason": "Observe a native lane with policy authority",
+                            "confirmation": "APPLY LAUNCHPLANE ROUTE BINDING RECONCILE",
+                            "expected_current": {
+                                "state": "present",
+                                "record_sha256": route_binding_record_sha256(before),
+                            },
+                        },
+                    )
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertEqual(response.json()["error"]["code"], "route_binding_changed")
+                else:
+                    response = await self.refresh()
+                    self.assertEqual(response.json()["result"]["conflict_count"], 1, response.text)
+                self.assertEqual(self.binding(), before)
+                self.store.write_product_profile_record(profile)

@@ -1,6 +1,16 @@
 import { validateRemovalResponse } from "./runtime-setting-removal";
+import type { CredentialInventoryResponse } from "./generated/openapi.ts";
+
+import type { RequestAttentionPage } from "./generated/openapi.ts";
+
+
 import type { ApplyIntegrationAllowancesData, ApplyIntegrationAllowancesResponse, ReadIntegrationAllowancesData, ReadIntegrationAllowancesResponse } from "./generated/openapi.ts";
 
+export function readRequestAttention(repository?: string, signal?: AbortSignal): Promise<RequestAttentionPage> {
+  const query = new URLSearchParams();
+  if (repository) query.set("repository", repository);
+  return requestJson(`/v1/attention/requests?${query}`, "GET", undefined, signal);
+}
 export function readIntegrationAllowances(query: NonNullable<ReadIntegrationAllowancesData["query"]>, signal?: AbortSignal): Promise<ReadIntegrationAllowancesResponse> {
   return requestJson(`/v1/product-config/integration-allowances?${new URLSearchParams(query as Record<string, string>)}`, "GET", undefined, signal);
 }
@@ -320,6 +330,10 @@ function generatedIdempotencyKey(headers?: object): string {
   }
   const value = (headers as Record<string, unknown>)["Idempotency-Key"];
   return typeof value === "string" ? value.trim() : "";
+}
+
+export function readCredentialInventory(signal?: AbortSignal): Promise<CredentialInventoryResponse> {
+  return requestJson("/v1/admin/credential-inventory", "GET", undefined, signal);
 }
 
 export function readAuthSession(

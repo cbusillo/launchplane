@@ -326,7 +326,7 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
             policy=_policy(),
             pre_inventory=_inventory(lanes=()),
             inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
-            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            token_fetcher=token_fetcher,
             remote_runner=command_runner,
             audit_poster=audit_poster,
         )
@@ -354,7 +354,7 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
             policy=_policy(),
             pre_inventory=_inventory(lanes=(_lane(),)),
             inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
-            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            token_fetcher=token_fetcher,
             remote_runner=command_runner,
             audit_poster=audit_poster,
         )
@@ -374,7 +374,7 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
             policy=_policy(),
             pre_inventory=_inventory(lanes=()),
             inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
-            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            token_fetcher=token_fetcher,
             remote_runner=command_runner,
             audit_poster=audit_poster,
         )
@@ -401,7 +401,7 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
             policy=_policy(),
             pre_inventory=_inventory(lanes=()),
             inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
-            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            token_fetcher=token_fetcher,
             remote_runner=command_runner,
             audit_poster=audit_poster,
         )
@@ -422,7 +422,7 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
             policy=_policy(),
             pre_inventory=_inventory(lanes=()),
             inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
-            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            token_fetcher=token_fetcher,
             remote_runner=command_runner,
             audit_poster=audit_poster,
         )
@@ -481,7 +481,7 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
             policy=_policy(),
             pre_inventory=_inventory(lanes=()),
             inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
-            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            token_fetcher=token_fetcher,
             remote_runner=command_runner,
             audit_poster=audit_poster,
         )
@@ -503,7 +503,7 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
             policy=_policy(),
             pre_inventory=_inventory(lanes=()),
             inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
-            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            token_fetcher=token_fetcher,
             remote_runner=command_runner,
             audit_poster=audit_poster,
         )
@@ -522,7 +522,7 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
                 policy=_policy(),
                 pre_inventory=_inventory(lanes=()),
                 inventory_reader=lambda _repo: _inventory(lanes=()),
-                token_fetcher=token_fetcher,  # type: ignore[arg-type]
+                token_fetcher=token_fetcher,
                 remote_runner=command_runner,
                 audit_poster=audit_poster,
             )
@@ -548,7 +548,7 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
                 policy=_policy(),
                 pre_inventory=_inventory(lanes=()),
                 inventory_reader=inventory_reader,
-                token_fetcher=token_fetcher,  # type: ignore[arg-type]
+                token_fetcher=token_fetcher,
                 remote_runner=command_runner,
                 audit_poster=audit_poster,
             )
@@ -726,7 +726,7 @@ class RunnerLaneRegistrationFilesystemTests(unittest.TestCase):
             policy=self.policy,
             pre_inventory=_inventory(lanes=()),
             inventory_reader=read_inventory,
-            token_fetcher=self.tokens,  # type: ignore[arg-type]
+            token_fetcher=self.tokens,
             remote_runner=run_command,
             audit_poster=post_audit,
         )

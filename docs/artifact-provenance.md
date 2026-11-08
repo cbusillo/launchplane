@@ -106,13 +106,6 @@ merge train already uses for the product repository, requesting only
 grants these, and the train's own token keeps its own permission set. No
 product repository gets any new access, and no new grant is needed.
 
-## What it replaces
-
-The artifact publish route and publish-inputs route, the reusable publish
-workflow, and the workflow-identity grants that let product repos call them.
-They are still in the code until #2606 (open) deletes them; nothing new may
-use them.
-
 ## Retained artifact source attribution
 
 `GET /v1/artifacts/protected` includes optional `manifest_provenance` on entries
@@ -139,3 +132,15 @@ sweep) is in [event-driven deploys](event-driven-deploys.md).
 Verified Odoo artifacts may carry the additive complete input/module inventory
 for [release database compatibility](release-database-compatibility.md). That
 page owns its producer contract and conservative missing-evidence behavior.
+
+## GitHub read failure evidence
+
+The shared build reader's existing `github_read_failed` diagnostic retains bounded
+HTTP status, route category, API/storage stage and exception types, plus validated
+GitHub request id and numeric quota/retry fields from the API stage. It excludes
+URLs, response bodies, arbitrary header values and upstream exception messages;
+reconciliation retains it in existing logs and `last_error` beside the failure trace.
+Classification reports rate-limit evidence (429, or API 403 with zero remaining
+quota or a Retry-After header), unauthorized, forbidden, server or transport failure.
+Forbidden alone does not establish missing permissions; absent metadata stays
+unknown. Retry and refusal decisions still read the unchanged original exception cause.

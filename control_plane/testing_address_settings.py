@@ -36,6 +36,7 @@ from control_plane.testing_candidate_probe import (
     CANDIDATE_CONTAINER_PROBE,
     sanitized_testing_readback_policy,
 )
+from control_plane.testing_serving_copy import testing_receiver_generation
 
 if TYPE_CHECKING:
     from control_plane.testing_address import TestingAddressAdapter
@@ -168,14 +169,11 @@ def canonical_settings_frame(
         if settings
         else environment.get(PAYLOAD_KEY, "")
     )
+    bootstrap = OdooPostDeployPayload.model_validate_json(
+        base64.b64decode(payload, validate=True)
+    ).website_bootstrap
     spec: dict[str, object] = {
-        "generation": plan.before.generation.model_dump(mode="json")
-        if plan.before.generation
-        else {
-            "namespace": candidate.namespace,
-            "instance": "testing",
-            "resources_binding_sha256": candidate.resources_binding_sha256,
-        },
+        "generation": testing_receiver_generation(candidate, plan.before.generation),
         "compose_project": plan.provider_project,
         "database_name": environment.get("ODOO_DB_NAME", ""),
         "database_data_directory": compose.ODOO_DATABASE_DATA_DIRECTORY,
@@ -200,6 +198,8 @@ def canonical_settings_frame(
             "payload": payload,
             "runtime_identity": identity.model_dump(mode="json", exclude={"deployed_at"}),
             "canonical_url": "https://" + plan.route_after.host,
+            "before_url": "https://" + plan.route_before.host,
+            "primary_page_xmlid_set": bool(bootstrap and bootstrap.primary_page_xmlid),
             "website_id": settings.website_id if settings else 0,
             "database_values_sha256": settings.database_values_sha256 if settings else "",
             "copy_witness_parameter": TESTING_COPY_COMPLETION_PARAMETER,
@@ -434,12 +434,12 @@ class CanonicalAddressEffect(DurableProviderMutationAdapter):
                 try:
                     self.frame("observe")
                     break
-                except NativeSourceUnavailable:
+                except NativeSourceUnavailable as error:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise NativeSourceUnavailable(
                             "The original canonical deployment has no qualified runtime proof."
-                        ) from None
+                        ) from error
                     time.sleep(min(2, remaining))
             return ProviderMutationOutcome(200, {"canonical_deployment_verified": True})
         frame = self.frame("gate", dispatch_guard=checkpoint)

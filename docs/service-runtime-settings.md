@@ -12,9 +12,22 @@ route is the supported writer.
 
 The declared keys and their value checks live in `DECLARED_SERVICE_SETTINGS` in
 [`service_runtime_settings.py`](../control_plane/service_runtime_settings.py).
-Each value is checked with the same parser its reader uses, so an invalid value
+Each value is checked by its declared parser, so an invalid value
 is refused before review. Any other key, including a secret-shaped one, is
 refused. Secrets stay in [managed secret records](secrets.md).
+
+`LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID` prepares the existing onboarding
+App selector for [service adoption](secrets.md#client-credential-input).
+Its value must be a nonempty identifier of at most 128 ASCII letters, digits or
+underscores or dots. Recording it does not switch the current onboarding workflows away
+from their Actions inputs, prove an installation, or create any credential.
+
+The declared merge-train stall sender routing keys are
+`LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REPOSITORY` and
+`LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REF`. They select the existing workflow
+sender described in [merge-train events](merge-train-events.md); setting them
+does not dispatch it or prove Discord delivery. Activation and delivery checks
+remain post-deployment local supported operations.
 
 The request names `key`, `value` and `reason`. `mode: dry-run` returns
 `result.plan_digest` and writes nothing. `mode: apply` repeats the same request with

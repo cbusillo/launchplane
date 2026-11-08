@@ -11,7 +11,18 @@ from fastapi import FastAPI
 from pydantic import ValidationError
 
 from control_plane import secrets
+from control_plane.github_app_configuration import (
+    ONBOARDING_GITHUB_APP_CLIENT_ID_ENV_KEY,
+    RUNNER_LIFECYCLE_GITHUB_APP_ID_KEY,
+    RUNNER_LIFECYCLE_GITHUB_APP_CLIENT_ID_KEY,
+    RUNNER_LIFECYCLE_GITHUB_APP_INTEGRATION,
+)
+from control_plane.runner_lane_service import runner_lifecycle_identity
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.merge_train_stall import (
+    STALL_WORKFLOW_REF_KEY,
+    STALL_WORKFLOW_REPOSITORY_KEY,
+)
 from control_plane.dokploy.memory_capacity import (
     PREVIEW_MEMORY_FLOORS_SETTING,
     PreviewMemoryCapacityRefused,
@@ -137,6 +148,83 @@ class ServiceRuntimeSettingTests(unittest.TestCase):
             self.call(self.apply_request(preview["plan_digest"]))
         self.assertEqual(_service_env(self.store), EXISTING_ENV)
 
+    def test_reviewed_onboarding_selector_write_preserves_other_service_settings(self) -> None:
+        setting = ServiceRuntimeSettingRequest(
+            key=ONBOARDING_GITHUB_APP_CLIENT_ID_ENV_KEY,
+            value="Iv1.syntheticOnboardingApp",
+            reason="Record the existing onboarding App selector.",
+        )
+        preview = self.call(setting)
+        self.assertEqual(_service_env(self.store), EXISTING_ENV)
+        self.call(
+            setting.model_copy(
+                update={"mode": "apply", "expected_plan_digest": preview["plan_digest"]}
+            ),
+            "onboarding-selector",
+        )
+        self.assertEqual(_service_env(self.store), {**EXISTING_ENV, setting.key: setting.value})
+        self.assertEqual(self.store.list_secret_records(), ())
+        for value in ("", "not a client id", "line\nbreak", "key=value"):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                ServiceRuntimeSettingRequest(key=setting.key, value=value, reason=setting.reason)
+
+    def test_runner_app_selectors_are_runtime_values_and_preserve_other_settings(self) -> None:
+        expected = dict(EXISTING_ENV)
+        for key, value in (
+            (RUNNER_LIFECYCLE_GITHUB_APP_ID_KEY, "42"),
+            (RUNNER_LIFECYCLE_GITHUB_APP_CLIENT_ID_KEY, "Iv1.syntheticRunnerApp"),
+        ):
+            request = ServiceRuntimeSettingRequest(
+                key=key, value=value, reason="Record runner App identity."
+            )
+            preview = self.call(request)
+            self.call(
+                request.model_copy(
+                    update={"mode": "apply", "expected_plan_digest": preview["plan_digest"]}
+                ),
+                key,
+            )
+            expected[key] = value
+            self.assertEqual(_service_env(self.store), expected)
+        self.assertEqual(self.store.list_secret_records(), ())
+        with self.assertRaises(ValueError):
+            runner_lifecycle_identity(self.store)
+        secrets.write_secret_value(
+            record_store=self.store,
+            scope="context",
+            integration=RUNNER_LIFECYCLE_GITHUB_APP_INTEGRATION,
+            name="private_key",
+            plaintext_value="synthetic-runner-key",
+            binding_key="private_key",
+            context_name="launchplane",
+            actor="test",
+        )
+        identity = runner_lifecycle_identity(self.store)
+        self.assertEqual(str(identity.app_id), expected[RUNNER_LIFECYCLE_GITHUB_APP_ID_KEY])
+        self.assertEqual(identity.client_id, expected[RUNNER_LIFECYCLE_GITHUB_APP_CLIENT_ID_KEY])
+        self.assertEqual(identity.private_key, "synthetic-runner-key")
+
+    def test_reviewed_apply_accepts_both_stall_sender_routing_settings(self) -> None:
+        expected = {
+            STALL_WORKFLOW_REPOSITORY_KEY: "example/launchplane",
+            STALL_WORKFLOW_REF_KEY: "main",
+        }
+        for index, (key, value) in enumerate(expected.items()):
+            request = ServiceRuntimeSettingRequest(
+                key=key, value=value, reason="Activate the existing stall sender route."
+            )
+            preview = self.call(request)
+            self.assertEqual(
+                _service_env(self.store), {**EXISTING_ENV, **dict(list(expected.items())[:index])}
+            )
+            self.call(
+                request.model_copy(
+                    update={"mode": "apply", "expected_plan_digest": preview["plan_digest"]}
+                ),
+                f"stall-route-{index}",
+            )
+        self.assertEqual(_service_env(self.store), {**EXISTING_ENV, **expected})
+
     def test_undeclared_secret_shaped_or_invalid_settings_are_refused(self) -> None:
         for key, value in (
             ("LAUNCHPLANE_UNDECLARED_SETTING", "1"),
@@ -144,6 +232,8 @@ class ServiceRuntimeSettingTests(unittest.TestCase):
             (PREVIEW_MEMORY_FLOORS_SETTING, json.dumps({"synthetic-execution-host": 0})),
             (PREVIEW_MEMORY_FLOORS_SETTING, "not json"),
             ("LAUNCHPLANE_DISCUSSION_REMINDERS", json.dumps({"schedules": []})),
+            (STALL_WORKFLOW_REPOSITORY_KEY, "not-a-repository"),
+            (STALL_WORKFLOW_REF_KEY, "   "),
         ):
             with self.subTest(key=key, value=value), self.assertRaises(ValidationError):
                 ServiceRuntimeSettingRequest(key=key, value=value, reason="Try it.")

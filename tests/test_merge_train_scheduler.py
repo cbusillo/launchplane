@@ -8,6 +8,7 @@ from typing import cast
 
 from control_plane import merge_train_events, merge_train_scheduler
 from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+from control_plane.github_request_timing import timed_github_request, record_github_response
 from control_plane.merge_train_github_token import merge_train_github_token_value
 from control_plane.merge_train_github import GitHubMergeTrainClient, UrllibMergeTrainGitHubTransport
 from control_plane.merge_train import (
@@ -205,7 +206,6 @@ class MergeTrainSchedulerPassTests(TestCase):
                 self.assertEqual(evidence.list_open_pull_requests("cbusillo/alpha", limit=1), ())
             # The controller still needs its credential after admission evidence completes.
             self.assertIs(kwargs["token"], credential)
-            self.assertIsInstance(evaluator.technical_check_client, GitHubMergeTrainClient)
             assert isinstance(evaluator.technical_check_client, GitHubMergeTrainClient)
             technical_transport = evaluator.technical_check_client.transport
             assert isinstance(technical_transport, UrllibMergeTrainGitHubTransport)
@@ -522,6 +522,37 @@ class MergeTrainSchedulerPassTests(TestCase):
         self.assertFalse(request.mutate)
         self.assertEqual(result.feedback_delivered, 0)
         self.mocks["write_merge_train_pr_feedback_record"].assert_not_called()
+
+    def test_controller_and_feedback_emit_separate_same_trace_tallies(self) -> None:
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+
+        def execute(**kwargs: object) -> MergeTrainControllerRunOnceResult:
+            with timed_github_request(method="GET", path="/controller"):
+                record_github_response(304)
+            return _controller_result()
+
+        def feedback(**kwargs: object) -> tuple[int, int]:
+            with timed_github_request(method="POST", path="/comments"):
+                record_github_response(201)
+            return (1, 0)
+
+        self.mocks["execute_merge_train_controller_run_once"].side_effect = execute
+        with (
+            patch.object(merge_train_scheduler, "_deliver_controller_feedback", feedback),
+            self.assertLogs("control_plane.github_request_timing", level="INFO") as logs,
+        ):
+            (result,) = self._run()
+        controller, delivery = [line for line in logs.output if "GitHub request tally:" in line]
+        self.assertIn("controller cbusillo/alpha@main trace " + result.trace_id, controller)
+        self.assertIn("feedback cbusillo/alpha@main trace " + result.trace_id, delivery)
+        self.assertIn("requests=1 not_modified=1 non_304_requests=0", controller)
+        self.assertIn("requests=1 not_modified=0 non_304_requests=1", delivery)
+        self.assertEqual(result.feedback_delivered, 1)
 
     def test_mutating_controller_pass_delivers_feedback(self) -> None:
         diagnostic = "missing-security-gate"

@@ -1,7 +1,6 @@
 import json
 import re
 from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
 from time import time_ns
 from typing import ContextManager, Protocol, cast
 
@@ -15,7 +14,7 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
     merge_train_pr_feedback_marker,
 )
 from control_plane.workflows.launchplane import upsert_github_issue_comment
-from control_plane.merge_train_provider_failure import provider_failure
+from control_plane.merge_train_provider_failure import provider_failure, provider_retry_deadline
 from control_plane.merge_train_planning_scope import PlanningScopeResolver
 from control_plane.merge_train_planning_completion import (
     PlanningCompletionFailure,
@@ -441,23 +440,15 @@ def _delivery_retry(
     if isinstance(error, PlanningCompletionProviderFailure):
         transient = error.retryable
         rate_limited = error.rate_limited
-    deadlines = [
-        _timestamp(attempted_at) + timedelta(seconds=min(60 * 2 ** min(attempts - 1, 4), 900))
-    ]
-    if transient:
-        retry_after = evidence.retry_after
-        if retry_after.isdigit():
-            deadlines.append(_timestamp(attempted_at) + timedelta(seconds=int(retry_after)))
-        elif retry_after:
-            try:
-                parsed = parsedate_to_datetime(retry_after)
-                if parsed.tzinfo is not None:
-                    deadlines.append(parsed)
-            except (ValueError, TypeError):
-                pass
-        if evidence.remaining == "0" and evidence.reset.isdigit():
-            deadlines.append(datetime.fromtimestamp(int(evidence.reset), tz=timezone.utc))
-    retry_at = max(deadlines).isoformat() if transient else ""
+    retry_at = (
+        provider_retry_deadline(
+            evidence,
+            now=_timestamp(attempted_at),
+            minimum_seconds=min(60 * 2 ** min(attempts - 1, 4), 900),
+        ).isoformat()
+        if transient
+        else ""
+    )
     return transient, retry_at, retry_at if rate_limited else ""
 
 

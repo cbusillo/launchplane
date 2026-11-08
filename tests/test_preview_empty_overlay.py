@@ -302,7 +302,9 @@ class EmptyOverlayPreservationTests(unittest.TestCase):
         self.namespace["spec"].update(mode="inspect", memory_floor=None)
         self.namespace["wait_database"] = Mock()
         self.calls.clear()
-        self.assertEqual(self.namespace["execute"](), receipt)
+        inspection = self.namespace["execute"]()
+        self.assertTrue(inspection.pop("writers_stopped"))
+        self.assertEqual(inspection, receipt)
         self.assertFalse(any(call[0] in {"start", "stop"} for call in self.calls))
         self.assertFalse(self.containers["database"]["State"]["Running"])
         self.namespace["spec"]["mode"] = "preserve"

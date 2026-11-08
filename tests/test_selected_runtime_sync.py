@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import unittest
 from contextlib import closing
 from unittest.mock import patch
@@ -64,6 +65,26 @@ class SelectedRuntimeSyncTests(unittest.TestCase):
         )
         with self.assertRaises(LiveTargetRuntimeError) as refusal:
             lane.sync(provider_env=written, selected_keys=("ODOO_DB_PASSWORD",))
+        self.assertEqual(refusal.exception.code, "retained_database_credential_changed")
+        saved = (
+            Path(__file__).parent / "fixtures/dokploy-compose/legacy-credential.env"
+        ).read_text()
+        retained = _LaneFixture(
+            self,
+            _instance_record(
+                {"ODOO_DB_PASSWORD": dokploy_api.parse_dokploy_env_text(saved)["ODOO_DB_PASSWORD"]}
+            ),
+        )
+        _seed_tracked_target_records(
+            database_url=retained.database_url,
+            context="example-site",
+            instance="testing",
+            target_id="app-testing",
+            target_type="compose",
+            target_name="example-site-testing",
+        )
+        with self.assertRaises(LiveTargetRuntimeError) as refusal:
+            retained.sync(provider_env=saved, requalify_literal_keys=("ODOO_DB_PASSWORD",))
         self.assertEqual(refusal.exception.code, "retained_database_credential_changed")
 
     def test_http_selection_keeps_authorization_and_idempotency_scoped(self) -> None:

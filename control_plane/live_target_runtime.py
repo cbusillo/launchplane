@@ -284,7 +284,6 @@ def _unused_testing_override_pointers(
         if target is not None:
             if (target.context, target.instance) != (context_name, instance_name):
                 return set()
-            required.update(target.env)
         try:
             overrides = getattr(record_store, "read_odoo_instance_override_record")(
                 context_name=context_name, instance_name=instance_name

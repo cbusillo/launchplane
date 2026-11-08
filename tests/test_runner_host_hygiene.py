@@ -424,7 +424,6 @@ class RunnerHostHygieneTests(unittest.TestCase):
             idle_observation_sleeper=lambda _seconds: None,
         )
 
-        self.assertIsNotNone(report.docker_toolchain)
         assert report.docker_toolchain is not None
         self.assertEqual(report.docker_toolchain.docker_buildx_version, "0.13.1+ds1")
         self.assertEqual(
@@ -525,7 +524,6 @@ class RunnerHostHygieneTests(unittest.TestCase):
             idle_observation_sleeper=lambda _seconds: None,
         )
 
-        self.assertIsNotNone(report.docker_toolchain)
         assert report.docker_toolchain is not None
         self.assertEqual(
             report.docker_toolchain.docker_buildx_plugin_path,

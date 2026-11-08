@@ -30,7 +30,14 @@ from control_plane.merge_train_github import (
     _stack_collapse_commit_message,
 )
 from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
-from control_plane.merge_train_handoff import MergeTrainReadyHandoff, handoff_head
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_review import ProductReviewCarry, ProductReviewDecisionRecord
+from control_plane.merge_train_handoff import (
+    MergeTrainReadyHandoff,
+    handoff_head,
+    ready_handoff_refusal,
+)
+from tests.support.profiles import product_profile_payload
 from control_plane.merge_train_release_hold import MergeTrainReleaseHold
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
@@ -351,6 +358,76 @@ class GitHubHandoffTests(unittest.TestCase):
             id=3, user={"id": 20, "login": "example"}, created_at="2026-10-16T12:00:00Z"
         )
         self.assertEqual(self._read(([edited, ready],)).status, "ready")
+
+    def test_checked_client_wait_is_admitted_once_the_client_accepts_its_head(self) -> None:
+        old_head = "b" * 40
+
+        def acceptance(head_sha: str, **changes: Any) -> ProductReviewDecisionRecord:
+            return ProductReviewDecisionRecord(
+                record_id=f"accepted-{head_sha[:7]}",
+                product="site",
+                repository=REPOSITORY,
+                pull_request_number=1,
+                head_sha=head_sha,
+                decision="accepted",
+                owner_github_id="901",
+                owner_github_login="client",
+                decided_at="2026-10-16T12:00:00Z",
+                base_branch="main",
+                **changes,
+            )
+
+        carried = acceptance(
+            HEAD,
+            carried_from=ProductReviewCarry(
+                record_id="accepted-old", head_sha=old_head, refresh_record_ids=("refresh",)
+            ),
+        )
+        client_wait = f"Engineering ready; waiting for the Client's acceptance\n\nHead: {HEAD}"
+        stale_client_wait = (
+            f"Engineering ready; waiting for the Client's acceptance\n\nHead: {old_head}"
+        )
+        other_wait = f"Engineering ready; waiting for required inspection\n\nHead: {HEAD}"
+        refusals: list[str] = []
+        for body, decision, admitted, needs_fresh_handoff in (
+            (client_wait, acceptance(HEAD), True, False),
+            (client_wait, carried, True, False),
+            (client_wait, acceptance(old_head), False, False),
+            (client_wait, None, False, False),
+            (stale_client_wait, acceptance(HEAD), False, True),
+            (other_wait, acceptance(HEAD), False, True),
+        ):
+            with self.subTest(body=body[:40], decision=decision and decision.record_id):
+                with TemporaryDirectory() as directory:
+                    store = FilesystemRecordStore(Path(directory))
+                    payload = product_profile_payload("site")
+                    payload.update(
+                        repository=REPOSITORY,
+                        owner={"github_login": "client", "github_id": "901"},
+                    )
+                    store.write_product_profile_record(
+                        LaunchplaneProductProfileRecord.model_validate(payload)
+                    )
+                    if decision is not None:
+                        store.write_product_review_decision_record(decision)
+                    reader = GitHubMergeTrainSnapshotReader(
+                        transport=RecordingMergeTrainGitHubTransport(responses=([_comment(body)],)),
+                        branch_refresh_store=cast(Any, store),
+                        repository_policy=self.policy,
+                    )
+                    with patch.object(reader, "_actor_role_for_user", return_value="repo_admin"):
+                        handoff = reader._read_ready_handoff(
+                            repository_path=REPOSITORY,
+                            number=1,
+                            head_sha=HEAD,
+                            base_branch="main",
+                        )
+                refusal = ready_handoff_refusal(self.policy, handoff, HEAD)
+                self.assertEqual(not refusal, admitted, refusal)
+                self.assertEqual("gh-pr.py ready" in refusal, needs_fresh_handoff, refusal)
+                if refusal:
+                    refusals.append(refusal)
+        self.assertEqual(len(set(refusals)), 3)
 
     def test_complete_pagination_and_unavailable_or_malformed_evidence_fail_closed(self) -> None:
         ready_page = [_comment(id=index) for index in range(1, 101)]

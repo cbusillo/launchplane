@@ -242,7 +242,6 @@ class HumanSessionManagerTests(unittest.TestCase):
         self.assertIn("SameSite=Lax", cookie)
         self.assertNotIn("Secure", cookie)
         loaded_session = manager.read_cookie(cookie)
-        self.assertIsNotNone(loaded_session)
         assert loaded_session is not None
         self.assertEqual(loaded_session.session_id, session.session_id)
 
@@ -338,7 +337,6 @@ class HumanSessionManagerTests(unittest.TestCase):
 
         rotated_session = manager.consume_csrf_token(session, csrf_token)
 
-        self.assertIsNotNone(rotated_session)
         assert rotated_session is not None
         self.assertEqual(rotated_session.csrf_generation, 1)
         self.assertNotEqual(manager.csrf_token(rotated_session), csrf_token)

@@ -41,23 +41,26 @@ Simple service products, such as bots or workers deployed as Dokploy
 applications, can also use `generic-web` when their lifecycle is image deploy,
 optional health verification, and Launchplane-owned provider mutation. See
 [dokploy-service-deployments.md](dokploy-service-deployments.md) for the
-service-specific contract, including persistent volumes and internal ports such
-as Discord Blue's Every Code bridge port `8787`.
+service-specific contract, including persistent volumes and internal ports.
 
 ## Launchplane Records
 
-Onboarding still requires the [existing admin operation](operations.md#conventional-generic-web-onboarding) to create the product
-profile and target records. That is an existing compatibility operation, not a
-product-repository integration contract; no deployed service replacement is
-claimed here. Keep its inputs in admin-owned state, outside the product
-repository and git-tracked history when they contain site-specific runtime
-details.
+Create new generic-web products through the [native target allocation and
+product-record operations](operations.md#native-target-allocation), and new
+Odoo products through [native Odoo onboarding](operations.md#native-odoo-onboarding). Resolve
+immutable repository and account IDs and the default branch through the configured
+GitHub helper before preparing the intent. The native service does not look
+these up. Save inputs and reviewed receipts in admin-owned state outside the
+product repository; the runbook includes the metadata lookup and recovery steps.
 
-The service's [native target allocation](operations.md#native-target-allocation)
-binds a new empty testing application to reviewed target and product-record
-plans, with original-actor/key recovery and custody retention. The compatibility
-workflow stays until that path and record apply have deployed qualification;
-local behavior tests alone do not establish operational replacement.
+The native path creates an empty testing application and the product/lane
+records without preview/testing caller grants. The retired `Product Onboarding`
+workflow and its reusable worker are removed; use the native original-actor/key
+readback, continuation and reviewed retention path for native allocations.
+Target/record qualification does not prove working previews or real-repository
+artifact provenance; verify those through the ordinary event-driven path.
+First Odoo testing edge publication accepts profile URLs already naming its intended
+HTTPS hostname; it creates the missing binding and verifies public TLS afterward.
 
 Reapplying an advanced manifest updates its declared settings while preserving
 existing service-owned state, including the Client, live classification,

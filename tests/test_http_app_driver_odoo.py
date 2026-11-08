@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -7,7 +8,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from unittest.mock import MagicMock, patch
 
 from click import ClickException
@@ -72,6 +73,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsRequest,
     OdooPreviewApplyInputsResult,
     OdooPreviewDokployApplyResult,
+    ODOO_PREVIEW_REQUIRED_ENV_KEYS,
 )
 from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateResult,
@@ -112,7 +114,7 @@ from tests.http_app_test_support import (
     _post_odoo_website_bootstrap_override,
 )
 from tests.support.openapi import openapi_response
-from tests.support.auth import _identity, _StubVerifier
+from tests.support.auth import _identity, _StubVerifier, scoped_agent_transport
 from tests.support.artifact_manifests import artifact_manifest_v2
 from tests.support.profiles import _odoo_preview_profile_payload
 from tests.support.stores import (
@@ -1037,103 +1039,77 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         apply_driver.assert_not_called()
 
     async def test_odoo_preview_apply_blocks_missing_service_runtime_environment(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = self._profile_store(database_url)
-            store.write_runtime_environment_record(
-                RuntimeEnvironmentRecord(
-                    scope="instance",
-                    context="cm",
-                    instance="testing",
-                    env={"ODOO_DB_USER": "odoo"},
-                    updated_at="2026-05-09T12:30:00Z",
-                    source_label="test",
-                )
+        from control_plane.odoo_preview_resources import preview_resource_environment
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._profile_store(_sqlite_database_url(root / "launchplane.sqlite3"))
+            runtime = RuntimeEnvironmentRecord(
+                scope="instance",
+                context="cm",
+                instance="testing",
+                env={"ODOO_DB_USER": "odoo"},
+                updated_at="2026-05-09T12:30:00Z",
+                source_label="test",
             )
+            store.write_runtime_environment_record(runtime)
             identity = self._identity(
                 repository="cbusillo/launchplane",
-                workflow_ref=(
-                    "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml@refs/heads/main"
-                ),
+                workflow_ref="cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml@refs/heads/main",
             )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(identity),
                 authz_policy=self._policy(
                     actions=("odoo_preview_apply.execute",),
-                    repository="cbusillo/launchplane",
-                    workflow_ref=(
-                        "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
-                        "@refs/heads/main"
-                    ),
+                    repository=identity.repository,
+                    workflow_ref=identity.workflow_ref,
                 ),
                 record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
-            plan_id = self._store_issued_preview_plan(
-                store=store,
-                identity=identity,
-                payload=_ready_odoo_preview_apply_payload(),
+            request_payload = _ready_odoo_preview_apply_payload()
+            request = OdooPreviewApplyEnvelope.model_validate(request_payload)
+            missing = sorted(
+                set(ODOO_PREVIEW_REQUIRED_ENV_KEYS)
+                - preview_resource_environment(request.apply.dry_run_plan.compose_name).keys()
+                - runtime.env.keys()
             )
-
-            with (
-                patch(
-                    "control_plane.odoo_preview_apply_http.refresh_odoo_preview_issued_plan",
-                    side_effect=lambda **kwargs: kwargs["request"],
-                ),
-                patch(
-                    "control_plane.odoo_preview_apply_http.execute_odoo_preview_dokploy_apply",
-                    return_value=OdooPreviewDokployApplyResult(
-                        status="pass",
-                        operation="refresh",
-                        product="odoo-tenant-cm",
-                        repository="cbusillo/odoo-tenant-cm",
-                        preview_slug="pr-42",
-                        preview_url="https://pr-42.cm-preview.example.test",
-                        domain_host="pr-42.cm-preview.example.test",
-                        compose_id="compose-cm-pr-42",
-                        compose_name="cm-odoo-preview-pr-42",
-                    ),
-                ) as apply_driver,
-            ):
-                response = await _post_odoo_preview_apply(
-                    app,
-                    {
-                        "schema_version": 1,
-                        "product": "odoo-tenant-cm",
-                        "apply": {
-                            "dry_run_plan": {
-                                "status": "ready",
-                                "operation": "refresh",
-                                "product": "odoo-tenant-cm",
-                                "repository": "cbusillo/odoo-tenant-cm",
-                                "preview_slug": "pr-42",
-                                "preview_url": "https://pr-42.cm-preview.example.test",
-                                "domain_host": "pr-42.cm-preview.example.test",
-                                "compose_ref": "${created.composeId:cm-odoo-preview-pr-42}",
-                                "compose_name": "cm-odoo-preview-pr-42",
-                                "environment_id": "env-cm-preview",
-                                "template_compose_id": "compose-cm-testing",
-                                "summary": "ready isolated Odoo preview apply",
-                            },
-                            "image_reference": _TEST_PREVIEW_IMAGE_REFERENCE,
-                            "wait_for_deploy": False,
-                            "smoke_check": False,
-                        },
-                    },
-                    idempotency_key=plan_id,
-                )
-
-        payload = response.json()
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(payload["error"]["code"], "odoo_preview_runtime_config_incomplete")
-        self.assertEqual(payload["details"]["context"], "cm")
-        self.assertEqual(payload["details"]["instance"], "testing")
-        self.assertEqual(
-            payload["details"]["missing_keys"],
-            ["ODOO_ADMIN_PASSWORD", "ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD"],
-        )
-        apply_driver.assert_not_called()
+            for transport in ("none", "driver"):
+                with self.subTest(transport=transport):
+                    profile = store.read_product_profile_record("odoo-tenant-cm")
+                    store.write_product_profile_record(
+                        profile.model_copy(
+                            update={
+                                "preview": profile.preview.model_copy(
+                                    update={"data_transport_mode": transport}
+                                )
+                            }
+                        )
+                    )
+                    plan_id = self._store_issued_preview_plan(
+                        store=store, identity=identity, payload=request_payload
+                    )
+                    with (
+                        patch(
+                            "control_plane.odoo_preview_apply_http.refresh_odoo_preview_issued_plan",
+                            side_effect=lambda **kwargs: kwargs["request"],
+                        ),
+                        patch(
+                            "control_plane.odoo_preview_apply_http.execute_odoo_preview_dokploy_apply"
+                        ) as driver,
+                    ):
+                        response = await _post_odoo_preview_apply(
+                            app, request_payload, idempotency_key=plan_id
+                        )
+                    payload = response.json()
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertEqual(
+                        payload["error"]["code"], "odoo_preview_runtime_config_incomplete"
+                    )
+                    self.assertEqual(payload["details"]["context"], runtime.context)
+                    self.assertEqual(payload["details"]["instance"], runtime.instance)
+                    self.assertEqual(payload["details"]["missing_keys"], missing)
+                    driver.assert_not_called()
 
     async def test_odoo_preview_apply_resolves_runtime_environment_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2381,11 +2357,23 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                         result=self._planned_preview_result(old_request.model_dump(mode="json")),
                         plan_id="odoo-preview-stale-refresh",
                     )
-                    original_intent = {
-                        "product": "odoo-tenant-cm",
-                        "issued_plan": old_plan.model_dump(mode="json"),
-                        "apply_request": old_request.model_dump(mode="json"),
-                    }
+                    from control_plane.odoo_preview_apply_execution import (
+                        prepare_odoo_preview_apply_operation,
+                    )
+
+                    original_operation = prepare_odoo_preview_apply_operation(
+                        control_plane_root=root,
+                        record_store=store,
+                        profile=store.read_product_profile_record("odoo-tenant-cm"),
+                        apply_request=old_request,
+                        issued_plan=old_plan,
+                        reservation_scope=idempotency_scope(identity),
+                        idempotency_key="odoo-preview-stale-refresh",
+                        request_fingerprint="odoo-preview-stale-refresh-fingerprint",
+                        trace_id="stale-refresh-trace",
+                    )
+                    original_operation.adapter.capture_source_decision()
+                    original_intent = original_operation.adapter.original_intent()
                     plan_id = self._store_issued_preview_plan(
                         store=store,
                         identity=identity,
@@ -3922,7 +3910,6 @@ class FastApiOdooStableBootstrapTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_operation.deployment_record_id, "")
             self.assertIsNone(stored_operation.result)
             self.assertEqual(stored_operation.schema_version, 2)
-            self.assertIsNotNone(stored_operation.authorization)
             assert stored_operation.authorization is not None
             self.assertEqual(
                 stored_operation.authorization.managed_rule_id,
@@ -4813,7 +4800,6 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_operation.deployment_record_id, "")
             self.assertIsNone(stored_operation.result)
             self.assertEqual(stored_operation.schema_version, 2)
-            self.assertIsNotNone(stored_operation.authorization)
             assert stored_operation.authorization is not None
             self.assertEqual(
                 stored_operation.authorization.managed_rule_id,
@@ -6428,6 +6414,296 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
+    async def test_standing_override_intent_requires_active_exclusive_context(self) -> None:
+        for scope in (
+            "retiring",
+            "retired",
+            "historical",
+            "current_lane",
+            "other_lane",
+            "preview",
+            "empty_owners",
+            "missing_owners",
+            "invalid_owners",
+            "unavailable_owners",
+        ):
+            for post, payload in (
+                (_post_odoo_config_parameter_override, self._config_override_payload()),
+                (_post_odoo_website_bootstrap_override, self._website_override_payload()),
+            ):
+                with (
+                    self.subTest(scope=scope, writer=post.__name__),
+                    TemporaryDirectory() as directory,
+                ):
+                    root = Path(directory)
+                    store = self._store_with_tenant_profile(root / "state")
+                    if scope in {"retiring", "retired"}:
+                        profile = store.read_product_profile_record("odoo-tenant-cm")
+                        store.write_product_profile_record(
+                            LaunchplaneProductProfileRecord.model_validate(
+                                {
+                                    **profile.model_dump(mode="json"),
+                                    "lifecycle_state": scope,
+                                    "preview": {"enabled": False},
+                                }
+                            )
+                        )
+                    elif scope in {"historical", "current_lane", "other_lane", "preview"}:
+                        other = _odoo_preview_profile_payload("other-product")
+                        other["production_use"] = "live"
+                        other["lanes"] = [
+                            {
+                                "context": "cm"
+                                if scope in {"current_lane", "other_lane"}
+                                else "other",
+                                "instance": "testing" if scope == "current_lane" else "prod",
+                            }
+                        ]
+                        other["preview"] = (
+                            {"enabled": True, "context": "cm"}
+                            if scope == "preview"
+                            else {"enabled": False}
+                        )
+                        other["historical_contexts"] = ["cm"] if scope == "historical" else []
+                        store.write_product_profile_record(
+                            LaunchplaneProductProfileRecord.model_validate(other)
+                        )
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(self._identity()),
+                        authz_policy=LaunchplaneAuthzPolicy(),
+                        record_store_factory=lambda: store,
+                        control_plane_root_path=root,
+                        bearer_identity_config=BearerIdentityConfig(
+                            local_operator_token="override-token",
+                            local_operator_subject="override-agent",
+                            local_operator_token_label="override-agent",
+                        ),
+                    )
+                    ownership_failures = {
+                        "empty_owners": None,
+                        "missing_owners": FileNotFoundError,
+                        "invalid_owners": ValueError,
+                        "unavailable_owners": TypeError,
+                    }
+                    with (
+                        patch(
+                            "control_plane.http_app.product_context_owners",
+                            return_value={},
+                            side_effect=ownership_failures[scope],
+                        )
+                        if scope in ownership_failures
+                        else nullcontext()
+                    ):
+                        response = await post(app, payload, authorization="Bearer override-token")
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(
+                        response.json()["error"]["code"],
+                        "product_driver_mismatch"
+                        if scope == "current_lane"
+                        else "authorization_denied",
+                    )
+                    with self.assertRaises(FileNotFoundError):
+                        store.read_odoo_instance_override_record(
+                            context_name="cm", instance_name="testing"
+                        )
+
+    async def test_standing_override_intent_rechecks_authority_at_commit(self) -> None:
+        for database_backed, changed in (
+            (database_backed, changed)
+            for database_backed in (False, True)
+            for changed in ("live", "retired", "historical")
+        ):
+            for post, payload in (
+                (_post_odoo_config_parameter_override, self._config_override_payload()),
+                (_post_odoo_website_bootstrap_override, self._website_override_payload()),
+            ):
+                with self.subTest(
+                    database_backed=database_backed, changed=changed, writer=post.__name__
+                ):
+                    root = Path(self.enterContext(TemporaryDirectory()))
+                    store: FilesystemRecordStore | PostgresRecordStore
+                    if database_backed:
+                        store = PostgresRecordStore(
+                            database_url=_sqlite_database_url(root / "state.db")
+                        )
+                        self.addCleanup(store.close)
+                        store.ensure_schema()
+                        store.write_product_profile_record(
+                            LaunchplaneProductProfileRecord.model_validate(
+                                _odoo_preview_profile_payload()
+                            )
+                        )
+                    else:
+                        store = self._store_with_tenant_profile(root / "state")
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(self._identity()),
+                        authz_policy=LaunchplaneAuthzPolicy(),
+                        record_store_factory=lambda: store,
+                        control_plane_root_path=root,
+                        bearer_identity_config=BearerIdentityConfig(
+                            local_operator_token="override-token",
+                            local_operator_subject="override-agent",
+                            local_operator_token_label="override-agent",
+                        ),
+                    )
+                    write_override = store.write_odoo_instance_override_record
+
+                    def change_authority_then_write(
+                        record: OdooInstanceOverrideRecord, **kwargs: Any
+                    ) -> object:
+                        if changed == "historical":
+                            other = _odoo_preview_profile_payload("other-product")
+                            other["lanes"] = [{"context": "other", "instance": "testing"}]
+                            other["preview"] = {"enabled": False}
+                            other["historical_contexts"] = ["cm"]
+                            store.write_product_profile_record(
+                                LaunchplaneProductProfileRecord.model_validate(other)
+                            )
+                        else:
+                            profile = store.read_product_profile_record("odoo-tenant-cm")
+                            profile_payload = profile.model_dump(mode="json")
+                            if changed == "live":
+                                profile_payload["production_use"] = "live"
+                            else:
+                                profile_payload["lifecycle_state"] = "retired"
+                                profile_payload["preview"] = {"enabled": False}
+                            store.write_product_profile_record(
+                                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+                            )
+                        return write_override(record, **kwargs)
+
+                    with patch.object(
+                        store,
+                        "write_odoo_instance_override_record",
+                        side_effect=change_authority_then_write,
+                    ):
+                        response = await post(app, payload, authorization="Bearer override-token")
+                    self.assertEqual(
+                        response.status_code, 403 if changed == "historical" else 409, response.text
+                    )
+                    with self.assertRaises(FileNotFoundError):
+                        store.read_odoo_instance_override_record(
+                            context_name="cm", instance_name="testing"
+                        )
+
+    async def test_director_records_override_intent_without_runtime_authority(self) -> None:
+        for transport, director, instance, production_use, grant, expected in (
+            ("local_operator", True, "testing", "unknown", False, 202),
+            ("local_operator", True, "testing", "prelaunch", False, 202),
+            ("local_operator", False, "testing", "unknown", False, 403),
+            ("terminal_agent", True, "testing", "unknown", False, 403),
+            ("local_operator", True, "testing", "live", False, 403),
+            ("local_operator", True, "prod", "unknown", False, 403),
+            ("local_operator", True, "prod", "prelaunch", False, 403),
+            ("local_operator", True, "prod", "live", False, 403),
+            ("local_operator", True, "prod", "live", True, 202),
+            ("local_operator", False, "prod", "live", True, 202),
+        ):
+            with (
+                self.subTest(
+                    transport=transport,
+                    director=director,
+                    instance=instance,
+                    production_use=production_use,
+                    grant=grant,
+                ),
+                TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                store = self._store_with_tenant_profile(root / "state")
+                profile = store.read_product_profile_record("odoo-tenant-cm")
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        {
+                            **profile.model_dump(mode="json"),
+                            "production_use": production_use,
+                            "lanes": [
+                                *(lane.model_dump(mode="json") for lane in profile.lanes),
+                                {"instance": "prod", "context": "cm"},
+                            ],
+                        }
+                    )
+                )
+                config = BearerIdentityConfig.model_validate(
+                    {
+                        f"{transport}_token": "override-token",
+                        f"{transport}_subject": "override-agent",
+                        f"{transport}_token_label": "override-agent",
+                    }
+                )
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(self._identity()),
+                    authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                        {
+                            "schema_version": 3,
+                            "local_operators": [
+                                {
+                                    "subjects": ["override-agent"],
+                                    "token_labels": ["override-agent"],
+                                    "products": ["odoo-tenant-cm"],
+                                    "contexts": ["cm"],
+                                    "instances": [instance],
+                                    "actions": [
+                                        "odoo_config_parameter_override.write",
+                                        "odoo_website_bootstrap_override.write",
+                                    ],
+                                }
+                            ]
+                            if grant
+                            else [],
+                        }
+                    ),
+                    record_store_factory=lambda: store,
+                    control_plane_root_path=root,
+                    bearer_identity_config=config,
+                )
+                with (
+                    nullcontext() if director else scoped_agent_transport(),
+                    patch(
+                        "control_plane.odoo_post_deploy_http.execute_odoo_post_deploy"
+                    ) as execute,
+                ):
+                    for post, payload in (
+                        (_post_odoo_config_parameter_override, self._config_override_payload()),
+                        (_post_odoo_website_bootstrap_override, self._website_override_payload()),
+                    ):
+                        cast(dict[str, object], payload["override"])["instance"] = instance
+                        response = await post(app, payload, authorization="Bearer override-token")
+                        self.assertEqual(response.status_code, expected)
+                    runtime = await _post_odoo_post_deploy(
+                        app,
+                        {
+                            "product": "odoo-tenant-cm",
+                            "post_deploy": {"context": "cm", "instance": instance},
+                        },
+                        authorization="Bearer override-token",
+                    )
+                    self.assertEqual(runtime.status_code, 403)
+                    execute.assert_not_called()
+                if expected == 202:
+                    record = store.read_odoo_instance_override_record(
+                        context_name="cm", instance_name=instance
+                    )
+                    self.assertEqual(
+                        record.config_parameters[0].value.value,
+                        cast(dict[str, object], self._config_override_payload()["override"])[
+                            "value"
+                        ],
+                    )
+                    self.assertEqual(
+                        record.website_bootstrap,
+                        OdooWebsiteBootstrapPayload.model_validate(
+                            cast(dict[str, object], self._website_override_payload()["override"])[
+                                "website_bootstrap"
+                            ]
+                        ),
+                    )
+                else:
+                    with self.assertRaises(FileNotFoundError):
+                        store.read_odoo_instance_override_record(
+                            context_name="cm", instance_name=instance
+                        )
+
     async def test_connection_repair_preserves_uncertain_and_precondition_errors(self) -> None:
         from control_plane.dokploy.api import DokployScheduleExecutionFailed
         from control_plane.odoo_connection_isolation import ConnectionIsolationPreconditionFailed
@@ -7293,6 +7569,121 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_request")
 
+    async def test_stable_website_bootstrap_plan_is_read_only_and_scoped(self) -> None:
+        for existing in (False, True):
+            for granted_instance in ("testing", "prod"):
+                with self.subTest(existing=existing, granted_instance=granted_instance):
+                    with TemporaryDirectory() as temporary_directory_name:
+                        root = Path(temporary_directory_name)
+                        state_dir = root / "state"
+                        store = self._store_with_tenant_profile(state_dir)
+                        if existing:
+                            store.write_odoo_instance_override_record(
+                                OdooInstanceOverrideRecord(
+                                    context="cm",
+                                    instance="testing",
+                                    apply_on=("manual",),
+                                    updated_at="2026-05-10T20:00:00Z",
+                                )
+                            )
+                        policy = LaunchplaneAuthzPolicy.model_validate(
+                            {
+                                "schema_version": 2,
+                                "github_actions": [
+                                    {
+                                        "repository": "every/tenant-opw",
+                                        "workflow_refs": [self._identity().workflow_ref],
+                                        "event_names": ["workflow_dispatch"],
+                                        "products": ["launchplane"],
+                                        "contexts": ["cm"],
+                                        "instances": [granted_instance],
+                                        "actions": ["operations.read"],
+                                    }
+                                ],
+                            }
+                        )
+                        app = create_launchplane_fastapi_app(
+                            verifier=_StubVerifier(self._identity()),
+                            authz_policy=policy,
+                            record_store_factory=lambda: store,
+                            control_plane_root_path=root,
+                        )
+                        before = {
+                            path.relative_to(state_dir): path.read_bytes()
+                            for path in state_dir.rglob("*")
+                            if path.is_file()
+                        }
+                        payload = self._website_override_payload()
+                        cast(dict[str, object], payload["override"])["mode"] = "dry-run"
+                        response = await _asgi_request(
+                            app,
+                            method="POST",
+                            path="/v1/drivers/odoo/website-bootstrap-override",
+                            headers={"Authorization": "Bearer valid-token"},
+                            payload=payload,
+                        )
+                        self.assertEqual(
+                            response.status_code, 202 if granted_instance == "testing" else 403
+                        )
+                        if response.status_code == 202:
+                            result = response.json()["result"]
+                            self.assertFalse(result["applied"])
+                            self.assertEqual(
+                                result["planned_website_bootstrap"],
+                                OdooWebsiteBootstrapPayload.model_validate(
+                                    cast(dict[str, object], payload["override"])[
+                                        "website_bootstrap"
+                                    ]
+                                ).model_dump(mode="json"),
+                            )
+                        cast(dict[str, object], payload["override"])["mode"] = "apply"
+                        apply_response = await _asgi_request(
+                            app,
+                            method="POST",
+                            path="/v1/drivers/odoo/website-bootstrap-override",
+                            headers={"Authorization": "Bearer valid-token"},
+                            payload=payload,
+                        )
+                        self.assertEqual(apply_response.status_code, 403)
+                        self.assertEqual(
+                            {
+                                path.relative_to(state_dir): path.read_bytes()
+                                for path in state_dir.rglob("*")
+                                if path.is_file()
+                            },
+                            before,
+                        )
+
+    async def test_terminal_agent_can_plan_bootstrap_without_apply_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="reader-token",
+                    terminal_agent_subject="reader",
+                    terminal_agent_token_label="reader",
+                ),
+            )
+            payload = self._website_override_payload()
+            cast(dict[str, object], payload["override"])["mode"] = "dry-run"
+            response = await _post_odoo_website_bootstrap_override(
+                app, payload, authorization="Bearer reader-token"
+            )
+            self.assertEqual(response.status_code, 202)
+            self.assertFalse(response.json()["result"]["applied"])
+            cast(dict[str, object], payload["override"])["mode"] = "apply"
+            response = await _post_odoo_website_bootstrap_override(
+                app, payload, authorization="Bearer reader-token"
+            )
+            self.assertEqual(response.status_code, 403)
+            with self.assertRaises(FileNotFoundError):
+                store.read_odoo_instance_override_record(context_name="cm", instance_name="testing")
+
     async def test_odoo_website_bootstrap_override_writes_typed_payload(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -7314,21 +7705,32 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                     updated_at="2026-05-10T20:00:00Z",
                 )
             )
+            policy = self._tenant_policy(
+                action="odoo_website_bootstrap_override.write",
+                workflow_name="odoo-website-bootstrap-override.yml",
+            )
+            policy.github_actions[0].products += ("launchplane",)
+            policy.github_actions[0].actions += ("operations.read",)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(
                     self._tenant_identity(workflow_name="odoo-website-bootstrap-override.yml")
                 ),
-                authz_policy=self._tenant_policy(
-                    action="odoo_website_bootstrap_override.write",
-                    workflow_name="odoo-website-bootstrap-override.yml",
-                ),
+                authz_policy=policy,
                 record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
 
+            payload = self._website_override_payload()
+            cast(dict[str, object], payload["override"])["mode"] = "dry-run"
+            planned = await _post_odoo_website_bootstrap_override(
+                app, payload, idempotency_key="odoo-cm-testing-website-bootstrap"
+            )
+            self.assertEqual(planned.status_code, 202)
+            self.assertFalse(planned.json()["result"]["applied"])
+            cast(dict[str, object], payload["override"])["mode"] = "apply"
             response = await _post_odoo_website_bootstrap_override(
                 app,
-                self._website_override_payload(),
+                payload,
                 idempotency_key="odoo-cm-testing-website-bootstrap",
             )
             stored_record = store.read_odoo_instance_override_record(
@@ -7339,13 +7741,18 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.json()["result"]["website_bootstrap"], True)
             self.assertEqual(stored_record.apply_on, ("manual", "deploy", "promotion"))
             self.assertEqual(stored_record.config_parameters[0].key, "web.base.url")
-            self.assertIsNotNone(stored_record.website_bootstrap)
             assert stored_record.website_bootstrap is not None
             self.assertEqual(stored_record.website_bootstrap.name, "Cell Mechanic")
             self.assertEqual(
                 stored_record.website_bootstrap.canonical_url,
                 "https://cm-testing.shinycomputers.com",
             )
+            cast(dict[str, object], payload["override"])["mode"] = "dry-run"
+            planned = await _post_odoo_website_bootstrap_override(
+                app, payload, idempotency_key="odoo-cm-testing-website-bootstrap"
+            )
+            self.assertEqual(planned.status_code, 202)
+            self.assertFalse(planned.json()["result"]["applied"])
 
     async def test_openapi_includes_odoo_post_deploy_override_contracts(self) -> None:
         response = await openapi_response()

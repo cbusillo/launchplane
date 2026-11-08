@@ -75,3 +75,52 @@ had no snapshot-provenance projection or aggregate operation. Its unknowns
 correctly stopped an unqualified query, but the capability gap surfaced only
 when product research needed counts. This operation consumes existing Q788
 qualification rather than changing those unknown observations into a pass.
+
+## Original snapshot source version
+
+`GET /v1/products/{product}/preview-snapshot-version` accepts only
+`original_reservation_id`, `expected_snapshot_id` and
+`expected_database_sha256`. It requires existing `preview.read` authority
+and `operations.read` on the exact testing instance used as the archive utility.
+The service validates the reservation-owned original intent, selects
+its immutable clean snapshot and checks all three requested bindings before
+any provider read. Missing originals return `404 snapshot_original_unavailable`;
+unverifiable or mismatched original bindings return `409 snapshot_binding_mismatch`.
+The decoder retains `snapshot_unavailable`, `archive_tool_unavailable` and
+`archive_unreadable` failures so custody and utility prerequisites stay distinct.
+It never substitutes the latest published snapshot, the
+current testing database or the preview image version. Original records and
+operation state are unchanged, including failed or held operations.
+
+The read reuses the same bounded, hash-verified, read-only archive descriptor
+and [inert decoder](https://www.postgresql.org/docs/current/app-pgrestore.html)
+described above, with the fixed table `ir_module_module`.
+It requires exactly one installed `base` row with a numeric recorded version;
+missing, ambiguous, malformed, incomplete or changed evidence refuses. Only
+that version is returned, with snapshot hash/capture and original-reservation
+identity. No other module or business row leaves the host.
+`metadata.preparation_stage` is null: neither this version nor the historical
+snapshot receipt proves migration or preparation completion. No unknown fact
+is inferred from a target image or a successful archive decode.
+
+The existing client selects this mode with an original reservation instead of
+a table. The operation lead supplies the exact private bindings:
+
+```bash
+uv run python scripts/read-copy-aggregates.py \
+  --operator-helper /installed/launchplane/scripts/launchplane-write-action.py \
+  --product example-odoo \
+  --original-reservation-id "$ORIGINAL_RESERVATION_ID" \
+  --expected-snapshot-id "$SNAPSHOT_ID" \
+  --expected-database-sha256 "$SNAPSHOT_DATABASE_SHA256"
+```
+
+The same exclusive testing utility target and snapshot host must still be
+available; otherwise the read remains unavailable. It creates no restore,
+database session, grant, credential or successor operation. This diagnostic
+GET adds no gate to the train, deploys, snapshot publication or recovery.
+Existing native job failure-stage diagnostics and original-operation monitoring
+remain the incident evidence. They expose a failed `module_update`, but cannot
+supply the missing source version. A repeated failed migration remains a
+separate cause to resolve before another preview attempt; reading metadata does
+not settle or retry it.

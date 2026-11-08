@@ -97,6 +97,8 @@ def controller_last_result(
     observation = "Run the next fenced controller pass with fresh evidence."
     if reconciliation_required:
         observation = "Reconcile the checkpointed effect with fresh provider evidence."
+    elif reason == "candidate_block_new_base_retest":
+        observation = "Recheck normal admission using the unchanged head's current Ready handoff."
     elif reason in {
         "candidate_block_new_head_reviewed",
         "candidate_block_unrelated_setup_reviewed",
@@ -106,6 +108,15 @@ def controller_last_result(
     elif reason == "merge_train_target_not_ready":
         actor = "repository_agent"
         observation = _text(_object(result.get("blocking_reason")).get("message"))
+    elif reason == "required_code_scanning_missing":
+        if details.get("recovery_reason_code") == "infrastructure_retry_used":
+            actor = "repository_agent"
+            observation = "Check required code-scanning delivery before retrying this queue on a new base or head."
+        elif details.get("recovery_reason_code"):
+            actor = "provider"
+            observation = "Observe fresh proof that the exact batch is closed and unmerged."
+        else:
+            observation = "Re-plan with fresh closed-batch evidence within the infrastructure replacement budget."
     elif reason in {"candidate_check_retry_used", "infrastructure_retry_used"}:
         actor = "repository_agent"
         observation = "Repair the failed checks; then let the controller reobserve the lineage."

@@ -3,21 +3,12 @@ title: Testing Style
 ---
 
 - Add targeted unit tests for storage, contracts, and workflow mapping.
-- A test stays only if it fails when the product is broken and passes when
-  someone makes an intended change. A version, toolchain, or dependency bump,
-  or an edit to a workflow step's wording, should need no test edit.
-- Do not assert a literal defined elsewhere (versions, pins, image digests,
-  hashes, counts, operation tables). Check agreement with the one source, or
-  keep a byte-exact gate only on a real generated artifact or immutable
-  evidence.
-- Do not assert workflow, action, config, or docs text. Run the embedded script
-  with inputs and check what it does, or enforce a rule that holds for every
-  workflow (fork isolation, pinned actions, permissions).
+- Follow the shared [Tests rule](https://github.com/cbusillo/codex-skills/blob/main/instructions/global.md#tests).
+- Do not assert documentation text in tests.
 - CI's `repository_pins` job runs the shared
   [change-detector scanner](https://github.com/cbusillo/codex-skills/blob/main/skills/references/test-quality.md)
   as warnings only. Triage its annotations on tests you add or change.
-- Verification code must not depend on working-tree state; read live state
-  only on the path that acts on it.
+- Read live state only on the path that acts on it.
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
 - When a fixture follows a record written with the current clock, derive its
   timestamps from that persisted record. A distant future date only delays the
@@ -60,8 +51,7 @@ Use `.github/github.json` for the lint and type-check commands and inspection
 configuration. `qualityGate.test.local` is the focused command template;
 `qualityGate.test.localSafety` takes whole safety module names, and
 `qualityGate.test.ci` names the complete suite for CI only. For a documentation
-or metadata change with no affected code, record why behavior tests or IDE inspection do not apply; do not add tests that
-assert instruction wording or config text.
+or metadata change with no affected code, record why behavior tests or IDE inspection do not apply.
 
 Use `qualityGate.inspection.lanes` for native JetBrains routing and inspect
 each product's files separately. TypeScript compiler validation remains in
@@ -571,19 +561,15 @@ layer because it validates service authentication and deployment wiring rather
 than deterministic UI behavior.
 
 Workflows are checked where they execute: CI runs them, `security.yml` runs
-actionlint over every workflow, and `tests/test_github_actions_security.py`
-holds the rules that apply to all of them. Do not add a test that re-reads one
-workflow to check that it says what it says. Workflow tests take one of three
-forms:
+actionlint, and `scripts/verify_repository_pins.py` enforces shared workflow
+properties on committed inputs. Its tests use arbitrary passing and violating
+fixtures. They never assert the text or structure of a tracked workflow.
 
-- Run an embedded script step with inputs (through `tests/support/workflows.py`
-  `load_workflow` and `step_named`) and assert its output or exit code.
-- Enforce a rule over every workflow, such as fork pull requests never reaching
-  self-hosted runners, remote actions being pinned to a full commit SHA, or
-  `run:` scripts reading inputs and event fields through `env` instead of
-  `${{ }}`, and name the workflow file and violated rule on failure.
-- Check that two real files agree, such as an admin wrapper's inputs and the
-  pinned worker it forwards to.
+Workflow behavior tests run an embedded script step with inputs through
+`tests/support/workflows.py` (`load_workflow` and `step_named`) and assert its
+output or exit code. Rules shared by workflows, browser-image dependency
+agreement, and wrapper/pinned-worker interface agreement belong in the linter.
+Their tests supply fixtures rather than reading tracked workflow text.
 
 ## HTTP and ASGI contracts
 

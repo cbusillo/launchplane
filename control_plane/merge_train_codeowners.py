@@ -38,7 +38,10 @@ def individual_landing_snapshots(
     patterns = _read_patterns(transport, repository_path, base_sha)
     result = []
     for pr in pull_requests:
-        handoff_ready = pr.ready_handoff is not None and pr.ready_handoff.status == "ready"
+        handoff_ready = pr.ready_handoff is not None and (
+            pr.ready_handoff.status == "ready"
+            or (pr.ready_handoff.status == "waiting" and pr.ready_handoff.client_accepted)
+        )
         if pr.state != "open" or pr.is_draft or (not patterns and not handoff_ready):
             result.append(pr)
             continue

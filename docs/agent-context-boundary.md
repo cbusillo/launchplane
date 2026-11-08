@@ -71,7 +71,9 @@ The preferred preflight endpoint is:
 GET /v1/agent/context
 ```
 
-It aggregates existing read models into named sections:
+It requires `product_environment.read` for product/context `launchplane` and
+accepts an optional `repository` filter. It aggregates existing read models
+into named sections:
 
 - repo-product mapping
 - preview readiness
@@ -88,8 +90,8 @@ repository classification, GitHub mergeability, and required technical-check
 readiness. Retired manager, waiver, and maintenance admission paths no longer
 qualify a merge; current results have empty paths and human actions. Client
 decisions use the separate product-review and release-checklist flows. Incomplete
-candidate queries fail rather than falling back to repository-name or file
-heuristics. Section-level authorization or provider failure leaves the other
+candidate queries return HTTP 400 rather than falling back to repository-name
+or file heuristics. Section-level authorization or provider failure leaves the other
 context sections available. The read grants no write authority.
 
 Agents may call lower-level read models directly when they need a narrower

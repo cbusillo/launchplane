@@ -15,7 +15,6 @@ from control_plane.contracts.route_binding_record import (
 )
 from control_plane.contracts.testing_route_refresh import (
     TestingRouteRefreshSources,
-    testing_route_domains,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import api, source
@@ -46,7 +45,7 @@ from control_plane.testing_publication_storage import (
     read_snapshot,
 )
 from control_plane.testing_serving_copy import published_testing_copy
-from control_plane.testing_address_storage import effective_testing_route
+from control_plane.testing_address_storage import effective_testing_route, read_testing_address
 
 
 def plan_native_testing_route_refresh(
@@ -147,7 +146,16 @@ def plan_native_testing_route_refresh(
         due = _route_binding_refresh_due(
             current_record=current, evaluated_at=observed_at.isoformat()
         )
-        domains = testing_route_domains(route)
+        public_binding = publication.plan.after.binding
+        address_key = current.source.source_versions.get("testing_address")
+        if address_key:
+            address = read_testing_address(store, address_key)
+            if address is None or address.state != "applied":
+                raise ValueError("The canonical testing address receipt is unavailable.")
+            public_binding = address.plan.binding_after
+        if public_binding is None:
+            raise ValueError("The testing publication has no public binding authority.")
+        domains = public_binding.domains
         if not due and current.domains == domains:
             return RouteBindingReconcilePlan(
                 status="unchanged",

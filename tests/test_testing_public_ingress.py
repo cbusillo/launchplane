@@ -70,6 +70,9 @@ class EdgeClient(_FakeNpmplusIngressClient):
             raise ValueError("The fixture host has private TLS or unloaded config")
         return next(host for host in self.proxy_hosts if host.id == host_id)
 
+    def list_certificates(self) -> tuple[NpmplusCertificate, ...]:
+        return (self.certificate,)
+
     def get_certificate(self, certificate_id: int) -> NpmplusCertificate:
         if certificate_id != self.certificate.id:
             raise ValueError("Unknown fixture certificate")
@@ -131,11 +134,20 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
             context_name=self.fixture.context, instance_name="testing"
         )
         self.store.write_dokploy_target_record(
-            target.model_copy(
+            target.model_copy(update={"domains": (generation.domain_host,)})
+        )
+        runtime = next(
+            iter(
+                self.store.list_runtime_environment_records(
+                    scope="instance", context_name=self.fixture.context, instance_name="testing"
+                )
+            )
+        )
+        self.store.write_runtime_environment_record(
+            runtime.model_copy(
                 update={
-                    "domains": (generation.domain_host,),
                     "env": {
-                        **target.env,
+                        **runtime.env,
                         "ODOO_PROJECT_NAME": generation.namespace,
                         "ODOO_STACK_NAME": generation.namespace,
                     },
@@ -292,6 +304,68 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
 
 
 class TestingPublicIngressTests(TestingPublicIngressScenario):
+    def test_profile_hostname_claim_refuses_before_creating_the_restored_route(self) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from tests.support.profiles import _odoo_preview_profile_payload
+
+        generation = self.store.read_fresh_odoo_testing_generation(
+            self.profile.product, self.fixture.context
+        )
+        assert generation is not None
+        foreign = _odoo_preview_profile_payload("foreign-odoo")
+        foreign["lanes"] = (
+            {
+                "context": "foreign",
+                "instance": "testing",
+                "base_url": "https://" + generation.domain_host,
+            },
+        )
+        foreign["preview"] = {"enabled": False, "context": "foreign"}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(foreign)
+        )
+        with self.assertRaises(ValueError):
+            self.edge().plan()
+        self.assertNotIn("create", self.client.calls)
+
+    def test_new_hostname_claim_after_effect_cannot_be_published_over(self) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from tests.support.profiles import _odoo_preview_profile_payload
+
+        self.review_edge()
+        generation = self.store.read_fresh_odoo_testing_generation(
+            self.profile.product, self.fixture.context
+        )
+        assert generation is not None
+        foreign_payload = _odoo_preview_profile_payload("foreign-odoo")
+        foreign_payload["lanes"] = (
+            {
+                "context": "foreign",
+                "instance": "testing",
+                "base_url": "https://" + generation.domain_host,
+            },
+        )
+        foreign_payload["preview"] = {"enabled": False, "context": "foreign"}
+        foreign = LaunchplaneProductProfileRecord.model_validate(foreign_payload)
+        publish = TestingPublicIngressAdapter._publish
+
+        def claim_hostname(adapter: TestingPublicIngressAdapter, *args: Any, **kwargs: Any) -> None:
+            self.store.write_product_profile_record(foreign)
+            publish(adapter, *args, **kwargs)
+
+        with patch.object(TestingPublicIngressAdapter, "_publish", new=claim_hostname):
+            with self.assertRaises(ProviderMutationUnknownError):
+                self.publish()
+        self.assertEqual(self.client.calls.count("create"), 1)
+        self.assertEqual(
+            self.store.read_route_binding_record(
+                product=self.profile.product,
+                context_name=self.fixture.context,
+                instance_name="testing",
+            ),
+            self.old_binding,
+        )
+
     def test_claim_list_uses_selected_route_configuration_for_readback(self) -> None:
         def claims() -> tuple[NpmplusProxyHostClaim, ...]:
             return tuple(

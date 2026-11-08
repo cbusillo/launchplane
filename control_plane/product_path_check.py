@@ -55,6 +55,7 @@ from control_plane.lane_movement import LANE_MOVEMENT_REFUSALS
 from control_plane.product_reconcile_read import (
     ProductReconcileRequestReader,
     product_reconcile_request_view,
+    testing_reconcile_failure_code,
 )
 from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
@@ -219,6 +220,14 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
             "Launchplane has not planned a testing deploy for this product yet.",
             "wait",
         )
+    if plan.get("reconcile_state") not in {"done", "failed"}:
+        return _step(
+            step_id,
+            "unknown",
+            "reconcile_not_done",
+            "The current testing reconcile has no terminal outcome; its saved plan may be older.",
+            "wait",
+        )
     deployed = str(plan.get("deployed_operation_id") or "")
     queued = str(plan.get("queued_operation_id") or "")
     failed = str(plan.get("last_failed_operation_id") or "")
@@ -249,6 +258,15 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
             summary or "The last testing deploy failed.",
             _testing_failure_fix(code),
             (failed,),
+        )
+    if plan.get("reconcile_state") == "failed":
+        code = safe_operation_error_code(testing_reconcile_failure_code(plan))
+        return _step(
+            step_id,
+            "blocked",
+            code,
+            "The last testing reconciliation failed.",
+            _testing_failure_fix(code),
         )
     if _completed_testing_noop(plan):
         return _step(
@@ -315,7 +333,7 @@ def _testing_artifact_id(value: object) -> str:
     return ""
 
 
-def _testing_steps(inputs: PathCheckInputs) -> list[PathCheckStep]:
+def _testing_steps(inputs: PathCheckInputs, *, include_deploy: bool = True) -> list[PathCheckStep]:
     steps = [_profile_step(inputs.profile, "testing")]
     hold = inputs.testing_hold_active
     if isinstance(hold, Unread):
@@ -332,7 +350,8 @@ def _testing_steps(inputs: PathCheckInputs) -> list[PathCheckStep]:
         )
     else:
         steps.append(_step("testing_hold", "clear", "no_hold", "The testing lane is not held."))
-    steps.append(_testing_attempt_step(inputs.testing_reconcile_plan))
+    if include_deploy:
+        steps.append(_testing_attempt_step(inputs.testing_reconcile_plan))
     steps.extend(inputs.testing_prerequisites)
     return steps
 
@@ -475,7 +494,6 @@ def _rollback_steps(inputs: PathCheckInputs) -> list[PathCheckStep]:
 
 
 _PATH_STEPS: dict[PathName, Callable[[PathCheckInputs], list[PathCheckStep]]] = {
-    "testing": _testing_steps,
     "promote": _promote_steps,
     "rollback": _rollback_steps,
 }
@@ -484,7 +502,11 @@ _PATH_STEPS: dict[PathName, Callable[[PathCheckInputs], list[PathCheckStep]]] = 
 def build_product_path_check(
     *, product: str, path: PathName, inputs: PathCheckInputs, intent: TestingIntent | None = None
 ) -> ProductPathCheck:
-    steps = tuple(_PATH_STEPS[path](inputs))
+    steps = tuple(
+        _testing_steps(inputs, include_deploy=intent != "provision")
+        if path == "testing"
+        else _PATH_STEPS[path](inputs)
+    )
     blocked = sum(step.state == "blocked" for step in steps)
     unknown = sum(step.state == "unknown" for step in steps)
     state: StepState = "blocked" if blocked else "unknown" if unknown else "clear"

@@ -45,7 +45,7 @@ class TestingRebuildPlan(FrozenRecord):
     base_url: str = Field(min_length=1)
     route_id: str = Field(min_length=1)
     authority_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
-    source: Literal["empty", "production", "upstream"]
+    source: Literal["empty", "production", "upstream", "migrated"]
     source_reference: str = ""
     old: TestingPredecessor
     new: TestingCopy
@@ -183,6 +183,7 @@ class TestingRebuildRecord(FrozenRecord):
     error: Literal[
         "",
         "candidate_public_health_failed",
+        "candidate_public_health_failed_after_retirement",
         "candidate_preparation_failed",
         "candidate_route_not_applied",
         "candidate_private_readiness_failed",

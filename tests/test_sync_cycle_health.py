@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
+from uuid import uuid4
 
 from control_plane.contracts.product_environment_read_model import build_product_environment_detail
 from control_plane.contracts.product_profile_record import (
@@ -104,6 +105,7 @@ class SyncCycleHealthTests(unittest.TestCase):
             [],
             {},
             sync_cycle_payload(cycle_id=private),
+            sync_cycle_payload(unrecovered_full_cycle_id=private),
             sync_cycle_payload(status=private),
             sync_cycle_payload(mode=private),
             sync_cycle_payload(cycle_started_at=private),
@@ -162,6 +164,64 @@ class SyncCycleHealthTests(unittest.TestCase):
                 self.assertIsNone(record.targets[0].sync)
                 assert record.targets[-1].sync is not None
                 self.assertEqual(record.targets[-1].sync.status, "recorded")
+
+    def test_full_failure_stays_open_through_restart_until_recovery(self) -> None:
+        failed_cycle_id = uuid4().hex
+        recovery_cycle_id = uuid4().hex
+        store = _Store((_profile(),))
+        stages = (
+            (503, "failed", failed_cycle_id, failed_cycle_id, "full", "open"),
+            (503, "running", recovery_cycle_id, failed_cycle_id, "full", "open"),
+            (200, "success", recovery_cycle_id, None, "full", "resolved"),
+        )
+        for minute, (http_status, status, cycle_id, retained, mode, incident_status) in enumerate(
+            stages, 5
+        ):
+            with self.subTest(status=status, retained=retained):
+                cycle = sync_cycle_payload(
+                    status=status,
+                    cycle_id=cycle_id,
+                    mode=mode,
+                    unrecovered_full_cycle_id=retained,
+                    cycle_finished_at=None if status == "running" else "2026-05-29T12:04:00Z",
+                    freshness_status="failed" if status == "failed" else "fresh",
+                )
+                run_public_ingress_monitor_once(
+                    record_store=store,
+                    checked_at=f"2026-05-29T12:{minute:02d}:00Z",
+                    http_get=lambda url, _timeout: HttpObservation(
+                        status_code=http_status,
+                        final_url=url,
+                        redirect_count=0,
+                        payload={"sync": cycle},
+                    ),
+                    notify=False,
+                )
+                self.assertEqual(len(store.incidents), 1)
+                self.assertEqual(store.incidents[0].status, incident_status)
+                evidence = store.records[-1].targets[-1].sync
+                assert evidence is not None and evidence.cycle is not None
+                self.assertEqual(evidence.cycle.unrecovered_full_cycle_id, retained)
+
+    def test_changed_cycle_identity_without_retained_failure_does_not_open_incident(self) -> None:
+        store = _Store((_profile(),))
+        for minute in (5, 10):
+            run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at=f"2026-05-29T12:{minute:02d}:00Z",
+                http_get=lambda url, _timeout: HttpObservation(
+                    status_code=200,
+                    final_url=url,
+                    redirect_count=0,
+                    payload={
+                        "sync": sync_cycle_payload(
+                            cycle_id=uuid4().hex, status="running", cycle_finished_at=None
+                        )
+                    },
+                ),
+                notify=False,
+            )
+        self.assertFalse(store.incidents)
 
     def test_private_monitor_keeps_sync_with_its_private_check(self) -> None:
         lane = ProductLaneProfile(
@@ -244,6 +304,7 @@ class SyncCycleHealthTests(unittest.TestCase):
                             "sync": sync_cycle_payload(
                                 status="failed",
                                 freshness_status="failed",
+                                unrecovered_full_cycle_id=sync_cycle_payload()["cycle_id"],
                                 last_error="private-error-sentinel",
                             )
                         },
@@ -255,11 +316,15 @@ class SyncCycleHealthTests(unittest.TestCase):
             try:
                 record = store.list_public_ingress_observation_records()[0]
                 self.assertEqual(record.status, "fail")
-                assert (
-                    record.targets[-1].sync is not None
-                    and record.targets[-1].sync.cycle is not None
+                evidence = record.targets[-1].sync
+                assert evidence is not None
+                cycle = evidence.cycle
+                assert cycle is not None
+                self.assertEqual(cycle.status, "failed")
+                self.assertEqual(
+                    cycle.unrecovered_full_cycle_id,
+                    sync_cycle_payload()["cycle_id"],
                 )
-                self.assertEqual(record.targets[-1].sync.cycle.status, "failed")
                 self.assertNotIn("private-error-sentinel", record.model_dump_json())
                 self.assertEqual(record.observed_at, checked_at)
             finally:

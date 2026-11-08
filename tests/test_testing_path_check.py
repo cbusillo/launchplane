@@ -110,6 +110,7 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "control_plane.product_path_check._testing_reconcile_plan",
                 return_value={
+                    "reconcile_state": "done",
                     "deployed_operation_id": "deployed-fixture",
                 },
             ),

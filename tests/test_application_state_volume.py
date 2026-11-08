@@ -1384,7 +1384,6 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
             route_path=PLAN_ROUTE,
             idempotency_key=plan["state_volume_plan_id"],
         )
-        self.assertIsNotNone(original)
         assert original is not None
         # Model an immutable pre-upgrade plan, whose request predates the browser adapter.
         old_intent = deepcopy(original.response_payload)

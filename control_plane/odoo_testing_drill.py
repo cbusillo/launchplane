@@ -186,6 +186,7 @@ def require_drill_use_unprotected(
     accepted_usage_revision: str = "",
     allow_down_repair: bool = True,
 ) -> None:
+    observed = datetime.fromtimestamp(now, timezone.utc) if now is not None else None
     try:
         # Missing tracked authority is an unreadable hold check, never no hold.
         store.read_dokploy_target_record(context_name=context, instance_name="testing")
@@ -193,7 +194,7 @@ def require_drill_use_unprotected(
         recorded = store.read_disposable_lane_safety(product, context, "testing")
         protected = (
             recorded is not None
-            and recorded.usage == "in_use"
+            and recorded.current_usage(observed) == "in_use"
             and _usage_revision(recorded) != accepted_usage_revision
             and hold is None
             and lane_usage_protected(
@@ -201,9 +202,9 @@ def require_drill_use_unprotected(
                 product=product,
                 context=context,
                 instance="testing",
-                usage=recorded.usage,
+                usage=recorded.current_usage(observed),
                 require_unused=allow_down_repair,
-                now=datetime.fromtimestamp(now, timezone.utc) if now is not None else None,
+                now=observed,
             )
         )
     except Exception as error:
@@ -343,9 +344,7 @@ def prepare_drill(
     if previous is None or not previous.completed_at:
         raise DrillPrerequisite("completed_qualified_testing_generation_required")
     safety = collect_drill_admission(store, previous, now)
-    target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
-    if "ODOO_DB_NAME" in target.env:
-        raise DrillPrerequisite("target_database_override_requires_migration")
+    store.read_dokploy_target_record(context_name=context, instance_name="testing")
     runtime = next(
         (
             item

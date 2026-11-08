@@ -12,10 +12,15 @@ import yaml
 
 from control_plane import runtime_environments
 from control_plane.build_provenance import GitHubBuildProvenanceTransport
+from control_plane.published_generation_resources import PublishedGenerationResourceStore
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.product_profile_record import (
+    is_exclusive_product_context,
+    product_context_owner_map,
+)
 from control_plane.contracts.testing_activation import (
     TestingActivationPlan,
     TestingActivationRefusal,
@@ -142,7 +147,7 @@ def verified_product_image(store: PostgresRecordStore, product: str, commit: str
 
 
 def activation_record(
-    store: PostgresRecordStore,
+    store: PublishedGenerationResourceStore,
     product: str,
     context: str,
     *,
@@ -519,6 +524,21 @@ def retained_fence_is_separated(store: object, reservation: object) -> bool:
             _profile, current, target_id, target = bind_testing_recipient(
                 store, record.product, record.context, "testing"
             )
+            candidates = [
+                TestingActivationRecord.model_validate(value)
+                for value in store.list_testing_application_activations(
+                    record.product, record.context
+                )
+            ]
+            serving = [
+                value
+                for value in candidates
+                if value.target_id == target_id.target_id
+                and completed_application_activation(store, value)
+            ]
+            if len(serving) != 1:
+                return False
+            record = serving[0]
             seen: set[str] = set()
             while record.target_id not in seen:
                 seen.add(record.target_id)
@@ -533,12 +553,6 @@ def retained_fence_is_separated(store: object, reservation: object) -> bool:
                         and current.target_type == target.provider_target_type == "application"
                         and target_id.target_id != snapshot.target_id
                     )
-                candidates = [
-                    TestingActivationRecord.model_validate(value)
-                    for value in store.list_testing_application_activations(
-                        record.product, record.context
-                    )
-                ]
                 predecessors = [
                     value
                     for value in candidates
@@ -567,10 +581,6 @@ def retained_fence_is_separated(store: object, reservation: object) -> bool:
             and target.target_id != record.retained_target_id.target_id
             and record.published_target is not None
             and current.target_type == "compose"
-            and all(
-                current.env.get(key) == record.published_target.env.get(key)
-                for key in (*record.request.volume_keys.values(), *record.request.port_keys)
-            )
         )
     except (ValueError, FileNotFoundError):
         return False
@@ -626,7 +636,13 @@ def completed_application_predecessor(
 
 
 def require_activation_hold_lift(
-    store: object, request: object, actor: str, root: Path, *, inspect_provider: bool = True
+    store: object,
+    request: object,
+    actor: str,
+    root: Path,
+    *,
+    inspect_provider: bool = True,
+    recovery: bool = False,
 ) -> bool:
     """Explicit same-caller lift of the unchanged interlock after fresh provider proof."""
     from control_plane.testing_lane_hold import TestingHoldApplyRequest
@@ -662,9 +678,16 @@ def require_activation_hold_lift(
         record.scope,
         "activation_hold_preflight",
     )
-    adapter.require_unchanged(record)
+    if recovery:
+        from control_plane.testing_application_activation import ApplicationActivationAdapter
+
+        if not isinstance(adapter, ApplicationActivationAdapter):
+            raise TestingActivationRefusal("Original recovery requires an application recipient.")
+        adapter.require_recovery_custody(record)
+    else:
+        adapter.require_unchanged(record)
     protection = store.read_disposable_lane_safety(record.product, record.context, "testing")
-    if protection and protection.usage == "in_use":
+    if protection and protection.current_usage() == "in_use":
         raise TestingActivationRefusal("Known staff use protects the testing recipient.")
     target = store.read_dokploy_target_record(context_name=record.context, instance_name="testing")
     if target.policies.staff_testing_hold not in (
@@ -676,9 +699,13 @@ def require_activation_hold_lift(
         # A lost post-clear receipt must still reach the writer's no-op/reconcile
         # recovery; the now-running recipient need not remain empty.
         return True
-    adapter.verify_provider(record)
-    resources, _ = preparation_resources(store, record.product, record.request, record.scope)
+    if recovery:
+        assert isinstance(adapter, ApplicationActivationAdapter)
+        adapter.verify_recovery_provider(record)
+    else:
+        adapter.verify_provider(record)
     if record.request.application is None:
+        resources, _ = preparation_resources(store, record.product, record.request, record.scope)
         inspect_new_resources(
             root,
             resources,
@@ -725,7 +752,7 @@ def build_activation(
             "An absent, foreign or unacknowledged staff hold is protected."
         )
     protection = store.read_disposable_lane_safety(product, request.context, "testing")
-    if protection and protection.usage == "in_use":
+    if protection and protection.current_usage() == "in_use":
         raise TestingActivationRefusal("Known staff use protects the old testing recipient.")
     resources, receipt_id = preparation_resources(store, product, request, scope)
     binding, old_key = preparation_binding(store, product, request.context, actor, root)
@@ -910,7 +937,7 @@ class TestingActivationAdapter:
             protection = self.store.read_disposable_lane_safety(
                 record.product, record.context, "testing"
             )
-            if protection is not None and protection.usage == "in_use":
+            if protection is not None and protection.current_usage() == "in_use":
                 raise TestingActivationRefusal("Known staff use protects the retained recipient.")
         if configuration_digest(
             self.store, self.product, record.context, version=record.configuration_version
@@ -928,12 +955,57 @@ class TestingActivationAdapter:
                 code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
             )
 
-    def require_recipient_custody(self, record: TestingActivationRecord) -> DokployTargetRecord:
-        _, target, target_id, provider = self.bindings()
+    def require_recipient_custody(
+        self, record: TestingActivationRecord, *, recovery: bool = False
+    ) -> DokployTargetRecord:
+        if recovery:
+            if not is_exclusive_product_context(
+                context=record.context,
+                product=record.product,
+                owners=product_context_owner_map(self.store.list_product_profile_records()),
+            ):
+                raise TestingActivationRefusal("Original recovery requires exclusive lane custody.")
+            target = self.store.read_dokploy_target_record(
+                context_name=record.context, instance_name="testing"
+            )
+            target_id = self.store.read_dokploy_target_id_record(
+                context_name=record.context, instance_name="testing"
+            )
+            provider = self.store.read_provider_target_record(
+                context_name=record.context, instance_name="testing"
+            )
+            physical: tuple[ProviderTargetRecord | DokployTargetIdRecord, ...] = (
+                *self.store.list_provider_target_records(),
+                *self.store.list_dokploy_target_id_records(),
+            )
+            protected_ids = (
+                {record.target_id}
+                if record.published
+                else {record.target_id, record.retained_target_id.target_id}
+            )
+            if any(
+                row.target_id in protected_ids
+                and (row.context, row.instance) != (record.context, "testing")
+                for row in physical
+            ):
+                raise TestingActivationRefusal("An original recovery target aliases another lane.")
+        else:
+            _, target, target_id, provider = self.bindings()
         if record.published:
             if (
                 target_id.target_id != record.target_id
                 or provider.target_id != record.target_id
+                or recovery
+                and (
+                    provider.provider_id,
+                    provider.target_category,
+                    provider.provider_target_type,
+                )
+                != (
+                    record.retained_provider.provider_id,
+                    record.retained_provider.target_category,
+                    record.retained_provider.provider_target_type,
+                )
                 or record.published_target is None
                 or recipient_target_identity(target)
                 != recipient_target_identity(record.published_target)
@@ -962,7 +1034,7 @@ class TestingActivationAdapter:
                     "The retained original reservation changed.",
                     code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
                 )
-        return cast(DokployTargetRecord, target)
+        return target
 
     def save(self, record: TestingActivationRecord, **updates: Any) -> TestingActivationRecord:
         replacement = record.model_copy(update=updates)
@@ -1573,13 +1645,20 @@ class TestingActivationAdapter:
                             body["serverId"] = str(old["serverId"])
                     checkpoint(phase)
                     record = self.save(record, phase=phase)
-                    response = api.dokploy_request(
-                        host=host,
-                        token=token,
-                        path=path,
-                        method="POST",
-                        payload=cast(api.JsonObject, body),
+                    from control_plane.production_recipient_retirement_names import (
+                        provider_name_guard,
                     )
+
+                    with provider_name_guard(
+                        self.store, record.namespace if phase == "create_compose" else ""
+                    ):
+                        response = api.dokploy_request(
+                            host=host,
+                            token=token,
+                            path=path,
+                            method="POST",
+                            payload=cast(api.JsonObject, body),
+                        )
                     # Current Dokploy returns {project, environment}; older
                     # supported servers returned the project directly.
                     if (

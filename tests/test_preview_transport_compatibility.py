@@ -107,7 +107,7 @@ class PreviewTransportCompatibilityTests(unittest.TestCase):
                         with (
                             patch(
                                 "control_plane.drivers.generic_web_preview_extensions."
-                                "apply_verireel_preview_refresh_result"
+                                "apply_postgres_preview_refresh_result"
                             ) as driver_refresh,
                             self.assertRaises(click.ClickException),
                         ):

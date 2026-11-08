@@ -5,9 +5,6 @@ from __future__ import annotations
 import hashlib
 from typing import Final, Literal, assert_never
 
-from control_plane.contracts.ordinary_agent_activation import (
-    OrdinaryAgentDeliveryActivationRecord,
-)
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.authz_scope import DOKPLOY_TARGET_LANE_SETUP_ACTION
 from control_plane.contracts.product_profile_record import (
@@ -43,9 +40,6 @@ from control_plane.service_auth import (
 from control_plane.contracts.ordinary_agent_client import ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION
 
 
-ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID: Final = (
-    "ordinary-agent-delivery-administration"
-)
 ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID = (
     "operator.ordinary-agent-delivery-administration"
 )
@@ -57,10 +51,6 @@ ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS = (
     ORDINARY_AGENT_DELIVERY_ACTIVATION_READ_ACTION,
     ORDINARY_AGENT_DELIVERY_ACTIVATION_REVOKE_ACTION,
 )
-ORDINARY_AGENT_DELIVERY_ADMINISTRATION_REASON = (
-    "Prepare bounded ordinary-agent delivery administration."
-)
-ORDINARY_AGENT_DELIVERY_ADMINISTRATION_RELATED_ISSUE = "#2369"
 
 ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID: Final = "administrator-product-evidence-read"
 ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID = "operator.product-evidence-read"
@@ -102,7 +92,6 @@ AGENT_POLICY_PROPOSER_RELATED_ISSUE = "#2586"
 
 AuthorizationCandidateId = Literal[
     "agent-policy-proposer",
-    "ordinary-agent-delivery-administration",
     "administrator-product-evidence-read",
     "agent-product-setup",
 ]
@@ -114,9 +103,6 @@ _AdministratorProductEvidenceReadState = Literal["absent", "legacy", "current", 
 AuthorizationCandidatePreparationReason = Literal[
     "candidate_set_conflict",
     "candidate_action_overlap",
-    "current_activation_requires_stop",
-    "activation_storage_unavailable",
-    "activation_history_truncated",
     "candidate_principal_unavailable",
     "candidate_products_required",
     "candidate_product_unavailable",
@@ -365,109 +351,6 @@ def ordinary_agent_delivery_administration_removed(
         github_id > 0
         and ordinary_agent_delivery_administration_state(candidate_policy, github_id=github_id)
         != "active"
-    )
-
-
-def _has_explicit_action_overlap(policy: LaunchplaneAuthzPolicy) -> bool:
-    actions = set(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS)
-    return any(
-        getattr(rule, "managed_set_id", None)
-        != ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID
-        and bool(actions.intersection(getattr(rule, "actions", ())))
-        for _principal_type, rule in _rules(policy)
-    )
-
-
-def _require_no_current_activation(record_store: object) -> None:
-    reader = getattr(record_store, "list_ordinary_agent_delivery_activation_records", None)
-    if not callable(reader):
-        raise AuthorizationCandidatePreparationError(
-            "activation_storage_unavailable", "Removal requires ordinary-agent activation storage."
-        )
-    try:
-        records = tuple(reader(limit=1001))
-        if len(records) > 1000:
-            raise AuthorizationCandidatePreparationError(
-                "activation_history_truncated",
-                "Removal cannot prove activation state within the bounded history read.",
-            )
-        activations = tuple(
-            record
-            if isinstance(record, OrdinaryAgentDeliveryActivationRecord)
-            else OrdinaryAgentDeliveryActivationRecord.model_validate(record)
-            for record in records
-        )
-    except AuthorizationCandidatePreparationError:
-        raise
-    except (RuntimeError, TypeError, ValueError) as error:
-        raise AuthorizationCandidatePreparationError(
-            "activation_storage_unavailable",
-            "Removal could not verify ordinary-agent activation state.",
-        ) from error
-    if any(
-        not activation.revoked_at and not activation.superseded_by_activation_id
-        for activation in activations
-    ):
-        raise AuthorizationCandidatePreparationError(
-            "current_activation_requires_stop",
-            "Removal is blocked while an ordinary-agent delivery activation is current.",
-        )
-
-
-def compile_ordinary_agent_delivery_administration_candidate(
-    *,
-    current_policy: LaunchplaneAuthzPolicy,
-    github_id: int,
-    intent: AuthorizationCandidateIntent,
-    record_store: object,
-) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
-    state = ordinary_agent_delivery_administration_state(
-        current_policy,
-        github_id=github_id,
-    )
-    if state == "conflict":
-        raise AuthorizationCandidatePreparationError(
-            "candidate_set_conflict",
-            "The authorization candidate conflicts with current policy state.",
-        )
-    if intent == "add" and _has_explicit_action_overlap(current_policy):
-        raise AuthorizationCandidatePreparationError(
-            "candidate_action_overlap",
-            "The authorization candidate actions overlap another policy rule.",
-        )
-    desired_active = intent == "add"
-    if (state == "active") == desired_active:
-        return "already_satisfied", None
-    if intent == "remove":
-        _require_no_current_activation(record_store)
-    desired_policy = LaunchplaneAuthzPolicy(
-        schema_version=current_policy.schema_version,
-        github_humans=(
-            (
-                GitHubHumanPolicyRule(
-                    managed_set_id=(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID),
-                    managed_rule_id=(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID),
-                    github_ids=(github_id,),
-                    roles=("admin",),
-                    products=("launchplane",),
-                    contexts=("launchplane",),
-                    actions=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS,
-                ),
-            )
-            if intent == "add"
-            else ()
-        ),
-    )
-    return (
-        "planned",
-        ManagedAuthzPolicySetProposalInput(
-            managed_set_id=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
-            desired_policy=desired_policy,
-            schema_migration="reject",
-            administrator_quorum_change=None,
-            reason=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_REASON,
-            related_issue=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_RELATED_ISSUE,
-        ),
     )
 
 
@@ -1146,13 +1029,6 @@ def compile_authorization_candidate(
             products=products,
             record_store=record_store,
         )
-    if candidate_id == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID:
-        return compile_ordinary_agent_delivery_administration_candidate(
-            current_policy=current_policy,
-            github_id=github_id,
-            intent=intent,
-            record_store=record_store,
-        )
     if candidate_id == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID:
         return compile_administrator_product_evidence_read_candidate(
             current_policy=current_policy,
@@ -1215,9 +1091,7 @@ def authorization_candidate_request_matches(
             == normalize_agent_product_setup_products(products)
             and agent_product_setup_grants_match_records(record_store=record_store, grants=grants)
         )
-    if candidate_id == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID:
-        recognized = is_ordinary_agent_delivery_administration_request(request)
-    elif candidate_id == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID:
+    if candidate_id == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID:
         recognized = is_administrator_product_evidence_read_request(request)
     else:
         assert_never(candidate_id)

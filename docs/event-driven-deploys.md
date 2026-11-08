@@ -15,7 +15,7 @@ Launchplane receives the webhook of the GitHub App its merge train already
 uses (the App is installed on every product repository). One receiver,
 `POST /v1/github/app-webhook`, takes `workflow_run` and `pull_request`
 deliveries for deploy reconciliation. Opted-in source checks also consume
-`push` and `merge_group` deliveries as described below. Other events are
+`push` and `merge_group` deliveries as described below. Message events also wake the existing [attention readers](request-attention.md#message-events). Other events are
 acknowledged and ignored.
 
 Events carry no instructions. An event only says which target to look at
@@ -66,6 +66,18 @@ redeliveries and the sweep cost one reconcile.
 The existing Odoo worker claims pending reconciles. Each one reads current
 state and makes the target match it, under the target's existing mutation
 reservation. The webhook request never waits on a deploy.
+
+Testing source reads use conditional GitHub requests with the existing bounded,
+credential-scoped process cache. An unchanged history still needs GitHub's 304
+confirmation; cached history never substitutes for a refused or failed read.
+Renewed tokens reuse validators only for the same verified App, installation,
+repository and permission scope; every read uses the current token.
+A classified GitHub rate limit leaves testing reconciliation pending until the
+reset or Retry-After deadline, with a one-minute minimum backoff. The saved
+deadline survives worker restarts and new webhook requests. This pre-deployment
+wait emits no failure feedback or testing-delivery incident; authorization,
+artifact and provider failures retain their existing handling. Earlier incidents
+remain until the normal supported recovery proves their resolution.
 
 - **testing:** the desired artifact is the newest commit on the default
   branch's first-parent history that has a verified release build. A late
@@ -257,6 +269,12 @@ reservation. The webhook request never waits on a deploy.
   - The manifest is not recorded in the artifact store. The preview's slug
     and URL come from the product profile as today. The result is posted on
     the PR; see [Pull request feedback](#pull-request-feedback).
+  - An Odoo `preview_provenance_refused` retains its specific
+    `preview_result_error_code` and `failure_trace_id`. The existing
+    `handled_error_cause` service log binds that trace and plan ID to bounded
+    source locations, without exception text or record contents. Follow the
+    [existing-preview source-history contract](disposable-lanes.md) for missing
+    origin evidence and its independent-recipient review route.
   - A snapshot Odoo preview without its Launchplane lifecycle record needs
     native restore custody before a refresh can supersede its original operation.
     The receipt, physical storage binding and database witness must prove an
@@ -269,6 +287,14 @@ reservation. The webhook request never waits on a deploy.
   - Read the PR state again after taking the preview's reservation and just
     before the provider apply; if it closed or moved its head, the reservation is released with no provider effect and the
     reconcile runs again.
+  - Automatic Odoo refresh uses the explicit apply path's disposable-preview
+    protection and resource qualification at each provider mutation boundary.
+    Recorded use, staff holds, only-needed copies and shared production resources
+    refuse refresh, including protection recorded after planning. An unchanged
+    serving build needs no mutation. Fresh creation and unprotected refresh keep
+    their existing UNKNOWN semantics without requiring a positive unused report.
+    After protection clears, the next normal reconciliation retries the retained
+    source intent through the same reservation and recovery rules.
   - A refused or failed destroy is attempted at most three times for the same
     preview lifecycle record, product-profile revision, context, and destroy
     reason. Busy operations, observation-only passes for unknown provider outcomes,
@@ -418,6 +444,15 @@ needs no workflow to report previews or testing deploys.
   build arrives removes its pending comment and records terminal cleared feedback;
   a closed PR without feedback history posts nothing. Other plans that change
   nothing, are deferred, or are held for another driver say nothing.
+  A completed failed Build for the exact head is recorded as a preview failure,
+  with its run ID, rather than an ordinary build wait. A retry waiting on another
+  build retains that failure in the existing feedback until a current-head
+  preview is ready. An unfinished run or a run from another repository does not
+  establish a failed build.
+  Retention reads the original feedback record, keeping its failed revision and
+  reason through temporary source-read errors, recovery holds and interrupted
+  cleanup. A successful cleanup is not a published preview. Failed delivery can
+  retry from that same record; unavailable or mismatched history stays failed.
 - **Testing:** one comment on the PR GitHub merged as the desired commit
   (`merge_commit_sha` equals it), marked `<!-- launchplane-reconcile-testing -->`:
   the deploy is queued, the testing lane runs it, it is waiting because the
@@ -509,10 +544,13 @@ inside refresh serialization. Existing previews need their configured product
 profile to resolve source authority; product onboarding/profile records supply
 that supported configuration path.
 
-Testing searches up to 20 pages of successful build runs and first-parent
-history to find its running build. An omitted running run or commit still
+Testing searches up to 20 pages of build runs and first-parent
+history to find its running build. It selects successful runs locally rather
+than relying on GitHub's status filter, whose listing can omit a completed
+successful run. Exact-run provenance verification still precedes selection.
+An omitted running run or commit still
 holds selection with the observed counts. For a recorded generic-web baseline
-predating contract Build adoption, a complete empty successful Build inventory
+predating contract Build adoption, a complete run inventory without a successful Build
 reports `no_verified_build`: there is no candidate to verify or deploy, and no
 commit-history search was attempted. If the running build is beyond
 those bounds, or its history was rewritten, the supported service
@@ -730,13 +768,6 @@ preview records do not hide stale pending feedback; their reconciliation remains
 a no-op. Previews still requiring lifecycle work retain their existing sweep
 coverage and retry rules.
 
-## Director steps
-
-Once the receiver is deployed: set the App's webhook URL to the receiver,
-generate its secret and store it through Launchplane's managed-secret path,
-and subscribe the App to "Workflow runs" and "Pull requests". No product
-repository changes.
-
 ## Odoo call-in retirement
 
 Odoo builds, previews and testing deploy from Build events. The Odoo publish
@@ -749,12 +780,6 @@ source deletion is not evidence that those records are gone.
 
 Repository identity comes from repository inventory rather than the old profile
 copy. Its separate compatibility/admin surface is not retired by this change.
-
-For SellYourOutboard and VeriReel (#2740): each repository's
-`launchplane-preview.yml` and `launchplane-preview-notice.yml`, replaced by its
-own `.github/workflows/build.yml`, then its `preview` label. Product-run preview
-verification went with `launchplane-preview.yml`; Launchplane's own health check
-of the expected build is what marks the preview ready, as for Odoo.
 
 ## Product configuration authority from source events
 
@@ -794,10 +819,11 @@ budget refuses verification. Scans have a four-minute read budget under a
 ten-minute lease; an expired lease is recovered and its older attempt cannot
 publish a check or stored result. Publication holds the database delivery fence
 through the provider write and completion; different deliveries for one
-repository are serialized. A separate scan thread is admitted after deploy and
-reconcile polling; a slow source read does not hold up newly queued operations.
-With no branch opted in, idle polling skips the scan table. The source migration
-adds a PostgreSQL index on scan state and receipt time for enabled queue reads.
+repository are serialized. A separate scan thread is admitted after each deploy
+or reconcile poll, including polls that completed work; a slow source read does
+not hold up newly queued operations. With no branch opted in, polling skips the
+scan table. The source migration adds a PostgreSQL index on scan state and receipt
+time for enabled queue reads.
 
 PR, recorded-candidate and merge-group results use the existing checks-only
 App's `launchplane/config-authority/current-comparison/<encoded-base-branch>`
