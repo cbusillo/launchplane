@@ -1306,6 +1306,7 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
             return_value={},
         ) as driver:
+            record_safety(self.store, "example-site", self.context, "testing", usage="in_use")
             self.assertEqual(await self.sync(), 409)
             driver.assert_not_called()
             record_safety(self.store, "example-site", self.context, "testing")
@@ -1442,13 +1443,6 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
                 },
             ),
         ):
-            unknown = await stage()
-            self.assertEqual(unknown.status_code, 409, unknown.text)
-            self.assertEqual(unknown.json()["error"]["code"], "disposable_lane_safety_unknown")
-            self.assertFalse(posted)
-            # This fixture supplies server facts; the public assertion API
-            # cannot manufacture them while the collector is unavailable.
-            record_safety(self.store, "example-site", self.context, "testing")
             with scoped_agent_transport():
                 client = await stage()
             self.assertEqual(client.status_code, 403, client.text)
@@ -1663,7 +1657,6 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
         with patch(
             "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
         ) as driver:
-            self.assertEqual(await self.sync(), 409)
             for changes in (
                 {"usage": "in_use"},
                 {"data": "only_copy"},
@@ -1843,3 +1836,77 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             driver.reset_mock()
             self.assertEqual(await self.sync(deploy=True), 409)
             driver.assert_not_called()
+
+
+class DisposableCreationFactsTests(_DisposableRuntimeAuthorityFixture):
+    def admit(self, **options: Any) -> str:
+        from control_plane.disposable_lanes import require_disposable_lane
+
+        return require_disposable_lane(
+            self.store, product="example-site", context=self.context, instance="testing", **options
+        )
+
+    def record_creation(self, **changes: str) -> str:
+        binding = self.admit()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        payload = target.model_dump()
+        payload["resource_provenance"] = {
+            "created_by": "service:fresh-testing-bootstrap",
+            "lane_binding_sha256": binding,
+            "data": "reproducible",
+            "production_resources": "isolated",
+            **changes,
+        }
+        self.store.write_dokploy_target_record(DokployTargetRecord.model_validate(payload))
+        return binding
+
+    def test_no_earlier_observation_is_not_protected_state(self) -> None:
+        self.assertTrue(self.admit())
+
+    def test_persisted_creation_survives_age_and_stale_positive_observation(self) -> None:
+        binding = self.record_creation()
+        now = datetime.now(timezone.utc)
+        record_safety(self.store, "example-site", self.context, "testing")
+        self.assertEqual(self.admit(now=now + timedelta(days=30)), binding)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.assertNotIn("expires_at", target.resource_provenance)
+
+    def test_creation_does_not_override_observed_use_needed_copy_or_shared_production(self) -> None:
+        from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
+
+        self.record_creation()
+        for unsafe in (
+            {"usage": "in_use"},
+            {"data": "only_copy"},
+            {"production_resources": "shared"},
+        ):
+            with self.subTest(unsafe=unsafe):
+                record_safety(self.store, "example-site", self.context, "testing", **unsafe)
+                with self.assertRaises(DisposableLaneSafetyUnknown):
+                    self.admit()
+
+    def test_binding_change_never_transfers_creation_isolation(self) -> None:
+        from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
+
+        self.record_creation()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"env": {"DATA_VOLUME": "different-storage"}})
+        )
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            self.admit()
+        record_safety(self.store, "example-site", self.context, "testing")
+        self.assertNotEqual(self.admit(), target.resource_provenance["lane_binding_sha256"])
+
+    def test_human_observation_still_expires_without_creation(self) -> None:
+        from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
+
+        record_safety(self.store, "example-site", self.context, "testing")
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            self.admit(now=datetime.now(timezone.utc) + timedelta(hours=1))

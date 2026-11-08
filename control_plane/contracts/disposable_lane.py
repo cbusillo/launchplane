@@ -19,6 +19,22 @@ TESTING_PRIVATE_INGRESS_ROUTE = "/v1/products/{product}/testing-private-ingress"
 TESTING_VERIFICATION_ROUTE = "/v1/products/{product}/testing-verification"
 
 
+class DisposableLaneCreation(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    created_by: Literal[
+        "service:fresh-testing-bootstrap",
+        "service:testing-replacement-resources",
+        "service:odoo-preview",
+    ]
+    lane_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    replaces_operation_id: str = ""
+    replaced_target_id: str = ""
+    isolation_evidence: str = ""
+    data: Literal["reproducible", "only_copy", "unknown"]
+    production_resources: Literal["isolated", "separation_ready", "shared", "unknown"]
+
+
 class DisposableLaneSafety(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

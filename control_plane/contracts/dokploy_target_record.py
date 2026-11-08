@@ -148,6 +148,11 @@ class DokployTargetRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
+    resource_provenance: dict[str, str] = Field(
+        default_factory=dict,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     context: str
     instance: str
     project_name: str = ""

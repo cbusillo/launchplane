@@ -680,11 +680,7 @@ class NeverServedHttpTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
                 app = fixture.fixture.fixture.app
-                previous = fixture.store.read_disposable_lane_safety(
-                    fixture.product, fixture.context, "testing"
-                )
-                assert previous is not None
-                fixture.store.write_disposable_lane_safety(previous.model_copy(update=changes))
+                record_safety(fixture.store, fixture.product, fixture.context, "testing", **changes)
                 body = {
                     "product": fixture.product,
                     "context": fixture.context,

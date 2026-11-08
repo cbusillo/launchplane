@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from control_plane.testing_never_served import NeverServedRecords
 
 from control_plane.contracts.disposable_lane import (
+    DisposableLaneCreation,
     DisposableLaneSafety,
     DisposableTestingReplacementPreparation,
     DisposableTestingSupersession,
@@ -36,7 +37,7 @@ class ReplacementBindings:
     runtime_records: tuple[RuntimeEnvironmentRecord, ...]
     secret_records: tuple[SecretRecord, ...]
     secret_bindings: tuple[SecretBinding, ...]
-    safety: DisposableLaneSafety
+    safety: DisposableLaneSafety | None
     preparation: DisposableTestingReplacementPreparation
     non_use_records: "NeverServedRecords | None" = None
 
@@ -57,7 +58,8 @@ class ReplacementBindings:
     ) -> DisposableLaneSafety | None:
         return (
             self.safety
-            if (product, context, instance)
+            if self.safety is not None
+            and (product, context, instance)
             == (self.safety.product, self.safety.context, self.safety.instance)
             else None
         )
@@ -122,14 +124,21 @@ def disposable_testing_supersession(
         raise DisposableLaneSafetyUnknown(
             "Only an excluded service-owned testing replacement can be superseded."
         )
-    require_disposable_lane(
+    binding = require_disposable_lane(
         cast(DisposableLaneStore, bindings),
         product=operation.product,
         context=operation.context,
         instance=operation.instance,
         usage_store=usage_store,
     )
-    evidence = bindings.safety
+    creation = (
+        DisposableLaneCreation.model_validate(bindings.target.resource_provenance)
+        if bindings.target.resource_provenance
+        else None
+    )
+    evidence = creation if creation and creation.lane_binding_sha256 == binding else bindings.safety
+    if evidence is None:
+        raise DisposableLaneSafetyUnknown("Replacement requires service-captured target identity.")
     preparation = bindings.preparation
     if (
         preparation.operation_id,
@@ -156,7 +165,11 @@ def disposable_testing_supersession(
             "Replacement evidence identifies a different retained target."
         )
     supersession = DisposableTestingSupersession(
-        binding_sha256=evidence.binding_sha256,
+        binding_sha256=(
+            evidence.lane_binding_sha256
+            if isinstance(evidence, DisposableLaneCreation)
+            else evidence.binding_sha256
+        ),
         retained_target_id=evidence.replaced_target_id,
         replacement_target_id=bindings.target_id.target_id,
         evidence_reference=evidence.isolation_evidence,

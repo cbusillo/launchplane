@@ -2253,18 +2253,24 @@ context, instance and preview ID. Clear sends one request; it never silently
 re-inspects changed bindings or retries an uncertain result. A refused clear
 requires a new inspection and review.
 
-Bounded Odoo authenticated-use evidence does not supply
-a universal occupancy or only-copy inventory, or a general
-inspection that proves every writable mount/backing store, live database,
-published port and credential relation. The schema does not pretend to supply
-that inspection. There is no universal producer of positive occupancy/custody facts permitting a
-disposable apply. The bounded existing-preview refresh above uses its own real
-resource inspection and protected-use rule instead. The assertion API cannot create one and a direct DB write is not a
-qualification procedure. Without qualified facts, apply paths
-requiring positive facts return `disposable_lane_safety_unknown`; absent observations never mean unused,
-reproducible or isolated. Operational qualification records the missing sources
-on the owning item. Do not fill observations from names, IDs, old comments
-or successful plans.
+Service-created testing and preview lanes retain creation facts on their existing
+`DokployTargetRecord` or `PreviewRecord`, in `resource_provenance`. The facts name
+`created_by`, reproducible `data`, `production_resources`, and the exact
+`lane_binding_sha256`. Preview provenance also keeps the qualified resource
+binding and time returned by its existing inspection. Creation facts have no
+expiry and do not assert that nobody is using a lane now. The testing resource
+writer records `separation_ready`; bootstrap records `isolated` after qualification.
+These writers no longer create five-minute occupancy observations.
+
+The disposable reader uses matching creation facts, independently checks current
+use and preserves observed needed copies and shared production resources. A
+binding change cannot transfer old isolation proof. Human observations retain
+their bounded expiry; older stored records remain readable, without backfill.
+An absent earlier observation alone proves neither safety nor protected state
+and does not refuse an otherwise owned lane. Actual staff holds, needed copies,
+shared production resources, ownership and backup gates still apply. A plan is
+never evidence that those checks passed. Generation-scoped usage and preview
+plan/admission alignment remain separate from this creation-fact contract.
 
 A disposable Odoo testing rebuild first calls `prepare-rebuild` on the same API,
 with the old binding digest and `replaces_operation_id`. The service excludes
@@ -2282,11 +2288,11 @@ forbidden on this path. It can issue only the three provider create calls,
 holds the old execution lock, checkpoints current safety and commits against
 the owned profile and old binding. It never updates or deletes the old target
 or its storage, copies credentials, starts containers or changes production.
-No service-scoped setup grant is needed. Missing current facts still stop staging.
+No service-scoped setup grant is needed. Observed protected state still stops staging.
 
-Inspect the new binding and obtain fresh authoritative facts naming that
-operation. The public assertion API records the gap until the collector exists.
-The service derives
+Inspect the new binding. Service-created facts on that lane name the retained
+operation and target; a current human observation can requalify a changed
+binding, with its normal expiry. The service derives
 `replaced_target_id` from its preparation; a caller cannot invent it. The worker acquires the old
 operation's execution lock, locks the lane, operation and current bindings,
 and atomically records `superseded` only when the new target differs and the

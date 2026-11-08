@@ -291,6 +291,8 @@ def apply_launchplane_generation_evidence(
     record_store: LaunchplaneMutationStore,
     preview_request: PreviewMutationRequest,
     generation_request: PreviewGenerationMutationRequest,
+    product: str = "",
+    resource_provenance: dict[str, str] | None = None,
 ) -> dict[str, object]:
     _validate_preview_generation_request_alignment(
         preview_request=preview_request,
@@ -332,6 +334,36 @@ def apply_launchplane_generation_evidence(
         transitioned_preview = apply_generation_requested_transition(
             preview=preview_record,
             generation=generation_record,
+        )
+    if resource_provenance is not None:
+        from control_plane.contracts.disposable_lane import DisposableLaneCreation
+        from control_plane.disposable_lanes import (
+            DisposableLaneStore,
+            resolve_disposable_observation_binding,
+        )
+
+        store = cast(DisposableLaneStore, record_store)
+        profile = store.read_product_profile_record(product)
+        binding = resolve_disposable_observation_binding(
+            store,
+            product=product,
+            context=transitioned_preview.context,
+            instance=profile.preview.slug_template.format(
+                number=transitioned_preview.anchor_pr_number
+            ),
+            preview_id=transitioned_preview.preview_id,
+            preview=transitioned_preview,
+        )
+        creation = DisposableLaneCreation.model_validate(
+            {
+                **resource_provenance,
+                "lane_binding_sha256": binding.binding_sha256,
+            }
+        )
+        transitioned_preview = transitioned_preview.model_copy(
+            update={
+                "resource_provenance": creation.model_dump(mode="json"),
+            }
         )
     if callable(bundled_write):
         generation_path, preview_path = cast(

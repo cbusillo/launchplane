@@ -1,7 +1,6 @@
 """Create empty replacement resources while retaining the old testing target."""
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections.abc import Callable
 from typing import Literal
@@ -13,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.disposable_lane import (
-    DisposableLaneSafety,
+    DisposableLaneCreation,
     TESTING_REPLACEMENT_RESOURCES_ROUTE,
 )
 from control_plane.contracts.disposable_lane import DisposableTestingResourcePreparation
@@ -697,27 +696,22 @@ class TestingReplacementResourceAdapter:
                 self.store, self.request.context, "testing"
             ),
         )
-        now = datetime.now(timezone.utc)
-        reference = f"service:testing-resources:{resources.binding_sha256}"
-        self.store.write_disposable_lane_safety(
-            DisposableLaneSafety(
-                product=self.product,
-                context=self.request.context,
-                instance="testing",
-                observed_by="service:testing-replacement-resources",
-                observer_kind="director_agent",
-                binding_sha256=binding,
-                usage="unused",
-                data="reproducible",
-                production_resources="separation_ready",
-                usage_evidence=reference,
-                data_evidence=reference,
-                isolation_evidence=reference,
-                replaces_operation_id=operation.operation_id,
-                replaced_target_id=preparation.retained_target_id,
-                observed_at=now,
-                expires_at=now + timedelta(minutes=5),
-            )
+        self.store.compare_and_write_dokploy_target_record(
+            expected_record=target,
+            replacement_record=target.model_copy(
+                update={
+                    "resource_provenance": DisposableLaneCreation(
+                        created_by="service:testing-replacement-resources",
+                        lane_binding_sha256=binding,
+                        replaces_operation_id=operation.operation_id,
+                        replaced_target_id=preparation.retained_target_id,
+                        isolation_evidence=f"service:testing-resources:{resources.binding_sha256}",
+                        data="reproducible",
+                        production_resources="separation_ready",
+                    ).model_dump(mode="json"),
+                }
+            ),
+            required_context_owner=(self.product, self.request.context),
         )
         return TestingReplacementResourcesReadback(
             product=self.product,

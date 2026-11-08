@@ -1,5 +1,6 @@
 """Fresh generation continuation against real record transactions and fake provider IO."""
 
+from contextlib import nullcontext
 from pathlib import Path
 import os
 from datetime import datetime, timedelta
@@ -1098,3 +1099,51 @@ class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
             response = await self.post()
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(response.json()["error"]["code"], prerequisite.code)
+
+
+class TestingCreationFactTests(FreshTestingBootstrapScenario):
+    def setUp(self) -> None:
+        self.seed("")
+
+    def test_resource_writer_retains_nonexpiring_separation_on_target(self) -> None:
+        target = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        self.assertEqual(target.resource_provenance["production_resources"], "separation_ready")
+        self.assertEqual(target.resource_provenance["data"], "reproducible")
+        self.assertNotIn("expires_at", target.resource_provenance)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(
+                self.profile.product, self.fixture.context, "testing"
+            )
+        )
+
+    def test_bootstrap_writer_persists_isolation_without_occupancy_expiry(self) -> None:
+        from tests.test_odoo_testing_restore import generation
+
+        created = generation().model_copy(
+            update={
+                "product": self.profile.product,
+                "context": self.fixture.context,
+                "operation_id": self.fixture.operation.operation_id,
+                "target_id": self.resources.target_id,
+            }
+        )
+        with (
+            patch.object(
+                self.store, "serialize_disposable_testing_resources", side_effect=nullcontext
+            ),
+            patch(
+                "control_plane.testing_replacement_bootstrap.read_current_testing_generation",
+                return_value=created,
+            ),
+        ):
+            self.adapter()._publish_creation(created, "retained-target")
+        target = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        self.assertEqual(
+            target.resource_provenance["created_by"], "service:fresh-testing-bootstrap"
+        )
+        self.assertEqual(target.resource_provenance["production_resources"], "isolated")
+        self.assertNotIn("expires_at", target.resource_provenance)

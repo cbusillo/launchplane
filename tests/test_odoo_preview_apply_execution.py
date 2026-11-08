@@ -828,6 +828,9 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
                     "domain_host": "pr-42.cm-preview.example.test",
                     "compose_name": "cm-odoo-preview-pr-42",
                     "resource_provenance": {
+                        "created_by": "service:odoo-preview",
+                        "data": "reproducible",
+                        "production_resources": "isolated",
                         "binding_sha256": "b" * 64,
                         "qualified_at": profile.updated_at,
                         "recipient_state": "unstarted",
@@ -896,6 +899,10 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         )
         self.assertEqual(len(previews), 1)
         self.assertEqual(previews[0].state, "active")
+        self.assertEqual(previews[0].resource_provenance["data"], "reproducible")
+        self.assertEqual(previews[0].resource_provenance["binding_sha256"], "b" * 64)
+        self.assertTrue(previews[0].resource_provenance["lane_binding_sha256"])
+        self.assertNotIn("expires_at", previews[0].resource_provenance)
 
 
 class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):

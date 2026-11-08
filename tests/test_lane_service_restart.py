@@ -805,9 +805,9 @@ class ServiceRestartTests(unittest.TestCase):
             self.expected.product, self.expected.context, "testing"
         )
         status, response = self.invoke(key="missing-safety")
-        self.assertEqual(status, 409, response)
-        self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
-        self.assertEqual(self.provider.writes, [])
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["result"]["status"], "pass")
+        self.assertEqual(len(self.provider.writes), 1)
 
     def test_unhealthy_web_with_missing_docker_route_recovers_before_identity_verification(
         self,

@@ -5,7 +5,6 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
 from enum import StrEnum
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -17,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.disposable_lane import (
     DisposableTestingResourcePreparation,
-    DisposableLaneSafety,
+    DisposableLaneCreation,
     TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
 )
 from control_plane.contracts.dokploy_target_record import PublicHostEffect
@@ -612,7 +611,7 @@ class TestingReplacementBootstrapAdapter:
             ):
                 self._require_domains(existing_generation)
                 check()
-                self._publish_safety(existing_generation, allocation.retained_target_id)
+                self._publish_creation(existing_generation, allocation.retained_target_id)
                 return existing_generation, operation, plan
             from control_plane.clean_testing_snapshot import snapshot_storage_budget
 
@@ -798,10 +797,10 @@ class TestingReplacementBootstrapAdapter:
             )
             old_check()
             lease.assert_current()
-            self._publish_safety(generation, allocation.retained_target_id)
+            self._publish_creation(generation, allocation.retained_target_id)
         return generation, operation, plan
 
-    def _publish_safety(
+    def _publish_creation(
         self, generation: FreshOdooTestingGeneration, retained_target_id: str
     ) -> None:
         with self.store.serialize_disposable_testing_resources():
@@ -827,27 +826,23 @@ class TestingReplacementBootstrapAdapter:
                     self.store, self.request.context, "testing"
                 ),
             )
-            now = datetime.now(timezone.utc)
-            reference = "service:fresh-testing-bootstrap:" + generation_binding(generation)
-            self.store.write_disposable_lane_safety(
-                DisposableLaneSafety(
-                    product=self.product,
-                    context=self.request.context,
-                    instance="testing",
-                    observed_by="service:fresh-testing-bootstrap",
-                    observer_kind="director_agent",
-                    binding_sha256=binding,
-                    usage="unused",
-                    data="reproducible",
-                    production_resources="isolated",
-                    usage_evidence=reference,
-                    data_evidence=reference,
-                    isolation_evidence=reference,
-                    replaces_operation_id=generation.operation_id,
-                    replaced_target_id=retained_target_id,
-                    observed_at=now,
-                    expires_at=now + timedelta(minutes=5),
-                )
+            self.store.compare_and_write_dokploy_target_record(
+                expected_record=target,
+                replacement_record=target.model_copy(
+                    update={
+                        "resource_provenance": DisposableLaneCreation(
+                            created_by="service:fresh-testing-bootstrap",
+                            lane_binding_sha256=binding,
+                            replaces_operation_id=generation.operation_id,
+                            replaced_target_id=retained_target_id,
+                            isolation_evidence="service:fresh-testing-bootstrap:"
+                            + generation_binding(generation),
+                            data="reproducible",
+                            production_resources="isolated",
+                        ).model_dump(mode="json"),
+                    }
+                ),
+                required_context_owner=(self.product, self.request.context),
             )
 
     def _require_domains(self, generation: FreshOdooTestingGeneration) -> None:
