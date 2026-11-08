@@ -4,9 +4,11 @@ import hashlib
 from typing import Protocol
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooSlot
 from control_plane.contracts.odoo_cutover import OdooCutoverRecord
+from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane, OdooSlotCoordinates
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.prepared_public_site import PublicSiteBinding
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
@@ -25,6 +27,9 @@ class CutoverAuthorityStore(Protocol):
         self, *, context_name: str, channel_name: str
     ) -> ReleaseTupleRecord: ...
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
+    def read_dokploy_target_id_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetIdRecord: ...
 
 
 def cutover_identity(product: str, context: str, instance: str, release_id: str) -> str:
@@ -88,6 +93,28 @@ def persisted_cutover(
     return deployment.odoo_cutover
 
 
+def serving_slot(
+    store: CutoverAuthorityStore,
+    config: OdooCutoverLane,
+    serving: RuntimeIdentity,
+    *,
+    context: str,
+    instance: str,
+) -> OdooSlotCoordinates | None:
+    if serving.slot:
+        if serving.database_uuid != config.database_uuid:
+            raise ValueError("two-slot lane lacks its exact recorded current DB/runtime identity")
+        return next((slot for slot in config.slots if slot.slot_id == serving.slot), None)
+    if serving.release_id or serving.image_digest or serving.database_uuid:
+        raise ValueError("legacy serving identity is incomplete or crosses two-slot authority")
+    try:
+        tracked = store.read_dokploy_target_id_record(context_name=context, instance_name=instance)
+    except FileNotFoundError:
+        return None
+    matches = [slot for slot in config.slots if slot.compose_id == tracked.target_id]
+    return matches[0] if len(matches) == 1 else None
+
+
 def resolve_profile_cutover_plan(
     store: CutoverAuthorityStore,
     *,
@@ -120,7 +147,7 @@ def resolve_profile_cutover_plan(
             or plan.writers != config.writers
             or plan.host_runtime != config.host_runtime
             or plan.old.binding.database != config.database
-            or plan.old.runtime_identity.database_uuid != config.database_uuid
+            or plan.database_uuid != config.database_uuid
             or coordinates
             != {(slot.slot_id, slot.compose_id, slot.private_url) for slot in (plan.old, plan.new)}
         ):
@@ -128,12 +155,12 @@ def resolve_profile_cutover_plan(
         return plan
     inventory = store.read_environment_inventory(context_name=context, instance_name=instance)
     previous = inventory.runtime_identity
-    if previous is None or previous.database_uuid != config.database_uuid:
+    if previous is None:
         raise ValueError("two-slot lane lacks its exact recorded current DB/runtime identity")
     current = store.read_release_tuple_record(context_name=context, channel_name=instance)
     production = store.read_artifact_manifest(current.artifact_id)
     candidate = store.read_artifact_manifest(artifact_id)
-    old_coordinate = next((slot for slot in config.slots if slot.slot_id == previous.slot), None)
+    old_coordinate = serving_slot(store, config, previous, context=context, instance=instance)
     if old_coordinate is None or previous.artifact_id != production.artifact_id:
         raise ValueError("lane coordinates differ from current serving inventory")
     new_coordinate = next(slot for slot in config.slots if slot != old_coordinate)

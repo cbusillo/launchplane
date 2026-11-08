@@ -139,7 +139,7 @@ class NativeCronWriterCapabilities:
                         "image": slot.image,
                         "environment": environment,
                         "database": slot.binding.database,
-                        "database_uuid": slot.runtime_identity.database_uuid,
+                        "database_uuid": self.plan.database_uuid,
                         "supported_server_wide": sorted(SUPPORTED_SERVER_WIDE_MODULES),
                         "planned_modules": list(self.plan.compatibility.install_modules)
                         if slot == self.plan.new
@@ -150,7 +150,7 @@ class NativeCronWriterCapabilities:
         )
         if (
             observed.get("image") != slot.image
-            or observed.get("database_uuid") != slot.runtime_identity.database_uuid
+            or observed.get("database_uuid") != self.plan.database_uuid
             or observed.get("web_crons") is not False
             or not isinstance(observed.get("modules"), list)
             or not observed["modules"]
@@ -184,7 +184,7 @@ class NativeCronWriterCapabilities:
                 json.dumps(
                     dict(
                         database=slot.binding.database,
-                        database_uuid=slot.runtime_identity.database_uuid,
+                        database_uuid=self.plan.database_uuid,
                         writer_id=writer.writer_id,
                         jobs=list(binding.cron_xmlids),
                     )

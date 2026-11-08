@@ -120,7 +120,7 @@ def run_slot_website_settings(
         "indexing_parameter": WEBSITE_INDEXING_PARAMETER,
         "program": WEBSITE_SETTINGS_PROGRAM,
         "database": slot.binding.database,
-        "database_uuid": slot.runtime_identity.database_uuid,
+        "database_uuid": plan.database_uuid,
     }
     readback = configure_startup(plan, slot, intent)
     startup_digest, retained_digest = readback.selected_digest, readback.retained_digest
