@@ -94,6 +94,36 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         )
         self.deploy(self.current, minutes_ago=10)
 
+    def test_reobserving_delivery_and_cadence_failures_preserves_their_summary(self) -> None:
+        deployment = self.store.list_deployment_records()[0]
+        self.store.write_deployment_record(
+            deployment.model_copy(
+                update={
+                    "deploy": deployment.deploy.model_copy(
+                        update={"started_at": (self.now - timedelta(minutes=11)).isoformat()}
+                    )
+                }
+            )
+        )
+        for check_name in ("production-delivery-fixture", "monitor-cadence:public_http:health"):
+            with self.subTest(check_name=check_name):
+                summary = "The candidate failed before deployment."
+                for minute in range(2):
+                    _observe(
+                        self.store,
+                        self.profile,
+                        self.lane,
+                        check_name=check_name,
+                        failed=True,
+                        summary=summary,
+                        observed_at=(self.now + timedelta(minutes=minute)).isoformat(),
+                    )
+                    incident = self.store.list_public_ingress_incident_records(
+                        check_name=check_name
+                    )[0]
+                    self.assertEqual(incident.summary, summary)
+                    summary = incident.summary
+
     def timestamp(self) -> str:
         return self.now.isoformat()
 

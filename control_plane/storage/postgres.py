@@ -19864,7 +19864,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def read_latest_lane_deployment_record(
-        self, *, context_name: str, instance_name: str
+        self, *, context_name: str, instance_name: str, observed_at: datetime | None = None
     ) -> DeploymentRecord | None:
         with self._session_factory() as session:
             records = self._monitor_deployment_states(session, {(context_name, instance_name)}).get(
@@ -19872,6 +19872,14 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if not records or any(not item.started_at for item in records):
                 return None
+            if observed_at is not None:
+                records = [
+                    item
+                    for item in records
+                    if datetime.fromisoformat(item.started_at) <= observed_at
+                ]
+                if not records:
+                    return None
             latest = max(records, key=lambda item: (item.started_at, item.record_id))
             row = session.get(LaunchplaneDeploymentRow, latest.record_id)
             return DeploymentRecord.model_validate(row.payload) if row is not None else None

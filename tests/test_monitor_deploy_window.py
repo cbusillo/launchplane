@@ -38,23 +38,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 
 class MonitorDeployWindowTests(unittest.TestCase):
     def setUp(self) -> None:
-        directory = TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.store = PostgresRecordStore(
-            database_url=_sqlite_database_url(Path(directory.name) / "records.sqlite3")
-        )
-        self.addCleanup(self.store.close)
-        self.store.ensure_schema()
-        self.store.write_product_profile_record(_profile())
-        self.store.write_public_ingress_notification_policy_record(
-            _notification_policy(
-                PublicIngressNotificationDestination(
-                    destination_id="discord",
-                    kind="discord",
-                    discord_webhook_secret="TEST_WEBHOOK",
-                )
-            )
-        )
+        self.store = self._new_store()
         self.started = datetime(2026, 10, 28, 13, 43, tzinfo=timezone.utc)
         self.identity = _identity()
         self.deployment = DeploymentRecord(
@@ -77,6 +61,26 @@ class MonitorDeployWindowTests(unittest.TestCase):
                 )
             }
         )
+
+    def _new_store(self) -> PostgresRecordStore:
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = PostgresRecordStore(
+            database_url=_sqlite_database_url(Path(directory.name) / "records.sqlite3")
+        )
+        self.addCleanup(store.close)
+        store.ensure_schema()
+        store.write_product_profile_record(_profile())
+        store.write_public_ingress_notification_policy_record(
+            _notification_policy(
+                PublicIngressNotificationDestination(
+                    destination_id="discord",
+                    kind="discord",
+                    discord_webhook_secret="TEST_WEBHOOK",
+                )
+            )
+        )
+        return store
 
     def test_deployment_failure_immediately_links_incident_and_counts_failed_time(self) -> None:
         self.store.write_deployment_record(self.deployment)
@@ -103,8 +107,8 @@ class MonitorDeployWindowTests(unittest.TestCase):
             )
             self.assertEqual(observation.status, "fail")
             incidents.append(incident.incident_id)
-            self.assertTrue(
-                self.store.list_outbox_delivery_records(kind="public_ingress_notification")
+            self.assertEqual(
+                len(self.store.list_outbox_delivery_records(kind="public_ingress_notification")), 1
             )
         self.assertEqual(incidents[0], incidents[1])
         recovered = run_public_ingress_monitor_once(
@@ -164,8 +168,9 @@ class MonitorDeployWindowTests(unittest.TestCase):
     def test_missing_or_unorderable_deployment_evidence_keeps_failure_alertable(self) -> None:
         for started_at in (None, "unknown", (self.started + timedelta(minutes=1)).isoformat()):
             with self.subTest(started_at=started_at):
+                store = self._new_store()
                 if started_at is not None:
-                    self.store.write_deployment_record(
+                    store.write_deployment_record(
                         self.deployment.model_copy(
                             update={
                                 "deploy": self.deployment.deploy.model_copy(
@@ -175,19 +180,46 @@ class MonitorDeployWindowTests(unittest.TestCase):
                         )
                     )
                 result = run_public_ingress_monitor_once(
-                    record_store=self.store,
+                    record_store=store,
                     checked_at=(self.started + timedelta(seconds=24)).isoformat(),
                     http_get=lambda url, timeout: HttpObservation(503, url, 0),
                 )
-                observation = self.store.read_public_ingress_observation_record(
+                observation = store.read_public_ingress_observation_record(
                     result.records[0].record_id
                 )
                 self.assertEqual(result.open_incident_count, 1)
                 self.assertTrue(observation.incident_id)
                 self.assertNotIn(self.deployment.record_id, observation.summary)
                 self.assertTrue(
-                    self.store.list_outbox_delivery_records(kind="public_ingress_notification")
+                    store.list_outbox_delivery_records(kind="public_ingress_notification")
                 )
+
+    def test_new_deployment_during_probe_keeps_the_deployment_at_probe_time(self) -> None:
+        self.store.write_deployment_record(self.deployment)
+        newer = self.deployment.model_copy(
+            update={
+                "record_id": "next-deployment",
+                "runtime_identity": self.identity.model_copy(
+                    update={"deployment_record_id": "next-deployment"}
+                ),
+                "deploy": self.deployment.deploy.model_copy(
+                    update={"started_at": (self.started + timedelta(seconds=25)).isoformat()}
+                ),
+            }
+        )
+
+        def fail_while_deploy_starts(url: str, _timeout: int) -> HttpObservation:
+            self.store.write_deployment_record(newer)
+            return HttpObservation(503, url, 0)
+
+        result = run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=(self.started + timedelta(seconds=24)).isoformat(),
+            http_get=fail_while_deploy_starts,
+        )
+        observation = self.store.read_public_ingress_observation_record(result.records[0].record_id)
+        self.assertIn(self.deployment.record_id, observation.summary)
+        self.assertNotIn(newer.record_id, observation.summary)
 
     def test_completed_deployment_connection_failure_opens_incident_immediately(self) -> None:
         self.store.write_product_profile_record(
@@ -266,9 +298,10 @@ class MonitorDeployWindowTests(unittest.TestCase):
         self.assertEqual(probe.call_count, 3)
 
     def test_dns_and_tls_failures_remain_alertable_during_deploy(self) -> None:
-        self.store.write_deployment_record(self.deployment)
         for code in ("dns_failure", "tls_failure"):
             with self.subTest(code=code):
+                store = self._new_store()
+                store.write_deployment_record(self.deployment)
 
                 def failed_get(_url: str, _timeout: int) -> HttpObservation:
                     if code == "dns_failure":
@@ -276,7 +309,7 @@ class MonitorDeployWindowTests(unittest.TestCase):
                     raise ssl.SSLError("test TLS failure")
 
                 result = run_public_ingress_monitor_once(
-                    record_store=self.store,
+                    record_store=store,
                     checked_at=(self.started + timedelta(seconds=24)).isoformat(),
                     http_get=failed_get,
                 )

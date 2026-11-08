@@ -948,13 +948,19 @@ def run_public_ingress_monitor_once(
                 )
 
             target_http_get = scoped_private_get
-        return check_public_ingress_target(
+        record = check_public_ingress_target(
             target=target,
             checked_at=checked_at.strip() or utc_now_timestamp(),
             timeout_seconds=timeout_seconds,
             http_get=target_http_get,
             tls_get=tls_probe,
             dns_get=dns_get,
+        )
+
+        return (
+            _associate_recorded_deployment(record_store, record)
+            if record.status == "fail"
+            else record
         )
 
     if max_concurrent_probes < 1:
@@ -1695,7 +1701,6 @@ def _plan_public_ingress_incident_transition(
             expected_open_incident_sha256=expected_incident_sha256,
         )
     if record.status == "fail":
-        record = _associate_recorded_deployment(record_store, record)
         fingerprint = _observation_material_fingerprint(record)
         fingerprint_sha256 = public_ingress_material_fingerprint_sha256(fingerprint)
         linked_observation = record.model_copy(
@@ -3235,11 +3240,17 @@ def _profile_uses_generic_web(profile: LaunchplaneProductProfileRecord) -> bool:
 def _associate_recorded_deployment(
     record_store: PublicIngressMonitorStore, record: PublicIngressObservationRecord
 ) -> PublicIngressObservationRecord:
+    if record.purpose != "probe" or record.check_kind not in {"public_http", "private_http"}:
+        return record
     read_latest = getattr(record_store, "read_latest_lane_deployment_record", None)
     if not callable(read_latest):
         return record
+    try:
+        observed = _parse_utc_timestamp(record.observed_at)
+    except ValueError:
+        return record
     deployment = cast(Callable[..., object], read_latest)(
-        context_name=record.context, instance_name=record.instance
+        context_name=record.context, instance_name=record.instance, observed_at=observed
     )
     if not isinstance(deployment, DeploymentRecord):
         return record
