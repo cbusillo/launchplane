@@ -32,10 +32,6 @@ class TraefikRouteTarget(FrozenRecord):
     def valid_file(self) -> "TraefikRouteTarget":
         if not self.route_file.is_absolute() or self.route_file.suffix not in {".yaml", ".yml"}:
             raise ValueError("file-provider route requires an explicit absolute YAML path")
-        if not self.route_file.parent.is_dir():
-            raise ValueError("configured file-provider directory is unavailable")
-        if self.route_file.is_symlink():
-            raise ValueError("route file cannot be a symlink")
         return self
 
 
@@ -167,13 +163,17 @@ class TraefikFileRoute:
             raise ValueError("applied route must have exactly one backend")
         return str(servers[0]["url"])
 
+    def owned_document(self) -> Any:
+        return yaml.safe_load(self._read_owned())
+
     def publish(self, backend: str, *, expected: tuple[str, ...]) -> str:
         observed = self.observed_target()
         if observed != backend and observed not in expected:
             raise ValueError("route authority changed; refusing a stale traffic switch")
         # A watched file belongs to this route alone. Never replace a shared
         # dynamic configuration and silently retire its other routers/services.
-        owned = yaml.safe_load(self.target.route_file.read_text())
+        predecessor = self._read_owned()
+        owned = yaml.safe_load(predecessor)
         intended = json.loads(json.dumps(route_payload(self.target, backend)))
         admitted = [
             json.loads(json.dumps(route_payload(self.target, target)))
@@ -193,12 +193,21 @@ class TraefikFileRoute:
                 observed = self.observed_target()
                 if observed == backend:
                     return observed
-                if (
-                    observed not in expected
-                    or yaml.safe_load(self.target.route_file.read_text()) != intended
-                ):
+                predecessor = self._read_owned()
+                if observed not in expected or yaml.safe_load(predecessor) != intended:
                     raise ValueError("route authority changed during publication recovery")
-        payload = json.dumps(intended, sort_keys=True)
+        self._replace_owned(json.dumps(intended, sort_keys=True), predecessor)
+        return self._wait_applied(backend, expected)
+
+    def _read_owned(self) -> str:
+        directory = self.target.route_file.parent
+        if not directory.is_dir() or self.target.route_file.is_symlink():
+            raise ValueError("configured file-provider route is unavailable")
+        return self.target.route_file.read_text()
+
+    def _replace_owned(self, payload: str, predecessor: str) -> None:
+        if self._read_owned() != predecessor:
+            raise ValueError("route authority changed; refusing a stale traffic switch")
         temporary: str | None = None
         try:
             # No supported file-provider extension while the file is incomplete.
@@ -223,7 +232,6 @@ class TraefikFileRoute:
         finally:
             if temporary is not None:
                 Path(temporary).unlink(missing_ok=True)
-        return self._wait_applied(backend, expected)
 
     def _wait_applied(self, backend: str, expected: tuple[str, ...]) -> str:
         # Asynchronous provider application may not be observable yet. The
