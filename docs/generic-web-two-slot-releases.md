@@ -2,9 +2,7 @@
 
 A lane's DB-backed `generic_web_cutover` owns two distinct private application
 or Compose targets, one route, the managed settings fingerprint and its explicit
-singleton writer inventory. Source support does not configure or activate a
-lane. Existing-lane seeding, installed service/host capabilities and real
-Client-accepted release qualification remain on #3268.
+singleton writer inventory. Source support does not configure or activate a lane.
 
 The existing generic-web deploy entrypoint uses that authority under its product
 operation serializer. Promotion retains the accepted-release and independent
@@ -125,7 +123,8 @@ Promotion consumes bounded cutover failures through its existing automatic
 rollback/finalization path. A rollback's newer checkpoint cannot be overwritten
 by the promotion's earlier deployment snapshot. New candidates must belong to
 the product's configured image and source repository. These checks grant no
-access and leave installed-provider/actual release qualification on #3268.
+access; installed-provider and real-release proof remain with the
+[qualification and activation work](odoo-two-slot-releases.md#records-retries-and-activation).
 
 Traffic completion is distinct from committing deployment and serving inventory.
 The source cutover holds the lane through both operations using
@@ -153,12 +152,5 @@ inventory and applied Traefik file mount. Product records or HTTP input cannot
 select a Python module, executable or credential. No entry point or multiple
 entries refuse with `cutover_host_capability_unavailable` before effects.
 
-The Odoo source assembly replaces host-provided maintenance, settings, fencing
-and handoff callbacks with the native consumers around one shared
-`ContainerSlotWriters` instance. A dynamically resolved private runner follows
-recreation, and startup preflight must validate both forward and retained
-settings before candidate effects. The concrete startup capability is supplied
-by the installed host; this discovery contract does not install host code,
-provide new access, seed a lane or prove the actual package/mount/transport.
-Installation into both runtimes and qualification against the recorded lane
-remain prerequisites on #3268 before an exact Client-accepted gated release.
+For Odoo's native consumers, shared writer inventory and startup preflight, use
+[Odoo two-slot releases](odoo-two-slot-releases.md#typed-website-settings).

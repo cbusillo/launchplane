@@ -16,8 +16,7 @@ access-admin actions, and trusted controls must remain outside untrusted preview
 content.
 
 Use [`operator-experience.md`](operator-experience.md) for the API-first product
-and environment contract. Do not polish the transitional context-picker UI as if
-it were the target model.
+and environment contract.
 
 Use this document as the Launchplane UI quality gate. UI slices that pass tests
 but fail this rubric are not complete.

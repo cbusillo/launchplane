@@ -129,17 +129,15 @@ The Director's answer on the operational issue supplies missing human knowledge;
 the existing reviewed production-use surface records classification. A reply
 does not waive resource, ownership, executor, review or recovery checks.
 
-Source tests and a merge do not establish deployed capability or retirement.
-The Supervisor routes the source PR and separately briefs actual lane operations.
-The canary, CM rebuild and RepairShopr separation are separate operational work.
-
 ## Existing lane-scoped requests
 
+Use `POST /v1/product-retirement` for tracked and no-target lane requests.
 The protected [dispatch wrapper](../.github/workflows/product-retirement.yml)
-and [reusable worker](../.github/workflows/reusable-product-retirement.yml)
-own the current machine inputs and pinned worker revision. Tracked requests
-review one profile-owned lane and its exact target digest. That lane must be
-the profile's only stable lane. Planning
+remains available for its existing tracked-lane inputs; it does not expose
+`no_target` or preview-inclusive retirement. Verify deployed service support
+before using a mode. Source tests alone do not establish activation.
+Tracked requests review one profile-owned lane and its exact target digest.
+That lane must be the profile's only stable lane. Planning
 and Apply refuse multi-lane profiles before lifecycle or provider effects,
 including older reviewed plans and finalization recovery. Selecting testing or
 production alone cannot establish whole-product retirement. Leave all lane
@@ -167,8 +165,7 @@ underscores and repeated spaces; renaming a display name does not rename its
 `appName`. Shared or incomplete evidence blocks absence; there is no override.
 This mode performs no provider writes and preserves runtime settings, secrets
 and artifact/package history. Its confirmation is supplied by the request
-contract. The protected wrapper's inputs and pinned worker must actually support
-this mode before using it; source support does not establish wrapper activation.
+contract.
 
 Tracked finalization seals a checkpoint after provider absence and before
 removing local authority. Retry requires that operation's same caller, key,
@@ -193,21 +190,11 @@ take over the target, and planning a replacement retirement refuses the retiring
 profile. **Resume original retirement** supports unchanged reviewed authority;
 it cannot complete this changed-authority case.
 
-There is currently no service capability to review and accept that changed
+There is no service capability to review and accept that changed
 secret authority within the held retirement. Preserve its original request,
 caller, key, finalization checkpoint, rotated pointer and audit history; do not
-clear the fence or restore an older secret pointer to force a retry. A future
-recovery proposal would need an explicit review of the changed authority bound
-to that original operation, fresh provider-absence and ownership checks, and
-durable evidence for adopting only the reviewed secret delta while retaining
-already committed disable events. That capability requires separate design and
-review; this qualification supplies no operational recovery procedure.
+clear the fence or restore an older secret pointer to force a retry.
 
 Existing product-retirement authority is DB-backed in
-`operator.product-retirement`. Its former GitHub-secret reconcile selector is
-removed. Maintain the managed set through the reviewed Access policy proposal
-path. Existing workflow bindings name both the caller `workflow_ref` and exact immutable
-`job_workflow_ref`; derive these from the dispatch wrapper and its `retire`
-job's `uses:` value, never a copied revision. This describes the existing bindings,
-not approval to create or expand it. New grants and managed-set changes follow
+`operator.product-retirement`. Managed-set changes follow
 [authorization authority](authorization-authority.md#who-can-do-what).

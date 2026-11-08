@@ -49,8 +49,7 @@ batches; capture selects only the retired service's containers. Removal reserves
 its full timeout before writing a started receipt, so qualification-budget
 exhaustion leaves no started receipt. It writes a durable host
 receipt before dispatch and verifies same-engine absence afterward. Uncertain
-effects stay attached to the original operation for readback. No deployment,
-production disposition or live deletion is performed by this source delivery.
+effects stay attached to the original operation for readback.
 
 Provider database resources need explicit complete mount details; absent details
 are unknown. Compose declarations are checked through converted provider source.

@@ -7,8 +7,7 @@ and recipient recoverable. Preparing another Compose target does not authorize
 bootstrapping it, changing the production binding, repointing consumers or
 retiring either recipient. The service separates preparation, accepted-release cutover,
 scoped inverse and reviewed old-resource retirement. It also provides purpose-bound upstream qualification
-and an isolated cold-data recovery verifier. [#3699](https://github.com/cbusillo/launchplane/issues/3699)
-tracks the complete source capability; preparation alone does not clear Gate A.
+and an isolated cold-data recovery verifier.
 
 `POST /v1/products/{product}/production-recipient` prepares a private undeployed
 recipient for a product that explicitly has no public website. Its `instance`
@@ -357,20 +356,9 @@ and no live product data or credential. Record the exact image and result on the
 PR. Ordinary unittest/CI runs explicitly skip it without that fixture input;
 their success alone is not the real MariaDB proof.
 
-Before any later bootstrap or cutover, separately qualify destination capture and
-isolated recovery, the accepted production artifact/release, actual enforced
-resource limits and writer/API-budget coordination. A backup-capture pass alone
-is not an isolated restore proof. The current production binding, monitor and
-backup authority must move together with exact revision checks; rollback must
-reverse only those changes and stop only the replacement writer, preserving
-intervening unrelated work. It must never restore a whole shared guest.
-
-Old-Compose and exclusive-volume retirement requires at least 24 hours after a
-recorded successful cutover, healthy continued sync and consumers, and fresh
-provider, lane, mount and custody references. A testing reference protects the resource.
-Shared backups and testing custody are retained. Product retirement and detached
-application retirement are not substitutes for this operation. Neither a
-successful preparation nor a source PR starts the observation window.
+Use [accepted-release cutover and exact inverse](#accepted-release-cutover-and-exact-inverse)
+for publication and recovery, then [old-placement retirement](#retiring-the-old-placement)
+for its observation window and custody checks. Preparation alone starts neither.
 
 ## Accepted-release cutover and exact inverse
 
