@@ -272,17 +272,17 @@ def require_preview_preservation_plan(
     issued_plan: OdooPreviewApplyInputsResult,
     original_reservation_id: str,
 ) -> None:
-    _require_preview_preservation_protection(
+    original, old = _require_preview_preservation_protection(
         store=store,
         profile=profile,
         issued_plan=issued_plan,
         original_reservation_id=original_reservation_id,
         operation_record_id="",
     )
-    original = store.read_idempotency_record_by_id(original_reservation_id)
-    if original is None:
-        raise ValueError("Original preview preservation authority disappeared.")
-    if store.read_original_mutation_intent(original).get("schedule_binding") is not None:
+    if (
+        old.dry_run_plan.clean_snapshot is None
+        and store.read_original_mutation_intent(original).get("schedule_binding") is not None
+    ):
         _preservation_execution_server(
             store=store,
             profile=profile,
@@ -300,11 +300,11 @@ def _require_preview_preservation_protection(
     issued_plan: OdooPreviewApplyInputsResult,
     original_reservation_id: str,
     operation_record_id: str,
-) -> None:
+) -> tuple[LaunchplaneIdempotencyRecord, OdooPreviewApplyInputsResult]:
     from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
     from control_plane.workflows.odoo_preview_runtime import ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS
 
-    original, _old = _read_preview_preservation_original(
+    original, old = _read_preview_preservation_original(
         store=store,
         profile=profile,
         issued_plan=issued_plan,
@@ -429,6 +429,11 @@ def _require_preview_preservation_protection(
         )
     except FileNotFoundError:
         tracked_target = None
+    if tracked_target is not None and tracked_target.policies.staff_testing_hold is not None:
+        raise ValueError(
+            "Original preview preservation has a staff-testing hold: "
+            + tracked_target.policies.staff_testing_hold.reason
+        )
     protection = recorded_lane_protection(tracked_target, report, preview)
     if (
         report is not None
@@ -438,6 +443,8 @@ def _require_preview_preservation_protection(
         or protection.resources_protected
     ):
         raise ValueError("Original preview preservation has a protected use or resource.")
+
+    return original, old
 
 
 def read_preview_preservation_source(

@@ -158,7 +158,6 @@ class PreviewRetirementTests(unittest.IsolatedAsyncioTestCase):
             retained = deepcopy(payload)
             original = retained["original"]
             assert isinstance(original, dict)
-            original.pop("steps", None)
             original.pop("blockers", None)
             return nonvalidating_compact_sorted_json_sha256(retained)
 

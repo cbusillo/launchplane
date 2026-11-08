@@ -200,7 +200,7 @@ def require_director_odoo_preview_admission(
     profile: LaunchplaneProductProfileRecord,
     issued_plan: OdooPreviewApplyInputsResult,
     references: _OdooPreviewOperationEnvelope,
-    operation_record_id: str = "",
+    operation_record_id: str,
     control_plane_root: Path,
     captured_schedule_binding: dict[str, object] | None = None,
 ) -> str | None:

@@ -619,7 +619,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("template-smtp-pass", response.text)
         self.assertNotIn("template-db-secret", json.dumps(response.json()))
 
-    async def test_odoo_preview_apply_inputs_builds_conditional_destroy_for_discovered_target(
+    async def test_odoo_preview_apply_inputs_builds_destroy_for_discovered_target(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:

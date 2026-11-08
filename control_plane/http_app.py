@@ -6751,6 +6751,7 @@ def create_launchplane_fastapi_app(
                     profile=product_profile,
                     issued_plan=preview_plan,
                     references=inputs_request,
+                    operation_record_id="",
                     control_plane_root=resolved_control_plane_root,
                 )
             except (DisposableLaneSafetyUnknown, FileNotFoundError, ValueError) as error:

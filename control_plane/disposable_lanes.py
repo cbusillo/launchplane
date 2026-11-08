@@ -484,7 +484,7 @@ def require_disposable_preview_operation(
     if unrecorded_creation and (
         profile.driver_id != "odoo"
         or issued_plan.preview_slug
-        != profile.preview.slug_template.strip().format(number=issued_plan.plan_request.pr_number)
+        != profile.preview.slug_template.format(number=issued_plan.plan_request.pr_number)
         or any(
             (lane.context, lane.instance) == (issued_plan.context, issued_plan.preview_slug)
             for lane in profile.lanes

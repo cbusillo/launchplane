@@ -145,7 +145,6 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
         original = _issued_plan(request).model_dump(mode="json")
         original.pop("blockers", None)
-        original.pop("steps", None)
         provenance = cast(dict[str, object], original["plan_provenance"])
         provenance["plan_sha256"] = nonvalidating_compact_sorted_json_sha256(
             {key: value for key, value in original.items() if key != "plan_provenance"}
@@ -1266,7 +1265,9 @@ class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
         )
         execute.assert_not_called()
 
-    async def test_protected_preview_plan_keeps_conditional_steps_while_apply_refuses(self) -> None:
+    async def test_protected_preview_plan_keeps_conditional_operations_while_apply_refuses(
+        self,
+    ) -> None:
         for facts in (
             {"usage": "in_use"},
             {"data": "only_copy"},

@@ -6041,9 +6041,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         from control_plane.product_reconcile import _fingerprint
 
         def historical_fingerprint(payload: dict[str, object]) -> str:
-            return _fingerprint(
-                {key: value for key, value in payload.items() if key not in {"steps", "blockers"}}
-            )
+            return _fingerprint({key: value for key, value in payload.items() if key != "blockers"})
 
         self.github.add_run(50, PR_HEAD, event="pull_request")
         build = self.provider.build_inputs

@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
-from typing import Any, cast
+from typing import cast
 from collections.abc import Callable
 
 from fastapi import FastAPI, HTTPException
@@ -50,7 +50,6 @@ from control_plane.odoo_preview_apply_http import (
     OdooPreviewPlanProvenanceError,
     ODOO_PREVIEW_APPLY_ROUTE,
 )
-from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsResult
 from control_plane.preview_reservation_recovery import (
     classify_preview_reservation,
     held_preview_reservations,
@@ -1734,25 +1733,12 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         **hooks: object,
     ) -> ReconcileOutcome:
         from tests.test_product_reconcile import FakePreviewProvider
-        from control_plane import odoo_preview_apply_http as preview_http
 
         self.transport = Mock()
         self.transport.get_json.return_value = {"state": pr_state, "head": {"sha": "a" * 40}}
         self.provider = FakePreviewProvider()
         provider_hooks = self.provider.hooks()
-
-        def build_inputs(**arguments: Any) -> dict[str, object]:
-            candidate = OdooPreviewApplyInputsResult.model_validate(
-                self.provider.build_inputs(**arguments)
-            )
-            with patch.object(
-                preview_http, "build_odoo_preview_apply_inputs", return_value=candidate
-            ):
-                return preview_http.build_odoo_preview_apply_inputs_result(**arguments)
-
-        provider_hooks = type(provider_hooks)(
-            **{**provider_hooks.__dict__, "build_inputs": build_inputs, **hooks}
-        )
+        provider_hooks = type(provider_hooks)(**{**provider_hooks.__dict__, **hooks})
         with patch(
             "control_plane.product_reconcile.launchplane_reconcile_preview_destination_allowed",
             return_value=True,

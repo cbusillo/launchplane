@@ -864,11 +864,14 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         result = self.store.complete_mutation_reservation(completion=completion)
         self.assertEqual(result.status, "completed")
 
-    def no_snapshot_original(self, binding: dict[str, object] | None) -> None:
+    def original_with_binding(
+        self, binding: dict[str, object] | None, *, clean_snapshot: bool = False
+    ) -> None:
         request = OdooPreviewApplyEnvelope.model_validate(
             self.store.read_original_mutation_intent(self.original)["apply_request"]
         )
-        request.apply.dry_run_plan.clean_snapshot = None
+        if not clean_snapshot:
+            request.apply.dry_run_plan.clean_snapshot = None
         self.complete_original()
         issued = _issued_plan(request)
         operation = prepare_odoo_preview_apply_operation(
@@ -1525,7 +1528,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
 
     def test_no_snapshot_original_uses_its_retained_server_without_changing_intent(self) -> None:
         binding = self.server_binding()
-        self.no_snapshot_original(binding)
+        self.original_with_binding(binding)
         retained = self.store.read_original_mutation_intent(self.original)
         self.assertEqual(self.authority().server_id, binding["lookup_id"])
         self.assertEqual(self.store.read_original_mutation_intent(self.original), retained)
@@ -1580,7 +1583,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         return cast(dict[str, Any], response.json()["result"])
 
     def test_preservation_plan_defers_only_absent_future_execution_proof(self) -> None:
-        self.no_snapshot_original(None)
+        self.original_with_binding(None)
         self.complete_original()
         planned = self.plan_preservation()
         self.assertEqual(planned["status"], "ready")
@@ -1589,10 +1592,65 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
             self.admit()
 
     def assert_plan_refuses_original_binding(self, binding: dict[str, object]) -> None:
-        self.no_snapshot_original(binding)
+        self.original_with_binding(binding)
         self.complete_original()
         with self.assertRaises(ValueError) as refusal:
             self.admit()
+        blocked = self.plan_preservation()
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["blockers"][0]["message"], str(refusal.exception))
+
+    def test_snapshot_preservation_plan_uses_the_same_server_authority_as_apply(self) -> None:
+        self.original_with_binding(
+            {**self.server_binding(), "schedule_type": "dokploy-server"}, clean_snapshot=True
+        )
+        self.complete_original()
+        self.assertTrue(self.admit().server_id)
+        planned = self.plan_preservation()
+        self.assertEqual(planned["status"], "ready")
+
+    def test_preservation_staff_hold_blocks_plan_and_apply_before_reservation(self) -> None:
+        from control_plane.contracts.dokploy_target_record import (
+            DokployTargetRecord,
+            DokployTargetPolicies,
+            DokployTargetStaffTestingHold,
+        )
+
+        self.complete_original()
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context=self.issued.context,
+                instance=self.issued.preview_slug,
+                updated_at=self.profile.updated_at,
+                policies=DokployTargetPolicies(
+                    staff_testing_hold=DokployTargetStaffTestingHold(
+                        reason="Staff are testing this preview"
+                    )
+                ),
+            )
+        )
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=self.destroy,
+            issued_plan=self.issued,
+            reservation_scope="held-preservation",
+            idempotency_key="held-preservation",
+            request_fingerprint="held-preservation",
+            trace_id="held-preservation",
+            execute_apply=Mock(),
+        )
+        with (
+            patch.object(operation.adapter, "capture_schedule_binding"),
+            patch("control_plane.preview_preservation.run_preview_preservation") as preserve,
+            self.assertRaises(ValueError) as refusal,
+        ):
+            operation.run(self.store)
+        preserve.assert_not_called()
+        self.assertIsNone(
+            self.store.read_idempotency_record_by_id(operation.adapter._deployment_record_id)
+        )
         blocked = self.plan_preservation()
         self.assertEqual(blocked["status"], "blocked")
         self.assertEqual(blocked["blockers"][0]["message"], str(refusal.exception))
@@ -1608,7 +1666,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         )
 
     def test_no_snapshot_original_uses_captured_then_persisted_preserving_binding(self) -> None:
-        self.no_snapshot_original(None)
+        self.original_with_binding(None)
         self.complete_original()
         from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsResult
 
@@ -1653,7 +1711,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         )
 
     def test_missing_server_proof_cannot_create_a_preserving_operation(self) -> None:
-        self.no_snapshot_original(None)
+        self.original_with_binding(None)
         self.complete_original()
         for binding in (
             None,
@@ -1693,7 +1751,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                 )
 
     def test_conflicting_server_proof_refuses_preservation(self) -> None:
-        self.no_snapshot_original(self.server_binding())
+        self.original_with_binding(self.server_binding())
         execute = Mock()
         operation = prepare_odoo_preview_apply_operation(
             control_plane_root=self.root,
@@ -1871,7 +1929,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
     def test_protected_custody_stays_held_even_with_completed_original(self) -> None:
         from tests.support.disposable_lanes import record_safety
 
-        self.no_snapshot_original(None)
+        self.original_with_binding(None)
         self.complete_original()
         for facts in (
             {"usage": "in_use"},
