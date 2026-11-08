@@ -244,7 +244,7 @@ class DownLaneCollectionTests(unittest.IsolatedAsyncioTestCase):
             safety.binding_sha256,
         )
 
-    async def test_needed_copy_and_failed_physical_inspection_still_refuse(self) -> None:
+    async def test_needed_copy_protects_and_failed_inspection_remains_unknown(self) -> None:
         first = await self.collect()
         self.assertEqual(first.status_code, 202, first.text)
         previous = self.store.read_disposable_lane_safety(self.product, self.context, "testing")
@@ -265,10 +265,11 @@ class DownLaneCollectionTests(unittest.IsolatedAsyncioTestCase):
             (failed.json()["result"]["data"], failed.json()["result"]["production_resources"]),
             ("unknown", "unknown"),
         )
-        with self.assertRaises(DisposableLaneSafetyUnknown):
+        self.assertTrue(
             require_disposable_lane(
                 self.store, product=self.product, context=self.context, instance="testing"
             )
+        )
 
     async def test_resource_denial_and_binding_drift_do_not_publish(self) -> None:
         self.transport.side_effect = NativeSourceAuthorizationDenied("private-provider-detail")

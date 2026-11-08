@@ -62,6 +62,31 @@ def prepare_held_rebuild(store: Any, product: str, context: str, *, prepare: boo
     return store.read_odoo_stable_target_replacement_operation_record(operation.operation_id)
 
 
+def record_creation(
+    store: Any, product: str, context: str, instance: str = "testing", **changes: Any
+) -> None:
+    from control_plane.contracts.disposable_lane import DisposableLaneCreation
+    from control_plane.disposable_lanes import resolve_disposable_observation_binding
+
+    binding = resolve_disposable_observation_binding(
+        store, product=product, context=context, instance=instance
+    )
+    target = binding.target
+    assert target is not None
+    previous = target.resource_provenance
+    creation = DisposableLaneCreation.model_validate(
+        {
+            **(previous.model_dump() if previous else {}),
+            "created_by": "service:fresh-testing-bootstrap",
+            "data": "reproducible",
+            "production_resources": "isolated",
+            "lane_binding_sha256": binding.binding_sha256,
+            **changes,
+        }
+    )
+    store.write_dokploy_target_record(target.model_copy(update={"resource_provenance": creation}))
+
+
 def record_safety(
     store: Any,
     product: str,

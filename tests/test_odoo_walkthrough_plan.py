@@ -103,8 +103,25 @@ class WalkthroughPlanTests(unittest.TestCase):
             adapter.connect.side_effect = protected_connection
             with self.assertRaises(ValueError):
                 plan_walkthrough(self.store, Path("."), changed_request, "actor")
-            safety = SimpleNamespace(
-                production_resources="isolated", usage="in_use", data="only_copy"
+            from datetime import datetime, timedelta, timezone
+            from control_plane.contracts.disposable_lane import DisposableLaneSafety
+
+            now = datetime.now(timezone.utc)
+            safety = DisposableLaneSafety(
+                product=request.product,
+                context=request.context,
+                instance="pr-42",
+                observed_by="fixture-agent",
+                observer_kind="director_agent",
+                binding_sha256="a" * 64,
+                production_resources="isolated",
+                usage="in_use",
+                data="only_copy",
+                usage_evidence="fixture:person",
+                data_evidence="fixture:needed-copy",
+                isolation_evidence="fixture:resources",
+                observed_at=now,
+                expires_at=now + timedelta(minutes=5),
             )
             self.store.read_disposable_lane_safety.return_value = safety
             self.host.connection.database.execute("DELETE FROM res_users")

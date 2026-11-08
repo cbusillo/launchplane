@@ -2,6 +2,7 @@ from typing import Any
 
 import click
 
+from control_plane.disposable_lanes import recorded_lane_protection
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
@@ -63,10 +64,12 @@ def testing_abandonment_authority(
         ):
             return None
         protection = store.read_disposable_lane_safety(profile.product, lane.context, "testing")
-        if protection is not None and (
-            protection.current_usage() == "in_use"
-            or protection.data == "only_copy"
-            or protection.production_resources in {"shared", "separation_ready"}
+        recorded = recorded_lane_protection(target, protection)
+        if (
+            protection is not None
+            and protection.current_usage() == "in_use"
+            or recorded.only_copy
+            or recorded.resources_protected
         ):
             return None
         return {

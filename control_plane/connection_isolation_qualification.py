@@ -1,5 +1,6 @@
 """Qualify the fixed connection-removal effect without declaring a copy disposable."""
 
+from control_plane.disposable_lanes import recorded_lane_protection
 from control_plane.disposable_lanes import (
     DisposableLaneSafetyUnknown,
     DisposableLaneStore,
@@ -36,17 +37,21 @@ def require_connection_isolation_lane(
     # This program preserves application records and never copies/rebuilds data.
     # It does not turn absent or stale observations into unused/reproducible facts.
     # Known exceptions remain protective even after their observation expires.
-    if protection is not None and (
-        lane_usage_protected(
-            store,
-            product=product,
-            context=context,
-            instance=instance,
-            usage=protection.current_usage(),
-            require_unused=False,
+    recorded = recorded_lane_protection(target, protection)
+    if (
+        protection is not None
+        and (
+            lane_usage_protected(
+                store,
+                product=product,
+                context=context,
+                instance=instance,
+                usage=protection.current_usage(),
+                require_unused=False,
+            )
         )
-        or protection.data == "only_copy"
-        or protection.production_resources in {"shared", "separation_ready"}
+        or recorded.only_copy
+        or recorded.resources_protected
     ):
         raise DisposableLaneSafetyUnknown(
             "A recorded use, needed-copy or sharing protection applies."

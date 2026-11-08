@@ -353,7 +353,7 @@ class ActionEffectTests(unittest.TestCase):
 
 
 class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
-    async def test_director_testing_runtime_plan_without_grants_requires_known_safety(
+    async def test_director_testing_runtime_without_observations_keeps_provider_verification(
         self,
     ) -> None:
         import os
@@ -420,16 +420,13 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(planned.status_code, 202, planned.text)
                         self.assertEqual(planned.json()["result"]["mode"], "dry-run")
                         self.assertNotIn(settings.env["SITE_LABEL"], planned.text)
-                        denied = await client.post(
+                        failed = await client.post(
                             "/v1/live-target-runtime/apply",
-                            headers={**headers, "Idempotency-Key": "director-write-denied"},
+                            headers={**headers, "Idempotency-Key": "director-readback-failed"},
                             json={**payload, "mode": "apply"},
                         )
-                        self.assertEqual(denied.status_code, 409, denied.text)
-                        self.assertEqual(
-                            denied.json()["error"]["code"], "disposable_lane_safety_unknown"
-                        )
-                    update_env.assert_not_called()
+                        self.assertEqual(failed.status_code, 400, failed.text)
+                    update_env.assert_called_once()
                     deploy.assert_not_called()
             self.assertEqual(store.read_product_profile_record(profile.product), profile)
             self.assertEqual(

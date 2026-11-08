@@ -1127,6 +1127,10 @@ def apply_odoo_preview_lifecycle_evidence(
         record_store=typed_record_store,
         preview_request=preview_request,
         generation_request=generation_request,
+        product=profile.product,
+        resource_provenance=(
+            result.resource_provenance if result.resource_provenance.get("created_by") else None
+        ),
     )
     return {**records, "lifecycle_evidence_status": "applied"}
 

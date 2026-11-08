@@ -1,6 +1,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.disposable_lane_creation import DisposableLaneCreation
 
 PreviewState = Literal[
     "pending",
@@ -16,6 +17,11 @@ class PreviewRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
+    resource_provenance: DisposableLaneCreation | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     preview_id: str
     context: str
     anchor_repo: str

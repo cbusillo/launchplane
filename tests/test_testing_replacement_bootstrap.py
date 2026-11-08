@@ -188,6 +188,7 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
             ),
             "fixture",
         )
+        self.resource_adapter = resource_adapter
         resource_adapter.publish(self.resources, "fixture-schedule")
         self.store.write_runtime_environment_record(
             RuntimeEnvironmentRecord(
@@ -1098,3 +1099,158 @@ class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
             response = await self.post()
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(response.json()["error"]["code"], prerequisite.code)
+
+
+class TestingCreationFactTests(FreshTestingBootstrapScenario):
+    def setUp(self) -> None:
+        self.seed("")
+
+    def test_resource_writer_retains_nonexpiring_separation_on_target(self) -> None:
+        self.resource_adapter.publish(self.resources, "fixture-schedule")
+        from control_plane.disposable_lanes import (
+            require_disposable_lane,
+            DisposableLaneSafetyUnknown,
+        )
+        from datetime import timezone
+
+        future = datetime.now(timezone.utc) + timedelta(days=30)
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                instance="testing",
+                now=future,
+            )
+        self.assertTrue(
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                instance="testing",
+                separation_only=True,
+                now=future,
+            )
+        )
+
+    def test_binding_changes_keep_created_separation_protective(self) -> None:
+        from control_plane.disposable_lanes import (
+            require_disposable_lane,
+            DisposableLaneSafetyUnknown,
+        )
+        from control_plane.dokploy_testing_domain import require_first_testing_target_unprotected
+
+        self.resource_adapter.publish(self.resources, "fixture-schedule")
+        target = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"env": {**target.env, "NEW_RUNTIME": "changed"}})
+        )
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                instance="testing",
+            )
+        with self.assertRaises(ValueError):
+            require_first_testing_target_unprotected(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                provider=self.store.read_provider_target_record(
+                    context_name=self.fixture.context, instance_name="testing"
+                ),
+            )
+        self.assertTrue(
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                instance="testing",
+                separation_only=True,
+            )
+        )
+
+    def test_creation_is_bound_to_the_runtime_and_credentials_in_its_committed_bundle(self) -> None:
+        from control_plane.contracts.secret_record import SecretRecord, SecretVersion, SecretBinding
+        from control_plane.disposable_lanes import resolve_disposable_observation_binding
+        from control_plane.storage.product_authority_bundle import RuntimeEnvironmentWrite
+        from control_plane.testing_replacement_resources import testing_creation_target
+
+        context = self.fixture.context
+        target = self.store.read_dokploy_target_record(
+            context_name=context, instance_name="testing"
+        )
+        target_id = self.store.read_dokploy_target_id_record(
+            context_name=context, instance_name="testing"
+        )
+        current = self.store.list_runtime_environment_records(
+            scope="instance", context_name=context, instance_name="testing"
+        )[0]
+        runtime = current.model_copy(update={"env": {**current.env, "NEW_RUNTIME": "published"}})
+        profile = self.profile.model_copy(update={"display_name": "Fixture publication"})
+        secret = SecretRecord(
+            secret_id="fixture-new-secret",
+            scope="context_instance",
+            context=context,
+            instance="testing",
+            integration="runtime_environment",
+            name="FIXTURE_LOCAL_SECRET",
+            current_version_id="fixture-secret-v1",
+            created_at=profile.updated_at,
+            updated_at=profile.updated_at,
+        )
+        binding = SecretBinding(
+            binding_id="fixture-new-binding",
+            secret_id=secret.secret_id,
+            integration="runtime_environment",
+            binding_key=secret.name,
+            context=context,
+            instance="testing",
+            created_at=profile.updated_at,
+            updated_at=profile.updated_at,
+        )
+        bundle = ProductAuthorityBundle(
+            required_context_owner=(self.profile.product, context),
+            expected_product_profiles=(self.profile,),
+            product_profiles=(profile,),
+            runtime_environment_writes=(
+                RuntimeEnvironmentWrite(record=runtime, expected_record=current),
+            ),
+            secret_records=(secret,),
+            secret_bindings=(binding,),
+            secret_versions=(
+                SecretVersion(
+                    version_id=secret.current_version_id,
+                    secret_id=secret.secret_id,
+                    ciphertext="opaque-fixture-ciphertext",
+                    created_at=profile.updated_at,
+                ),
+            ),
+        )
+        created = testing_creation_target(
+            self.store,
+            profile=profile,
+            target=target,
+            target_id=target_id,
+            bundle=bundle,
+            operation_id=self.fixture.operation.operation_id,
+            retained_target_id="fixture-retained",
+            production_resources="isolated",
+            isolation_evidence="fixture:qualified-resources",
+        )
+        self.store.write_product_authority_bundle(
+            bundle.model_copy(update={"dokploy_targets": (created,)})
+        )
+        persisted = self.store.read_dokploy_target_record(
+            context_name=context, instance_name="testing"
+        )
+        assert persisted.resource_provenance is not None
+        current_binding = resolve_disposable_observation_binding(
+            self.store, product=profile.product, context=context, instance="testing"
+        )
+        self.assertEqual(
+            persisted.resource_provenance.lane_binding_sha256, current_binding.binding_sha256
+        )

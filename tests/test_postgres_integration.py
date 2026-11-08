@@ -11604,11 +11604,18 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                     ),
                     fixture.operation,
                 )
-                safety = fixture.store.read_disposable_lane_safety(
-                    fixture.profile.product, fixture.context, "testing"
+                from control_plane.disposable_lanes import (
+                    DisposableLaneSafetyUnknown,
+                    require_disposable_lane,
                 )
-                assert safety is not None
-                self.assertEqual(safety.production_resources, "separation_ready")
+
+                with self.assertRaises(DisposableLaneSafetyUnknown):
+                    require_disposable_lane(
+                        fixture.store,
+                        product=fixture.profile.product,
+                        context=fixture.context,
+                        instance="testing",
+                    )
                 self.assertFalse(
                     fixture.store.supersede_disposable_testing_replacement(fixture.operation)
                 )
@@ -11776,7 +11783,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
         for scenario in (
             "test_collect_produces_real_resource_facts_then_admits_down_runtime_repair",
             "test_expired_positive_usage_is_retained_but_does_not_block_fresh_down_repair",
-            "test_needed_copy_and_failed_physical_inspection_still_refuse",
+            "test_needed_copy_protects_and_failed_inspection_remains_unknown",
             "test_resource_denial_and_binding_drift_do_not_publish",
             "test_recorded_shared_resources_survive_passing_inspection",
             "test_positive_usage_reads_are_distinct_but_retained_history_stays_stable",
@@ -12388,6 +12395,181 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteSc
 
     def test_fresh_bootstrap_supersedes_only_old_fence_and_queues_once(self) -> None:
         self.scenario("normal")
+        from control_plane.disposable_lanes import require_disposable_lane
+
+        target = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        assert target.resource_provenance is not None
+        self.assertEqual(
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                instance="testing",
+            ),
+            target.resource_provenance.lane_binding_sha256,
+        )
+
+    def test_bootstrap_rejects_configuration_changed_during_resource_readback(self) -> None:
+        self.patches()
+        self.review()
+
+        def change_after_qualification(**arguments: Any) -> None:
+            arguments["checkpoint"]()
+            self.store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="global",
+                    env={"UNREVIEWED_CHANGE": "fixture"},
+                    updated_at=self.profile.updated_at,
+                )
+            )
+
+        with patch(
+            "control_plane.testing_replacement_bootstrap.run_resource_schedule",
+            side_effect=change_after_qualification,
+        ):
+            with self.assertRaises(ValueError):
+                self.apply()
+        self.assertEqual(self.route_writes, 0)
+        from control_plane.disposable_lanes import (
+            require_disposable_lane,
+            DisposableLaneSafetyUnknown,
+        )
+
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                instance="testing",
+            )
+
+    def test_committed_bootstrap_replay_does_not_recertify_changed_configuration(self) -> None:
+        self.patches()
+        self.review()
+        self.apply()
+        original = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        ).resource_provenance
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="global",
+                env={"UNREVIEWED_CHANGE": "fixture"},
+                updated_at=self.profile.updated_at,
+            )
+        )
+        self.apply()
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.fixture.context, instance_name="testing"
+            ).resource_provenance,
+            original,
+        )
+        self.assertEqual(self.route_writes, 1)
+
+    def test_configuration_writer_during_route_finishes_and_prevents_creation_commit(self) -> None:
+        self.patches()
+        self.review()
+
+        def route_with_change(**arguments: Any) -> str:
+            with closing(PostgresRecordStore(database_url=self.store.database_url)) as second:
+                pool = ThreadPoolExecutor(max_workers=1)
+                try:
+                    future = pool.submit(
+                        second.write_runtime_environment_record,
+                        RuntimeEnvironmentRecord(
+                            scope="global",
+                            env={"UNREVIEWED_CHANGE": "during-route"},
+                            updated_at=self.profile.updated_at,
+                        ),
+                    )
+                    future.result(timeout=10)
+                finally:
+                    pool.shutdown(wait=False)
+            return self.route(**arguments)
+
+        original = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        ).resource_provenance
+        with patch(
+            "control_plane.testing_replacement_bootstrap.compose.ensure_compose_web_domain_route",
+            side_effect=route_with_change,
+        ):
+            with self.assertRaises(ValueError):
+                self.apply()
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.fixture.context, instance_name="testing"
+            ).resource_provenance,
+            original,
+        )
+
+    def test_interrupted_bootstrap_requalifies_changed_configuration_before_supersession(
+        self,
+    ) -> None:
+        from control_plane.disposable_lanes import require_disposable_lane
+
+        self.patches()
+        self.review()
+        with patch.object(
+            self.store,
+            "supersede_disposable_testing_replacement",
+            side_effect=RuntimeError("fixture crash before supersession"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.apply()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="global",
+                env={"CHANGED_BEFORE_RESUME": "fixture"},
+                updated_at=self.profile.updated_at,
+            )
+        )
+        self.apply()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        assert target.resource_provenance is not None
+        self.assertEqual(
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                instance="testing",
+            ),
+            target.resource_provenance.lane_binding_sha256,
+        )
+        self.assertEqual(self.route_writes, 1)
+
+    def test_bootstrap_completes_legacy_service_staging_without_clearing_observation(self) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        preparation = self.store.read_disposable_replacement_preparation(
+            self.fixture.operation.operation_id
+        )
+        assert preparation is not None
+        record_safety(
+            self.store,
+            self.profile.product,
+            self.fixture.context,
+            "testing",
+            observed_by="service:testing-replacement-resources",
+            production_resources="separation_ready",
+            isolation_evidence="service:testing-resources:qualified",
+            replaces_operation_id=self.fixture.operation.operation_id,
+            replaced_target_id=preparation.retained_target_id,
+        )
+        original = self.store.read_disposable_lane_safety(
+            self.profile.product, self.fixture.context, "testing"
+        )
+        self.scenario("normal")
+        self.assertEqual(
+            self.store.read_disposable_lane_safety(
+                self.profile.product, self.fixture.context, "testing"
+            ),
+            original,
+        )
 
     def test_first_execution_result_keeps_intent_binding_and_original_bootstrap_receipt(
         self,

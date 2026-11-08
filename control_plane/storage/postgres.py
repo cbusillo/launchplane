@@ -6799,10 +6799,18 @@ class PostgresRecordStore(HumanSessionStore):
         apply_provider: Callable[[Callable[[str, str, int], None]], None],
         pending_effects: tuple[PublicHostEffect, ...] = (),
         verify_provider: Callable[[], None] | None = None,
+        validate_configuration: Callable[[], None] | None = None,
     ) -> None:
         """Checkpoint owned effects before the atomic config/success-receipt commit."""
 
         def guard(session: Any) -> None:
+            if validate_configuration is not None:
+                outer = getattr(self._disposable_authority_context, "session", None)
+                self._disposable_authority_context.session = session
+                try:
+                    validate_configuration()
+                finally:
+                    self._disposable_authority_context.session = outer
             requested_hosts = bundle.dokploy_targets[0].hostname_claims | frozenset(
                 retained_hostname_identity(effect.host) for effect in pending_effects
             )
@@ -16570,14 +16578,7 @@ class PostgresRecordStore(HumanSessionStore):
         from control_plane.testing_never_served import NON_USE_EVIDENCE_PREFIX
 
         preparation = self.read_disposable_replacement_preparation(expected.operation_id)
-        safety = self.read_disposable_lane_safety(
-            expected.product, expected.context, expected.instance
-        )
-        if (
-            preparation is None
-            or safety is None
-            or safety.replaces_operation_id != expected.operation_id
-        ):
+        if preparation is None:
             return False
         with self.testing_replacement_execution_lock(expected.operation_id) as check_lock:
             if check_lock is None:
@@ -16664,10 +16665,12 @@ class PostgresRecordStore(HumanSessionStore):
                     expected.operation_id,
                     with_for_update=True,
                 )
-                if safety_row is None or preparation_row is None:
+                if preparation_row is None:
                     return False
-                safety = self._read_payload(
-                    model_type=DisposableLaneSafety, payload=safety_row.payload
+                safety = (
+                    self._read_payload(model_type=DisposableLaneSafety, payload=safety_row.payload)
+                    if safety_row is not None
+                    else None
                 )
                 preparation = self._read_payload(
                     model_type=DisposableTestingReplacementPreparation,
@@ -16732,7 +16735,8 @@ class PostgresRecordStore(HumanSessionStore):
                             target_id_row.target_id,
                             shared_session=session,
                         )
-                        if safety.usage_evidence.startswith(NON_USE_EVIDENCE_PREFIX)
+                        if safety is not None
+                        and safety.usage_evidence.startswith(NON_USE_EVIDENCE_PREFIX)
                         else None
                     ),
                 )
