@@ -5,18 +5,19 @@ from typing import Protocol
 
 import click
 
-from control_plane.npmplus import NpmplusClient, NpmplusCredentials
+from control_plane.npmplus import (
+    NpmplusClient,
+    NpmplusCredentials,
+    NPMPLUS_BASE_URL_ENV_KEY as NPMPLUS_BASE_URL_ENV_KEY,
+    NPMPLUS_IDENTITY_ENV_KEY as NPMPLUS_IDENTITY_ENV_KEY,
+    NPMPLUS_SECRET_ENV_KEY as NPMPLUS_SECRET_ENV_KEY,
+)
 from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyRequest,
     NpmplusIngressApplyResult,
     NpmplusIngressClient,
     apply_npmplus_ingress_route,
 )
-
-
-NPMPLUS_BASE_URL_ENV_KEY = "LAUNCHPLANE_NPMPLUS_BASE_URL"
-NPMPLUS_IDENTITY_ENV_KEY = "LAUNCHPLANE_NPMPLUS_IDENTITY"
-NPMPLUS_SECRET_ENV_KEY = "LAUNCHPLANE_NPMPLUS_SECRET"
 
 
 class IngressProvider(Protocol):

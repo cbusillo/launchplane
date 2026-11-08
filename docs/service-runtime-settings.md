@@ -16,6 +16,14 @@ Each value is checked by its declared parser, so an invalid value
 is refused before review. Any other key, including a secret-shaped one, is
 refused. Secrets stay in [managed secret records](secrets.md).
 
+`LAUNCHPLANE_NPMPLUS_BASE_URL` records the existing NPMplus API endpoint. It
+accepts an HTTP(S) URL with a usable hostname and nonzero port, without user
+information, query, fragment or whitespace;
+this prepares configuration for the later combined consumer switch. Current
+consumers still use their existing environment configuration. Identity and secret
+stay in the fixed
+[NPMplus credential input](secrets.md#npmplus-api-credentials), not this record.
+
 `LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID` prepares the existing onboarding
 App selector for [service adoption](secrets.md#client-credential-input).
 Its value must be a nonempty identifier of at most 128 ASCII letters, digits or

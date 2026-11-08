@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.npmplus import NPMPLUS_BASE_URL_ENV_KEY, validate_npmplus_base_url
+
 from control_plane.delivery_apply_receipt import apply_reviewed_service_bundle
 from control_plane.contracts.merge_train_stall import (
     STALL_WORKFLOW_REF_KEY,
@@ -44,6 +46,7 @@ SETTING_VALUE_LIMIT = 65536
 
 DECLARED_SERVICE_SETTINGS: Mapping[str, Callable[[str], object]] = MappingProxyType(
     {
+        NPMPLUS_BASE_URL_ENV_KEY: validate_npmplus_base_url,
         PREVIEW_MEMORY_FLOORS_SETTING: parse_preview_memory_floors,
         RUNNER_HOST_HYGIENE_SETTING: RunnerHostHygieneConfiguration.model_validate_json,
         DISCUSSION_REMINDERS_SETTING: DiscussionReminderSettings.model_validate_json,
