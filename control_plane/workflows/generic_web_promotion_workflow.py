@@ -149,6 +149,7 @@ def dispatch_generic_web_promotion_workflow_delivery(
                     token=token,
                     previous_run_ids=previous_run_ids,
                     min_created_at=min_created_at,
+                    expected_run_title=_string_value(payload.get("expected_run_title")),
                 )
                 if existing_run:
                     return _delivered_workflow_outbox_delivery(delivery_record, existing_run)
@@ -174,6 +175,7 @@ def dispatch_generic_web_promotion_workflow_delivery(
                 previous_run_ids=previous_run_ids,
                 min_created_at=min_created_at,
                 timeout_seconds=_bounded_observe_timeout(payload.get("observe_timeout_seconds")),
+                expected_run_title=_string_value(payload.get("expected_run_title")),
             )
             if run:
                 return _delivered_workflow_outbox_delivery(delivery_record, run)
@@ -220,6 +222,7 @@ def _wait_for_workflow_run(
     previous_run_ids: set[int],
     min_created_at: datetime,
     timeout_seconds: int,
+    expected_run_title: str = "",
 ) -> dict[str, object]:
     deadline = time.monotonic() + timeout_seconds
     while True:
@@ -231,6 +234,7 @@ def _wait_for_workflow_run(
             token=token,
             previous_run_ids=previous_run_ids,
             min_created_at=min_created_at,
+            expected_run_title=expected_run_title,
         )
         if run:
             return run
@@ -248,6 +252,7 @@ def _latest_workflow_dispatch_run(
     token: str,
     previous_run_ids: set[int],
     min_created_at: datetime,
+    expected_run_title: str = "",
 ) -> dict[str, object]:
     min_created_at = _github_timestamp_precision(min_created_at)
     workflow_runs = _workflow_dispatch_runs(
@@ -256,9 +261,12 @@ def _latest_workflow_dispatch_run(
         workflow_id=workflow_id,
         ref=ref,
         token=token,
+        run_limit=100 if expected_run_title else 10,
     )
     new_runs: list[dict[str, object]] = []
     for raw_run in workflow_runs:
+        if expected_run_title and raw_run.get("display_title") != expected_run_title:
+            continue
         run_id = _int_value(raw_run.get("id"))
         if not run_id or run_id in previous_run_ids:
             continue
@@ -291,9 +299,9 @@ def _workflow_dispatch_run_ids(
 
 
 def _workflow_dispatch_runs(
-    *, owner: str, repo: str, workflow_id: str, ref: str, token: str
+    *, owner: str, repo: str, workflow_id: str, ref: str, token: str, run_limit: int = 10
 ) -> list[dict[str, object]]:
-    query = urlencode({"event": "workflow_dispatch", "branch": ref, "per_page": 10})
+    query = urlencode({"event": "workflow_dispatch", "branch": ref, "per_page": run_limit})
     payload = github_api_request(
         path=f"/repos/{owner}/{repo}/actions/workflows/{quote(workflow_id, safe='')}/runs?{query}",
         token=token,
