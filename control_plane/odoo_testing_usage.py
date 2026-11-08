@@ -8,14 +8,16 @@ import hashlib
 import json
 from urllib.parse import parse_qsl, unquote, urlsplit
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 import click
+from sqlalchemy.exc import SQLAlchemyError
 from websockets.exceptions import WebSocketException
 
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.testing_candidate_application import candidate_compose_project_matches
 from control_plane.dokploy import api, source
 from control_plane.dokploy.compose import (
     ODOO_DATABASE_IMAGE,
@@ -24,6 +26,9 @@ from control_plane.dokploy.compose import (
 )
 from control_plane.dokploy.cutover_writer_capabilities import SUPPORTED_SERVER_WIDE_MODULES
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceAuthorizationDenied
+
+if TYPE_CHECKING:
+    from control_plane.storage.postgres import PostgresRecordStore
 
 
 # Public diagnostics are a closed vocabulary, never exception text or topology.
@@ -65,6 +70,8 @@ ODOO_USAGE_PROBE_REASON_CODES = frozenset(
 ODOO_USAGE_REASON_CODES = ODOO_USAGE_PROBE_REASON_CODES | frozenset(
     [
         "complete",
+        "generation_boundary_unavailable",
+        "generation_changed",
         "diagnostics_unavailable",
         "diagnostics_unrecognized",
         "not_collected",
@@ -79,7 +86,6 @@ ODOO_USAGE_REASON_CODES = ODOO_USAGE_PROBE_REASON_CODES | frozenset(
         "provider_target_changed",
         "provider_target_unavailable",
         "provider_transport_unavailable",
-        "staff_testing_hold",
         "target_alias",
         "target_unavailable",
     ]
@@ -120,8 +126,9 @@ class OdooTestingUsage:
 # session-store get/save/GC, account names, tokens or session IDs leave it.
 ODOO_USAGE_CONTAINER_PROGRAM_TEMPLATE = r"""
 import argparse, configparser, json, logging, os, re, stat
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 EXPECTED_INSTANCE=__EXPECTED_INSTANCE__
+GENERATION_CREATED_AT=__GENERATION_CREATED_AT__
 from pathlib import Path
 CONFIG_PATH=__CONFIG_PATH__
 SUPPORTED_SERVER_WIDE_MODULES=__SUPPORTED_SERVER_WIDE_MODULES__
@@ -178,9 +185,6 @@ def serving_configured(process, options, database):
 def read_sessions(path, database, evidence=None):
     global checkpoint
     checkpoint='session_store_unavailable'
-    # Count every authenticated or partially authenticated file, regardless of
-    # age. A database/device row is not proof that a browser session has ended.
-    # Bound traversal and bytes; truncation or an unreadable file is unknown.
     if path.is_symlink() or not path.is_dir():
         raise UsageUnavailable('session_store_unavailable')
     pending=[path]
@@ -211,6 +215,8 @@ def read_sessions(path, database, evidence=None):
                 data=json.load(handle)
             if not isinstance(data,dict):
                 raise UsageUnavailable('session_file_unreadable')
+            if GENERATION_CREATED_AT is not None and info.st_mtime < GENERATION_CREATED_AT:
+                continue
             if data.get('db')==database and (data.get('uid') or data.get('pre_uid')):
                 used=True
                 user=data.get('uid') or data.get('pre_uid')
@@ -263,15 +269,17 @@ def probe():
         checkpoint='login_history_unavailable'
         with connection.cursor() as cursor:
             cursor.execute('SET TRANSACTION READ ONLY')
-            # Include all accounts, including portal/admin/automation. Restored
-            # production history may conservatively protect a lane too.
-            cursor.execute("SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - interval '24 hours')")
+            since=datetime.now(timezone.utc)-timedelta(hours=24)
+            if GENERATION_CREATED_AT is not None:
+                since=max(since,datetime.fromtimestamp(GENERATION_CREATED_AT,timezone.utc))
+            parameters=(since.replace(tzinfo=None).isoformat(sep=' '),)
+            cursor.execute("SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= %s)",parameters)
             recent=cursor.fetchone()[0]
             if type(recent) is not bool:
                 raise UsageUnavailable('login_history_unavailable')
             if recent:
                 try:
-                    cursor.execute("SELECT create_uid, min(create_date) FROM res_users_log WHERE create_date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - interval '24 hours' GROUP BY create_uid ORDER BY create_uid LIMIT 256")
+                    cursor.execute("SELECT create_uid, min(create_date) FROM res_users_log WHERE create_date >= %s GROUP BY create_uid ORDER BY create_uid LIMIT 256",parameters)
                     for user,since in cursor.fetchall():
                         if type(user) is int and user>0:
                             evidence.setdefault('actors',set()).add('odoo-user:'+str(user))
@@ -304,10 +312,17 @@ if __name__=='__main__':
 )
 
 
-def odoo_usage_container_program(instance: str) -> str:
+def odoo_usage_container_program(
+    instance: str, *, generation_created_at: datetime | None = None
+) -> str:
     if instance not in {"testing", "preview"}:
         raise ValueError("unsupported_lane")
-    return ODOO_USAGE_CONTAINER_PROGRAM_TEMPLATE.replace("__EXPECTED_INSTANCE__", repr(instance))
+    return ODOO_USAGE_CONTAINER_PROGRAM_TEMPLATE.replace(
+        "__EXPECTED_INSTANCE__", repr(instance)
+    ).replace(
+        "__GENERATION_CREATED_AT__",
+        repr(generation_created_at.timestamp() if generation_created_at is not None else None),
+    )
 
 
 ODOO_TESTING_USAGE_CONTAINER_PROGRAM = odoo_usage_container_program("testing")
@@ -537,6 +552,54 @@ except Exception:
 )
 
 
+def testing_usage_generation_created_at(
+    store: "PostgresRecordStore | None",
+    *,
+    product: str,
+    target: DokployTargetRecord,
+    target_id: DokployTargetIdRecord,
+    project: str,
+) -> datetime | None:
+    if (
+        store is None
+        or not product
+        or (target.context, target.instance) != (target_id.context, target_id.instance)
+    ):
+        return None
+    generation = store.read_fresh_odoo_testing_generation(product, target.context)
+    candidate = store.find_testing_candidate_by_target(target_id.target_id)
+    generation_matches = generation is not None and (
+        (generation.product, generation.context, generation.instance, generation.target_id)
+        == (product, target.context, "testing", target_id.target_id)
+        and candidate_compose_project_matches(generation.namespace, project)
+    )
+    if (
+        candidate is not None
+        and (candidate.product, candidate.context, candidate.compose_id)
+        == (
+            product,
+            target.context,
+            target_id.target_id,
+        )
+        and candidate_compose_project_matches(candidate.namespace, project)
+    ):
+        if (
+            generation_matches
+            and generation is not None
+            and generation.operation_id != candidate.operation_id
+        ):
+            return None
+        created = candidate.created_at
+    elif generation_matches and generation is not None:
+        try:
+            created = datetime.fromisoformat(generation.prepared_at)
+        except ValueError:
+            return None
+    else:
+        return None
+    return created if created.utcoffset() is not None and created <= datetime.now(UTC) else None
+
+
 def read_odoo_testing_usage(
     *,
     target: DokployTargetRecord,
@@ -544,6 +607,8 @@ def read_odoo_testing_usage(
     control_plane_root: Path,
     database_url: str,
     preview_spec: dict[str, object] | None = None,
+    record_store: "PostgresRecordStore | None" = None,
+    product: str = "",
 ) -> OdooTestingUsage:
     if target.target_type != "compose" or (preview_spec is None and target.instance != "testing"):
         return OdooTestingUsage(reason_code="unsupported_lane")
@@ -561,6 +626,20 @@ def read_odoo_testing_usage(
         project = str(provider.get("appName") or "")
         if not project:
             return OdooTestingUsage(reason_code="provider_target_unavailable")
+        checkpoint = "generation_boundary_unavailable"
+        generation_created_at = None
+        boundary_unavailable = False
+        if preview_spec is None:
+            try:
+                generation_created_at = testing_usage_generation_created_at(
+                    record_store,
+                    product=product,
+                    target=target,
+                    target_id=target_id,
+                    project=project,
+                )
+            except (SQLAlchemyError, ValueError, OSError):
+                boundary_unavailable = True
         frames: list[dict[str, object]] = []
         checkpoint = "provider_transport_unavailable"
         _read_remote(
@@ -573,7 +652,8 @@ def read_odoo_testing_usage(
                 "context": target.context,
                 "instance": "preview" if preview_spec is not None else "testing",
                 "container_program": odoo_usage_container_program(
-                    "preview" if preview_spec is not None else "testing"
+                    "preview" if preview_spec is not None else "testing",
+                    generation_created_at=generation_created_at,
                 ),
                 **(
                     {
@@ -637,6 +717,15 @@ def read_odoo_testing_usage(
         recent, sessions = frames[0]["recent_signins"], frames[0]["authenticated_sessions"]
         if type(recent) is not bool or type(sessions) is not bool:
             return OdooTestingUsage(reason_code="probe_result_invalid")
+        if preview_spec is None and not (recent or sessions):
+            if boundary_unavailable:
+                return OdooTestingUsage(reason_code="generation_boundary_unavailable")
+            checkpoint = "generation_boundary_unavailable"
+            if generation_created_at != testing_usage_generation_created_at(
+                record_store, product=product, target=target, target_id=target_id, project=project
+            ):
+                return OdooTestingUsage(reason_code="generation_changed")
+            checkpoint = "probe_result_invalid"
         hashes = frames[0].get("credential_hashes", [])
         if not isinstance(hashes, list):
             return OdooTestingUsage(reason_code="probe_result_invalid")
@@ -698,5 +787,6 @@ def read_odoo_testing_usage(
         AttributeError,
         WebSocketException,
         click.ClickException,
+        SQLAlchemyError,
     ):
         return OdooTestingUsage(reason_code=checkpoint)
