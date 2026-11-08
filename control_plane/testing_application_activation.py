@@ -410,7 +410,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         protection = self.store.read_disposable_lane_safety(
             self.product, self.request.context, "testing"
         )
-        if protection is not None and protection.usage == "in_use":
+        if protection is not None and protection.current_usage() == "in_use":
             raise TestingActivationRefusal("Known staff use protects the retained recipient.")
         if self.request.volume_keys or self.request.port_keys:
             raise TestingActivationRefusal(
@@ -2329,7 +2329,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         protection = self.store.read_disposable_lane_safety(
             record.product, record.context, "testing"
         )
-        if protection is not None and protection.usage == "in_use":
+        if protection is not None and protection.current_usage() == "in_use":
             raise TestingActivationRefusal("Staff use pauses original route recovery.")
 
     def candidate_refusal_ready(self, record: TestingActivationRecord) -> bool:

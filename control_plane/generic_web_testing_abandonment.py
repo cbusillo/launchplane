@@ -64,7 +64,7 @@ def testing_abandonment_authority(
             return None
         protection = store.read_disposable_lane_safety(profile.product, lane.context, "testing")
         if protection is not None and (
-            protection.usage == "in_use"
+            protection.current_usage() == "in_use"
             or protection.data == "only_copy"
             or protection.production_resources in {"shared", "separation_ready"}
         ):

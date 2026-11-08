@@ -5,6 +5,7 @@ import io
 import json
 import re
 import shlex
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
@@ -173,6 +174,7 @@ class SessionInventoryTests(unittest.TestCase):
         failure: str = "",
         *,
         recent: bool = False,
+        actor_metadata_unavailable: bool = False,
         instance: str = "testing",
         argv: list[bytes] | None = None,
     ) -> dict[str, Any]:
@@ -196,6 +198,13 @@ class SessionInventoryTests(unittest.TestCase):
             options["server_wide_modules"] = "base,web,session_store_module"
         connection = MagicMock()
         connection.cursor.return_value.__enter__.return_value.fetchone.return_value = (recent,)
+        if actor_metadata_unavailable:
+
+            def execute(query: str) -> None:
+                if query.startswith("SELECT create_uid"):
+                    raise TimeoutError("private-fixture optional metadata")
+
+            connection.cursor.return_value.__enter__.return_value.execute.side_effect = execute
         if failure == "sql":
             connection.cursor.return_value.__enter__.return_value.execute.side_effect = (
                 RuntimeError("private-fixture database topology")
@@ -240,6 +249,12 @@ class SessionInventoryTests(unittest.TestCase):
         result = self.probe_result("sessions_used", recent=True, instance="preview")
         self.assertIs(result["recent_signins"], True)
         self.assertIs(result["authenticated_sessions"], True)
+        self.assertIn("odoo-user:42", result["actors"])
+        self.assertAlmostEqual(
+            datetime.fromisoformat(result["since"]).timestamp(),
+            (self.path / "sessions" / "private-fixture-session").stat().st_mtime,
+            delta=0.000001,
+        )
 
     def wrapped_image_argv(self, *, gevent: bool = False) -> list[bytes]:
         argv = supported_odoo_argv()
@@ -342,6 +357,13 @@ class SessionInventoryTests(unittest.TestCase):
                 self.assertEqual(result["reason_code"], reason)
                 self.assertNotIn("recent_signins", result)
                 self.assertNotIn("authenticated_sessions", result)
+
+    def test_optional_actor_lookup_failure_preserves_observed_people(self) -> None:
+        result = self.probe_result("sessions_used", recent=True, actor_metadata_unavailable=True)
+        self.assertIs(result.get("authenticated_sessions"), True)
+        self.assertIs(result.get("recent_signins"), True)
+        self.assertTrue(result.get("actors"))
+        self.assertNotIn("unavailable", result)
 
     def test_complete_container_probe_distinguishes_non_use_and_use(self) -> None:
         for failure, recent, sessions in (

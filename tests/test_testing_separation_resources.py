@@ -113,6 +113,26 @@ class SeparationResourceTests(unittest.TestCase):
         )
         self.effects: list[str] = []
 
+    def test_bounded_use_expires_without_reinterpreting_the_retained_hold(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        from tests.support.disposable_lanes import record_safety
+
+        now = datetime.now(timezone.utc)
+        record_safety(self.store, self.product, self.context, "testing", usage="in_use")
+        safety = self.store.read_disposable_lane_safety(self.product, self.context, "testing")
+        assert safety is not None
+        self.store.write_disposable_lane_safety(
+            safety.model_copy(
+                update={
+                    "observed_at": now - timedelta(minutes=2),
+                    "expires_at": now + timedelta(minutes=3),
+                    "usage_valid_until": now - timedelta(minutes=1),
+                }
+            )
+        )
+        preparation_binding(self.store, self.product, self.context, self.actor, self.root)
+        self.assert_retained()
+
     def run_preparation(self, key: str = "prepare") -> DurableProviderOperationResult:
         return run_durable_provider_operation(
             store=self.store,

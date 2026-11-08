@@ -1152,6 +1152,9 @@ class OdooPreviewDokployApplyResult(BaseModel):
     domain_id: str = ""
     module_install_update_status: Literal["pass", "fail", "skipped"] = "skipped"
     module_install_update_evidence: dict[str, str] = Field(default_factory=dict)
+    resource_provenance: dict[str, str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
     steps: tuple[OdooPreviewDokployApplyStep, ...] = ()
     rollback_errors: tuple[str, ...] = ()
     error_message: str = ""
@@ -1806,6 +1809,7 @@ def _execute_refresh(
     provider_effect_attempted = False
     module_install_update_status: Literal["pass", "fail", "skipped"] = "skipped"
     module_install_update_evidence: dict[str, str] = {}
+    resource_provenance: dict[str, str] = {}
     steps: list[OdooPreviewDokployApplyStep] = []
 
     def checkpoint_provider_effect(phase: str) -> None:
@@ -1934,7 +1938,7 @@ def _execute_refresh(
             if qualify_existing_preview or preserve_existing_data or creating_compose:
                 from control_plane.odoo_preview_resources import require_existing_preview_resources
 
-                require_existing_preview_resources(
+                binding = require_existing_preview_resources(
                     host=host,
                     token=token,
                     compose_id=compose_id,
@@ -1946,6 +1950,11 @@ def _execute_refresh(
                     pending_filestore=restore_clean_snapshot and filestore is not None,
                     unstarted=creating_compose,
                     expected_server_id=source_server_id,
+                )
+                resource_provenance.update(
+                    binding_sha256=binding,
+                    qualified_at=datetime.now(timezone.utc).isoformat(),
+                    recipient_state="unstarted" if creating_compose else "existing",
                 )
 
         qualify_resources()
@@ -2130,6 +2139,7 @@ def _execute_refresh(
             provider_effect_attempted=provider_effect_attempted,
             module_install_update_status=module_install_update_status,
             module_install_update_evidence=module_install_update_evidence,
+            resource_provenance=resource_provenance,
             steps=tuple(steps),
         )
     except NativeSourceAuthorizationDenied:
@@ -2149,6 +2159,7 @@ def _execute_refresh(
             provider_effect_attempted=provider_effect_attempted,
             module_install_update_status=module_install_update_status,
             module_install_update_evidence=module_install_update_evidence,
+            resource_provenance=resource_provenance,
             steps=tuple(steps),
         )
 
@@ -2597,6 +2608,7 @@ def _apply_result(
     provider_effect_attempted: bool = False,
     module_install_update_status: Literal["pass", "fail", "skipped"] = "skipped",
     module_install_update_evidence: dict[str, str] | None = None,
+    resource_provenance: dict[str, str] | None = None,
     steps: tuple[OdooPreviewDokployApplyStep, ...] = (),
     rollback_errors: tuple[str, ...] = (),
     error_message: str = "",
@@ -2617,6 +2629,7 @@ def _apply_result(
         domain_id=domain_id,
         module_install_update_status=module_install_update_status,
         module_install_update_evidence=module_install_update_evidence or {},
+        resource_provenance=resource_provenance or {},
         steps=steps,
         rollback_errors=rollback_errors,
         error_message=error_message,

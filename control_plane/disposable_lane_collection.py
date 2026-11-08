@@ -19,18 +19,32 @@ class CollectedDisposableLaneFacts:
     data: str = "unknown"
     production_resources: str = "unknown"
     usage_evidence: str = ""
+    usage_actor: str = ""
+    usage_since: datetime | None = None
+    usage_valid_until: datetime | None = None
     data_evidence: str = ""
     isolation_evidence: str = ""
 
-    def payload(self) -> dict[str, str]:
+    def payload(self) -> dict[str, object]:
         return {
             "usage": self.usage,
             "data": self.data,
             "production_resources": self.production_resources,
             "usage_evidence": self.usage_evidence,
+            "usage_actor": self.usage_actor,
+            "usage_since": self.usage_since,
+            "usage_valid_until": self.usage_valid_until,
             "data_evidence": self.data_evidence,
             "isolation_evidence": self.isolation_evidence,
         }
+
+
+def _hold_since(recorded_at: str) -> datetime | None:
+    try:
+        since = datetime.fromisoformat(recorded_at)
+    except ValueError:
+        return None
+    return since if since.utcoffset() is not None else None
 
 
 def collect_disposable_lane_facts(
@@ -44,11 +58,8 @@ def collect_disposable_lane_facts(
     odoo_usage: OdooTestingUsage | None = None,
 ) -> CollectedDisposableLaneFacts:
     """Combine service occupancy reads with protective hold and alias records."""
-    held = (
-        target is not None
-        and target.policies.staff_testing_hold is not None
-        and target.policies.staff_testing_hold.purpose == "staff_testing"
-    )
+    hold = target.policies.staff_testing_hold if target is not None else None
+    held = hold is not None and hold.purpose == "staff_testing"
     shared_sources = []
     if target is not None and target_id is not None:
         for other in store.list_dokploy_target_id_records():
@@ -71,6 +82,9 @@ def collect_disposable_lane_facts(
     usage = odoo_usage or OdooTestingUsage()
     return CollectedDisposableLaneFacts(
         usage="in_use" if held else usage.usage,
+        usage_actor=hold.recorded_by if held and hold is not None else ", ".join(usage.actors),
+        usage_since=_hold_since(hold.recorded_at) if held and hold is not None else usage.since,
+        usage_valid_until=usage.valid_until if not held else None,
         usage_evidence=(
             f"service:staff-testing-hold:{binding_sha256}"
             if held
@@ -172,8 +186,14 @@ def merge_collected_safety(
 ) -> DisposableLaneSafety:
     """Keep protection and independent fresh proofs; collection never renews them."""
     changes: dict[str, object] = {}
-    if previous.usage == "in_use" and collected.usage == "unknown":
-        changes.update(usage="in_use", usage_evidence=previous.usage_evidence)
+    if previous.current_usage(collected.observed_at) == "in_use" and collected.usage == "unknown":
+        changes.update(
+            usage="in_use",
+            usage_evidence=previous.usage_evidence,
+            usage_actor=previous.usage_actor,
+            usage_since=previous.usage_since,
+            usage_valid_until=previous.usage_valid_until,
+        )
     if previous.data == "only_copy":
         changes.update(data="only_copy", data_evidence=previous.data_evidence)
     if previous.production_resources in {"shared", "separation_ready"}:

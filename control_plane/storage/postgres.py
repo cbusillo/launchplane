@@ -12737,8 +12737,19 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if row is not None:
                 previous = self._read_payload(model_type=DisposableLaneSafety, payload=row.payload)
+                if previous.observed_at > record.observed_at or (
+                    previous.observed_at == record.observed_at
+                    and previous.usage == "in_use"
+                    and record.usage != "in_use"
+                ):
+                    if record.usage == "in_use":
+                        session.commit()
+                    return False
                 if not collect_facts and (
-                    (previous.usage == "in_use" and record.usage != "in_use")
+                    (
+                        previous.current_usage(record.observed_at) == "in_use"
+                        and record.usage != "in_use"
+                    )
                     or (previous.data == "only_copy" and record.data != "only_copy")
                     or (
                         previous.production_resources == "shared"
@@ -12757,14 +12768,6 @@ class PostgresRecordStore(HumanSessionStore):
                         self._invalidate_testing_non_use_in_session(
                             session, product=record.product, context=record.context
                         )
-                if previous.observed_at > record.observed_at or (
-                    previous.observed_at == record.observed_at
-                    and previous.usage == "in_use"
-                    and record.usage != "in_use"
-                ):
-                    if record.usage == "in_use":
-                        session.commit()
-                    return False
             session.merge(
                 LaunchplaneDisposableLaneSafetyRow(
                     product=record.product,
@@ -14502,7 +14505,8 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 if (
                     safety_row is not None
-                    and DisposableLaneSafety.model_validate(safety_row.payload).usage == "in_use"
+                    and DisposableLaneSafety.model_validate(safety_row.payload).current_usage()
+                    == "in_use"
                 ):
                     raise ValueError("Known staff use protects the retained testing recipient.")
             application = record.request.application is not None

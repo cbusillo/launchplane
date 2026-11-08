@@ -1978,6 +1978,30 @@ not change submission, settlement or resume authority. The machine
 target-replacement plan route supports the same native read without a provider
 write.
 
+After a verified build is selected, an execution blocker returns a conditional
+plan with `status: pending`, `blockers` and ordered `steps`, retaining the selected
+build, source mode and address. Blockers describe the first refused checkpoint;
+later checks remain unproved. Provider authorization denials remain denials.
+Submission repeats admission against current facts before registering the artifact
+or queuing work. A plan is never authority to bypass a blocker or replay an original.
+
+Positive Odoo use identifies the recorded account IDs and the earliest recorded
+login or session-file time available to the reader. Its bounded evidence expires;
+that deadline does not expire a browser session, a staff hold, needed data or a
+production-resource protection. A fresh read still protects an existing authenticated
+session regardless of its age. Legacy use records without a bounded deadline retain
+their protection and report missing actor/time details explicitly. Collection does
+not renew an inherited use deadline or infer an actor from an empty recipient.
+
+Preview creation retains the resource inspector's actual binding, qualification
+time and unstarted/existing recipient state as `resource_provenance` in its existing
+original-operation result, including a failed later preparation. Native testing
+creation already retains its independent-copy receipt in the rebuild record.
+These are creation facts, never proof that nobody currently uses the lane or that
+it has no only-needed copy. Current ownership, source custody, use and physical
+isolation checks still precede effects; legacy or external resources gain no
+qualification merely because Launchplane knows their ID.
+
 The machine native routes verify the current release through the same preflight
 and immutable artifact registration as the signed-in control. Planning records
 nothing; submission registers after admission checks. An exact original request

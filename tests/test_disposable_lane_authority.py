@@ -518,6 +518,27 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
                 )
                 self.store.clear_disposable_lane_safety("example-site", self.context, "testing")
 
+    async def test_stale_collection_cannot_replace_a_newer_use_observation(self) -> None:
+        record_safety(self.store, "example-site", self.context, "testing", usage="in_use")
+        saved = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        assert saved is not None
+        saved = saved.model_copy(update={"usage_since": saved.observed_at})
+        self.store.write_disposable_lane_safety(saved)
+        stale = saved.model_copy(
+            update={
+                "usage": "unknown",
+                "usage_evidence": "",
+                "usage_since": None,
+                "observed_at": saved.observed_at - timedelta(seconds=1),
+            }
+        )
+        self.assertIs(
+            self.store.publish_collected_disposable_lane_safety(stale, collect_facts=True), False
+        )
+        self.assertEqual(
+            self.store.read_disposable_lane_safety("example-site", self.context, "testing"), saved
+        )
+
     async def test_delayed_unused_collection_cannot_erase_newer_protective_evidence(self) -> None:
         from control_plane.odoo_testing_usage import OdooTestingUsage
 

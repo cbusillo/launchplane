@@ -63,7 +63,7 @@ def require_first_testing_target_unprotected(
         raise ValueError("The testing compose is shared with another lane.")
     evidence = store.read_disposable_lane_safety(product, context, "testing")
     if evidence is not None and (
-        evidence.usage == "in_use"
+        evidence.current_usage() == "in_use"
         or evidence.data == "only_copy"
         or evidence.production_resources in {"shared", "separation_ready"}
     ):
