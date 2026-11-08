@@ -1,3 +1,4 @@
+from control_plane.contracts.disposable_lane_creation import DisposableLaneCreation
 import re
 from typing import Literal
 
@@ -148,9 +149,9 @@ class DokployTargetRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    resource_provenance: dict[str, str] = Field(
-        default_factory=dict,
-        exclude_if=lambda value: not value,
+    resource_provenance: DisposableLaneCreation | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
     context: str

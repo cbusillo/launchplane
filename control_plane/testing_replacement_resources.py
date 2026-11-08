@@ -708,7 +708,7 @@ class TestingReplacementResourceAdapter:
                         isolation_evidence=f"service:testing-resources:{resources.binding_sha256}",
                         data="reproducible",
                         production_resources="separation_ready",
-                    ).model_dump(mode="json"),
+                    ),
                 }
             ),
             required_context_owner=(self.product, self.request.context),

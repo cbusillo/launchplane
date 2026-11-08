@@ -839,7 +839,7 @@ class TestingReplacementBootstrapAdapter:
                             + generation_binding(generation),
                             data="reproducible",
                             production_resources="isolated",
-                        ).model_dump(mode="json"),
+                        ),
                     }
                 ),
                 required_context_owner=(self.product, self.request.context),

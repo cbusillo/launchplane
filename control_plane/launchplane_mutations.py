@@ -339,20 +339,20 @@ def apply_launchplane_generation_evidence(
         from control_plane.contracts.disposable_lane import DisposableLaneCreation
         from control_plane.disposable_lanes import (
             DisposableLaneStore,
-            resolve_disposable_observation_binding,
+            read_disposable_lane_binding,
         )
 
         store = cast(DisposableLaneStore, record_store)
         profile = store.read_product_profile_record(product)
-        binding = resolve_disposable_observation_binding(
+        binding = read_disposable_lane_binding(
             store,
-            product=product,
+            profile=profile,
             context=transitioned_preview.context,
             instance=profile.preview.slug_template.format(
                 number=transitioned_preview.anchor_pr_number
             ),
-            preview_id=transitioned_preview.preview_id,
             preview=transitioned_preview,
+            preview_lifecycle=False,
         )
         creation = DisposableLaneCreation.model_validate(
             {
@@ -362,7 +362,7 @@ def apply_launchplane_generation_evidence(
         )
         transitioned_preview = transitioned_preview.model_copy(
             update={
-                "resource_provenance": creation.model_dump(mode="json"),
+                "resource_provenance": creation,
             }
         )
     if callable(bundled_write):

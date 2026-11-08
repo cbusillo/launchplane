@@ -190,10 +190,11 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
         self.assertEqual(safety.data, "unknown")
         self.assertEqual(safety.production_resources, "unknown")
         with patch(
-            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+            return_value={},
         ) as driver:
-            self.assertEqual(await self.sync(), 409)
-            driver.assert_not_called()
+            self.assertEqual(await self.sync(), 202)
+            driver.assert_called_once()
         with scoped_agent_transport():
             denied = await self.observe(mode="record", expected_binding_sha256=proof)
         self.assertEqual(denied.status_code, 403)
@@ -739,11 +740,12 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
         )
         self.assertEqual(self.store.read_product_profile_record("example-site"), initial)
         with patch(
-            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+            return_value={},
         ) as driver:
-            self.assertEqual(await self.sync(), 409)
+            self.assertEqual(await self.sync(), 202)
             self.assertEqual(await self.sync(instance="prod"), 403)
-            driver.assert_not_called()
+            driver.assert_called_once()
         with scoped_agent_transport():
             refused = await self.observe(
                 mode="collect", expected_binding_sha256=evidence.binding_sha256
@@ -884,10 +886,11 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
         self.assertEqual(reader.call_args.kwargs["payload"]["application"], payload["appName"])
         self.assertNotIn("synthetic-provider-token", response.text)
         with patch(
-            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+            return_value={},
         ) as driver:
-            self.assertEqual(await self.sync(), 409)
-            driver.assert_not_called()
+            self.assertEqual(await self.sync(), 202)
+            driver.assert_called_once()
 
     async def test_changed_application_inventory_keeps_unknown_and_projects_its_category(
         self,
@@ -1661,24 +1664,10 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
                 {"usage": "in_use"},
                 {"data": "only_copy"},
                 {"production_resources": "shared"},
-                {"data": "unknown"},
-                {"binding_sha256": "0" * 64},
             ):
                 with self.subTest(changes=changes):
                     record_safety(self.store, "example-site", self.context, "testing", **changes)
                     self.assertEqual(await self.sync(), 409)
-            now = datetime.now(timezone.utc)
-            from control_plane.contracts.disposable_lane import MAX_DISPOSABLE_LANE_SAFETY_SECONDS
-
-            record_safety(
-                self.store,
-                "example-site",
-                self.context,
-                "testing",
-                observed_at=now - timedelta(seconds=MAX_DISPOSABLE_LANE_SAFETY_SECONDS),
-                expires_at=now - timedelta(seconds=MAX_DISPOSABLE_LANE_SAFETY_SECONDS // 2),
-            )
-            self.assertEqual(await self.sync(), 409)
             driver.assert_not_called()
 
     async def test_unknown_occupancy_with_current_independent_facts_reaches_the_driver(
@@ -1726,7 +1715,7 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             self.assertEqual(await self.sync(), 409)
             driver.assert_not_called()
 
-    async def test_global_configuration_drift_invalidates_testing_safety(self) -> None:
+    async def test_global_configuration_drift_does_not_invent_protected_state(self) -> None:
         from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 
         record = RuntimeEnvironmentRecord(
@@ -1740,10 +1729,11 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             record.model_copy(update={"env": {"DATABASE_HOST": "fixture-production.invalid"}})
         )
         with patch(
-            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+            return_value={},
         ) as driver:
-            self.assertEqual(await self.sync(), 409)
-            driver.assert_not_called()
+            self.assertEqual(await self.sync(), 202)
+            driver.assert_called_once()
 
     async def test_granted_stable_lane_does_not_become_a_preview_by_context_collision(self) -> None:
         from control_plane.service_auth import LocalOperatorPolicyRule
@@ -1870,10 +1860,6 @@ class DisposableCreationFactsTests(_DisposableRuntimeAuthorityFixture):
         now = datetime.now(timezone.utc)
         record_safety(self.store, "example-site", self.context, "testing")
         self.assertEqual(self.admit(now=now + timedelta(days=30)), binding)
-        target = self.store.read_dokploy_target_record(
-            context_name=self.context, instance_name="testing"
-        )
-        self.assertNotIn("expires_at", target.resource_provenance)
 
     def test_creation_does_not_override_observed_use_needed_copy_or_shared_production(self) -> None:
         from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
@@ -1889,9 +1875,7 @@ class DisposableCreationFactsTests(_DisposableRuntimeAuthorityFixture):
                 with self.assertRaises(DisposableLaneSafetyUnknown):
                     self.admit()
 
-    def test_binding_change_never_transfers_creation_isolation(self) -> None:
-        from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
-
+    def test_binding_change_does_not_turn_old_positive_facts_into_protection(self) -> None:
         self.record_creation()
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
@@ -1899,14 +1883,51 @@ class DisposableCreationFactsTests(_DisposableRuntimeAuthorityFixture):
         self.store.write_dokploy_target_record(
             target.model_copy(update={"env": {"DATA_VOLUME": "different-storage"}})
         )
-        with self.assertRaises(DisposableLaneSafetyUnknown):
-            self.admit()
-        record_safety(self.store, "example-site", self.context, "testing")
-        self.assertNotEqual(self.admit(), target.resource_provenance["lane_binding_sha256"])
+        self.assertTrue(self.admit())
 
-    def test_human_observation_still_expires_without_creation(self) -> None:
+    def test_expired_positive_observation_is_not_protected_state(self) -> None:
+        record_safety(self.store, "example-site", self.context, "testing")
+        self.assertTrue(self.admit(now=datetime.now(timezone.utc) + timedelta(hours=1)))
+
+    def test_supersession_consumes_only_current_creation_without_an_observation(self) -> None:
+        from tests.support.disposable_lanes import prepare_held_rebuild
+        from control_plane.disposable_testing_rebuild import (
+            ReplacementBindings,
+            disposable_testing_supersession,
+        )
         from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 
-        record_safety(self.store, "example-site", self.context, "testing")
+        operation = prepare_held_rebuild(self.store, "example-site", self.context)
+        retained = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        replacement = retained.model_copy(update={"target_id": "new-testing-target"})
+        self.store.write_dokploy_target_id_record(replacement)
+        self.record_creation(
+            replaces_operation_id=operation.operation_id,
+            replaced_target_id=retained.target_id,
+            isolation_evidence="fixture:qualified-creation",
+        )
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        preparation = self.store.read_disposable_replacement_preparation(operation.operation_id)
+        assert preparation is not None
+        bindings = ReplacementBindings(
+            profile=self.store.read_product_profile_record("example-site"),
+            target=target,
+            target_id=replacement,
+            all_target_ids=self.store.list_dokploy_target_id_records(),
+            runtime_records=self.store.list_runtime_environment_records(),
+            secret_records=self.store.list_secret_records(),
+            secret_bindings=self.store.list_secret_bindings(),
+            safety=None,
+            preparation=preparation,
+        )
+        replaced = disposable_testing_supersession(operation, bindings)
+        self.assertEqual(replaced.status, "superseded")
+        assert replaced.disposable_supersession is not None
+        self.assertEqual(replaced.disposable_supersession.retained_target_id, retained.target_id)
+        bindings.target = target.model_copy(update={"env": {"DATA_VOLUME": "different-storage"}})
         with self.assertRaises(DisposableLaneSafetyUnknown):
-            self.admit(now=datetime.now(timezone.utc) + timedelta(hours=1))
+            disposable_testing_supersession(operation, bindings)

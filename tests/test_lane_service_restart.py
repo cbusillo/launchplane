@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from contextlib import closing
 from collections.abc import Callable, Iterator
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from dataclasses import replace
 from functools import cache
 import json
@@ -779,18 +779,10 @@ class ServiceRestartTests(unittest.TestCase):
             policy_runtime=LaunchplaneAuthzPolicyRuntime(LaunchplaneAuthzPolicy())
         )
         self.review()
-        now = datetime.now(timezone.utc)
         unsafe_facts: tuple[dict[str, object], ...] = (
             {"usage": "in_use"},
             {"data": "only_copy"},
-            {"data": "unknown"},
             {"production_resources": "shared"},
-            {"production_resources": "unknown"},
-            {"binding_sha256": "0" * 64},
-            {
-                "observed_at": now - timedelta(minutes=2),
-                "expires_at": now - timedelta(minutes=1),
-            },
         )
         for index, changes in enumerate(unsafe_facts):
             with self.subTest(changes=changes):

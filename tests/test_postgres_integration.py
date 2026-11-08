@@ -12388,6 +12388,28 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteSc
 
     def test_fresh_bootstrap_supersedes_only_old_fence_and_queues_once(self) -> None:
         self.scenario("normal")
+        from control_plane.disposable_lanes import require_disposable_lane
+
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(
+                self.profile.product,
+                self.fixture.context,
+                "testing",
+            )
+        )
+        target = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        assert target.resource_provenance is not None
+        self.assertEqual(
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                instance="testing",
+            ),
+            target.resource_provenance.lane_binding_sha256,
+        )
 
     def test_first_execution_result_keeps_intent_binding_and_original_bootstrap_receipt(
         self,

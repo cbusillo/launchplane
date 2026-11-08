@@ -189,6 +189,7 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
             ),
             "fixture",
         )
+        self.resource_adapter = resource_adapter
         resource_adapter.publish(self.resources, "fixture-schedule")
         self.store.write_runtime_environment_record(
             RuntimeEnvironmentRecord(
@@ -1106,12 +1107,33 @@ class TestingCreationFactTests(FreshTestingBootstrapScenario):
         self.seed("")
 
     def test_resource_writer_retains_nonexpiring_separation_on_target(self) -> None:
-        target = self.store.read_dokploy_target_record(
-            context_name=self.fixture.context, instance_name="testing"
+        self.resource_adapter.publish(self.resources, "fixture-schedule")
+        from control_plane.disposable_lanes import (
+            require_disposable_lane,
+            DisposableLaneSafetyUnknown,
         )
-        self.assertEqual(target.resource_provenance["production_resources"], "separation_ready")
-        self.assertEqual(target.resource_provenance["data"], "reproducible")
-        self.assertNotIn("expires_at", target.resource_provenance)
+        from datetime import timezone
+
+        future = datetime.now(timezone.utc) + timedelta(days=30)
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                instance="testing",
+                now=future,
+            )
+        self.assertTrue(
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                instance="testing",
+                separation_only=True,
+                now=future,
+            )
+        )
+
         self.assertIsNone(
             self.store.read_disposable_lane_safety(
                 self.profile.product, self.fixture.context, "testing"
@@ -1139,11 +1161,15 @@ class TestingCreationFactTests(FreshTestingBootstrapScenario):
             ),
         ):
             self.adapter()._publish_creation(created, "retained-target")
-        target = self.store.read_dokploy_target_record(
-            context_name=self.fixture.context, instance_name="testing"
+        from control_plane.disposable_lanes import require_disposable_lane
+        from datetime import timezone
+
+        self.assertTrue(
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=self.fixture.context,
+                instance="testing",
+                now=datetime.now(timezone.utc) + timedelta(days=30),
+            )
         )
-        self.assertEqual(
-            target.resource_provenance["created_by"], "service:fresh-testing-bootstrap"
-        )
-        self.assertEqual(target.resource_provenance["production_resources"], "isolated")
-        self.assertNotIn("expires_at", target.resource_provenance)

@@ -1,11 +1,11 @@
 """Lane eligibility is separate from identity and from historical recovery proof."""
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from control_plane.contracts.disposable_lane import DisposableLaneCreation, DisposableLaneSafety
+from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -163,18 +163,32 @@ def resolve_disposable_observation_binding(
     context: str,
     instance: str,
     preview_id: str = "",
-    preview: PreviewRecord | None = None,
 ) -> DisposableLaneObservationBinding:
     """Use the same exact lane and binding for inspection and evidence writes."""
     profile = store.read_product_profile_record(product)
+    preview = None
     if preview_id:
-        preview = preview or resolve_disposable_preview(store, profile, context, instance)
+        preview = resolve_disposable_preview(store, profile, context, instance)
         if preview.preview_id != preview_id:
             raise ValueError("Observation does not match the owned preview.")
     elif instance != "testing" or not any(
         (lane.context, lane.instance) == (context, instance) for lane in profile.lanes
     ):
         raise ValueError("Observation requires an exact owned testing lane.")
+    return read_disposable_lane_binding(
+        store, profile=profile, context=context, instance=instance, preview=preview
+    )
+
+
+def read_disposable_lane_binding(
+    store: DisposableLaneStore,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    context: str,
+    instance: str,
+    preview: PreviewRecord | None = None,
+    preview_lifecycle: bool = True,
+) -> DisposableLaneObservationBinding:
     try:
         target = store.read_dokploy_target_record(context_name=context, instance_name=instance)
     except FileNotFoundError:
@@ -196,6 +210,7 @@ def resolve_disposable_observation_binding(
             target_id,
             preview,
             disposable_lane_configuration(store, context, instance),
+            preview_lifecycle=preview_lifecycle,
         ),
     )
 
@@ -326,6 +341,41 @@ def require_disposable_lane(
         now=now,
         runtime_stopped=runtime_stopped,
     )
+    binding = disposable_lane_binding_sha256(
+        profile, target, target_id, preview, disposable_lane_configuration(store, context, instance)
+    )
+    creation_binding = (
+        disposable_lane_binding_sha256(
+            profile,
+            target,
+            target_id,
+            preview,
+            disposable_lane_configuration(store, context, instance),
+            preview_lifecycle=False,
+        )
+        if preview
+        else binding
+    )
+    facts = (
+        evidence,
+        *(
+            fact
+            for fact in (
+                target.resource_provenance if target else None,
+                preview.resource_provenance if preview else None,
+            )
+            if fact is not None
+            and (
+                fact.lane_binding_sha256 == creation_binding
+                or fact.data == "only_copy"
+                or fact.production_resources == "shared"
+            )
+        ),
+    )
+    protected_resources = any(
+        fact is not None and fact.production_resources in {"shared", "separation_ready"}
+        for fact in facts
+    )
     down_recovery = (
         recovery and not (preview_operation or retirement) and usage.reason == "verified_down"
     )
@@ -334,9 +384,7 @@ def require_disposable_lane(
             raise DisposableLaneSafetyUnknown(
                 "Existing-container recovery requires an owned testing lane."
             )
-        if usage.protected or (
-            evidence is not None and evidence.production_resources in {"shared", "separation_ready"}
-        ):
+        if usage.protected or protected_resources:
             raise DisposableLaneSafetyUnknown(
                 "Recovery is held by use, needed data or shared production resources."
             )
@@ -350,7 +398,7 @@ def require_disposable_lane(
             and preview.state not in {"active", "destroyed"}
         ):
             raise DisposableLaneSafetyUnknown("The preview lifecycle does not admit a refresh.")
-        require_unprotected_preview(target, evidence)
+        require_unprotected_preview(target, evidence, preview)
         binding = disposable_lane_binding_sha256(
             profile,
             target,
@@ -365,10 +413,10 @@ def require_disposable_lane(
         # Retirement stops an owned application; it neither starts a lane nor
         # needs a recipe for reproducing disposable output. Known exceptions
         # remain holds, including old observations: expiry cannot erase them.
-        if evidence is not None and (
+        if (
             usage.protected
-            or evidence.data == "only_copy"
-            or evidence.production_resources in {"shared", "separation_ready"}
+            or protected_resources
+            or any(fact is not None and fact.data == "only_copy" for fact in facts)
         ):
             raise DisposableLaneSafetyUnknown(
                 "Retirement is held by recorded usage, needed data or shared resources."
@@ -393,57 +441,19 @@ def require_disposable_lane(
             preview,
             disposable_lane_configuration(store, context, instance),
         )
-    binding = disposable_lane_binding_sha256(
-        profile, target, target_id, preview, disposable_lane_configuration(store, context, instance)
-    )
-    allowed_resources = {"isolated", "separation_ready"} if separation_only else {"isolated"}
-    if (
-        usage.protected
-        or evidence is not None
+    if usage.protected or any(
+        fact is not None
         and (
-            evidence.data == "only_copy"
-            or evidence.production_resources in {"shared", "separation_ready"} - allowed_resources
+            fact.data == "only_copy"
+            or fact.production_resources == "shared"
+            or fact.production_resources == "separation_ready"
+            and not separation_only
         )
+        for fact in facts
     ):
         raise DisposableLaneSafetyUnknown(
             "The lane is in use, holds needed data or shares production resources."
         )
-    provenance = (
-        preview.resource_provenance if preview else target.resource_provenance if target else {}
-    )
-    creation = DisposableLaneCreation.model_validate(provenance) if provenance else None
-    if creation is not None and creation.lane_binding_sha256 == binding:
-        if (
-            creation.data != "reproducible"
-            or creation.production_resources not in allowed_resources
-        ):
-            raise DisposableLaneSafetyUnknown(
-                "Service creation did not qualify disposable resources."
-            )
-    elif evidence is not None:
-        if evidence.observer_kind != "director_agent":
-            raise DisposableLaneSafetyUnknown(
-                "Historical observations cannot qualify lane mutations."
-            )
-        current_time = now or datetime.now(timezone.utc)
-        if not evidence.observed_at <= current_time < evidence.expires_at:
-            raise DisposableLaneSafetyUnknown(
-                "Disposable lane safety evidence is stale or not yet valid."
-            )
-        if evidence.binding_sha256 != binding:
-            raise DisposableLaneSafetyUnknown(
-                "Disposable lane bindings changed after the safety observation."
-            )
-        if (
-            evidence.data != "reproducible"
-            and not down_recovery
-            or evidence.production_resources not in allowed_resources
-        ):
-            raise DisposableLaneSafetyUnknown(
-                "Recorded lane data or production isolation is unqualified."
-            )
-    elif creation is not None:
-        raise DisposableLaneSafetyUnknown("Lane bindings changed after service creation.")
     if rehearsal_binding and binding != rehearsal_binding:
         raise DisposableLaneSafetyUnknown("The rehearsal's original lane binding changed.")
     return binding
@@ -542,14 +552,27 @@ def require_disposable_preview_operation(
 
 
 def require_unprotected_preview(
-    target: DokployTargetRecord | None, evidence: DisposableLaneSafety | None
+    target: DokployTargetRecord | None,
+    evidence: DisposableLaneSafety | None,
+    preview: PreviewRecord | None = None,
 ) -> None:
-    if (target is not None and target.policies.staff_testing_hold is not None) or (
-        evidence is not None
-        and (
-            evidence.current_usage() == "in_use"
-            or evidence.data == "only_copy"
-            or evidence.production_resources in {"shared", "separation_ready"}
+    facts = (
+        evidence,
+        target.resource_provenance if target else None,
+        preview.resource_provenance if preview else None,
+    )
+    if (
+        target is not None
+        and target.policies.staff_testing_hold is not None
+        or evidence is not None
+        and evidence.current_usage() == "in_use"
+        or any(
+            fact is not None
+            and (
+                fact.data == "only_copy"
+                or fact.production_resources in {"shared", "separation_ready"}
+            )
+            for fact in facts
         )
     ):
         raise DisposableLaneSafetyUnknown("The preview has a recorded protected use or resource.")

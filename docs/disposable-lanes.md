@@ -2262,12 +2262,15 @@ expiry and do not assert that nobody is using a lane now. The testing resource
 writer records `separation_ready`; bootstrap records `isolated` after qualification.
 These writers no longer create five-minute occupancy observations.
 
-The disposable reader uses matching creation facts, independently checks current
-use and preserves observed needed copies and shared production resources. A
-binding change cannot transfer old isolation proof. Human observations retain
-their bounded expiry; older stored records remain readable, without backfill.
-An absent earlier observation alone proves neither safety nor protected state
-and does not refuse an otherwise owned lane. Actual staff holds, needed copies,
+The disposable reader uses current matching creation facts and independently
+preserves observed use, needed copies and shared production resources. A
+binding change cannot transfer old isolation proof into testing supersession.
+Human observations retain their bounded expiry for qualification; an expired,
+unknown or nonmatching positive observation is not protected state. Older
+stored records remain readable without backfill. Missing earlier observations
+prove neither safety nor protected state and do not refuse an otherwise owned
+lane. Supersession still needs current qualified evidence of its captured
+retained target because that earlier target and its needed custody exist. Actual staff holds, needed copies,
 shared production resources, ownership and backup gates still apply. A plan is
 never evidence that those checks passed. Generation-scoped usage and preview
 plan/admission alignment remain separate from this creation-fact contract.
@@ -2292,7 +2295,7 @@ No service-scoped setup grant is needed. Observed protected state still stops st
 
 Inspect the new binding. Service-created facts on that lane name the retained
 operation and target; a current human observation can requalify a changed
-binding, with its normal expiry. The service derives
+binding for supersession, with its normal expiry. The service derives
 `replaced_target_id` from its preparation; a caller cannot invent it. The worker acquires the old
 operation's execution lock, locks the lane, operation and current bindings,
 and atomically records `superseded` only when the new target differs and the

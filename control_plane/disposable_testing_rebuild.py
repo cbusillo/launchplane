@@ -8,7 +8,6 @@ if TYPE_CHECKING:
     from control_plane.testing_never_served import NeverServedRecords
 
 from control_plane.contracts.disposable_lane import (
-    DisposableLaneCreation,
     DisposableLaneSafety,
     DisposableTestingReplacementPreparation,
     DisposableTestingSupersession,
@@ -131,14 +130,24 @@ def disposable_testing_supersession(
         instance=operation.instance,
         usage_store=usage_store,
     )
-    creation = (
-        DisposableLaneCreation.model_validate(bindings.target.resource_provenance)
-        if bindings.target.resource_provenance
-        else None
-    )
+    creation = bindings.target.resource_provenance
     evidence = creation if creation and creation.lane_binding_sha256 == binding else bindings.safety
-    if evidence is None:
-        raise DisposableLaneSafetyUnknown("Replacement requires service-captured target identity.")
+    if (
+        evidence is None
+        or evidence.data != "reproducible"
+        or evidence.production_resources != "isolated"
+    ):
+        raise DisposableLaneSafetyUnknown(
+            "Replacement requires qualified service-captured target identity."
+        )
+    if isinstance(evidence, DisposableLaneSafety) and (
+        evidence.binding_sha256 != binding
+        or evidence.observer_kind != "director_agent"
+        or not evidence.observed_at <= datetime.now(timezone.utc) < evidence.expires_at
+    ):
+        raise DisposableLaneSafetyUnknown(
+            "Replacement observation does not qualify the current binding."
+        )
     preparation = bindings.preparation
     if (
         preparation.operation_id,
@@ -165,11 +174,7 @@ def disposable_testing_supersession(
             "Replacement evidence identifies a different retained target."
         )
     supersession = DisposableTestingSupersession(
-        binding_sha256=(
-            evidence.lane_binding_sha256
-            if isinstance(evidence, DisposableLaneCreation)
-            else evidence.binding_sha256
-        ),
+        binding_sha256=binding,
         retained_target_id=evidence.replaced_target_id,
         replacement_target_id=bindings.target_id.target_id,
         evidence_reference=evidence.isolation_evidence,

@@ -5,6 +5,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.disposable_lane_creation import (
+    DisposableLaneCreation as DisposableLaneCreation,
+)
 
 
 ODOO_PREVIEW_RESOURCES_OK_MARKER = "preview_resources_ok"
@@ -17,22 +20,6 @@ TESTING_REPLACEMENT_BOOTSTRAP_ROUTE = "/v1/products/{product}/testing-replacemen
 TESTING_PUBLIC_INGRESS_ROUTE = "/v1/products/{product}/testing-public-ingress"
 TESTING_PRIVATE_INGRESS_ROUTE = "/v1/products/{product}/testing-private-ingress"
 TESTING_VERIFICATION_ROUTE = "/v1/products/{product}/testing-verification"
-
-
-class DisposableLaneCreation(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    created_by: Literal[
-        "service:fresh-testing-bootstrap",
-        "service:testing-replacement-resources",
-        "service:odoo-preview",
-    ]
-    lane_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    replaces_operation_id: str = ""
-    replaced_target_id: str = ""
-    isolation_evidence: str = ""
-    data: Literal["reproducible", "only_copy", "unknown"]
-    production_resources: Literal["isolated", "separation_ready", "shared", "unknown"]
 
 
 class DisposableLaneSafety(BaseModel):
