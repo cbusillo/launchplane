@@ -22,6 +22,12 @@ from control_plane.disposable_lane_collection import merge_collected_safety
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_restore import read_current_testing_generation
+from control_plane.odoo_walkthrough import (
+    WalkthroughPrerequisite,
+    WalkthroughPrerequisiteError,
+    plan_walkthrough,
+    read_walkthrough_prerequisites,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.test_odoo_testing_restore import generation
@@ -189,6 +195,7 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
         )
         self.store.read_product_profile_record.return_value = self.profile
         self.store.list_product_profile_records.return_value = (self.profile,)
+        self.store.list_preview_records.return_value = ()
         self.store.read_dokploy_target_record.return_value = self.target
         self.store.read_dokploy_target_id_record.return_value = DokployTargetIdRecord(
             context=self.generation.context,
@@ -253,12 +260,6 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
     def _assert_held_prerequisite_read(self) -> None:
         from control_plane.copy_readback_diagnostics import ReadbackPredicate
         from control_plane.dokploy.native_copy_stream import NativeProgramFailed
-        from control_plane.odoo_walkthrough import (
-            WalkthroughPrerequisite,
-            WalkthroughPrerequisiteError,
-            plan_walkthrough,
-            read_walkthrough_prerequisites,
-        )
         from control_plane.contracts.odoo_walkthrough import OdooWalkthroughRequest
         from control_plane.contracts.runtime_identity import RuntimeIdentity
         from control_plane.odoo_runtime_reads import OdooRuntimeSelection
