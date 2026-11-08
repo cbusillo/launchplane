@@ -132,46 +132,18 @@ until the Director explicitly approves host changes. VeriReel production must
 not be used as a runner-baseline test surface without explicit Director
 permission.
 
-## Control Planning
+For host provisioning and replacement, use the existing private
+[infrastructure runbook](https://github.com/cbusillo/shiny-infra-ops/blob/main/docs/infrastructure/remote-build-host.md).
+Do not copy host-level Docker credentials. Before routing a replacement onto a
+shared or ops-gate lane, require passing baseline evidence and an accepted hygiene
+dry run with the configured retained images. Keep the prior settings recoverable
+and the old host available until a scheduled dry run succeeds; rollback restores
+that routing and configuration through their supported paths.
 
-Runner control starts with a dry-run plan, not a host mutation. The typed
-contract in `control_plane.contracts.runner_lane_control` requires all of these
-before a plan can become ready:
-
-- the repository allow-list is non-empty and explicitly opts the repository into
-  runner control
-- the requested action is enabled by policy
-- mutate mode is explicitly requested
-- the lane baseline is ready
-- existing lanes carry the managed label, defaulting to `launchplane-managed`
-- busy drain, restart, or removal requests include explicit drain confirmation
-
-The planner does not create, drain, restart, or remove a runner. It only returns
-structured blockers and next steps so a later host adapter can be reviewed
-against a stable policy boundary. Repository values are canonicalized to
-`owner/name` before comparing policy, request, and inventory records, and a
-matching lane name must resolve to exactly one inventory record before the plan
-can target it.
-
-To build the first read-only control plan from saved inventory and baseline
-evidence, run:
-
-```bash
-uv run launchplane runner-control-plan \
-  --action restart \
-  --repository owner/name \
-  --lane-name launchplane-runner-1 \
-  --allow-restart \
-  --allowed-repository owner/name \
-  --inventory-file runner-inventory.json \
-  --baseline-readiness-file runner-baseline.json
-```
-
-The command does not contact GitHub and does not mutate hosts. It only evaluates
-the typed runner-control policy and request against the supplied inventory and
-baseline readiness JSON. `--mutate` records the admin's explicit mutation
-intent in the request so the planner can tell whether a future host adapter would
-be allowed to proceed, but this CLI command itself remains a dry-run surface.
+The local `runner-control-plan` command evaluates saved inventory and baseline
+readiness without contacting GitHub or mutating hosts. Its `--mutate` flag
+records intent only. Use the lifecycle executors below for supported registration
+and retirement.
 
 ## Existing-runner relabel
 
@@ -280,12 +252,38 @@ terminal service audit cannot be delivered after mutation, the executor returns
 `audit_delivery_pending` and embeds the complete terminal audit in the uploaded
 workflow result so the job fails visibly without discarding the outcome record.
 
+All lifecycle roots must be scoped absolute paths rather than bare `/` and
+reject explicit parent-directory (`..`)
+components. Benign `.` components, duplicate separators, and trailing separators
+remain supported when the normalized path stays scoped. Malformed roots fail
+model validation before a planned audit is written.
+
+Before creating an absent registration root, registration proves its nearest
+existing ancestor is a directory whose exact canonical path matches the approved
+lexical path. Symlinked ancestors, including dangling links, are refused before
+directory creation can follow them. The resulting root and new runner directory
+must be directories, non-symlinks, exactly canonical, owned by the requested
+service user, and within the approved root. Existing runner entries, including
+dangling symlinks, are refused rather than adopted or overwritten. Valid absent
+roots remain supported without privileged ownership changes.
+
+Registration validates the target without filesystem writes before acquiring its
+short-lived GitHub token, then repeats that validation before creating directories.
+A token-acquisition failure therefore leaves an absent root and lane absent, so
+the next dispatch can retry. Registration repeats the shared registration/retirement
+identity checks before and after extraction, before configuration, before service
+start, and before completed audit publication. It extracts and
+configures from a verified physical working directory. A detected path change
+fails the operation; these boundary checks are not a guarantee against arbitrary
+concurrent filesystem replacement. Failed command evidence redacts the known
+registration token before truncating or persisting it. File-backed lifecycle
+audits use bounded ASCII filenames below the filesystem component limit, retain
+ordinary short-key filename identity, and preserve the original audit key in the
+record. PostgreSQL key semantics are unchanged.
+
 Existing-lane adoption, remove/recreate, generic service restarts, and automatic
-scaling remain future maintainer capabilities. The earlier proof path briefly
-started `run.sh` from inside the GitHub Actions job, but that can produce
-transient online evidence and leave the runner offline after job cleanup. That
-shortcut remains disabled; the runner must be supervised outside the Actions
-job process tree.
+scaling are not supported by these executors. The runner must be supervised
+outside the Actions job process tree.
 
 The manual workflow defaults `registration_root` to `auto`, which resolves to
 `LAUNCHPLANE_RUNNER_REGISTRATION_ALLOWED_ROOT` when configured, otherwise to
@@ -300,8 +298,8 @@ The service uses one repository-scoped token per call and revokes it afterward.
 Local rehearsal mode still accepts an explicitly supplied fixture token; service
 audit mode always uses Launchplane and has no GitHub-token fallback.
 
-This executor is the proving-ground adapter for #1231. Mutating runs require a
-`runner_package_url` workflow input (passed as `--runner-package-url`) that
+Mutating registrations require a `runner_package_url` workflow input
+(passed as `--runner-package-url`) that
 points to an `actions/runner` release tarball on GitHub, plus a preinstalled
 `launchplane-runner@.service` template and a narrow sudo rule or equivalent
 root helper for `systemctl enable --now` and `systemctl is-active` on that
@@ -396,30 +394,3 @@ launchplane-runner-hygiene ALL=(root) NOPASSWD: NOSETENV: /usr/local/sbin/launch
 Validate the helper, target file, and candidate sudoers policy before the
 mutating lifecycle dispatch. Remove a completed one-time target binding after
 post-retirement verification so stale host authority does not accumulate.
-
-## Supervised Runner Maintainer Plan
-
-The durable runner maintainer grows from the create-only executor into full
-desired-state reconciliation. It must keep reconciling runner state rather than
-starting a transient runner process:
-
-1. Read GitHub runner inventory and local service state for the requested lane.
-2. If registration is required, request a short-lived GitHub registration token
-   and run `config.sh` under an approved registration root.
-3. Install or update a persistent supervisor outside the GitHub Actions job
-   process tree. Prefer a root-owned systemd unit such as
-   `launchplane-runner@<lane>.service` with `User=<service_user>`, an approved
-   `WorkingDirectory`, `ExecStart=<runner-dir>/bin/runsvc.sh`, and
-   `Restart=always`.
-4. Use a small validated root helper or narrow sudo rule for the privileged
-   systemd verbs. Do not grant arbitrary `systemctl`, file-write, or shell
-   authority.
-5. Mark the audit completed only after the service is enabled and active, the
-   process runs as the expected service user, GitHub inventory shows the lane
-   online with expected labels, and baseline readiness passes.
-
-The offline `cm-website-chris-testing` proof runner was removed from GitHub
-inventory after demonstrating why transient process supervision is not
-acceptable. Future cm-website proof runs should first produce a maintainer
-dry-run that decides whether to adopt, remove, or recreate any existing runner
-record, then apply only through the supervised maintainer path.
