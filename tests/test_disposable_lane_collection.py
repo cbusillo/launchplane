@@ -512,6 +512,52 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
 
 
 class CurrentGenerationUsageAgreementTests(_DisposableRuntimeAuthorityFixture):
+    def test_initial_generation_still_protects_current_use_without_creation_history(self) -> None:
+        from control_plane import odoo_testing_usage
+        from control_plane.dokploy import api, source
+        from control_plane.testing_initial_generation import require_testing_generation_usage
+
+        profile = self.store.read_product_profile_record("example-site").model_copy(
+            update={"driver_id": "odoo"}
+        )
+        self.store.write_product_profile_record(profile)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        identity = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        with (
+            patch.object(
+                source, "read_dokploy_config", return_value=("https://provider.invalid", "fixture")
+            ),
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={
+                    "name": target.target_name,
+                    "appName": "fixture",
+                    "serverId": "fixture",
+                },
+            ),
+            patch.object(
+                odoo_testing_usage,
+                "_read_remote",
+                side_effect=lambda **kw: kw["receive"](
+                    {"type": "complete", "recent_signins": True, "authenticated_sessions": False}
+                ),
+            ),
+            self.assertRaisesRegex(ValueError, "Original testing use is protected"),
+        ):
+            require_testing_generation_usage(
+                Path(self.temporary.name),
+                self.store,
+                profile.product,
+                self.context,
+                target,
+                identity,
+            )
+
     async def test_isolation_hold_keeps_collection_inspection_and_admission_on_one_usage_answer(
         self,
     ) -> None:
@@ -611,6 +657,7 @@ class CurrentGenerationUsageAgreementTests(_DisposableRuntimeAuthorityFixture):
                         expected_binding_sha256=before.json()["result"]["binding_sha256"],
                     )
                     self.assertEqual(collected.status_code, 202, collected.text)
+                    probe.assert_called()
                     expected = "in_use" if purpose == "staff_testing" else usage
                     self.assertEqual(collected.json()["result"]["usage"], expected)
                     self.assertEqual(
@@ -619,6 +666,10 @@ class CurrentGenerationUsageAgreementTests(_DisposableRuntimeAuthorityFixture):
                     )
                     inspected = await self.observe()
                     self.assertEqual(inspected.json()["result"]["observation"]["usage"], expected)
+                    self.store.clear_disposable_lane_safety(
+                        profile.product, self.context, "testing"
+                    )
+                    probe.reset_mock()
                     if refusal:
                         with self.assertRaises(TestingRebuildRefused) as caught:
                             testing_rebuild_service.check_testing_rebuild_protection(
@@ -637,7 +688,8 @@ class CurrentGenerationUsageAgreementTests(_DisposableRuntimeAuthorityFixture):
                             intent,
                             actor="fixture-agent",
                         )
-                    self.assertEqual(probe.call_count, 1 if purpose == "staff_testing" else 2)
+                    if purpose == "isolation_staging":
+                        probe.assert_called()
                 self.assertEqual(
                     self.store.read_dokploy_target_record(
                         context_name=self.context, instance_name="testing"

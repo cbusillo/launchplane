@@ -28,6 +28,8 @@ from control_plane.odoo_testing_usage import (
     odoo_usage_container_program,
     credential_candidates,
 )
+from tests.test_odoo_testing_restore import generation as fixture_generation
+from sqlalchemy.exc import SQLAlchemyError
 
 
 def supported_odoo_argv(database: str = "testing_db") -> list[bytes]:
@@ -92,6 +94,15 @@ class SessionInventoryTests(unittest.TestCase):
         session.write_text(json.dumps({"db": "another_db", "uid": 2}))
         self.assertFalse(self.sessions())
         session.write_text(json.dumps({"db": "testing_db", "pre_uid": 2}))
+        self.assertTrue(self.sessions())
+
+    def test_current_generation_session_older_than_login_window_still_protects(self) -> None:
+        now = datetime.now(UTC)
+        self.namespace["GENERATION_CREATED_AT"] = (now - timedelta(days=3)).timestamp()
+        session = self.path / "session"
+        session.write_text(json.dumps({"db": "testing_db", "uid": 42}))
+        stamp = (now - timedelta(days=2)).timestamp()
+        os.utime(session, (stamp, stamp))
         self.assertTrue(self.sessions())
 
     def test_missing_corrupt_aliased_and_oversized_stores_cannot_mean_idle(self) -> None:
@@ -222,10 +233,7 @@ class SessionInventoryTests(unittest.TestCase):
             def execute_history(query: str, parameters: tuple[object, ...] = ()) -> None:
                 if query == "SET TRANSACTION READ ONLY":
                     return
-                translated = query.replace(
-                    "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - interval '24 hours'",
-                    "datetime('now', '-24 hours')",
-                ).replace("%s", "?")
+                translated = query.replace("%s", "?")
                 result = database.execute(translated, parameters)
                 cursor.fetchone.side_effect = lambda: (bool(result.fetchone()[0]),)
                 cursor.fetchall.side_effect = result.fetchall
@@ -501,14 +509,14 @@ class UsageReaderTests(unittest.TestCase):
         self.remote = self.enterContext(patch(module + "_read_remote"))
         self.store = Mock()
         self.store.find_testing_candidate_by_target.return_value = None
-        self.generation = SimpleNamespace(
-            product="fixture",
-            context="fixture",
-            instance="testing",
-            target_id=self.target_id.target_id,
-            namespace="fixture-project",
-            prepared_at=self.target.updated_at,
-            completed_at=(datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+        self.generation = fixture_generation().model_copy(
+            update={
+                "product": "fixture",
+                "context": "fixture",
+                "target_id": self.target_id.target_id,
+                "namespace": "fixture-project",
+                "prepared_at": self.target.updated_at,
+            }
         )
         self.store.read_fresh_odoo_testing_generation.return_value = self.generation
 
@@ -564,43 +572,39 @@ class UsageReaderTests(unittest.TestCase):
             ("target_id", "retired"),
             ("context", "retired"),
             ("namespace", "retired"),
-            ("completed_at", "invalid"),
-            ("completed_at", "2026-01-01T00:00:00"),
-            ("completed_at", (datetime.now(UTC) + timedelta(hours=1)).isoformat()),
+            ("prepared_at", "2026-01-01T00:00:00"),
+            ("prepared_at", (datetime.now(UTC) + timedelta(hours=1)).isoformat()),
         ):
             previous = getattr(self.generation, field)
             with self.subTest(field=field, value=value):
                 setattr(self.generation, field, value)
                 result = self.read()
-                self.assertEqual(
-                    (result.usage, result.reason_code),
-                    ("unknown", "generation_boundary_unavailable"),
-                )
+                self.assertEqual((result.usage, result.reason_code), ("unused", "complete"))
                 setattr(self.generation, field, previous)
         self.assertEqual(self.read().usage, "unused")
         captured_legacy: dict[str, Any] = {"__name__": "fixture"}
-        self.remote.side_effect = lambda **kw: (
-            exec(kw["payload"]["container_program"], captured_legacy),
-            kw["receive"](
+
+        def legacy_probe(**kwargs: Any) -> None:
+            exec(kwargs["payload"]["container_program"], captured_legacy)
+            kwargs["receive"](
                 {"type": "complete", "recent_signins": False, "authenticated_sessions": False}
-            ),
-        )
+            )
+
+        self.remote.side_effect = legacy_probe
         self.assertEqual(self.read().usage, "unused")
         self.assertEqual(
             captured_legacy["GENERATION_CREATED_AT"],
-            datetime.fromisoformat(self.generation.completed_at).timestamp(),
+            self.generation.created_at.timestamp(),
         )
         self.store.read_fresh_odoo_testing_generation.return_value = None
-        self.assertEqual(self.read().usage, "unknown")
+        self.assertEqual(self.read().usage, "unused")
         candidate = SimpleNamespace(
             product="fixture",
             context="fixture",
             compose_id=self.target_id.target_id,
             namespace="fixture-project",
             created_at=datetime.now(UTC) - timedelta(hours=1),
-            application=SimpleNamespace(
-                prepared=SimpleNamespace(observed_at=datetime.now(UTC) - timedelta(minutes=30))
-            ),
+            operation_id=self.generation.operation_id,
         )
         self.store.find_testing_candidate_by_target.return_value = candidate
         captured: dict[str, Any] = {"__name__": "fixture"}
@@ -615,16 +619,46 @@ class UsageReaderTests(unittest.TestCase):
         self.assertEqual(self.read().usage, "unused")
         self.assertEqual(
             captured["GENERATION_CREATED_AT"],
-            candidate.application.prepared.observed_at.timestamp(),
+            candidate.created_at.timestamp(),
         )
+        self.store.read_fresh_odoo_testing_generation.return_value = self.generation
+        self.assertEqual(self.read().usage, "unused")
+        candidate.operation_id = "different-original"
+        self.assertEqual(self.read().usage, "unused")
+        self.assertIsNone(captured["GENERATION_CREATED_AT"])
+        candidate.operation_id = self.generation.operation_id
 
         def changed(**kwargs: Any) -> None:
             probe(**kwargs)
-            candidate.application.prepared.observed_at += timedelta(seconds=1)
+            candidate.created_at += timedelta(seconds=1)
 
         self.remote.side_effect = changed
         result = self.read()
         self.assertEqual((result.usage, result.reason_code), ("unknown", "generation_changed"))
+
+    def test_missing_boundary_keeps_positive_current_use_and_store_failure_stays_unknown(
+        self,
+    ) -> None:
+        self.store.read_fresh_odoo_testing_generation.return_value = None
+        for recent, sessions in ((True, False), (False, True), (False, False)):
+            with self.subTest(recent=recent, sessions=sessions):
+                self.remote.side_effect = lambda **kw: kw["receive"](
+                    {
+                        "type": "complete",
+                        "recent_signins": recent,
+                        "authenticated_sessions": sessions,
+                    }
+                )
+                self.assertEqual(self.read().usage, "in_use" if recent or sessions else "unused")
+        self.remote.reset_mock()
+        self.store.read_fresh_odoo_testing_generation.side_effect = SQLAlchemyError(
+            "private fixture store"
+        )
+        result = self.read()
+        self.assertEqual(
+            (result.usage, result.reason_code), ("unknown", "generation_boundary_unavailable")
+        )
+        self.remote.assert_not_called()
 
     def test_missing_generation_preserves_probe_failure_without_inventing_unused(self) -> None:
         self.store.read_fresh_odoo_testing_generation.return_value = None

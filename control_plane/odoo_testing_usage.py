@@ -10,6 +10,7 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 import click
+from sqlalchemy.exc import SQLAlchemyError
 from websockets.exceptions import WebSocketException
 
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
@@ -126,7 +127,7 @@ class OdooTestingUsage:
 # session-store get/save/GC, account names, tokens or session IDs leave it.
 ODOO_USAGE_CONTAINER_PROGRAM_TEMPLATE = r"""
 import argparse, configparser, json, logging, os, re, stat
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 EXPECTED_INSTANCE=__EXPECTED_INSTANCE__
 GENERATION_CREATED_AT=__GENERATION_CREATED_AT__
 from pathlib import Path
@@ -256,8 +257,6 @@ def probe():
     # custom command or another config cannot qualify this read.
     if not all(serving_configured(p,options,database) for p in odoo_processes):
         raise UsageUnavailable('serving_configuration_mismatch')
-    if EXPECTED_INSTANCE=='testing' and GENERATION_CREATED_AT is None:
-        raise UsageUnavailable('generation_boundary_unavailable')
     evidence={}
     session_use=read_sessions(data_dir/'sessions',database,evidence)
     checkpoint='database_connection_unavailable'
@@ -271,15 +270,17 @@ def probe():
         checkpoint='login_history_unavailable'
         with connection.cursor() as cursor:
             cursor.execute('SET TRANSACTION READ ONLY')
-            generation_filter=' AND create_date >= %s' if GENERATION_CREATED_AT is not None else ''
-            parameters=(datetime.fromtimestamp(GENERATION_CREATED_AT,timezone.utc).replace(tzinfo=None).isoformat(sep=' '),) if GENERATION_CREATED_AT is not None else ()
-            cursor.execute("SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - interval '24 hours'"+generation_filter+")",parameters)
+            since=datetime.now(timezone.utc)-timedelta(hours=24)
+            if GENERATION_CREATED_AT is not None:
+                since=max(since,datetime.fromtimestamp(GENERATION_CREATED_AT,timezone.utc))
+            parameters=(since.replace(tzinfo=None).isoformat(sep=' '),)
+            cursor.execute("SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= %s)",parameters)
             recent=cursor.fetchone()[0]
             if type(recent) is not bool:
                 raise UsageUnavailable('login_history_unavailable')
             if recent:
                 try:
-                    cursor.execute("SELECT create_uid, min(create_date) FROM res_users_log WHERE create_date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - interval '24 hours'"+generation_filter+" GROUP BY create_uid ORDER BY create_uid LIMIT 256",parameters)
+                    cursor.execute("SELECT create_uid, min(create_date) FROM res_users_log WHERE create_date >= %s GROUP BY create_uid ORDER BY create_uid LIMIT 256",parameters)
                     for user,since in cursor.fetchall():
                         if type(user) is int and user>0:
                             evidence.setdefault('actors',set()).add('odoo-user:'+str(user))
@@ -583,11 +584,12 @@ def testing_usage_generation_created_at(
             target_id.target_id,
         ) or not candidate_compose_project_matches(candidate.namespace, project):
             return None
-        if candidate.application is None or candidate.application.prepared is None:
-            return None
-        created = candidate.application.prepared.observed_at
+        created = candidate.created_at
     elif generation is not None:
-        created = datetime.fromisoformat(generation.completed_at)
+        try:
+            created = generation.created_at
+        except ValueError:
+            return None
     else:
         return None
     return created if created.utcoffset() is not None and created <= datetime.now(UTC) else None
@@ -696,8 +698,6 @@ def read_odoo_testing_usage(
                         return OdooTestingUsage(reason_code="serving_history_present")
                     return OdooTestingUsage(reason_code=reason, never_served_candidate=True)
                 return OdooTestingUsage(reason_code=reason)
-        if preview_spec is None and generation_created_at is None:
-            return OdooTestingUsage(reason_code="generation_boundary_unavailable")
         if (
             len(frames) != 1
             or set(frames[0]) - {"actors", "since"}
@@ -772,5 +772,6 @@ def read_odoo_testing_usage(
         AttributeError,
         WebSocketException,
         click.ClickException,
+        SQLAlchemyError,
     ):
         return OdooTestingUsage(reason_code=checkpoint)

@@ -532,7 +532,7 @@ def _walkthrough_preflight(
                     )
                 target_id = generation.target_id
                 copy_binding = generation_binding(generation)
-                usage_since = generation.prepared_at
+                usage_since = generation.created_at.isoformat()
                 receiver_generation = generation.model_dump(mode="json")
             elif publication is not None:
                 candidate = publication.plan.candidate

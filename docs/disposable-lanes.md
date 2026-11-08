@@ -627,12 +627,15 @@ running web container's configured filesystem session store. The preceding
 24 hours count for interactive and `authenticate()` logins on every account,
 including administrator and portal accounts, bounded below by the current
 generation's creation boundary. Native copies use their candidate's immutable
-private-readiness `observed_at`, before public cutover; earlier restored copies
-use the existing generation's `completed_at`. Allocation and preparation start
-before copying history and cannot supply that boundary.
+`created_at`; restored generations use their existing `prepared_at` creation
+fact. Completion and later readiness timestamps cannot erase real use that
+started earlier. Copy history newer than creation remains conservative use
+evidence because it cannot be distinguished from a person's activity there.
 The product, context, target and provider compose project must
 match that custody, which is rechecked after the probe. A missing or mismatched
-boundary reports UNKNOWN, without adding a positive-unused admission requirement.
+boundary retains the existing live login/session read, without inventing a
+cutoff or adding a positive-unused admission requirement. A failed generation
+lookup reports UNKNOWN with its actual failure code.
 Authenticated or partially authenticated session files count when their modification
 time is at or after that boundary. Restored earlier login/session history stays
 intact and does not establish current use. Current sessions remain protective
