@@ -14,6 +14,7 @@ from control_plane.contracts.odoo_prod_promotion_operation import (
     ODOO_CUTOVER_RECONCILIATION_DELAY,
 )
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_cutover import OdooCutoverRecord
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane, OdooSlotCoordinates
@@ -146,6 +147,110 @@ class OdooCutoverActivationTests(unittest.TestCase):
             )
             store.write_product_profile_record(lane)
             with self.assertRaisesRegex(ValueError, "persisted cutover"):
+                resolve_profile_cutover_plan(store, **arguments)
+
+    def test_first_cutover_adopts_the_tracked_legacy_serving_project_as_its_old_slot(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            store = self.store(temporary)
+            provider = IsolatedCutoverProvider(Path(temporary) / "fixture")
+            self.addCleanup(provider.engine.dispose)
+            pair = provider.cutover
+            config = OdooCutoverLane(
+                route_id=pair.route_id,
+                host=pair.host,
+                database=pair.old.binding.database,
+                database_uuid=pair.old.runtime_identity.database_uuid,
+                prepared_origin="http://prepared:8080",
+                slots=(
+                    OdooSlotCoordinates(
+                        **pair.new.model_dump(include={"slot_id", "compose_id", "private_url"})
+                    ),
+                    OdooSlotCoordinates(
+                        **pair.old.model_dump(include={"slot_id", "compose_id", "private_url"})
+                    ),
+                ),
+                writers=pair.writers,
+            )
+            profile = _odoo_preview_profile_payload()
+            profile["lanes"] = [
+                {
+                    "context": "fixture",
+                    "instance": "isolated",
+                    "base_url": "http://fixture.invalid",
+                    "health_url": "http://fixture.invalid/launchplane/health",
+                    "odoo_cutover": config.model_dump(mode="json"),
+                }
+            ]
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile)
+            )
+            for artifact in (pair.production, pair.candidate):
+                store.write_artifact_manifest(artifact)
+            store.write_release_tuple_record(
+                ReleaseTupleRecord(
+                    tuple_id="previous",
+                    context="fixture",
+                    channel="isolated",
+                    artifact_id=pair.production.artifact_id,
+                    repo_shas={"example/fixture": pair.production.source_commit},
+                    provenance="ship",
+                    minted_at=datetime.now(UTC).isoformat(),
+                )
+            )
+            legacy = pair.old.runtime_identity.model_copy(
+                update={"slot": "", "release_id": "", "image_digest": "", "database_uuid": ""}
+            )
+            store.write_environment_inventory(
+                EnvironmentInventory(
+                    context="fixture",
+                    instance="isolated",
+                    source_git_ref=pair.production.source_commit,
+                    deploy=DeploymentEvidence(
+                        status="pass",
+                        deploy_mode="dokploy-compose-api",
+                        target_type="compose",
+                        target_name="fixture",
+                    ),
+                    runtime_identity=legacy,
+                    updated_at=datetime.now(UTC).isoformat(),
+                    deployment_record_id="previous",
+                )
+            )
+            arguments = dict(
+                product="odoo-tenant-cm",
+                context="fixture",
+                instance="isolated",
+                artifact_id=pair.candidate.artifact_id,
+                release_id="accepted-operation",
+            )
+            with self.assertRaisesRegex(ValueError, "serving"):
+                resolve_profile_cutover_plan(store, **arguments)
+            store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context="fixture",
+                    instance="isolated",
+                    target_id=pair.old.compose_id,
+                    updated_at=datetime.now(UTC).isoformat(),
+                )
+            )
+            plan = resolve_profile_cutover_plan(store, **arguments)
+            assert plan is not None
+            self.assertEqual(plan.old.compose_id, pair.old.compose_id)
+            self.assertEqual(plan.old.runtime_identity, legacy)
+            self.assertEqual(plan.new.compose_id, pair.new.compose_id)
+            self.assertEqual(plan.database_uuid, config.database_uuid)
+            store.write_environment_inventory(
+                store.read_environment_inventory(
+                    context_name="fixture", instance_name="isolated"
+                ).model_copy(
+                    update={
+                        "runtime_identity": legacy.model_copy(update={"database_uuid": "other"})
+                    }
+                )
+            )
+            with self.assertRaises(ValueError):
                 resolve_profile_cutover_plan(store, **arguments)
 
     def test_native_forward_reconciliation_is_exclusive_charged_and_retains_phase_history(

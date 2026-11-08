@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.dokploy_target_record import DokployTargetType
+from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
 from control_plane.contracts.product_profile_record import (
     ProductOdooLaneDataPolicy,
     ProductOdooPrelaunchRebuildPolicy,
@@ -34,6 +35,7 @@ class ProductOnboardingLaneManifest(BaseModel):
     health_monitoring: ProductLaneHealthMonitoringPolicy = Field(
         default_factory=ProductLaneHealthMonitoringPolicy
     )
+    odoo_cutover: OdooCutoverLane | None = None
 
     @model_validator(mode="after")
     def _validate_lane(self) -> "ProductOnboardingLaneManifest":

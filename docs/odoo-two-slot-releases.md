@@ -125,7 +125,15 @@ data or overwriting later business writes.
 
 ## Records, retries and activation
 
-Product re-onboarding preserves the exact matching lane's `odoo_cutover` record.
+A lane's `odoo_cutover` record is written through the protected onboarding
+manifest; re-onboarding without one preserves the exact matching lane's record.
+The first cutover on a lane whose serving inventory still carries a legacy
+runtime identity, with no slot, release, image digest or database UUID, adopts
+the configured slot whose Compose project is the lane's tracked target. Its old
+slot keeps that legacy identity, so the serving container's own identity still
+matches exactly; the lane record's database UUID is proven by native old-slot
+readiness against the selected database. A partial identity, an untracked or
+ambiguous target, or a different artifact refuses.
 Stable target replacement reports `two_slot_cutover_required` for a configured
 two-slot lane or a recorded serving slot, including when configuration has been
 removed. It cannot recreate that lane's serving project. Use the accepted
