@@ -1848,6 +1848,21 @@ class DisposableCreationFactsTests(_DisposableRuntimeAuthorityFixture):
     def test_no_earlier_observation_is_not_protected_state(self) -> None:
         self.assertTrue(self.admit())
 
+    def test_legacy_service_staging_without_creation_still_protects_resources(self) -> None:
+        from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
+
+        record_safety(
+            self.store,
+            "example-site",
+            self.context,
+            "testing",
+            observed_by="service:testing-replacement-resources",
+            production_resources="separation_ready",
+            isolation_evidence="service:testing-resources:qualified",
+        )
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            self.admit()
+
     def test_creation_does_not_override_observed_use_needed_copy_or_shared_production(self) -> None:
         from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 

@@ -2596,12 +2596,20 @@ ENV_OVERRIDE_DISABLE_CRON = true
 """.strip(),
             )
             store = FilesystemRecordStore(state_dir=state_dir)
+            from control_plane.contracts.disposable_lane_creation import DisposableLaneCreation
+
+            creation = DisposableLaneCreation(
+                created_by="service:odoo-preview",
+                lane_binding_sha256="a" * 64,
+                data="reproducible",
+                production_resources="isolated",
+            )
             store.write_preview_record(
                 _preview_record(
                     preview_id="hpr_legacy",
                     created_at="2026-04-10T10:00:00Z",
                     updated_at="2026-04-10T10:00:00Z",
-                )
+                ).model_copy(update={"resource_provenance": creation})
             )
             input_file = control_plane_root / "preview-update-request.json"
             input_file.write_text(
@@ -2639,6 +2647,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(record.created_at, "2026-04-10T10:00:00Z")
             self.assertEqual(record.updated_at, "2026-04-13T12:30:00Z")
             self.assertEqual(record.state, "paused")
+            self.assertEqual(record.resource_provenance, creation)
 
     def test_launchplane_previews_write_preview_fails_closed_when_base_url_missing(self) -> None:
         runner = CliRunner()
