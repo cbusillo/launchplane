@@ -1208,5 +1208,225 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
         )
 
 
+class OdooPreviewConditionalPlanTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        from tests.test_director_bounded_writes import DirectorBoundedWritesFixture
+
+        self.fixture = DirectorBoundedWritesFixture(self, record_source_history=False)
+        self.fixture.prepare_destroyed_preview_creation()
+        self.candidate = _issued_plan(OdooPreviewApplyEnvelope.model_validate(self.fixture.payload))
+
+    async def plan(self, key: str) -> dict[str, object]:
+        with (
+            patch.object(
+                preview_http, "_build_odoo_preview_apply_inputs", return_value=self.candidate
+            ),
+            patch("control_plane.http_app.prepare_odoo_preview_apply_operation") as prepare,
+            patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute,
+        ):
+            response = await self.fixture.post(
+                "/v1/drivers/odoo/preview-apply-inputs",
+                {
+                    "product": self.fixture.profile.product,
+                    "inputs": self.candidate.plan_request.model_dump(mode="json"),
+                },
+                key,
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        prepare.assert_not_called()
+        execute.assert_not_called()
+        return cast(dict[str, object], response.json()["result"])
+
+    async def test_protected_preview_plan_keeps_conditional_steps_while_apply_refuses(self) -> None:
+        for facts in (
+            {"usage": "in_use"},
+            {"data": "only_copy"},
+            {"production_resources": "shared"},
+            {"production_resources": "separation_ready"},
+        ):
+            with self.subTest(facts=facts):
+                self.fixture.safety(**facts)
+                before = self.fixture.store.read_disposable_lane_safety(
+                    self.fixture.profile.product,
+                    self.candidate.context,
+                    self.candidate.preview_slug,
+                )
+                result = await self.plan("conditional-" + next(iter(facts)))
+                self.assertEqual(result["status"], "blocked")
+                self.assertTrue(result["blockers"])
+                self.assertEqual(
+                    result["steps"], [item.name for item in self.candidate.dry_run_plan.operations]
+                )
+                self.assertIsNone(result["plan_provenance"])
+                self.assertEqual(
+                    self.fixture.store.read_disposable_lane_safety(
+                        self.fixture.profile.product,
+                        self.candidate.context,
+                        self.candidate.preview_slug,
+                    ),
+                    before,
+                )
+                self.assertEqual(
+                    self.fixture.store.read_preview_record(self.fixture.preview.preview_id),
+                    self.fixture.preview,
+                )
+                with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+                    response = await self.fixture.preview_apply()
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], "disposable_lane_safety_unknown")
+                self.assertEqual(
+                    response.json()["error"]["message"],
+                    cast(list[dict[str, object]], result["blockers"])[0]["message"],
+                )
+                execute.assert_not_called()
+
+    async def test_staff_hold_is_a_concrete_plan_blocker(self) -> None:
+        from control_plane.contracts.dokploy_target_record import (
+            DokployTargetRecord,
+            DokployTargetPolicies,
+            DokployTargetStaffTestingHold,
+        )
+
+        self.fixture.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context=self.candidate.context,
+                instance=self.candidate.preview_slug,
+                updated_at=self.fixture.profile.updated_at,
+                policies=DokployTargetPolicies(
+                    staff_testing_hold=DokployTargetStaffTestingHold(
+                        reason="Staff are reviewing the preview"
+                    )
+                ),
+            )
+        )
+        result = await self.plan("held-preview")
+        self.assertEqual(result["status"], "blocked")
+        self.assertTrue(result["blockers"])
+        self.assertTrue(result["steps"])
+
+    async def test_unrecorded_recipient_cannot_use_another_lane_slug(self) -> None:
+        from sqlalchemy import delete
+        from control_plane.storage.postgres import (
+            LaunchplanePreviewRow,
+            LaunchplanePreviewGenerationRow,
+        )
+
+        with self.fixture.store._session_factory() as session:
+            session.execute(delete(LaunchplanePreviewGenerationRow))
+            session.execute(delete(LaunchplanePreviewRow))
+            session.commit()
+        self.candidate = self.candidate.model_copy(deep=True)
+        self.candidate.preview_slug = "unowned-recipient"
+        result = await self.plan("unowned-first-recipient")
+        self.assertEqual(result["status"], "blocked")
+        self.assertTrue(result["blockers"])
+
+    async def test_creation_facts_keep_only_copy_and_production_protection(self) -> None:
+        from control_plane.contracts.disposable_lane_creation import DisposableLaneCreation
+        from control_plane.disposable_lanes import read_disposable_lane_binding
+
+        binding = read_disposable_lane_binding(
+            self.fixture.store,
+            profile=self.fixture.profile,
+            context=self.candidate.context,
+            instance=self.candidate.preview_slug,
+            preview=self.fixture.preview,
+        )
+        for facts in (
+            {"data": "only_copy", "production_resources": "isolated"},
+            {"data": "reproducible", "production_resources": "shared"},
+        ):
+            with self.subTest(facts=facts):
+                preview = self.fixture.preview.model_copy(
+                    update={
+                        "resource_provenance": DisposableLaneCreation.model_validate(
+                            {
+                                "created_by": "service:odoo-preview",
+                                "lane_binding_sha256": binding.binding_sha256,
+                                **facts,
+                            }
+                        )
+                    }
+                )
+                self.fixture.store.write_preview_record(preview)
+                result = await self.plan("protected-creation-" + facts["data"])
+                self.assertEqual(result["status"], "blocked")
+                self.assertTrue(result["blockers"])
+                self.assertEqual(
+                    self.fixture.store.read_preview_record(preview.preview_id), preview
+                )
+                self.assertIsNone(
+                    self.fixture.store.read_disposable_lane_safety(
+                        self.fixture.profile.product,
+                        self.candidate.context,
+                        self.candidate.preview_slug,
+                    )
+                )
+
+    async def test_missing_lifecycle_allows_first_service_creation_without_invented_facts(
+        self,
+    ) -> None:
+        from sqlalchemy import delete
+        from control_plane.storage.postgres import (
+            LaunchplanePreviewRow,
+            LaunchplanePreviewGenerationRow,
+        )
+
+        with self.fixture.store._session_factory() as session:
+            session.execute(delete(LaunchplanePreviewGenerationRow))
+            session.execute(delete(LaunchplanePreviewRow))
+            session.commit()
+        result = await self.plan("first-service-creation")
+        self.assertEqual(result["status"], "ready")
+        self.assertFalse(result["blockers"])
+        self.assertTrue(result["steps"])
+        self.assertEqual(self.fixture.store.list_preview_records(), ())
+        self.assertIsNone(
+            self.fixture.store.read_disposable_lane_safety(
+                self.fixture.profile.product, self.candidate.context, self.candidate.preview_slug
+            )
+        )
+        with patch(
+            "control_plane.http_app.execute_odoo_preview_apply_result",
+            return_value={
+                "status": "pass",
+                "operation": "refresh",
+                "product": self.fixture.profile.product,
+                "repository": self.fixture.profile.repository,
+                "preview_slug": self.candidate.preview_slug,
+                "preview_url": self.candidate.preview_url,
+                "compose_id": "first-recipient",
+                "compose_name": self.candidate.dry_run_plan.compose_name,
+                "domain_host": self.candidate.dry_run_plan.domain_host,
+            },
+        ) as execute:
+            response = await self.fixture.preview_apply()
+        self.assertEqual(response.status_code, 202, response.text)
+        execute.assert_called_once()
+
+    async def test_production_alias_blocks_plan_without_dispatch(self) -> None:
+        from control_plane.contracts.deploy_target import ProviderTargetRecord
+
+        candidate = self.candidate.model_copy(deep=True)
+        candidate.dry_run_plan.compose_ref = "production-compose"
+        self.candidate = candidate
+        self.fixture.store.write_provider_target_record(
+            ProviderTargetRecord(
+                context=candidate.context,
+                instance="prod",
+                display_name="production",
+                provider_id="dokploy",
+                target_category="application",
+                provider_target_type="compose",
+                target_id=candidate.dry_run_plan.compose_ref,
+                updated_at=self.fixture.profile.updated_at,
+            )
+        )
+        result = await self.plan("production-alias")
+        self.assertEqual(result["status"], "blocked")
+        self.assertTrue(result["blockers"])
+        self.assertTrue(result["steps"])
+
+
 if __name__ == "__main__":
     unittest.main()

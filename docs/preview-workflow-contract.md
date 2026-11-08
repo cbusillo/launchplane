@@ -275,6 +275,23 @@ replanning into another effect. Blocked apply-inputs responses have no apply
 provenance and are not persisted as issued plans, so a later retry can
 re-evaluate recovered dependencies.
 
+Preview apply-inputs runs the same disposable-preview admission rule as HTTP
+apply and event reconciliation. A recorded hold, current human use, needed copy,
+production resource sharing, or target ownership conflict returns HTTP 202 with
+`status: blocked` and concrete `blockers`. `steps` retains the operation names
+from the proposed dry-run plan so the response explains the conditional work.
+The nested runtime and Dokploy plans describe routing; their readiness alone
+does not authorize apply. A blocked response has no apply provenance. Planning
+does not prepare an executor, capture native state, allocate resources, or run
+an operational checkpoint. Apply still rechecks current protection and returns
+409 on a safety conflict, including protection recorded after plan issuance.
+
+First service creation uses the same rule on both callers: absent preview history
+does not refuse a refresh that creates an unbound recipient. No usage, data, or
+isolation observation is invented. Existing lifecycle and creation facts retain
+their protections; a retained target or original operation still needs its own
+current ownership, custody and execution checks.
+
 Odoo destroy observation treats a missing provider lookup as inconclusive until
 two complete, bounded compose inventories agree that neither the original ID
 nor a replacement with its name exists, and the exact compose's domain list is

@@ -17,6 +17,11 @@ from control_plane import live_target_runtime as control_plane_live_target_runti
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import runtime_platform_credentials
 from control_plane.preview_source import PreviewSourceDecision
+from control_plane.disposable_lanes import (
+    DisposableLaneSafetyUnknown,
+    DisposablePreviewOperationStore,
+    require_disposable_preview_operation,
+)
 
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot, preview_snapshot
 from control_plane.odoo_testing_restore import preflight_fresh_testing_intent
@@ -103,6 +108,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewDokployApplyRequest,
     OdooPreviewDokployApplyResult,
     OdooPreviewDokployDryRunPlan,
+    OdooPreviewDokployDryRunBlocker,
     build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
     observe_odoo_preview_dokploy_apply,
@@ -213,13 +219,33 @@ def build_odoo_preview_apply_inputs_result(
     request: OdooPreviewApplyInputsRequest,
     database_url: str | None,
 ) -> dict[str, object]:
-    return _build_odoo_preview_apply_inputs(
+    result = _build_odoo_preview_apply_inputs(
         control_plane_root=control_plane_root,
         record_store=record_store,
         profile=profile,
         request=request,
         database_url=database_url,
-    ).model_dump(mode="json")
+    )
+    try:
+        require_disposable_preview_operation(
+            cast(DisposablePreviewOperationStore, record_store),
+            profile=profile,
+            issued_plan=result,
+        )
+    except (DisposableLaneSafetyUnknown, FileNotFoundError, ValueError) as error:
+        result = result.model_copy(
+            update={
+                "status": "blocked",
+                "plan_provenance": None,
+                "blockers": (
+                    OdooPreviewDokployDryRunBlocker(
+                        code="disposable_lane_safety_unknown", message=str(error)
+                    ),
+                ),
+                "error_message": str(error),
+            }
+        )
+    return result.model_dump(mode="json")
 
 
 def _build_odoo_preview_apply_inputs(

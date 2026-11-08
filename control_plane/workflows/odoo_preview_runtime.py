@@ -88,6 +88,7 @@ _IMMUTABLE_IMAGE_REFERENCE_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[A-Za-z0-9._-]+$"
 )
 OdooPreviewDokployDryRunBlockerCode = Literal[
+    "disposable_lane_safety_unknown",
     "endpoint_path_missing",
     "environment_id_missing",
     "preview_url_invalid",
@@ -238,6 +239,8 @@ class OdooPreviewApplyInputsResult(BaseModel):
     runtime_plan: OdooPreviewRuntimePlan
     dry_run_plan: OdooPreviewDokployDryRunPlan
     plan_provenance: OdooPreviewApplyPlanProvenance | None = None
+    blockers: tuple[OdooPreviewDokployDryRunBlocker, ...] = ()
+    steps: tuple[OdooPreviewDokployOperationName, ...] = ()
     # Template-lane integration credentials the preview receives blank because no
     # key-safety rule allows them on previews. Key names only, never values.
     omitted_integration_credential_keys: tuple[str, ...] = ()
@@ -256,6 +259,7 @@ class OdooPreviewApplyInputsResult(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_result(self) -> "OdooPreviewApplyInputsResult":
+        self.steps = tuple(operation.name for operation in self.dry_run_plan.operations)
         self.omitted_integration_credential_keys = tuple(
             sorted(set(self.omitted_integration_credential_keys))
         )
@@ -284,6 +288,8 @@ class OdooPreviewApplyInputsResult(BaseModel):
             raise ValueError("Odoo preview apply inputs result requires matching dry-run operation")
         if self.status == "blocked" and self.plan_provenance is not None:
             raise ValueError("Blocked Odoo preview plans cannot include apply provenance")
+        if self.status == "ready" and self.blockers:
+            raise ValueError("Ready Odoo preview plans cannot include safety blockers")
         self.error_message = self.error_message.strip()
         return self
 
