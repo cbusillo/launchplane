@@ -166,6 +166,11 @@ class EphemeralAddonRunnerTests(unittest.TestCase):
         self.assertTrue(result["container_removed"])
         self.assertTrue(result["registration_removed"])
         self.assertEqual(self.client.retired, [71])
+        created = next(args for args, _ in self.calls if args[1] == "create")
+        self.assertIn("--cgroupns=private", created)
+        stopped = next(index for index, (args, _) in enumerate(self.calls) if args[1] == "stop")
+        removed = next(index for index, (args, _) in enumerate(self.calls) if args[1] == "rm")
+        self.assertLess(stopped, removed)
         removal = next(args for args, _ in self.calls if args[1] == "rm")
         self.assertEqual(removal[-1], self.container_id)
         arguments = " ".join(argument for args, _ in self.calls for argument in args)
@@ -179,6 +184,34 @@ class EphemeralAddonRunnerTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertTrue(result["container_removed"])
         self.assertTrue(result["registration_removed"])
+
+    def test_failed_startup_preserves_redacted_diagnostics_and_cleans_without_settlement_polling(
+        self,
+    ) -> None:
+        def failed_start(
+            container_id: str, token: str, _registered: Receipt
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                ["docker", "start", container_id], 3, "", f"fixture refused {token}"
+            )
+
+        with patch(
+            "control_plane.workflows.runner_lane_ephemeral.time.sleep",
+            side_effect=AssertionError("A failed startup does not need job-success settlement."),
+        ):
+            result = run_ephemeral_addon_job(
+                client=self.client,
+                request=self.request,
+                output=self.output,
+                command=self.command,
+                start_runner=failed_start,
+            )
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["container_removed"])
+        self.assertTrue(result["registration_removed"])
+        log = (self.output / "runner.log").read_text()
+        self.assertIn("fixture refused", log)
+        self.assertNotIn("synthetic-registration-value", log)
 
     def test_success_on_another_runner_does_not_prove_this_container_executed_the_job(self) -> None:
         self.client.job_runner_id = 99
@@ -237,6 +270,27 @@ class EphemeralAddonRunnerTests(unittest.TestCase):
 
 
 class NativeRunnerStreamTests(unittest.TestCase):
+    def test_startup_failure_retains_diagnostics_without_claiming_a_native_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            program = root / "docker"
+            program.write_text(
+                f"#!{sys.executable}\nimport sys\n"
+                "sys.stdin.readline()\n"
+                "print('fixture registration refused', file=sys.stderr)\n"
+                "sys.exit(3)\n"
+            )
+            program.chmod(0o755)
+            with patch.dict(os.environ, {"PATH": f"{root}{os.pathsep}{os.environ['PATH']}"}):
+                result = _start_runner_process(
+                    "c" * 64,
+                    "synthetic-registration-value",
+                    lambda _: self.fail("No native identity was reported."),
+                    timeout_seconds=5,
+                )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("fixture registration refused", result.stderr)
+
     def test_native_identity_reaches_the_caller_before_the_listener_finishes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

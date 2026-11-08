@@ -72,19 +72,23 @@ Runner Lane Lifecycle workflow. Production image builds remain GitHub-hosted.
 The product owns its container recipe and test commands. Before queuing the
 addon job, its workflow uploads `addon-runner-recipe-{run_attempt}` containing
 exactly `Dockerfile`, `entrypoint.sh`, and `source-commit` (the run's head SHA).
+Failed-job retries can reuse the most recent verified recipe from an earlier
+attempt of that same immutable source/run; they still create a fresh container
+for the current job/attempt. The recipe contains source, never job state.
 The job requests `self-hosted` plus `lp-addon-{run_id}-{run_attempt}`; its name
 and commands belong to the product. Fork runs, public repositories,
-`pull_request_target`, old attempts, and mismatched recipe sources are refused.
+`pull_request_target`, old job attempts, and mismatched recipe sources are refused.
 
 The existing outbox worker scans queued addon jobs every minute. It uses the
 Runner Lifecycle App's existing repository-scoped Actions read permission to
-verify the job and artifact digest, then queues the retained lifecycle workflow
+verify the job source, then queues the retained lifecycle workflow
 once per job through the existing outbox. Its dispatch source comes from the
 existing exact lifecycle authorization rule; no second source binding or grant
 is needed. Missing or ambiguous authority remains unavailable. Existing outbox
 reconciliation rules apply to dispatches whose provider effect is uncertain.
 Dispatch observation matches the original job's unique workflow run title.
 The scan verifies job/source identity; only the executor downloads the recipe.
+The executor verifies its artifact digest and same-source identity before building.
 
 The scan observes outstanding launcher records even after the tenant run finishes.
 The existing outbox record projects terminal launcher failure into failed
@@ -102,7 +106,7 @@ dispatch failure, then cancel and **Re-run all jobs** on the tenant workflow.
 That explicit new workflow attempt has new job identities. Never delete the
 original outbox row, change its marker or blindly retry an unknown dispatch.
 
-The lifecycle executor builds the same-attempt recipe, creates one fresh
+The lifecycle executor builds the same-source recipe, creates one fresh
 container with private filesystem and Docker configuration, and supplies the
 short-lived registration token on standard input. The recipe must use native
 `config.sh --ephemeral`, report its native runner ID and ephemeral flag as its
@@ -110,11 +114,13 @@ first stdout JSON line, and start `run.sh`. The token must stay out of process
 arguments and listener environment. A successful listener exit alone does not
 prove the addon job passed: the executor reads the actual job conclusion.
 
-The container has its own Docker daemon and anonymous data volume, with no host
+The container has a private cgroup namespace, its own Docker daemon and anonymous
+data volume, with no host
 socket, source, credential, or cache mounts. It is privileged and therefore does
 not claim guest or host-administrator isolation. The executor limits its CPU,
 memory and processes. Container, registration and image identities are recorded
-before subsequent effects. Normal completion, failure and cancellation remove
+before subsequent effects. Cleanup requests a bounded graceful container stop,
+then confirms removal even if stopping fails. Normal completion, failure and cancellation remove
 the original container and its volumes, retire any remaining exact runner
 registration, and remove the recipe image. Cleanup failures remain failed,
 never inferred absent from a Docker error. The workflow's always-step can

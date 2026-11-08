@@ -75,6 +75,13 @@ class AddonJobReaderTests(unittest.TestCase):
         assert isinstance(recipe, dict)
         self.assertEqual(recipe["Dockerfile"], "FROM fixture")
 
+    def test_failed_job_retry_reuses_only_the_same_run_and_source_recipe(self) -> None:
+        self.artifact["name"] = f"{ADDON_RECIPE_ARTIFACT_PREFIX}1"
+        self.assertIn("recipe", self.read())
+        self.artifact["workflow_run"] = {"id": 12, "head_sha": "b" * 40}
+        with self.assertRaises(ValueError):
+            self.read()
+
     def test_rejects_forks_public_repositories_old_attempts_and_wrong_routing(
         self,
     ) -> None:

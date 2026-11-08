@@ -110,15 +110,20 @@ def read_addon_job(
     artifacts = transport.get_json(f"{root}/runs/{request.run_id}/artifacts?per_page=100")
     if not isinstance(artifacts, dict) or not isinstance(artifacts.get("artifacts"), list):
         raise ValueError("Addon recipe artifact inventory is unavailable.")
-    matches = [
-        artifact
-        for artifact in artifacts["artifacts"]
-        if isinstance(artifact, dict)
-        and artifact.get("name") == f"{ADDON_RECIPE_ARTIFACT_PREFIX}{request.run_attempt}"
-        and artifact.get("expired") is False
-    ]
+    candidates: list[tuple[int, dict[str, object]]] = []
+    for artifact in artifacts["artifacts"]:
+        if not isinstance(artifact, dict) or artifact.get("expired") is not False:
+            continue
+        name = artifact.get("name")
+        if not isinstance(name, str):
+            continue
+        match = re.fullmatch(rf"{ADDON_RECIPE_ARTIFACT_PREFIX}([1-9][0-9]*)", name)
+        if match and int(match[1]) <= request.run_attempt:
+            candidates.append((int(match[1]), artifact))
+    latest = max((attempt for attempt, _ in candidates), default=0)
+    matches = [artifact for attempt, artifact in candidates if attempt == latest]
     if len(matches) != 1:
-        raise ValueError("The current attempt's addon runner recipe is unavailable.")
+        raise ValueError("The exact-source addon runner recipe is unavailable.")
     artifact = matches[0]
     origin = artifact.get("workflow_run")
     artifact_id = artifact.get("id")
@@ -211,6 +216,7 @@ def run_ephemeral_addon_job(
                     "create",
                     "--interactive",
                     "--privileged",
+                    "--cgroupns=private",
                     "--cpus",
                     "8",
                     "--memory",
@@ -267,7 +273,9 @@ def run_ephemeral_addon_job(
             observed = client.read_addon_job(request)
             deadline = time.monotonic() + 30
             while (
-                observed.get("status") in {"queued", "in_progress"} and time.monotonic() < deadline
+                started.returncode == 0
+                and observed.get("status") in {"queued", "in_progress"}
+                and time.monotonic() < deadline
             ):
                 time.sleep(1)
                 observed = client.read_addon_job(request)
@@ -308,6 +316,7 @@ def _start_runner_process(
         with subprocess.Popen(
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors
         ) as process:
+            prefix = b""
             try:
                 assert process.stdin is not None and process.stdout is not None
                 process.stdin.write((token + "\n").encode())
@@ -315,7 +324,6 @@ def _start_runner_process(
                 process.stdin = None
                 descriptor = process.stdout.fileno()
                 os.set_blocking(descriptor, False)
-                prefix = b""
                 deadline = started + min(180, timeout_seconds)
                 with selectors.DefaultSelector() as selector:
                     selector.register(descriptor, selectors.EVENT_READ)
@@ -346,8 +354,21 @@ def _start_runner_process(
                     (prefix + stdout).decode(errors="replace"),
                     errors.read().decode(errors="replace"),
                 )
+            except (ValueError, TimeoutError, subprocess.TimeoutExpired) as error:
+                if process.poll() is None:
+                    process.kill()
+                stdout, _ = process.communicate()
+                errors.seek(0)
+                return subprocess.CompletedProcess(
+                    args,
+                    process.returncode or 1,
+                    (prefix + stdout).decode(errors="replace"),
+                    errors.read().decode(errors="replace")
+                    + f"\nRunner process failed ({type(error).__name__}).\n",
+                )
             except BaseException:
-                process.kill()
+                if process.poll() is None:
+                    process.kill()
                 process.communicate()
                 raise
 
@@ -446,6 +467,10 @@ def _cleanup_ephemeral_addon_job(
                 )
                 if label.stdout.strip() != request.name:
                     raise ValueError("Original addon container ownership changed.")
+                try:
+                    _docker(command, ["stop", "--time", "5", container_id], timeout=10, check=False)
+                except (OSError, subprocess.SubprocessError):
+                    pass
                 _docker(command, ["rm", "--force", "--volumes", container_id])
             present = _docker(
                 command, ["container", "ls", "--all", "--quiet", "--filter", f"id={container_id}"]
