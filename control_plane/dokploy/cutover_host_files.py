@@ -109,6 +109,9 @@ elif spec['mode']=='publish':
             os.unlink(temporary); raise
         sync_directory(directory)
         print(json.dumps({'outcome':'published','sha256':sha256(read_owned(route))}))
+elif spec['mode']=='fence':
+    hold_lock(spec['lock'])
+    print(json.dumps({'outcome':'fenced' if advance_generation(spec['generation'],spec['expected_generation']) else 'predecessor_changed'}))
 else:
     raise ValueError('unknown route host mode')
 """
@@ -152,6 +155,7 @@ elif spec['mode']=='activate':
     hold_lock(spec['lock'])
     path=directory/'active.json'
     if not directory.is_dir() or path.is_symlink(): raise ValueError('prepared publication is unavailable')
+    if read_owned(directory/owned_name(spec['name'])) is None: raise ValueError('prepared publication has no staged bundle')
     if not advance_generation(spec['generation'],spec['expected_generation']): raise ValueError('prepared publication changed after admission')
     temporary=write_temporary(directory,spec['content'],'.active-','.pending')
     try: os.replace(temporary,path)
@@ -161,9 +165,8 @@ elif spec['mode']=='activate':
     print(json.dumps({'content':read_owned(path)}))
 elif spec['mode']=='prune':
     hold_lock(spec['lock'])
-    if read_generation(spec['generation'])!=spec['expected_generation']: raise ValueError('prepared publication changed during retention')
+    if not advance_generation(spec['generation'],spec['expected_generation']): raise ValueError('prepared publication changed during retention')
     if spec['deactivate'] is not None:
-        advance_generation(spec['generation'],spec['expected_generation'])
         if read_owned(directory/'active.json')!=spec['deactivate']: raise ValueError('prepared publication changed during retention')
         (directory/'active.json').unlink()
     for item in spec['remove']:
@@ -176,6 +179,11 @@ else:
     raise ValueError('unknown prepared host mode')
 """
 )
+
+
+def lane_fence(lock_directory: str, route_id: str) -> tuple[str, str]:
+    authority = f"{lock_directory.rstrip('/')}/{route_id}.cutover"
+    return authority + ".lock", authority + ".generation"
 
 
 def content_sha256(content: str) -> str:
@@ -203,9 +211,9 @@ class ProductHostFileRoute(TraefikFileRoute):
     ) -> None:
         super().__init__(target)
         self.reader, self.execute, self.guard = reader, execute, guard
-        authority = f"{lock_directory.rstrip('/')}/{target.route_id}.route"
-        self.lock, self.generation = authority + ".lock", authority + ".generation"
+        self.lock, self.generation = lane_fence(lock_directory, target.route_id)
         self.admitted: tuple[str, int] | None = None
+        self.replaced = False
 
     def _request(self, mode: str, **values: object) -> dict[str, Any]:
         return {
@@ -218,7 +226,22 @@ class ProductHostFileRoute(TraefikFileRoute):
 
     def publish(self, backend: str, *, expected: tuple[str, ...]) -> str:
         self.guard()
-        return super().publish(backend, expected=expected)
+        self.replaced = False
+        applied = super().publish(backend, expected=expected)
+        if not self.replaced:
+            self._fence_outstanding_commands()
+        return applied
+
+    def _fence_outstanding_commands(self) -> None:
+        if self.admitted is None:
+            raise ValueError("route authority was not read before its fence")
+        frame = run_host_program(
+            self.execute,
+            ROUTE_HOST_PROGRAM,
+            self._request("fence", lock=self.lock, expected_generation=self.admitted[1]),
+        )
+        if frame != {"outcome": "fenced"}:
+            raise ValueError("route authority changed; refusing a stale traffic switch")
 
     def verify_watch(self) -> None:
         frame = run_host_program(
@@ -262,6 +285,7 @@ class ProductHostFileRoute(TraefikFileRoute):
         )
         if frame != {"outcome": "published", "sha256": content_sha256(payload)}:
             raise ValueError("route authority changed; refusing a stale traffic switch")
+        self.replaced = True
 
     def _api(self, suffix: str) -> Any:
         url = self.target.api_url.rstrip("/") + suffix
@@ -299,8 +323,7 @@ class ProductHostPreparedSites:
     ) -> None:
         self.reader, self.execute = reader, execute
         self.volume, self.site = volume, site
-        authority = f"{lock_directory.rstrip('/')}/{site}.prepared"
-        self.lock, self.generation = authority + ".lock", authority + ".generation"
+        self.lock, self.generation = lane_fence(lock_directory, site)
 
     def _run(self, command: ContainerCommand, mode: str, **values: object) -> dict[str, Any]:
         request = {
@@ -340,7 +363,11 @@ class ProductHostPreparedSites:
         if parse_prepared_bundle(str(staged["content"]), pause_id) != site:
             raise ValueError("prepared bundle differs from its immutable pause")
         activated = self._run(
-            self.execute, "activate", content=json.dumps(pause_id), expected_generation=generation
+            self.execute,
+            "activate",
+            name=bundle_name(pause_id),
+            content=json.dumps(pause_id),
+            expected_generation=generation,
         )
         if parse_active_pause(str(activated["content"])) != pause_id:
             raise ValueError("prepared publication readback differs")

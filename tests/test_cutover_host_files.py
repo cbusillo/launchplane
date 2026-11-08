@@ -6,7 +6,12 @@ import unittest
 from unittest.mock import Mock
 
 from control_plane.dokploy.cutover_host_files import ProductHostFileRoute, ProductHostPreparedSites
-from control_plane.dokploy.prepared_host import PreparedSiteDirectory, prepared_directory_app
+from control_plane.dokploy.prepared_host import (
+    PreparedSiteDirectory,
+    bundle_name,
+    prepared_bundle_text,
+    prepared_directory_app,
+)
 from control_plane.dokploy.traefik_cutover import TraefikRouteTarget, route_payload
 from control_plane.prepared_public_site import prepare_public_site
 from tests.support.fake_product_host import FakeProductHost
@@ -86,6 +91,22 @@ class ProductHostRouteTests(unittest.TestCase):
             )
         self.assertEqual(self.route.observed_target(), OLD)
 
+    def test_delayed_switch_cannot_apply_after_a_no_op_recovery_publication(self) -> None:
+        delayed = ProductHostFileRoute(
+            self.target,
+            reader=self.host.read,
+            execute=self.host.execute,
+            lock_directory=str(self.host.authority),
+            guard=Mock(),
+        )
+        admitted = delayed._read_owned()
+        self.assertEqual(self.route.publish(OLD, expected=(NEW,)), OLD)
+        with self.assertRaisesRegex(ValueError, "stale traffic switch"):
+            delayed._replace_owned(
+                json.dumps(route_payload(self.target, NEW), sort_keys=True), admitted
+            )
+        self.assertEqual(self.route.observed_target(), OLD)
+
     def test_watch_proof_refuses_a_directory_the_proxy_does_not_watch(self) -> None:
         proxy = self.host.state["containers"]["dokploy-traefik"]
         original_mounts = proxy["Mounts"]
@@ -158,6 +179,7 @@ class ProductHostPreparedSitesTests(unittest.IsolatedAsyncioTestCase):
             sites._run(
                 sites.execute,
                 "activate",
+                name=bundle_name("original-operation"),
                 content=json.dumps("original-operation"),
                 expected_generation=admitted_generation,
             )
@@ -171,6 +193,27 @@ class ProductHostPreparedSitesTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(sites.active_pause(), "rollback-operation")
         self.assertEqual(sites.load("original-operation"), self.site)
+
+    async def test_delayed_activation_cannot_point_at_a_bundle_retention_removed(self) -> None:
+        sites = self.sites()
+        admitted_generation = int(sites._read_frame("active.json")["generation"])
+        sites._run(
+            sites.execute,
+            "stage",
+            name=bundle_name("aborted-operation"),
+            content=prepared_bundle_text(self.site, "aborted-operation"),
+        )
+        sites.prune({"aborted-operation": self.site}, protected=set(), serving_prepared=False)
+        with self.assertRaises(Exception):
+            sites._run(
+                sites.execute,
+                "activate",
+                name=bundle_name("aborted-operation"),
+                content=json.dumps("aborted-operation"),
+                expected_generation=admitted_generation,
+            )
+        with self.assertRaises(FileNotFoundError):
+            sites.active_pause()
 
     async def test_volume_outside_the_product_daemon_root_is_refused(self) -> None:
         self.host.state["volumes"][self.host.volume]["Mountpoint"] = str(self.host.authority)

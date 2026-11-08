@@ -425,9 +425,11 @@ container bind-mounts exactly that directory read-write, that its static file
 provider watches the mounted destination, and that host and container see the
 same directory device and inode. Publication takes a host lock in the authority
 directory, rechecks that mount, and replaces the file only when its current
-bytes and a host generation counter both still match what the worker read. Each
-replacement advances that generation, so a delayed or obsolete command refuses
-even after the route returns to identical bytes. Applied readback reads Traefik's API from inside that container. The
+bytes and the lane's host generation both still match what the worker read.
+Every route publication advances that generation, including one that finds the
+route already applied, and so do pause activation and retention, which share
+the same lane lock and generation. A delayed or obsolete command therefore
+refuses after any later decision, even when the route returns to identical bytes. Applied readback reads Traefik's API from inside that container. The
 initial file must already name the serving slot, and applied Traefik authority
 must agree with its single exact route. Missing mounts or file permissions are
 activation prerequisites. Changing live ingress access remains a Director stop
@@ -437,9 +439,8 @@ The lane's dedicated prepared-public volume lives on the product host's Docker
 daemon, beside the retained server that reads it. Equal volume names on another
 daemon never share these bytes. The host stages each immutable bundle into that
 volume's local mountpoint under the lane's route ID, never replacing an
-existing bundle, then atomically replaces the active-pause pointer. Pointer
-changes and retention use the same generation fence, so a delayed activation or
-prune cannot change a newer pause. It contains
+existing bundle, then atomically replaces the active-pause pointer after
+checking that its bundle is still staged. It contains
 only already-public immutable bundles and that pointer, not runtime records or
 credentials. Staging reads back every resource, its digest and original pause
 ID through the retained server before publishing the route. Another process can
