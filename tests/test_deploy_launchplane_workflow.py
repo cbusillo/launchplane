@@ -423,46 +423,39 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
         removed = cast(list[str], deploy.get("oauth_env_removals", []))
         self.assertTrue(retired.keys() <= set(removed))
 
-    def test_self_deploy_removes_unset_public_ingress_token_and_omitted_npmplus_env(
-        self,
-    ) -> None:
-        base = {
-            "BOOTSTRAP_SECRET_OPERATION": "preserve",
-            "DEPLOYMENT_MARKER": "deploy-marker",
-            "DEPLOY_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:" + ("b" * 64),
-            "IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
-        }
-        cases = (
-            ("", "false", ["LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"]),
-            ("public-ingress-token", "false", None),
-            (
-                "",
-                "true",
-                [
-                    "LAUNCHPLANE_NPMPLUS_BASE_URL",
-                    "LAUNCHPLANE_NPMPLUS_IDENTITY",
-                    "LAUNCHPLANE_NPMPLUS_SECRET",
-                    "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN",
-                ],
-            ),
+    def test_self_deploy_stops_npmplus_seeding_and_preserves_existing_rollback_copies(self) -> None:
+        from control_plane.npmplus import (
+            NPMPLUS_BASE_URL_ENV_KEY,
+            NPMPLUS_IDENTITY_ENV_KEY,
+            NPMPLUS_SECRET_ENV_KEY,
         )
-        for token, omit_npmplus, removals in cases:
-            with self.subTest(token=bool(token), omit_npmplus=omit_npmplus):
+
+        retired = dict.fromkeys(
+            (NPMPLUS_BASE_URL_ENV_KEY, NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY),
+            "synthetic-existing-copy",
+        )
+        for token in ("", "synthetic-alert-token"):
+            with self.subTest(alert_token=bool(token)):
                 payload = self._render(
                     "Render Launchplane self deploy request",
                     {
-                        **base,
+                        "BOOTSTRAP_SECRET_OPERATION": "preserve",
+                        "DEPLOYMENT_MARKER": "deploy-marker",
+                        "DEPLOY_IMAGE_REFERENCE": "ghcr.io/example/service@sha256:" + ("b" * 64),
+                        "IMAGE_REPOSITORY": "ghcr.io/example/service",
                         "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN": token,
-                        "OMIT_NPMPLUS_ENV": omit_npmplus,
+                        **retired,
                     },
                 )
                 deploy = cast(dict[str, object], payload["deploy"])
+                self.assertTrue(
+                    retired.keys().isdisjoint(cast(dict[str, str], deploy["oauth_env"]))
+                )
                 removed = set(cast(list[str], deploy.get("oauth_env_removals", [])))
-                self.assertTrue(set(removals or ()).issubset(removed))
-                if token:
-                    self.assertNotIn("LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN", removed)
-                if omit_npmplus == "false":
-                    self.assertNotIn("LAUNCHPLANE_NPMPLUS_SECRET", removed)
+                self.assertTrue(retired.keys().isdisjoint(removed))
+                self.assertEqual(
+                    "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN" in removed, not bool(token)
+                )
 
     def test_self_deploy_rejects_multiline_previous_image_reference(self) -> None:
         with TemporaryDirectory() as directory_name:

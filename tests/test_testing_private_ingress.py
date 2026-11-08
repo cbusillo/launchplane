@@ -211,7 +211,7 @@ class PrivateIngressFixture(unittest.IsolatedAsyncioTestCase):
         )
         self.factory = self.enterContext(
             patch(
-                "control_plane.http_routes.testing_private_ingress.build_npmplus_ingress_client_from_env",
+                "control_plane.http_routes.testing_private_ingress.build_npmplus_ingress_client_from_records",
                 return_value=self.client,
             )
         )
@@ -391,7 +391,7 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
         with patch.object(TestingPrivateIngressAdapter, "_desired", legacy_desired):
             original, _, _ = self.adapter()._snapshot()
         with patch(
-            "control_plane.workflows.ingress_provider.build_npmplus_ingress_client_from_env",
+            "control_plane.workflows.ingress_provider.build_npmplus_ingress_client_from_records",
             return_value=self.client,
         ):
             current, _, _ = private_ingress_snapshot(

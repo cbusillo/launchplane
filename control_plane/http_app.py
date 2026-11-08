@@ -4250,8 +4250,6 @@ def create_launchplane_fastapi_app(
                 return NpmplusIngressProvider(client=npmplus_ingress_client_factory())
 
             resolved_ingress_provider_factory = npmplus_ingress_provider_from_client_factory
-        else:
-            resolved_ingress_provider_factory = default_ingress_provider
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -23603,7 +23601,11 @@ def create_launchplane_fastapi_app(
         preflight_result: NpmplusIngressApplyResult | None = None
         guarded_instance_apply = False
         try:
-            ingress_provider = resolved_ingress_provider_factory()
+            ingress_provider = (
+                resolved_ingress_provider_factory()
+                if resolved_ingress_provider_factory is not None
+                else default_ingress_provider(record_store=record_store)
+            )
             if resolved_ingress_request.route.dns_challenge:
                 if (
                     instance_name
@@ -26066,7 +26068,11 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
         )
         try:
-            ingress_provider = resolved_ingress_provider_factory()
+            ingress_provider = (
+                resolved_ingress_provider_factory()
+                if resolved_ingress_provider_factory is not None
+                else default_ingress_provider(record_store=record_store)
+            )
             write_ingress_route_pending_audit_record(
                 ingress_store=canary_store,
                 trace_id=trace_id,

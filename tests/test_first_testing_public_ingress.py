@@ -137,7 +137,7 @@ class FirstTestingPublicIngressTests(unittest.IsolatedAsyncioTestCase):
         )
         self.enterContext(
             patch(
-                "control_plane.http_routes.testing_public_ingress.build_npmplus_ingress_client_from_env",
+                "control_plane.http_routes.testing_public_ingress.build_npmplus_ingress_client_from_records",
                 return_value=self.client,
             )
         )

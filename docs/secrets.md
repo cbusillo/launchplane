@@ -138,6 +138,32 @@ remaining consumers and deletes/revokes it. First qualification after human key
 entry is a read-only inventory request, with a value-free receipt, not a runner
 registration or retirement.
 
+## NPMplus API credentials
+
+The Director enters the independently held existing NPMplus identity and secret
+in the existing masked, write-only form at
+`/ui/owner-secrets?product=launchplane&environment=launchplane_service`.
+This fixed request exposes only `LAUNCHPLANE_NPMPLUS_IDENTITY` and
+`LAUNCHPLANE_NPMPLUS_SECRET`. Each writes its same-named context-scoped binding
+in `launchplane_service`, context `launchplane`, no instance. Current database
+administrator checks, stale-request checks, encryption and atomic writes remain
+the same as the other service inputs. Agents never retrieve or relay either
+value. The separate `preview_dns_cloudflare` purpose is unchanged.
+
+The non-secret `LAUNCHPLANE_NPMPLUS_BASE_URL` belongs in the exact service
+runtime record, written through [service runtime settings](service-runtime-settings.md).
+It accepts HTTP(S) endpoints without user information, query or fragment.
+The service reader and private-health transport use that record, with no
+environment fallback; managed credentials are excluded from product rendering.
+
+Before deploying the combined consumer switch, qualify the replacement binding,
+the exact existing endpoint, independent credential custody and a usable rollback.
+The deployment workflow stops seeding these settings and preserves existing host
+copies for rollback. It never deletes them automatically. Keep the GitHub copies
+until the migration's supported default readback and rollback proof are complete;
+Chris alone deletes the obsolete GitHub copies by hand. The migration's remaining
+proof and next actor stay on [launchplane#3510](https://github.com/cbusillo/launchplane/issues/3510).
+
 ## Preview wildcard DNS credential
 
 The Director enters the preview-zone-scoped Cloudflare DNS-edit token in the

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Literal
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 from fastapi import FastAPI
@@ -13,6 +16,10 @@ from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditRecord,
 )
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.npmplus import NPMPLUS_BASE_URL_ENV_KEY
+from control_plane.service_runtime_settings import SERVICE_CONTEXT
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.npmplus import NpmplusProxyHost, NpmplusProxyHostPayload
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.workflows.npmplus_ingress import (
@@ -24,6 +31,8 @@ from tests.support.http import get as http_get
 
 
 class _FakeNpmplusIngressClient:
+    base_url = "https://edge.example.test"
+
     def __init__(self, proxy_hosts: tuple[NpmplusProxyHost, ...] = ()) -> None:
         self.proxy_hosts = list(proxy_hosts)
         self.calls: list[str] = []
@@ -69,6 +78,31 @@ class _FakeNpmplusIngressClient:
                 self.proxy_hosts[index] = updated
                 return updated
         raise AssertionError(f"Unknown proxy host: {host_id}")
+
+
+@contextmanager
+def npmplus_service_endpoint(
+    store: PostgresRecordStore, client: _FakeNpmplusIngressClient, base_url: str
+) -> Iterator[None]:
+    records = store.list_runtime_environment_records(scope="context", context_name=SERVICE_CONTEXT)
+    previous = (
+        records[0]
+        if records
+        else RuntimeEnvironmentRecord(
+            scope="context",
+            context=SERVICE_CONTEXT,
+            env={NPMPLUS_BASE_URL_ENV_KEY: client.base_url},
+            updated_at="2026-11-07T00:00:00Z",
+        )
+    )
+    store.write_runtime_environment_record(
+        previous.model_copy(update={"env": {**previous.env, NPMPLUS_BASE_URL_ENV_KEY: base_url}})
+    )
+    try:
+        with patch.object(client, "base_url", base_url):
+            yield
+    finally:
+        store.write_runtime_environment_record(previous)
 
 
 class _FakeIngressProvider:

@@ -8,7 +8,12 @@ from fastapi import Depends, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from control_plane import secrets
-from control_plane.npmplus import PREVIEW_DNS_INTEGRATION, PREVIEW_DNS_BINDING
+from control_plane.npmplus import (
+    PREVIEW_DNS_INTEGRATION,
+    PREVIEW_DNS_BINDING,
+    NPMPLUS_IDENTITY_ENV_KEY,
+    NPMPLUS_SECRET_ENV_KEY,
+)
 from control_plane.contracts.authz_policy_record import AuthzPolicyConflictError
 from control_plane.artifact_scan import GHCR_ARTIFACT_READ_INTEGRATION
 from control_plane.github_app_configuration import (
@@ -47,6 +52,14 @@ OWNER_SECRET_INPUT_ROUTE = "/v1/owner-secret-inputs"
 OWNER_SECRET_SUBMIT_ROUTE = "/v1/owner-secret-inputs/submit"
 
 _SERVICE_CREDENTIAL_FIELDS = {
+    secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION: (
+        "NPMplus API credentials",
+        "Enter the independently held existing NPMplus API identity and secret. Launchplane uses them only for ingress operations. They are never shown again. Keep the existing copies until migration and rollback are verified.",
+        (
+            (NPMPLUS_IDENTITY_ENV_KEY, "Existing NPMplus API identity"),
+            (NPMPLUS_SECRET_ENV_KEY, "Existing NPMplus API secret"),
+        ),
+    ),
     PREVIEW_DNS_INTEGRATION: (
         "Preview wildcard DNS credential",
         "Enter the Cloudflare DNS-edit token scoped to the preview zone. Launchplane uses it only for NPMplus wildcard certificate creation. It is never shown again.",

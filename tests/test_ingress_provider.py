@@ -9,17 +9,18 @@ import click
 from control_plane import secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretRecord
-from control_plane.npmplus import NpmplusClient
+from control_plane.npmplus import (
+    NpmplusClient,
+    NPMPLUS_BASE_URL_ENV_KEY,
+    NPMPLUS_IDENTITY_ENV_KEY,
+    NPMPLUS_SECRET_ENV_KEY,
+)
 from control_plane.runtime_environments import resolve_site_runtime_environment_from_store
 from control_plane.service_runtime_settings import SERVICE_CONTEXT
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows import ingress_provider
 from control_plane.workflows.ingress_provider import (
-    NPMPLUS_BASE_URL_ENV_KEY,
-    NPMPLUS_IDENTITY_ENV_KEY,
-    NPMPLUS_SECRET_ENV_KEY,
     NpmplusIngressProvider,
-    build_npmplus_ingress_client_from_env,
     default_ingress_provider,
 )
 from tests.support.stores import sqlite_database_url
@@ -72,6 +73,12 @@ class RecordIngressProviderTests(unittest.TestCase):
         self.assertEqual(credentials.identity, "synthetic-service-identity")
         self.assertEqual(credentials.secret, "synthetic-service-secret")
         authenticate.assert_not_called()
+
+    def test_default_provider_uses_managed_credentials_despite_legacy_environment(self) -> None:
+        with patch.dict(os.environ, {NPMPLUS_SECRET_ENV_KEY: "obsolete-secret"}):
+            provider = default_ingress_provider(record_store=self.store)
+        self.assertIsInstance(provider, NpmplusIngressProvider)
+        self.assertEqual(provider.wildcard_client()._credentials.secret, "synthetic-service-secret")
 
     def test_record_reader_refuses_missing_or_ambiguous_endpoint_despite_environment(self) -> None:
         with patch.dict(
@@ -194,48 +201,6 @@ class RecordIngressProviderTests(unittest.TestCase):
                     ingress_provider.build_npmplus_ingress_client_from_records(
                         record_store=self.store
                     )
-
-
-class IngressProviderTests(unittest.TestCase):
-    def test_build_npmplus_ingress_client_from_env_fails_closed_when_missing_env(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaises(click.ClickException) as raised:
-                build_npmplus_ingress_client_from_env()
-
-        message = str(raised.exception)
-        self.assertIn(NPMPLUS_BASE_URL_ENV_KEY, message)
-        self.assertIn(NPMPLUS_IDENTITY_ENV_KEY, message)
-        self.assertIn(NPMPLUS_SECRET_ENV_KEY, message)
-
-    def test_build_npmplus_ingress_client_from_env_builds_client(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                NPMPLUS_BASE_URL_ENV_KEY: "https://npmplus.example.test",
-                NPMPLUS_IDENTITY_ENV_KEY: "launchplane@example.test",
-                NPMPLUS_SECRET_ENV_KEY: "secret",
-            },
-            clear=True,
-        ):
-            client = build_npmplus_ingress_client_from_env()
-
-        self.assertIsInstance(client, NpmplusClient)
-
-    def test_default_ingress_provider_wraps_npmplus_provider(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                NPMPLUS_BASE_URL_ENV_KEY: "https://npmplus.example.test",
-                NPMPLUS_IDENTITY_ENV_KEY: "launchplane@example.test",
-                NPMPLUS_SECRET_ENV_KEY: "secret",
-            },
-            clear=True,
-        ):
-            provider = default_ingress_provider()
-
-        self.assertIsInstance(provider, NpmplusIngressProvider)
-        self.assertEqual(provider.provider_id, "npmplus")
-        self.assertEqual(provider.delegated_executor, "control-plane.npmplus")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,6 @@
 from dataclasses import replace
 from datetime import datetime, timedelta
 import json
-import os
 import socket
 from typing import Any, cast
 from unittest.mock import Mock, patch
@@ -21,10 +20,10 @@ from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditRecord,
     TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
 )
-from control_plane.workflows.ingress_provider import NPMPLUS_BASE_URL_ENV_KEY
+from control_plane.npmplus import NPMPLUS_BASE_URL_ENV_KEY
 import click
 from tests.test_testing_private_ingress import PrivateIngressFixture
-from tests.support.ingress import _npmplus_proxy_host
+from tests.support.ingress import _npmplus_proxy_host, npmplus_service_endpoint
 from tests.test_outbound_http import _FakeConnection, _FakeResponse, _resolver_for
 
 
@@ -39,13 +38,11 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         )
         self.enterContext(
             patch(
-                "control_plane.testing_private_health.build_npmplus_ingress_client_from_env",
+                "control_plane.testing_private_health.build_npmplus_ingress_client_from_records",
                 return_value=self.client,
             )
         )
-        self.enterContext(
-            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "http://10.77.0.9:81"})
-        )
+        self.enterContext(npmplus_service_endpoint(self.store, self.client, "http://10.77.0.9:81"))
 
     def fetch(self, **changes: Any) -> PublicHttpResponse:
         return fetch_testing_private_health(
@@ -202,7 +199,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         self.create()
         self.assertEqual(self.fetch().status_code, 200)
         self.transport.assert_called_once_with(
-            self.endpoint.url, edge_url=os.environ[NPMPLUS_BASE_URL_ENV_KEY], timeout_seconds=3
+            self.endpoint.url, edge_url=self.client.base_url, timeout_seconds=3
         )
         for fields in (
             {"url": "https://arbitrary.example.test/health"},
@@ -223,7 +220,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         self.client.proxy_hosts.append(api_host)
         self.transport.side_effect = outbound_http.request_private_edge_health
         with (
-            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "https://edge-api.example.test"}),
+            npmplus_service_endpoint(self.store, self.client, "https://edge-api.example.test"),
             patch(
                 "control_plane.outbound_http._system_address_resolver",
                 _resolver_for("10.77.0.9"),
@@ -245,7 +242,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                     self.assertEqual(self.fetch().status_code, 200)
                     self.transport.assert_called_once_with(
                         self.endpoint.url,
-                        edge_url=os.environ[NPMPLUS_BASE_URL_ENV_KEY],
+                        edge_url=self.client.base_url,
                         timeout_seconds=3,
                     )
         self.client.proxy_hosts[-1] = api_host
@@ -258,7 +255,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         )
         self.transport.side_effect = outbound_http.request_private_edge_health
         with (
-            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "https://edge-api.example.test"}),
+            npmplus_service_endpoint(self.store, self.client, "https://edge-api.example.test"),
             patch("control_plane.outbound_http._system_address_resolver", resolve),
             patch(
                 "control_plane.outbound_http._private_http_connection", return_value=connection
@@ -322,7 +319,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         )
         self.client.proxy_hosts.append(api_host)
         with (
-            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "https://edge-api.example.test"}),
+            npmplus_service_endpoint(self.store, self.client, "https://edge-api.example.test"),
             patch(
                 "control_plane.outbound_http._system_address_resolver",
                 _resolver_for("93.184.216.34"),
@@ -424,7 +421,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         )
         self.client.proxy_hosts.append(api_host)
         with (
-            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "https://edge-api.example.test"}),
+            npmplus_service_endpoint(self.store, self.client, "https://edge-api.example.test"),
             patch(
                 "control_plane.outbound_http._system_address_resolver",
                 side_effect=_resolver_for("93.184.216.34"),
@@ -449,7 +446,19 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                         elif change == "dns_failure":
                             resolve.side_effect = socket.gaierror
                         else:
-                            os.environ[NPMPLUS_BASE_URL_ENV_KEY] = "https://foreign.example.test"
+                            (setting,) = self.store.list_runtime_environment_records(
+                                scope="context", context_name="launchplane"
+                            )
+                            self.store.write_runtime_environment_record(
+                                setting.model_copy(
+                                    update={
+                                        "env": {
+                                            **setting.env,
+                                            NPMPLUS_BASE_URL_ENV_KEY: "https://foreign.example.test",
+                                        }
+                                    }
+                                )
+                            )
                         return response
 
                     self.transport.side_effect = change_api
@@ -460,6 +469,19 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                         "dns_failure" if change == "dns_failure" else "private_url",
                     )
                     self.client.proxy_hosts = [self.client.proxy_hosts[0], api_host]
+                    (setting,) = self.store.list_runtime_environment_records(
+                        scope="context", context_name="launchplane"
+                    )
+                    self.store.write_runtime_environment_record(
+                        setting.model_copy(
+                            update={
+                                "env": {
+                                    **setting.env,
+                                    NPMPLUS_BASE_URL_ENV_KEY: self.client.base_url,
+                                }
+                            }
+                        )
+                    )
                     resolve.side_effect = _resolver_for("93.184.216.34")
 
     async def test_monitor_uses_verified_edge_and_preserves_identity_check(self) -> None:

@@ -175,7 +175,7 @@ def private_ingress_snapshot(
         TestingPrivateIngressRequest,
         latest_testing_private_ingress_receipt,
     )
-    from control_plane.workflows.ingress_provider import build_npmplus_ingress_client_from_env
+    from control_plane.workflows.ingress_provider import build_npmplus_ingress_client_from_records
 
     from control_plane.testing_public_ingress import _host_payload
 
@@ -190,7 +190,7 @@ def private_ingress_snapshot(
         raise ValueError("Use one exact active private testing health endpoint.")
     endpoint = endpoints[0]
     hostname = urlsplit(endpoint.url).hostname
-    client = build_npmplus_ingress_client_from_env()
+    client = build_npmplus_ingress_client_from_records(record_store=store)
     hosts = [host for host in client.list_proxy_hosts() if hostname in host.domain_names]
     if len(hosts) != 1:
         raise ValueError("Use the unique original private testing edge.")

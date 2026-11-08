@@ -1,15 +1,21 @@
 from __future__ import annotations
 
-import os
 from typing import Protocol
-from urllib.parse import urlsplit
 
 import click
 
 from control_plane import secrets
-from control_plane.npmplus import NpmplusClient, NpmplusCredentials
+from control_plane.npmplus import (
+    NpmplusClient,
+    NpmplusCredentials,
+    NPMPLUS_BASE_URL_ENV_KEY,
+    NPMPLUS_IDENTITY_ENV_KEY,
+    NPMPLUS_SECRET_ENV_KEY,
+    validate_npmplus_base_url,
+)
 from control_plane.runtime_environments import SiteRuntimeEnvironmentStore
 from control_plane.service_runtime_settings import SERVICE_CONTEXT
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyRequest,
     NpmplusIngressApplyResult,
@@ -18,14 +24,7 @@ from control_plane.workflows.npmplus_ingress import (
 )
 
 
-NPMPLUS_BASE_URL_ENV_KEY = "LAUNCHPLANE_NPMPLUS_BASE_URL"
-NPMPLUS_IDENTITY_ENV_KEY = "LAUNCHPLANE_NPMPLUS_IDENTITY"
-NPMPLUS_SECRET_ENV_KEY = "LAUNCHPLANE_NPMPLUS_SECRET"
-
-
-def build_npmplus_ingress_client_from_records(
-    *, record_store: SiteRuntimeEnvironmentStore
-) -> NpmplusClient:
+def npmplus_service_base_url_from_records(*, record_store: SiteRuntimeEnvironmentStore) -> str:
     records = tuple(
         record
         for record in record_store.list_runtime_environment_records(context_name=SERVICE_CONTEXT)
@@ -37,19 +36,15 @@ def build_npmplus_ingress_client_from_records(
     if not isinstance(base_url, str) or not base_url.strip():
         raise click.ClickException("NPMplus service endpoint is missing or invalid.")
     try:
-        parsed = urlsplit(base_url.strip())
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ValueError
-        _ = parsed.port
+        return validate_npmplus_base_url(base_url)
     except ValueError:
         raise click.ClickException("NPMplus service endpoint is invalid.") from None
+
+
+def build_npmplus_ingress_client_from_records(
+    *, record_store: SiteRuntimeEnvironmentStore
+) -> NpmplusClient:
+    base_url = npmplus_service_base_url_from_records(record_store=record_store)
     values = {
         key: secrets.resolve_context_secret_value_from_store(
             record_store=record_store,
@@ -103,26 +98,9 @@ class NpmplusIngressProvider:
         return apply_npmplus_ingress_route(client=self._client, request=request)
 
 
-def build_npmplus_ingress_client_from_env() -> NpmplusClient:
-    required_env = (
-        NPMPLUS_BASE_URL_ENV_KEY,
-        NPMPLUS_IDENTITY_ENV_KEY,
-        NPMPLUS_SECRET_ENV_KEY,
+def default_ingress_provider(*, record_store: object) -> NpmplusIngressProvider:
+    if not isinstance(record_store, PostgresRecordStore):
+        raise click.ClickException("NPMplus service credentials require database records.")
+    return NpmplusIngressProvider(
+        client=build_npmplus_ingress_client_from_records(record_store=record_store)
     )
-    missing_env = tuple(key for key in required_env if not os.environ.get(key, "").strip())
-    if missing_env:
-        missing_list = ", ".join(missing_env)
-        raise click.ClickException(
-            f"NPMplus ingress client is not configured; missing {missing_list}."
-        )
-    return NpmplusClient(
-        credentials=NpmplusCredentials(
-            base_url=os.environ.get(NPMPLUS_BASE_URL_ENV_KEY, ""),
-            identity=os.environ.get(NPMPLUS_IDENTITY_ENV_KEY, ""),
-            secret=os.environ.get(NPMPLUS_SECRET_ENV_KEY, ""),
-        )
-    )
-
-
-def default_ingress_provider() -> IngressProvider:
-    return NpmplusIngressProvider(client=build_npmplus_ingress_client_from_env())

@@ -1,6 +1,5 @@
 """Health-only transport through a freshly verified testing edge route."""
 
-import os
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
@@ -27,8 +26,8 @@ from control_plane.testing_private_ingress import (
     latest_testing_private_ingress_receipt,
 )
 from control_plane.workflows.ingress_provider import (
-    NPMPLUS_BASE_URL_ENV_KEY,
-    build_npmplus_ingress_client_from_env,
+    npmplus_service_base_url_from_records,
+    build_npmplus_ingress_client_from_records,
 )
 
 
@@ -106,8 +105,8 @@ def fetch_testing_private_health(
             or private_health_endpoint_record_sha256(endpoint) != endpoint_sha256
         ):
             raise ValueError("Testing health endpoint changed.")
-        api_url = os.environ.get(NPMPLUS_BASE_URL_ENV_KEY, "")
-        client = build_npmplus_ingress_client_from_env()
+        client = build_npmplus_ingress_client_from_records(record_store=store)
+        api_url = client.base_url
         edge_origin = _edge_health_origin(client, api_url)
         hostname = urlsplit(url).hostname
         hosts = tuple(host for host in client.list_proxy_hosts() if hostname in host.domain_names)
@@ -184,7 +183,7 @@ def fetch_testing_private_health(
     )
     try:
         if (
-            os.environ.get(NPMPLUS_BASE_URL_ENV_KEY, "") != api_url
+            npmplus_service_base_url_from_records(record_store=store) != api_url
             or _edge_health_origin(client, api_url) != edge_origin
             or adapter._snapshot()[0] != snapshot
             or latest_testing_private_ingress_receipt(
