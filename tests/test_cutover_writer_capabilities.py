@@ -126,7 +126,11 @@ class NativeCronWriterCapabilityTests(unittest.TestCase):
                 )
 
             native = SimpleNamespace(_load_settings=load_settings)
-            startup = {"_load_settings": native._load_settings, "_write_runtime_config": configure}
+            startup = {
+                "_load_settings": native._load_settings,
+                "_write_runtime_config": configure,
+                "_odoo_environment": lambda _: dict(os.environ),
+            }
             request = json.dumps(
                 {
                     "database": self.plan.old.binding.database,

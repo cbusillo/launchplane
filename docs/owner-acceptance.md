@@ -4,6 +4,48 @@ title: Client Review and Retired Acceptance History
 
 ## Current Client review
 
+### Native Odoo signup links
+
+The signed-in recorded Client can choose a tenant-declared Odoo user from the
+preview or testing review page. The optional installed seed addon manifest key
+`launchplane_client_user_xmlids` is a plain list of exact canonical native
+`res.users` XMLIDs owned by that addon. Missing or empty metadata offers no user
+and never gates a deployment. Malformed or unresolved declarations refuse
+sign-in qualification. Both reads and clicks discover addons through the native
+startup-generated effective config and its native child environment. Missing or ambiguous installed addon sources
+refuse qualification. Published testing lanes are observed through their managed
+route and publication custody, sharing the walkthrough check; compose domains
+are not required for these lanes.
+
+Only active declared users without a password or earlier sign-in are offered;
+Settings and other administrative roles are excluded. Tenant repositories own
+user seeds, names and groups. Launchplane creates no user or password.
+
+`GET /v1/product-review/sign-in` reads eligible users without issuing an
+invitation. Clicking “Sign in as” sends the selected native external ID and
+reviewed runtime binding to `POST` on the same route, with the existing browser
+session and CSRF protection. Both calls require the current recorded Client's
+numeric GitHub identity. Admins, agents and foreign Clients cannot use them.
+The server rechecks the current lane, image, runner, database and user before
+minting, then checks the current Client and generation before disclosure.
+
+The existing private walkthrough transport carries the invitation only in
+memory. Odoo's native signed token has its normal signup validity (144 hours
+unless configured in Odoo) and becomes invalid after signup or sign-in.
+Launchplane stores no invitation, secret, idempotency result or auth record.
+Ordinary review payloads, deploy evidence and GitHub projections contain none.
+The private response is uncacheable, and no credential URL enters the DOM before
+the click. The person chooses their own password on Odoo's native signup form.
+Launchplane never writes user email/login fields (native security-notice mail
+can be triggered by those writes even with `no_reset_password`). No email or
+Authentik setup is performed. Production is outside this first slice.
+
+A native signup URL is a credential. Never capture its address, DOM, network
+payload or page in agent traces or screenshots. Before actual lane use, qualify
+native and ingress access-log handling and the sanitized copy's database signing
+key separation. Source and synthetic browser tests do not prove these lane
+properties or a person's sign-in.
+
 ### Reviewed conflict integrations
 
 An admin or the Director's authenticated agent can attest that one exact conflict

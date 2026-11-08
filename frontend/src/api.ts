@@ -225,6 +225,29 @@ async function requestJson<T>(
   return queuedRequest;
 }
 
+export interface ClientSigninLookup {
+  repository: string;
+  pull_request?: number;
+  generation_id: string;
+  instance: "preview" | "testing";
+}
+
+export interface ClientSigninUser {
+  xmlid: string;
+  name: string;
+  login: string;
+}
+
+export function readClientSigninUsers(lookup: ClientSigninLookup, signal?: AbortSignal): Promise<{ users: ClientSigninUser[]; runtime_binding: string }> {
+  const query = new URLSearchParams({ repository: lookup.repository, generation_id: lookup.generation_id, instance: lookup.instance });
+  if (lookup.pull_request !== undefined) query.set("pull_request", String(lookup.pull_request));
+  return requestJson(`/v1/product-review/sign-in?${query}`, "GET", undefined, signal);
+}
+
+export function mintClientSignin(body: ClientSigninLookup & { xmlid: string; reviewed_runtime_binding: string }): Promise<{ name: string; sign_in_url: string }> {
+  return requestJson("/v1/product-review/sign-in", "POST", body);
+}
+
 async function performJsonRequest<T>(
   path: string,
   method: "GET" | "POST",

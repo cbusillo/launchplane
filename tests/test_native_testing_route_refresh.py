@@ -190,6 +190,101 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(blocked.json()["result"]["status"], "attention", blocked.text)
         self.assertEqual(blocked.json()["result"]["blocked_count"], 1, blocked.text)
 
+    async def test_client_signup_uses_fresh_published_route_without_compose_domains(self) -> None:
+        from control_plane.odoo_client_signup import (
+            ClientSigninLane,
+            list_client_signin_users,
+            mint_client_signin,
+        )
+        from control_plane.odoo_runtime_reads import (
+            OdooRuntimeConnection,
+            OdooRuntimeEvidence,
+            OdooRuntimeSelection,
+        )
+        from tests.test_product_review import _human, _profile
+
+        binding = self.binding()
+        profile = self.store.read_product_profile_record(binding.product).model_copy(
+            update={"driver_id": "odoo", "owner": _profile().owner}
+        )
+        self.store.write_product_profile_record(profile)
+        identity = self.fixture.plan.deployment.runtime_identity
+        assert identity is not None
+        selection = OdooRuntimeSelection(identity, "https://" + binding.domains[0].domain_name)
+        connection = OdooRuntimeConnection(
+            selection=selection,
+            evidence=OdooRuntimeEvidence(
+                identity=identity,
+                target_id=self.candidate.compose_id,
+                target_name=self.candidate.namespace,
+                container_id="fixture",
+                observed_at=self.now.isoformat(),
+            ),
+            host="fixture",
+            token="fixture",
+            server_id=self.candidate.server_id,
+            app_name=self.fixture.fixture.provider_state["appName"],
+            credentials={"ODOO_DB_NAME": "fixture"},
+        )
+        with (
+            patch("control_plane.odoo_client_signup.select_stable_runtime", return_value=selection),
+            patch("control_plane.odoo_client_signup.assert_selection_current"),
+            patch("control_plane.odoo_client_signup.connect_runtime", return_value=connection),
+            patch(
+                "control_plane.odoo_client_signup.odoo_compose_has_domain",
+                return_value=False,
+                create=True,
+            ),
+            patch(
+                "control_plane.odoo_client_signup.client_signin_command", return_value={"users": []}
+            ) as native,
+        ):
+
+            def users() -> dict[str, object]:
+                return list_client_signin_users(
+                    store=self.store,
+                    root=self.fixture.fixture.root,
+                    profile=profile,
+                    identity=_human(login="renamed-client", github_id=9001),
+                    lane=ClientSigninLane(
+                        profile.repository, None, identity.artifact_id, "testing"
+                    ),
+                )
+
+            listed = users()
+            self.assertEqual(listed["users"], [])
+            self.read.assert_called()
+            self.read.reset_mock()
+            native.return_value = {
+                "xmlid": "fixture.user_client",
+                "name": "Example",
+                "token": "fixture",
+            }
+
+            def mint() -> dict[str, str]:
+                return mint_client_signin(
+                    store=self.store,
+                    root=self.fixture.fixture.root,
+                    profile=profile,
+                    identity=_human(login="renamed-client", github_id=9001),
+                    lane=ClientSigninLane(
+                        profile.repository, None, identity.artifact_id, "testing"
+                    ),
+                    reviewed_runtime_binding=str(listed["runtime_binding"]),
+                    xmlid="fixture.user_client",
+                )
+
+            self.assertTrue(mint()["sign_in_url"].startswith(selection.base_url + "/web/signup?"))
+            self.read.assert_called()
+            native.reset_mock()
+            self.frame["old_endpoints"] = []
+            with self.assertRaises(ValueError):
+                users()
+            with self.assertRaises(ValueError):
+                mint()
+            native.assert_not_called()
+        self.assertEqual(self.binding(), binding)
+
     async def test_director_renews_only_observed_native_authority_without_a_grant(self) -> None:
         before = self.binding()
         response = await refresh_testing_binding_http(
