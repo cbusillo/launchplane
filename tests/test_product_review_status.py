@@ -1746,15 +1746,33 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no Client is set", feedback.comment_markdown)
 
     async def test_director_standing_ready_feedback_sends_no_client_invitation(self) -> None:
-        from contextlib import nullcontext
-        from control_plane.workflows.preview_pr_feedback import pull_request_client_review
-
         payload = product_profile_payload("verireel")
         payload["release_on_acceptance"] = "director_standing"
         payload["owner"] = {"github_login": "site-owner", "github_id": str(_OWNER_GITHUB_ID)}
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(payload)
         )
+        await self._assert_ready_feedback_invites_no_client()
+
+    async def test_held_product_of_the_standing_client_ready_feedback_invites_no_client(
+        self,
+    ) -> None:
+        owner = {"github_login": "site-owner", "github_id": str(_OWNER_GITHUB_ID)}
+        held = product_profile_payload("verireel")
+        held["owner"] = owner
+        standing = product_profile_payload("standing-tool")
+        standing["owner"] = owner
+        standing["release_on_acceptance"] = "director_standing"
+        for payload in (held, standing):
+            self.store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(payload)
+            )
+        await self._assert_ready_feedback_invites_no_client()
+
+    async def _assert_ready_feedback_invites_no_client(self) -> None:
+        from contextlib import nullcontext
+        from control_plane.workflows.preview_pr_feedback import pull_request_client_review
+
         app = create_launchplane_fastapi_app(
             verifier=StubVerifier(_preview_pr_feedback_identity()),
             authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
