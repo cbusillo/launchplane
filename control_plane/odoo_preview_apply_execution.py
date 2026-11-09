@@ -702,8 +702,21 @@ class OdooPreviewProviderMutationAdapter:
             _log_failed_preview_evidence(
                 driver_result, operation_id=self._deployment_record_id, trace_id=self._trace_id
             )
-            raise ProviderMutationUnknownError(
-                "Odoo preview provider outcome requires reconciliation."
+            if self._apply_request.preserve_original_reservation_id or not driver_result.get(
+                "schedule_failure_reason"
+            ):
+                raise ProviderMutationUnknownError(
+                    "Odoo preview provider outcome requires reconciliation."
+                )
+            lease.assert_current()
+            return ProviderMutationOutcome(
+                response_status_code=502,
+                response_payload=provider_operation_response_payload(
+                    trace_id=self._trace_id,
+                    records={},
+                    result=driver_result,
+                ),
+                provider_effect_performed=True,
             )
         response_status_code = 202
         records: dict[str, object] = {}
