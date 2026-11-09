@@ -26,7 +26,7 @@ from control_plane.testing_public_ingress import (
     TestingPublicIngressAdapter,
     TestingPublicIngressRequest,
 )
-from control_plane.workflows.ingress_provider import build_npmplus_ingress_client_from_env
+from control_plane.workflows.ingress_provider import build_npmplus_ingress_client_from_records
 
 
 def register_testing_public_ingress_routes(
@@ -72,7 +72,12 @@ def register_testing_public_ingress_routes(
                 else FirstTestingPublicIngressAdapter
             )
             adapter = adapter_type(
-                root, record_store, product, body, trace, build_npmplus_ingress_client_from_env()
+                root,
+                record_store,
+                product,
+                body,
+                trace,
+                build_npmplus_ingress_client_from_records(record_store=record_store),
             )
             if body.mode == "apply":
                 return await run_provider_mutation(

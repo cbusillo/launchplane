@@ -24,7 +24,7 @@ from control_plane.testing_private_ingress import (
     TestingPrivateIngressAdapter,
     TestingPrivateIngressRequest,
 )
-from control_plane.workflows.ingress_provider import build_npmplus_ingress_client_from_env
+from control_plane.workflows.ingress_provider import build_npmplus_ingress_client_from_records
 
 
 def register_testing_private_ingress_routes(
@@ -65,7 +65,12 @@ def register_testing_private_ingress_routes(
             refuse(400, "idempotency_key_required", "Keep the original testing ingress key.")
         try:
             adapter = TestingPrivateIngressAdapter(
-                root, record_store, product, body, trace, build_npmplus_ingress_client_from_env()
+                root,
+                record_store,
+                product,
+                body,
+                trace,
+                build_npmplus_ingress_client_from_records(record_store=record_store),
             )
             if body.mode == "apply":
                 return await run_provider_mutation(

@@ -11,7 +11,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.service_auth import parse_authz_policy_toml
-from control_plane.workflows.ingress_provider import (
+from control_plane.npmplus import (
     NPMPLUS_BASE_URL_ENV_KEY,
     NPMPLUS_IDENTITY_ENV_KEY,
     NPMPLUS_SECRET_ENV_KEY,
@@ -57,9 +57,6 @@ LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
         "LAUNCHPLANE_LOCAL_ADMIN_SUBJECT",
         "LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL",
         "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN",
-        NPMPLUS_BASE_URL_ENV_KEY,
-        NPMPLUS_IDENTITY_ENV_KEY,
-        NPMPLUS_SECRET_ENV_KEY,
     }
 )
 
@@ -76,6 +73,11 @@ _RETIRED_WORK_GRAPH_ENV_KEYS = frozenset(
         "LAUNCHPLANE_WORK_GRAPH_GH_BINARY",
         "GH_TOKEN",
     }
+)
+
+
+_RETIRED_NPMPLUS_ENV_KEYS = frozenset(
+    {NPMPLUS_BASE_URL_ENV_KEY, NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY}
 )
 
 
@@ -140,12 +142,15 @@ class LaunchplaneSelfDeployRequest(BaseModel):
             if normalized_value:
                 normalized_oauth_env[normalized_key] = normalized_value
         self.oauth_env = normalized_oauth_env
+        removable_keys = (
+            LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS
+            | _RETIRED_WORK_GRAPH_ENV_KEYS
+            | _RETIRED_NPMPLUS_ENV_KEYS
+        )
         normalized_oauth_env_removals: list[str] = []
         for env_key in self.oauth_env_removals:
             normalized_key = env_key.strip()
-            if normalized_key not in (
-                LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS | _RETIRED_WORK_GRAPH_ENV_KEYS
-            ):
+            if normalized_key not in removable_keys:
                 raise ValueError(
                     f"Launchplane self deploy does not accept oauth_env_removals key {normalized_key!r}."
                 )
@@ -176,7 +181,7 @@ class LaunchplaneSelfDeployRequest(BaseModel):
         normalized_expected_values: dict[str, str] = {}
         for env_key, raw_value in self.oauth_env_expected_values.items():
             normalized_key = env_key.strip()
-            if normalized_key not in LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS:
+            if normalized_key not in removable_keys:
                 raise ValueError(
                     "Launchplane self deploy does not accept oauth_env_expected_values key "
                     f"{normalized_key!r}."

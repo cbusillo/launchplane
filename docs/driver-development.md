@@ -364,10 +364,19 @@ Callers send a product/context envelope plus a typed route request. `mode` is
 `ingress_route.plan` for dry-run authorization and `ingress_route.apply` for
 provider mutation authorization. The service resolves an ingress provider
 adapter for route execution; the default provider is NPMplus. The default
-provider adapter constructs its client from environment keys named
-`LAUNCHPLANE_NPMPLUS_BASE_URL`, `LAUNCHPLANE_NPMPLUS_IDENTITY`, and
-`LAUNCHPLANE_NPMPLUS_SECRET`; do not commit real values or local admin
-overrides.
+provider adapter constructs its client from the executing request's record
+store: `LAUNCHPLANE_NPMPLUS_BASE_URL` in the exact `launchplane` context runtime
+record, and exact context-scoped `LAUNCHPLANE_NPMPLUS_IDENTITY` and
+`LAUNCHPLANE_NPMPLUS_SECRET` bindings in `launchplane_service`. Testing public
+and private ingress, application-route custody and private health use this
+same reader. Missing, ambiguous, disabled or mismatched records fail closed
+without host-environment fallback. Private health rechecks the record endpoint
+and configured credentials after its probe. Product runtime rendering also
+refuses legacy raw copies of these service credentials.
+See [NPMplus credential input](secrets.md#npmplus-api-credentials) for adoption
+and the [migration issue](https://github.com/cbusillo/launchplane/issues/3510)
+for remaining activation and copy-retirement proof.
+
 Ingress audit records must persist the adapter's provider identity explicitly;
 do not rely on a provider-specific model default for admin evidence.
 

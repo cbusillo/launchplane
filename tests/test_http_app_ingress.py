@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1120,6 +1121,102 @@ class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_default_provider_requires_database_storage(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_route.plan", product="launchplane", context="reon-prod"
+                ),
+                record_store_factory=lambda: store,
+            )
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/ingress/route-apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=_npmplus_ingress_route_payload(),
+            )
+            self.assertEqual(response.status_code, 503, response.text)
+            self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
+    async def test_default_route_uses_the_request_store_and_managed_credentials(self) -> None:
+        from control_plane import secrets
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+        from control_plane.npmplus import (
+            NpmplusClient,
+            NPMPLUS_BASE_URL_ENV_KEY,
+            NPMPLUS_IDENTITY_ENV_KEY,
+            NPMPLUS_SECRET_ENV_KEY,
+        )
+        from tests.support.stores import sqlite_database_url
+
+        with (
+            TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "fixture-service-key",
+                    NPMPLUS_BASE_URL_ENV_KEY: "https://obsolete.example.test",
+                    NPMPLUS_IDENTITY_ENV_KEY: "obsolete-identity",
+                    NPMPLUS_SECRET_ENV_KEY: "obsolete-secret",
+                },
+            ),
+        ):
+            store = PostgresRecordStore(
+                database_url=sqlite_database_url(Path(directory) / "records.sqlite")
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="context",
+                    context="launchplane",
+                    env={NPMPLUS_BASE_URL_ENV_KEY: "https://managed.example.test"},
+                    updated_at="2026-11-07T00:00:00Z",
+                )
+            )
+            for key, value in (
+                (NPMPLUS_IDENTITY_ENV_KEY, "managed-identity"),
+                (NPMPLUS_SECRET_ENV_KEY, "managed-secret"),
+            ):
+                secrets.write_secret_value(
+                    record_store=store,
+                    scope="context",
+                    context_name="launchplane",
+                    integration=secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                    name=key,
+                    binding_key=key,
+                    plaintext_value=value,
+                )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_route.plan", product="launchplane", context="reon-prod"
+                ),
+                record_store_factory=lambda: store,
+            )
+            credentials = []
+
+            def observe(client: NpmplusClient) -> tuple[()]:
+                credentials.append(client._credentials)
+                return ()
+
+            with patch.object(NpmplusClient, "list_proxy_hosts", observe):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/drivers/ingress/route-apply",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload=_npmplus_ingress_route_payload(),
+                )
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(
+                [(item.base_url, item.identity, item.secret) for item in credentials],
+                [("https://managed.example.test", "managed-identity", "managed-secret")],
+            )
+
     async def test_existing_host_new_certificate_returns_supported_update_error(self) -> None:
         client = _FakeNpmplusIngressClient((_npmplus_proxy_host(),))
         with TemporaryDirectory() as directory:

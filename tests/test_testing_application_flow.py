@@ -3044,10 +3044,10 @@ class ApplicationFlowTests(unittest.TestCase):
         )
         self.store.write_edge_endpoint_record(edge)
         from control_plane.npmplus import NpmplusClient
-        from control_plane.workflows.ingress_provider import NPMPLUS_BASE_URL_ENV_KEY
+        from tests.support.ingress import npmplus_service_endpoint
 
-        self.enterContext(patch.dict(os.environ, {NPMPLUS_BASE_URL_ENV_KEY: "http://10.21.0.9:81"}))
         client = EdgeClient()
+        self.enterContext(npmplus_service_endpoint(self.store, client, "http://10.21.0.9:81"))
         client.certificate = client.certificate.model_copy(
             update={"domain_names": ("*.example.invalid",)}
         )
@@ -3080,13 +3080,13 @@ class ApplicationFlowTests(unittest.TestCase):
         )
         self.enterContext(
             patch(
-                "control_plane.workflows.ingress_provider.build_npmplus_ingress_client_from_env",
+                "control_plane.workflows.ingress_provider.build_npmplus_ingress_client_from_records",
                 return_value=client,
             )
         )
         self.enterContext(
             patch(
-                "control_plane.testing_private_health.build_npmplus_ingress_client_from_env",
+                "control_plane.testing_private_health.build_npmplus_ingress_client_from_records",
                 return_value=client,
             )
         )

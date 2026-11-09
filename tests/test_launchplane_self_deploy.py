@@ -13,6 +13,22 @@ from control_plane.workflows.launchplane_self_deploy import (
 
 
 class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
+    def test_npmplus_values_cannot_be_reseeded_by_self_deploy(self) -> None:
+        from control_plane.npmplus import (
+            NPMPLUS_BASE_URL_ENV_KEY,
+            NPMPLUS_IDENTITY_ENV_KEY,
+            NPMPLUS_SECRET_ENV_KEY,
+        )
+
+        for key in (NPMPLUS_BASE_URL_ENV_KEY, NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                LaunchplaneSelfDeployRequest(
+                    target_type="compose",
+                    target_id="test",
+                    image_reference="registry.invalid/service@sha256:abc",
+                    oauth_env={key: "obsolete-value"},
+                )
+
     _BOOTSTRAP_ENV = (
         "DOCKER_IMAGE_REFERENCE=old\n"
         "LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://launchplane:test@db.internal:5432/launchplane\n"
@@ -182,6 +198,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
                     "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET": "new-manager-secret",
                 },
                 "oauth_env_removals": ("LAUNCHPLANE_NPMPLUS_SECRET",),
+                "oauth_env_expected_values": {"LAUNCHPLANE_NPMPLUS_SECRET": "npmplus-secret"},
                 "no_cache": True,
             }
         )
