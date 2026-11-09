@@ -179,9 +179,9 @@ their uncertainty, and only verified inventory uses active or empty wording.
 An observed preview without a successful lifecycle record may still have a
 retained provider operation. The overview reads that operation's recovery status
 under the existing product preview-read permission before suggesting cleanup.
-Missing original proof is shown as a resource-retention hold, not missing status.
-These warnings neither settle the operation nor establish safe disposal, and
-the recorded/observed mismatch remains visible until recovery actually completes.
+Missing original history is stated plainly; a closed pull request's preview is then removed automatically.
+These warnings do not settle the operation, and the recorded/observed mismatch
+remains visible until the preview or its recovery actually completes.
 
 The workspace's read-only recorded-preview list exposes bounded identity
 references only under the existing `preview.read` grant. Selecting a change

@@ -2204,6 +2204,7 @@ def _preview_cleanup_guard(
     profile: LaunchplaneProductProfileRecord,
     number: int,
     original_reservation_id: str = "",
+    without_original_reservation_id: str = "",
 ) -> None:
     from control_plane.disposable_lanes import (
         DisposableLaneStore,
@@ -2229,6 +2230,17 @@ def _preview_cleanup_guard(
                 profile=profile,
                 number=number,
                 reservation_id=original_reservation_id,
+            )
+        elif without_original_reservation_id:
+            from control_plane.preview_reservation_recovery import (
+                require_closed_preview_without_original,
+            )
+
+            require_closed_preview_without_original(
+                cast(PostgresRecordStore, store),
+                profile=profile,
+                number=number,
+                reservation_id=without_original_reservation_id,
             )
         else:
             resolve_disposable_preview(
@@ -2323,6 +2335,16 @@ def _plan_preview_target(
                 )
                 plan["unrecorded_original_reservation_id"] = reservation.record_id
                 break
+            if not live:
+                from control_plane.preview_reservation_recovery import previews_without_original
+
+                held = previews_without_original(record_store, profile=profile).get(
+                    pull_request_number
+                )
+                if held is not None:
+                    live = True
+                    lifecycle_token = f"no-original:{held.record_id}:{held.request_fingerprint}"
+                    plan["preview_without_original_reservation_id"] = held.record_id
         return without_preview("pull_request_not_open")
     intent = change_client_review(
         body=str(pull_request.get("body") or ""),
@@ -2513,6 +2535,7 @@ def _run_preview_operation(
                 profile,
                 pull_request_number,
                 str(plan.get("unrecorded_original_reservation_id") or ""),
+                str(plan.get("preview_without_original_reservation_id") or ""),
             )
         if disposal_original:
             from control_plane.preview_reservation_recovery import (
@@ -3617,6 +3640,7 @@ def request_product_reconcile_sweep(
         from control_plane.preview_reservation_recovery import (
             held_preview_reservations,
             original_preview_intent,
+            previews_without_original,
             require_unrecorded_preview_original,
         )
 
@@ -3661,6 +3685,12 @@ def request_product_reconcile_sweep(
                             product=profile.product, number=number
                         )
                     )
+            targets.extend(
+                ProductReconcileTarget(
+                    product=profile.product, target_kind="preview", pull_request_number=number
+                )
+                for number in previews_without_original(record_store, profile=profile)
+            )
         for reservation in originals.values():
             try:
                 original = original_preview_intent(reservation, profile=profile, store=record_store)

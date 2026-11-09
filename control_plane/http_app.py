@@ -24270,6 +24270,7 @@ def create_launchplane_fastapi_app(
                 context=observation.context,
                 instance=observation.instance,
                 preview_id=observation.preview_id,
+                read_only=observation.mode == "inspect",
             )
             profile, target, target_id, preview = (
                 binding.profile,

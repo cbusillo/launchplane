@@ -311,6 +311,11 @@ def build_preview_lifecycle_sweep(
             for record in holds[:100]
         ]
         entry["held_reservations_truncated"] = len(holds) > 100
+        # A hold with no original left cannot be recovered; reconcile disposes of it.
+        recoverable_holds = len(holds) > 100 or any(
+            reservation["classification"] != "original_evidence_unavailable"
+            for reservation in cast(list[dict[str, object]], entry["held_reservations"])
+        )
         if profile.product in denied_actions:
             entry.update(
                 {
@@ -323,7 +328,7 @@ def build_preview_lifecycle_sweep(
             )
             entries.append(entry)
             continue
-        if holds and request.apply:
+        if recoverable_holds and request.apply:
             entry.update(
                 status="blocked",
                 error_message="Held previews require original-intent recovery before cleanup apply.",
@@ -429,7 +434,7 @@ def build_preview_lifecycle_sweep(
                 "error_message": cleanup_record.error_message,
             }
         )
-        if holds:
+        if recoverable_holds:
             entry["status"] = "blocked"
             entry["error_message"] = "Held preview reservations require original-intent recovery."
         entries.append(entry)

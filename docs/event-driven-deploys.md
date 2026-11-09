@@ -343,8 +343,11 @@ remain until the normal supported recovery proves their resolution.
     uses that original as its lifecycle token and rechecks its product, context,
     PR, target naming and exclusive ownership before effects. Existing executor
     exclusion, recovery grace, original schedule quiescence, target supersession
-    and physical resource inspection still apply. Missing original proof holds
-    the operation; the cleanup never invents a serving generation.
+    and physical resource inspection still apply. A held reservation with no
+    retained original intent no longer holds a closed PR's preview: fresh provider
+    inventory and the reservation's current target name identify what exists, the
+    recorded usage, only-needed-copy and production-sharing protections are rechecked
+    before effects, and the sweep requests it. The cleanup never invents a serving generation.
     A qualified destroy may supersede a missing-original-intent reservation
     under the same target execution lock, expired-lease grace and exact-record
     compare-and-swap. It records the earlier operation as superseded, never as

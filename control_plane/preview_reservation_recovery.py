@@ -6,7 +6,7 @@ from datetime import timedelta
 import hashlib
 import click
 from pathlib import Path
-from typing import Callable
+from typing import Callable, cast
 
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
@@ -41,6 +41,7 @@ from control_plane.odoo_preview_apply_execution import (
     preview_execution_lock_name,
     prepare_odoo_preview_apply_operation,
 )
+from control_plane.preview_inventory_evidence import read_preview_inventory_evidence
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.generic_web_preview import (
     effective_preview_app_name_prefix,
@@ -458,8 +459,6 @@ def require_unrecorded_preview_original(
     number: int,
     reservation_id: str,
 ) -> LaunchplaneIdempotencyRecord:
-    from control_plane.disposable_lanes import require_lane_target_ownership
-
     reservation = store.read_idempotency_record_by_id(reservation_id)
     if reservation is None:
         raise ValueError("Original preview reservation is unavailable.")
@@ -469,22 +468,45 @@ def require_unrecorded_preview_original(
     require_current_preview_original_target(
         profile=profile, reservation=reservation, original=original, instance=instance
     )
-    if issued.plan_request.pr_number != number or any(
+    if issued.plan_request.pr_number != number:
+        raise ValueError("Original preview does not identify an unrecorded preview.")
+    target_id = issued.dry_run_plan.compose_ref
+    _require_unrecorded_preview_target(
+        store,
+        profile=profile,
+        instance=instance,
+        reservation=reservation,
+        target_id="" if target_id.startswith("${created.") else target_id,
+    )
+    return reservation
+
+
+def _require_unrecorded_preview_target(
+    store: PostgresRecordStore,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    instance: str,
+    reservation: LaunchplaneIdempotencyRecord,
+    target_id: str = "",
+) -> None:
+    """The preview's own resources: no live record, lane or other product's claim on them."""
+    from control_plane.disposable_lanes import require_lane_target_ownership
+
+    context = profile.preview.context
+    if any(
         profile.preview.slug_template.format(number=item.anchor_pr_number) == instance
         and (
             item.state != "destroyed"
             or parse_launchplane_mutation_timestamp(item.updated_at, field_name="updated_at")
             >= parse_launchplane_mutation_timestamp(reservation.created_at, field_name="created_at")
         )
-        for item in store.list_preview_records(context_name=profile.preview.context)
+        for item in store.list_preview_records(context_name=context)
     ):
         raise ValueError("Original preview does not identify an unrecorded preview.")
     for other in store.list_product_profile_records():
-        if any(
-            (lane.context, lane.instance) == (issued.context, instance) for lane in other.lanes
-        ) or (
+        if any((lane.context, lane.instance) == (context, instance) for lane in other.lanes) or (
             other.product != profile.product
-            and issued.context
+            and context
             in {
                 other.preview.context,
                 *other.historical_contexts,
@@ -492,14 +514,95 @@ def require_unrecorded_preview_original(
             }
         ):
             raise ValueError("Original preview has shared lane or context ownership.")
-    target_id = issued.dry_run_plan.compose_ref
     require_lane_target_ownership(
         (*store.list_dokploy_target_id_records(), *store.list_physical_provider_target_records()),
-        context=issued.context,
+        context=context,
         instance=instance,
-        target_id="" if target_id.startswith("${created.") else target_id,
+        target_id=target_id,
     )
-    return reservation
+
+
+def previews_without_original(
+    store: PostgresRecordStore, *, profile: LaunchplaneProductProfileRecord
+) -> dict[int, LaunchplaneIdempotencyRecord]:
+    """Held previews the provider currently shows, by PR, whose reservation keeps no intent.
+
+    Their target name and today's inventory identify what exists. Nothing here
+    says what the lost operation did, so it can only be disposed of, never settled.
+    """
+    observed = _currently_observed_preview_slugs(store, profile)
+    previews: dict[int, LaunchplaneIdempotencyRecord] = {}
+    for reservation in store.list_held_odoo_preview_reservations(
+        product=profile.product, limit=1001
+    ):
+        number = _preview_number_without_original(store, profile, reservation)
+        if number and profile.preview.slug_template.format(number=number) in observed:
+            previews[number] = reservation
+    return previews
+
+
+def _currently_observed_preview_slugs(
+    store: PostgresRecordStore, profile: LaunchplaneProductProfileRecord
+) -> tuple[str, ...]:
+    """Slugs in a fresh, complete provider scan; an unreadable scan observes nothing."""
+    inventory = read_preview_inventory_evidence(
+        record_store=store,
+        context=profile.preview.context,
+        product=profile.product,
+        repository=profile.repository,
+    )
+    return inventory.observed_slugs if inventory.status == "nonempty" else ()
+
+
+def _preview_number_without_original(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    reservation: LaunchplaneIdempotencyRecord,
+) -> int:
+    if reservation.route_path != ODOO_PREVIEW_APPLY_ROUTE or (
+        store.read_original_mutation_intent(reservation)
+    ):
+        return 0
+    return cast(
+        int,
+        classify_preview_reservation(reservation, profile=profile, store=store)[
+            "target_pull_request_number"
+        ],
+    )
+
+
+def require_closed_preview_without_original(
+    store: PostgresRecordStore,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    number: int,
+    reservation_id: str,
+) -> None:
+    """Recheck today's facts just before the provider is touched.
+
+    The executor has already superseded the held reservation here, so it is read
+    by id rather than through the held list.
+    """
+    from control_plane.disposable_lanes import require_unprotected_preview
+
+    reservation = store.read_idempotency_record_by_id(reservation_id)
+    context, instance = profile.preview.context, profile.preview.slug_template.format(number=number)
+    if (
+        reservation is None
+        or _preview_number_without_original(store, profile, reservation) != number
+        or instance not in _currently_observed_preview_slugs(store, profile)
+    ):
+        raise ValueError("The preview is no longer currently observed without its original.")
+    _require_unrecorded_preview_target(
+        store, profile=profile, instance=instance, reservation=reservation
+    )
+    try:
+        target = store.read_dokploy_target_record(context_name=context, instance_name=instance)
+    except FileNotFoundError:
+        target = None
+    require_unprotected_preview(
+        target, store.read_disposable_lane_safety(profile.product, context, instance)
+    )
 
 
 def require_unrecorded_preview_refresh(
