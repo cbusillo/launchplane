@@ -774,9 +774,21 @@ class CandidateFailureClassificationTests(unittest.TestCase):
                 {4: "2026-11-09T18:23:13Z   RESULTS: success abandoned success\n"},
             ),
         }
+        never_ran_shapes["abandoned gates in two workflows"] = (
+            [
+                _check_run(4, "security-gate", "failure", suite_id=8),
+                _check_run(5, "security-gate", "failure", suite_id=9),
+            ],
+            {
+                4: "2026-11-09T18:23:13Z   RESULTS: success abandoned success\n",
+                5: "2026-11-09T18:24:05Z   RESULTS: abandoned abandoned abandoned\n",
+            },
+        )
         for shape, (check_runs, logs) in never_ran_shapes.items():
             with self.subTest(shape):
-                failures = self._classify(check_runs, {4: [_exit_code()]}, logs=logs)
+                failures = self._classify(
+                    check_runs, {4: [_exit_code()], 5: [_exit_code()]}, logs=logs
+                )
                 self.assertTrue(failures.infrastructure_only)
 
     def test_gate_failing_beside_a_real_failure_is_not_infrastructure(self) -> None:
@@ -787,6 +799,10 @@ class CandidateFailureClassificationTests(unittest.TestCase):
                 _check_run(4, "ci-gate", "failure", suite_id=7),
             ],
             "gate run unidentified": [_check_run(4, "ci-gate", "failure")],
+            "failed job in another workflow": [
+                _check_run(3, "static_checks", "failure", suite_id=8),
+                _check_run(4, "ci-gate", "failure", suite_id=7),
+            ],
         }
         for shape, check_runs in real_failure_shapes.items():
             with self.subTest(shape):

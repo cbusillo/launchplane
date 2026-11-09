@@ -176,12 +176,17 @@ def _mark_gates_whose_needed_jobs_never_ran(
     read_job_log: Callable[[int], str | None],
 ) -> list[CandidateCheckFailure]:
     sole_failed_gates = _sole_failed_check_run_ids(check_runs)
-    return [
+    marked = [
         replace(failure, runner_lost=True)
         if _gate_needed_jobs_never_ran(failure, sole_failed_gates, read_job_log)
         else failure
         for failure in failures
     ]
+    return marked if all(_infrastructure_shaped(failure) for failure in marked) else failures
+
+
+def _infrastructure_shaped(failure: CandidateCheckFailure) -> bool:
+    return failure.runner_lost or failure.conclusion in INFRASTRUCTURE_CONCLUSIONS
 
 
 def _gate_needed_jobs_never_ran(

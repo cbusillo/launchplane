@@ -1387,7 +1387,7 @@ unrelated optional workflows cannot change its classification:
   generic dependent-job exit annotations do not establish a separate product failure.
   A failed gate that is the only failure in its run, and whose job log shows a step
   environment value made only of needed-job results including `abandoned` (a job
-  GitHub never created), counts the same.
+  GitHub never created), counts the same when that explains every failure.
   Runs that were cancelled, went stale or failed to start count only when no
   run failed outright, because fail-fast also cancels the siblings of a real
   failure. A named failed test in that execution or a matching required failing commit status rules
