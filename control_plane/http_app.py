@@ -103,8 +103,11 @@ from control_plane.dokploy_target_setup_http import (
     DokployComposeDomainPartialError,
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
+    first_production_target_lock_name,
     first_testing_replacement_lock_name,
+    require_empty_owned_environment,
     require_empty_testing_target_creation,
+    require_first_production_target_creation,
     TestingTargetSourceEvidenceUnavailable,
 )
 from control_plane import product_config as control_plane_product_config
@@ -4254,8 +4257,18 @@ def create_launchplane_fastapi_app(
                 return NpmplusIngressProvider(client=npmplus_ingress_client_factory())
 
             resolved_ingress_provider_factory = npmplus_ingress_provider_from_client_factory
-        else:
-            resolved_ingress_provider_factory = default_ingress_provider
+
+    def ingress_provider_for_store(record_store: object, trace_id: str) -> IngressProvider:
+        if resolved_ingress_provider_factory is not None:
+            return resolved_ingress_provider_factory()
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="NPMplus service credentials require database records.",
+            )
+        return default_ingress_provider(record_store=record_store)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -16426,11 +16439,12 @@ def create_launchplane_fastapi_app(
         operator_identity = isinstance(
             identity, GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity
         )
-        service_dns_input = (
-            isinstance(identity, LocalOperatorIdentity)
-            and director_agent_identity(identity)
-            and product_config_request.is_preview_dns_service_input()
+        fixed_service_slot = (
+            product_config_request.fixed_service_secret_slot()
+            if isinstance(identity, LocalOperatorIdentity) and director_agent_identity(identity)
+            else None
         )
+        fixed_service_input = fixed_service_slot is not None
         action = (
             "product_config.apply"
             if product_config_request.mode == "apply"
@@ -16501,7 +16515,7 @@ def create_launchplane_fastapi_app(
                         message=f"Caller cannot perform {required_action} for calendar configuration.",
                     )
         if (
-            not service_dns_input
+            not fixed_service_input
             and isinstance(identity, LocalOperatorIdentity)
             and (product_config_request.mode == "apply" or not director_agent_identity(identity))
         ):
@@ -16613,7 +16627,7 @@ def create_launchplane_fastapi_app(
         try:
             config_profile = (
                 None
-                if service_dns_input
+                if fixed_service_input
                 else control_plane_product_config_service.resolve_product_config_profile(
                     database_store,
                     product=product_config_request.product,
@@ -16709,14 +16723,13 @@ def create_launchplane_fastapi_app(
                 code="matching_dry_run_required",
                 message="Product-config apply requires a prior matching dry-run.",
             )
-        if service_dns_input:
-            from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION
-
+        if fixed_service_slot is not None:
+            fixed_integration, fixed_name = fixed_service_slot
             if (
                 database_store.find_secret_record(
                     scope="context",
-                    integration=PREVIEW_DNS_INTEGRATION,
-                    name=PREVIEW_DNS_BINDING,
+                    integration=fixed_integration,
+                    name=fixed_name,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                     instance="",
                 )
@@ -16726,7 +16739,7 @@ def create_launchplane_fastapi_app(
                     status_code=409,
                     trace_id=trace_id,
                     code="service_secret_already_configured",
-                    message="The DNS credential is already configured. Use the signed-in form to rotate it.",
+                    message="This service credential is already configured. Use the signed-in form to rotate it.",
                 )
 
         def secret_copy_source_readable(*, context: str, instance: str) -> bool:
@@ -16936,7 +16949,7 @@ def create_launchplane_fastapi_app(
             authority_bundle = authority_bundle.model_copy(
                 update={"expected_product_profiles": (expected_product_profile,)}
             )
-        if not service_dns_input:
+        if not fixed_service_input:
             authority_bundle = authority_bundle.model_copy(
                 update={
                     "required_product_config_target": (
@@ -17016,7 +17029,7 @@ def create_launchplane_fastapi_app(
             )
         else:
             if (
-                not service_dns_input
+                not fixed_service_input
                 and isinstance(identity, LocalOperatorIdentity)
                 and product_config_request.context
             ):
@@ -17039,8 +17052,8 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     response=product_config_response,
                 )
-                if service_dns_input:
-                    database_store.write_preview_dns_secret_bundle(
+                if fixed_service_input:
+                    database_store.write_fixed_service_secret_bundle(
                         completed_bundle, identity=identity
                     )
                 elif public_hosts_plan is None:
@@ -17157,16 +17170,16 @@ def create_launchplane_fastapi_app(
                 message="The secret copy source changed. Read metadata and review a fresh dry-run.",
             ) from error
         except SecretRecordConflictError as error:
-            dns_input = product_config_request.is_preview_dns_service_input()
+            service_input = product_config_request.fixed_service_secret_slot() is not None
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="service_secret_already_configured"
-                if dns_input
+                if service_input
                 else "provider_secret_already_recorded",
                 message=(
-                    "The DNS credential was configured before commit. Use the signed-in form to rotate it."
-                    if dns_input
+                    "This service credential was configured before commit. Use the signed-in form to rotate it."
+                    if service_input
                     else "A secret named for provider adoption was recorded before commit. "
                     "Review a fresh dry-run."
                 ),
@@ -23602,7 +23615,7 @@ def create_launchplane_fastapi_app(
         preflight_result: NpmplusIngressApplyResult | None = None
         guarded_instance_apply = False
         try:
-            ingress_provider = resolved_ingress_provider_factory()
+            ingress_provider = ingress_provider_for_store(record_store, trace_id)
             if resolved_ingress_request.route.dns_challenge:
                 if (
                     instance_name
@@ -26075,7 +26088,7 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
         )
         try:
-            ingress_provider = resolved_ingress_provider_factory()
+            ingress_provider = ingress_provider_for_store(record_store, trace_id)
             write_ingress_route_pending_audit_record(
                 ingress_store=canary_store,
                 trace_id=trace_id,
@@ -26696,6 +26709,14 @@ def create_launchplane_fastapi_app(
             and not setup_request.replaces_operation_id
             and bool(lane_owner)
         )
+        first_production_setup = (
+            director_agent_identity(identity)
+            and setup_request.mode == "apply"
+            and setup_request.operation == "create-compose"
+            and setup_request.instance == "prod"
+            and bool(lane_owner)
+            and database_store.read_product_profile_record(lane_owner).production_use != "live"
+        )
         director_source_completion = (
             director_agent_identity(identity)
             and setup_request.operation == "complete-compose-source"
@@ -26714,6 +26735,7 @@ def create_launchplane_fastapi_app(
             and setup_request.mode == "apply"
             and not disposable_rebuild_setup
             and not first_testing_setup
+            and not first_production_setup
             and not director_source_completion
             and not director_testing_domain
             and not native_onboarding
@@ -26747,6 +26769,9 @@ def create_launchplane_fastapi_app(
         first_testing_setup = first_testing_setup and (
             isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
         )
+        first_production_setup = first_production_setup and (
+            isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
+        )
         director_source_completion = director_source_completion and (
             isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
         )
@@ -26758,6 +26783,7 @@ def create_launchplane_fastapi_app(
             or lane_scoped_only
             or disposable_rebuild_setup
             or first_testing_setup
+            or first_production_setup
             or director_source_completion
             or director_testing_domain
             or native_onboarding
@@ -27016,6 +27042,11 @@ def create_launchplane_fastapi_app(
                     control_plane_root_path=resolved_control_plane_root,
                 )
                 return
+            if first_production_setup:
+                require_first_production_target_creation(
+                    database_store, setup_request, product=lane_owner
+                )
+                return
             if not disposable_rebuild_setup or setup_request.mode != "apply":
                 return
             operation = database_store.read_odoo_stable_target_replacement_operation_record(
@@ -27070,6 +27101,8 @@ def create_launchplane_fastapi_app(
             replacement_lock = (
                 first_testing_replacement_lock_name(database_store, setup_request)
                 if first_testing_setup
+                else first_production_target_lock_name(setup_request.context)
+                if first_production_setup
                 else None
             )
             lock = (
@@ -27083,7 +27116,7 @@ def create_launchplane_fastapi_app(
             )
             with lock as check:
                 if check is None:
-                    raise ValueError("A testing executor for this target is still active.")
+                    raise ValueError("Another executor for this target is still active.")
 
                 def checkpoint() -> None:
                     check()
@@ -27102,10 +27135,20 @@ def create_launchplane_fastapi_app(
                         or role_only_setup
                         or disposable_rebuild_setup
                         or first_testing_setup
+                        or first_production_setup
                         else None
                     ),
                     disposable_checkpoint=checkpoint
-                    if disposable_rebuild_setup or first_testing_setup
+                    if disposable_rebuild_setup or first_testing_setup or first_production_setup
+                    else None,
+                    disposable_before_create=(
+                        lambda _path: require_empty_owned_environment(
+                            database_store,
+                            setup_request,
+                            control_plane_root_path=resolved_control_plane_root,
+                        )
+                    )
+                    if first_production_setup
                     else None,
                 )
         except BridgeNetworkCapacityRefused as error:

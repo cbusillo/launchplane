@@ -1,7 +1,7 @@
 import base64
 import json
 import subprocess
-from typing import Any, Literal
+from typing import Any
 from unittest.mock import patch
 
 from control_plane import odoo_runtime_source_prerequisites as reader
@@ -40,7 +40,7 @@ class RuntimeSourceTests(PrerequisiteFixture):
             )
         return super().subprocess_run(command, **kwargs)
 
-    def consume(self, mode: Literal["grants", "preview"] = "grants") -> reader.SourceConsumerResult:
+    def consume(self) -> reader.SourceConsumerResult:
         from control_plane import odoo_runtime_reads as reads
 
         with (
@@ -60,8 +60,7 @@ class RuntimeSourceTests(PrerequisiteFixture):
                 product=self.fixture.profile.product,
                 control_plane_root=self.root,
                 database_url=None,
-                mode=mode,
-                sources=tuple(SOURCE_PREFIXES) if mode == "grants" else ("fishbowl",),
+                sources=tuple(SOURCE_PREFIXES),
             )
 
     def test_capacity_and_reader_failures_keep_bounded_stages(self) -> None:
@@ -123,20 +122,8 @@ class RuntimeSourceTests(PrerequisiteFixture):
             {self.values[prefix + ".host"] for prefix in SOURCE_PREFIXES.values()},
         )
         self.assertNotIn(PRIVATE, result.model_dump_json())
-        self.assertTrue(all(not source.parameters for source in result.sources))
         self.pg.rollback.assert_called()
         self.pg.close.assert_called()
-
-    def test_omitted_options_keep_persisted_values_and_preview_freezes_effective_source(
-        self,
-    ) -> None:
-        self.values["fishbowl.port"] = "3499"
-        result = self.consume("preview")
-        source = next(item for item in result.sources if item.source == "fishbowl")
-        self.assertEqual(source.parameters["port"], self.values["fishbowl.port"])
-        self.assertEqual(source.parameters["db"], self.values["fishbowl.db"])
-        self.assertNotIn(PRIVATE, result.model_dump_json())
-        self.assertEqual(self.probes, [])
 
     def test_explicit_option_must_agree_with_applied_and_delivered_payload(self) -> None:
         self.set_overrides({"fishbowl.db": "inventory", "fishbowl.port": 3401})
@@ -159,11 +146,12 @@ class RuntimeSourceTests(PrerequisiteFixture):
         self.fixture.runtime = self.fixture.runtime.model_copy(
             update={"env": {"ENV_OVERRIDE_CONFIG_PARAM__FISHBOWL__PORT": "3306"}}
         )
-        result = self.consume("preview")
-        self.assertFalse(
-            next(item for item in result.sources if item.source == "fishbowl").parameters
+        self.assertEqual(
+            next(item for item in self.consume().sources if item.source == "fishbowl").grants,
+            "unknown",
         )
         self.fixture.runtime = self.fixture.runtime.model_copy(update={"env": {}})
+        self.probes.clear()
         self.installed = {key: "uninstalled" for key in self.installed}
         self.assertTrue(all(item.grants == "unknown" for item in self.consume().sources))
         self.assertEqual(self.probes, [])
@@ -173,18 +161,13 @@ class RuntimeSourceTests(PrerequisiteFixture):
             key = prefix + ".password"
             self.values[key] = "different-value"
             self.env[config_parameter_secret_env_key(key)] = "different-value"
-        modes: tuple[Literal["grants", "preview"], ...] = ("grants", "preview")
-        for mode in modes:
-            with self.subTest(mode=mode):
-                self.probes.clear()
-                result = self.consume(mode)
-                self.assertEqual(result.runtime, "verified")
-                self.assertTrue(all(item.grants == "unknown" for item in result.sources))
-                self.assertTrue(all(not item.parameters for item in result.sources))
-                self.assertEqual(self.probes, [])
+        result = self.consume()
+        self.assertEqual(result.runtime, "verified")
+        self.assertTrue(all(item.grants == "unknown" for item in result.sources))
+        self.assertEqual(self.probes, [])
 
     def test_applied_password_tls_and_payload_disagreement_remain_unknown(self) -> None:
-        for kind in ("delivered_password", "disabled_tls", "payload_mismatch"):
+        for kind in ("delivered_password", "payload_mismatch"):
             with self.subTest(kind=kind):
                 self.probes.clear()
                 self.set_overrides({"fishbowl.db": "inventory"})
@@ -192,8 +175,6 @@ class RuntimeSourceTests(PrerequisiteFixture):
                 self.env[config_parameter_secret_env_key("fishbowl.password")] = PRIVATE
                 if kind == "delivered_password":
                     self.values["fishbowl.password"] = "different-value"
-                elif kind == "disabled_tls":
-                    self.values["fishbowl.ssl_verify"] = "false"
                 elif kind == "payload_mismatch":
                     payload = json.loads(
                         base64.b64decode(self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY])
@@ -206,11 +187,29 @@ class RuntimeSourceTests(PrerequisiteFixture):
                     self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = base64.b64encode(
                         json.dumps(payload).encode()
                     ).decode()
-                result = self.consume("preview")
-                source = next(item for item in result.sources if item.source == "fishbowl")
-                self.assertFalse(source.parameters)
+                source = next(item for item in self.consume().sources if item.source == "fishbowl")
+                self.assertEqual(source.grants, "unknown")
                 self.assertEqual(source.failure_stage, "source_resolution")
                 self.values["fishbowl.password"] = PRIVATE
+
+    def test_misspelled_fishbowl_setting_is_not_an_opt_out(self) -> None:
+        self.values["fishbowl.ssl_verify"] = "flase"
+        source = next(item for item in self.consume().sources if item.source == "fishbowl")
+        self.assertEqual(source.grants, "unknown")
+        self.assertEqual(source.failure_stage, "source_resolution")
+        self.assertNotIn("fishbowl.invalid", {probe["host"] for probe in self.probes})
+
+    def test_runtime_probe_honors_fishbowl_verification_off_and_no_other_source(self) -> None:
+        self.values["fishbowl.ssl_verify"] = "false"
+        self.values[SOURCE_PREFIXES["cm_data"] + ".ssl_verify"] = "false"
+        sources = {item.source: item for item in self.consume().sources}
+        self.assertEqual(sources["fishbowl"].grants, "read_only")
+        self.assertEqual(sources["cm_data"].grants, "unknown")
+        self.assertEqual(sources["cm_data"].failure_stage, "source_resolution")
+        hosts = {probe["host"]: probe for probe in self.probes}
+        self.assertEqual(hosts["fishbowl.invalid"]["ssl_verify"], "false")
+        self.assertNotIn("cm_data.invalid", hosts)
+        self.assertNotIn("ssl_verify", hosts["repairshopr.invalid"])
 
     def test_parameter_and_container_drift_discards_the_observation(self) -> None:
         for kind in ("parameter", "container", "image"):
@@ -218,12 +217,12 @@ class RuntimeSourceTests(PrerequisiteFixture):
                 self.parameter_reads = 0
                 self.inspections = 0
                 self.drift = kind
-                result = self.consume("preview")
+                result = self.consume()
                 self.assertEqual(result.runtime, "unknown")
                 self.assertEqual(
                     result.failure_stage, "host_inspection" if kind == "image" else "drift"
                 )
-                self.assertTrue(all(not item.parameters for item in result.sources))
+                self.assertTrue(all(item.grants == "unknown" for item in result.sources))
 
     def test_probe_timeout_stage_and_unexplained_unknown_preserve_other_sources(self) -> None:
         self.probe_failure = self.values["cm_data.db.host"]
@@ -243,28 +242,9 @@ class RuntimeSourceTests(PrerequisiteFixture):
                     )
                 )
 
-    def test_typed_only_authority_reaches_grant_route_and_preview_consumer(self) -> None:
+    def test_typed_only_authority_reaches_grant_route(self) -> None:
         from control_plane import odoo_import_diagnostics as diagnostic, odoo_runtime_reads as reads
-        from control_plane.odoo_preview_import_source import resolve_fishbowl_preview_source
-        from control_plane.product_secret_copy import ProductSecretCopyFrom
 
-        fishbowl = next(
-            index
-            for index, item in enumerate(self.fixture.bindings)
-            if item.binding_id == "fishbowl"
-        )
-        from control_plane.contracts.secret_record import SecretBinding
-
-        payload = self.fixture.bindings[fishbowl].model_dump(mode="json")
-        payload.update(
-            declared_secret_class="shared_safe",
-            sharing_reason={
-                "kind": "read_only_source",
-                "reason": "Fixture source",
-                "evidence": "Fixture SELECT-only grant",
-            },
-        )
-        self.fixture.bindings[fishbowl] = SecretBinding.model_validate(payload)
         self.values["fishbowl.port"] = "3499"
         with (
             patch.object(reader, "_read_remote", side_effect=self.remote),
@@ -277,10 +257,6 @@ class RuntimeSourceTests(PrerequisiteFixture):
             ),
             patch.object(reads, "assert_selection_current"),
             patch.object(reader, "_decrypt_secret_value", return_value=PRIVATE) as compare_decrypt,
-            patch(
-                "control_plane.odoo_preview_import_source.copy_source_value",
-                side_effect=AssertionError("Planning must not copy source passwords"),
-            ),
             patch.object(diagnostic, "_decrypt_secret_value", return_value=PRIVATE),
             patch.dict(diagnostic._FAILED_PROBES, {}, clear=True),
         ):
@@ -294,23 +270,6 @@ class RuntimeSourceTests(PrerequisiteFixture):
                 all(item.applied_connection_grants == "read_only" for item in result.sources),
                 result,
             )
-            preview = resolve_fishbowl_preview_source(
-                store=self.fixture.store,
-                profile=self.fixture.profile,
-                preview_slug="pr-42",
-                copy_from=ProductSecretCopyFrom(
-                    context=self.fixture.context, instance="testing", version_id="fishbowl-v1"
-                ),
-                control_plane_root=self.root,
-                database_url=None,
-            )
-        fields = {
-            item.key: item.value.value
-            for item in preview.parameters
-            if item.value.source == "literal"
-        }
-        self.assertEqual(fields["fishbowl.port"], self.values["fishbowl.port"])
-        self.assertEqual(preview.environment, {})
         compare_decrypt.assert_called()
 
     def test_grant_consumer_cannot_substitute_a_new_runtime_origin(self) -> None:

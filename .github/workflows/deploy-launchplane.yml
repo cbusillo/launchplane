@@ -44,11 +44,6 @@ on:
         required: false
         default: false
         type: boolean
-      omit_npmplus_env:
-        description: Temporarily omit NPMplus env for one compatibility deploy.
-        required: false
-        default: false
-        type: boolean
       break_glass_confirm:
         description: Type ROLL BACK LAUNCHPLANE THROUGH DIRECT DOKPLOY to run the manual emergency rollback job.
         required: false
@@ -111,13 +106,9 @@ jobs:
       LAUNCHPLANE_LOCAL_ADMIN_TOKEN: ${{ secrets.LAUNCHPLANE_LOCAL_ADMIN_TOKEN }}
       LAUNCHPLANE_LOCAL_ADMIN_SUBJECT: ${{ vars.LAUNCHPLANE_LOCAL_ADMIN_SUBJECT }}
       LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL: ${{ vars.LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL }}
-      LAUNCHPLANE_NPMPLUS_BASE_URL: ${{ vars.LAUNCHPLANE_NPMPLUS_BASE_URL }}
-      LAUNCHPLANE_NPMPLUS_IDENTITY: ${{ secrets.LAUNCHPLANE_NPMPLUS_IDENTITY }}
-      LAUNCHPLANE_NPMPLUS_SECRET: ${{ secrets.LAUNCHPLANE_NPMPLUS_SECRET }}
       LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK: ${{ vars.LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK }}
       OMIT_TERMINAL_AGENT_ENV: ${{ inputs.omit_terminal_agent_env || false }}
       OMIT_OWNER_AGENT_ENV: ${{ inputs.omit_owner_agent_env || false }}
-      OMIT_NPMPLUS_ENV: ${{ inputs.omit_npmplus_env || false }}
     steps:
       - name: Resolve deploy inputs
         id: prep
@@ -206,8 +197,7 @@ jobs:
 
           for omit_environment_variable in \
             OMIT_TERMINAL_AGENT_ENV \
-            OMIT_OWNER_AGENT_ENV \
-            OMIT_NPMPLUS_ENV; do
+            OMIT_OWNER_AGENT_ENV; do
             omit_environment_value="${!omit_environment_variable}"
             if [ "$omit_environment_value" != "true" ] && [ "$omit_environment_value" != "false" ]; then
               echo "${omit_environment_variable} must be true or false." >&2
@@ -489,12 +479,8 @@ jobs:
               --arg local_admin_subject "${LAUNCHPLANE_LOCAL_ADMIN_SUBJECT:-}" \
               --arg local_admin_token_label "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL:-}" \
               --arg compose_external_network "${LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK:-}" \
-              --arg npmplus_base_url "${LAUNCHPLANE_NPMPLUS_BASE_URL:-}" \
-              --arg npmplus_identity "${LAUNCHPLANE_NPMPLUS_IDENTITY:-}" \
-              --arg npmplus_secret "${LAUNCHPLANE_NPMPLUS_SECRET:-}" \
               --argjson omit_terminal_agent_env "$OMIT_TERMINAL_AGENT_ENV" \
               --argjson omit_owner_agent_env "$OMIT_OWNER_AGENT_ENV" \
-              --argjson omit_npmplus_env "$OMIT_NPMPLUS_ENV" \
               --arg bootstrap_secret_operation "$BOOTSTRAP_SECRET_OPERATION" \
               '(
                 {
@@ -547,27 +533,6 @@ jobs:
                   end
                 )
                 + (
-                  if (($omit_npmplus_env | not) and $npmplus_base_url != "") then
-                    {LAUNCHPLANE_NPMPLUS_BASE_URL: $npmplus_base_url}
-                  else
-                    {}
-                  end
-                )
-                + (
-                  if (($omit_npmplus_env | not) and $npmplus_identity != "") then
-                    {LAUNCHPLANE_NPMPLUS_IDENTITY: $npmplus_identity}
-                  else
-                    {}
-                  end
-                )
-                + (
-                  if (($omit_npmplus_env | not) and $npmplus_secret != "") then
-                    {LAUNCHPLANE_NPMPLUS_SECRET: $npmplus_secret}
-                  else
-                    {}
-                  end
-                )
-                + (
                   if $public_ingress_github_token != "" then
                     {LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN: $public_ingress_github_token}
                   else
@@ -599,7 +564,6 @@ jobs:
             jq -n \
               --arg public_ingress_github_token "${LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN:-}" \
               --arg bootstrap_secret_operation "$BOOTSTRAP_SECRET_OPERATION" \
-              --argjson omit_npmplus_env "$OMIT_NPMPLUS_ENV" \
               '[
                 "GH_TOKEN",
                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER",
@@ -609,17 +573,7 @@ jobs:
                 "LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES",
                 "LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT",
                 "LAUNCHPLANE_WORK_GRAPH_GH_BINARY"
-              ] + (
-                if $omit_npmplus_env then
-                  [
-                    "LAUNCHPLANE_NPMPLUS_BASE_URL",
-                    "LAUNCHPLANE_NPMPLUS_IDENTITY",
-                    "LAUNCHPLANE_NPMPLUS_SECRET"
-                  ]
-                else
-                  []
-                end
-              )
+              ]
               + (
                 if $bootstrap_secret_operation == "remove" then
                   ["LAUNCHPLANE_SECRET_KEYS_JSON"]

@@ -276,7 +276,6 @@ WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
 }
 WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {
-        "inputs.omit_npmplus_env.default": frozenset(("false",)),
         "inputs.omit_owner_agent_env.default": frozenset(("false",)),
         "inputs.omit_terminal_agent_env.default": frozenset(("false",)),
     },
@@ -538,9 +537,6 @@ WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
             ("${{ secrets.LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET }}",)
         ),
         "LAUNCHPLANE_IMAGE_REPOSITORY": frozenset(("${{ vars.LAUNCHPLANE_IMAGE_REPOSITORY }}",)),
-        "LAUNCHPLANE_NPMPLUS_BASE_URL": frozenset(("${{ vars.LAUNCHPLANE_NPMPLUS_BASE_URL }}",)),
-        "LAUNCHPLANE_NPMPLUS_IDENTITY": frozenset(("${{ secrets.LAUNCHPLANE_NPMPLUS_IDENTITY }}",)),
-        "LAUNCHPLANE_NPMPLUS_SECRET": frozenset(("${{ secrets.LAUNCHPLANE_NPMPLUS_SECRET }}",)),
         "LAUNCHPLANE_PUBLIC_URL": frozenset(("${{ vars.LAUNCHPLANE_PUBLIC_URL }}",)),
         "LAUNCHPLANE_SERVICE_AUDIENCE": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
         "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN": frozenset(
@@ -563,12 +559,6 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "BREAK_GLASS_REASON": frozenset(("${{ inputs.break_glass_reason }}",)),
         "DEPLOY_GIT_REF": frozenset(("${{ inputs.git_ref }}",)),
         "DEPLOY_IMAGE_REFERENCE": frozenset(("${{ inputs.image_reference }}",)),
-        "OMIT_NPMPLUS_ENV": frozenset(
-            (
-                "${{ inputs.omit_npmplus_env }}",
-                "${{ inputs.omit_npmplus_env || false }}",
-            )
-        ),
         "OMIT_OWNER_AGENT_ENV": frozenset(
             (
                 "${{ inputs.omit_owner_agent_env }}",

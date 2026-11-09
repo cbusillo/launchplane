@@ -138,7 +138,8 @@ that this context reaches the actual deployment runner's intended Docker daemon.
 A passing rehearsal on a different daemon cannot qualify that runner. The job
 summary retains the safe result, never the snapshot. When the export refuses,
 its value-free `records.snapshot_failure` projection (reason, family and budget
-counters) is mapped to a step output before cleanup deletes the response file,
+counters, including `elapsed_wall_ms` and this request thread's `thread_cpu_ms`,
+which separate real work from waiting and scheduling) is mapped to a step output before cleanup deletes the response file,
 and the retention step prints it to the job log and summary.
 
 Snapshots expire after five minutes. The shared workflow wrapper bounds image

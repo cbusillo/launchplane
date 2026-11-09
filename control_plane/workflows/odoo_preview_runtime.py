@@ -1127,6 +1127,7 @@ class OdooPreviewDokployApplyResult(BaseModel):
     steps: tuple[OdooPreviewDokployApplyStep, ...] = ()
     rollback_errors: tuple[str, ...] = ()
     error_message: str = ""
+    schedule_failure_reason: str = Field(default="", exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def _normalize_result(self) -> "OdooPreviewDokployApplyResult":
@@ -2128,6 +2129,10 @@ def _execute_refresh(
             request=request,
             status="fail",
             error_message=str(exc),
+            schedule_failure_reason=exc.reason
+            if isinstance(exc, dokploy_post_deploy.OdooPostDeployScheduleFailed)
+            and module_install_update_status == "fail"
+            else "",
             domain_id=domain_id,
             compose_id=resolved_compose_id,
             created_compose=bool(created_compose_id),
@@ -2587,6 +2592,7 @@ def _apply_result(
     steps: tuple[OdooPreviewDokployApplyStep, ...] = (),
     rollback_errors: tuple[str, ...] = (),
     error_message: str = "",
+    schedule_failure_reason: str = "",
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     return OdooPreviewDokployApplyResult(
@@ -2608,6 +2614,7 @@ def _apply_result(
         steps=steps,
         rollback_errors=rollback_errors,
         error_message=error_message,
+        schedule_failure_reason=schedule_failure_reason,
     )
 
 

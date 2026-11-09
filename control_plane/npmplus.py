@@ -391,6 +391,13 @@ class NpmplusHttpOpener(Protocol):
 
 
 class NpmplusClient:
+    def uses_same_credentials(self, other: "NpmplusClient") -> bool:
+        return self._credentials == other._credentials
+
+    @property
+    def base_url(self) -> str:
+        return self._credentials.normalized_base_url
+
     def __init__(
         self,
         *,

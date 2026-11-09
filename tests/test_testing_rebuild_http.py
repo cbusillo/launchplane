@@ -1287,6 +1287,36 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.latest.assert_not_called()
         self.assertEqual(self.fixture.effects, [])
 
+    async def test_expired_saved_file_positive_cannot_wedge_a_fresh_non_use_plan(self) -> None:
+        from datetime import UTC, datetime, timedelta
+        from control_plane import testing_rebuild_service as service
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+        from tests.support.disposable_lanes import record_safety
+
+        context = self.fixture.operation.context
+        now = datetime.now(UTC)
+        fresh = OdooTestingUsage("unused", False, False, "complete")
+        for name, valid_until, blocked in (
+            ("expired_observation", now - timedelta(seconds=1), False),
+            ("live_observation", now + timedelta(minutes=5), True),
+        ):
+            with self.subTest(name=name):
+                record_safety(
+                    self.store,
+                    self.product,
+                    context,
+                    "testing",
+                    usage="in_use",
+                    usage_actor="odoo-user:8, odoo-user:9",
+                    usage_valid_until=valid_until,
+                    observed_at=now - timedelta(minutes=5),
+                )
+                with patch.object(service, "read_odoo_testing_usage", return_value=fresh):
+                    inspected = await self.call("GET", path=self.url + "/inputs")
+                self.assertEqual(inspected.status_code, 200, inspected.json())
+                codes = [item["code"] for item in inspected.json()["blockers"]]
+                self.assertEqual("testing_in_use" in codes, blocked, codes)
+
     async def test_known_use_returns_conditional_plan_but_blocks_submission(self) -> None:
         from datetime import UTC, datetime, timedelta
         from control_plane import testing_rebuild_service as service

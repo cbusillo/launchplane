@@ -19,9 +19,7 @@ refused. Secrets stay in [managed secret records](secrets.md).
 `LAUNCHPLANE_NPMPLUS_BASE_URL` records the existing NPMplus API endpoint. It
 accepts an HTTP(S) URL with a usable hostname and nonzero port, without user
 information, query, fragment or whitespace;
-this prepares configuration for the later combined consumer switch. Current
-consumers still use their existing environment configuration. Identity and secret
-stay in the fixed
+the reader uses the same validator. Identity and secret stay in the fixed
 [NPMplus credential input](secrets.md#npmplus-api-credentials), not this record.
 
 `LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID` prepares the existing onboarding

@@ -59,9 +59,12 @@ and inspection runs outside the API event loop.
 
 Fixed capability programs serialize their credential-key set in sorted order,
 so a service process change preserves program identity. Inspection and admitted
-host readback also recognize an older serialization only when it permutes the
-identical credential-key tokens in that one literal and every remaining byte
-matches. Different keys, quoting, inputs or code still refuse provenance.
+host readback also recognize permutations of the exact current credential-key
+set or the fixed set from before NPMplus service-key exclusion. Every remaining
+byte must match. Partial, duplicate or foreign keys, changed quoting, inputs or
+code still refuse provenance. Historical recognition never executes the old
+classifier: admitted readbacks dispatch only the regenerated current program,
+which rejects both NPMplus service credential keys.
 The immediately preceding stricter capability program is also recognized only
 with its complete unchanged body and identical inputs; new readbacks execute the
 current program. Partial edits to its physical proof do not match.
@@ -74,6 +77,9 @@ missing or ambiguous witness still refuses a tag-only task.
 Storage programs retain exact comparison. Disabled-program, terminal-history,
 binding and all physical capability checks remain required; this compatibility
 does not authorize retry, allocation, settlement or hold lifting.
+An older image cannot recognize upgraded program bytes. After a rollback to such
+an image, capability operations on an upgraded program refuse before dispatch;
+recover by deploying forward to a build that understands both key sets.
 
 `resources-read` uses the original key and reads only the saved service record.
 A completed operation returns its existing preparation receipt. A missing,

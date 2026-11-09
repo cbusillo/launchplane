@@ -2,6 +2,7 @@
 
 import json
 import re
+import socket
 import ssl
 import sys
 from typing import Literal
@@ -9,6 +10,9 @@ from typing import Literal
 import pymysql
 
 GrantStatus = Literal["read_only", "unsafe", "unknown"]
+ProbeFailure = Literal["dns", "tcp", "tls", "timeout", "auth", "driver"]
+_MYSQL_ACCESS_DENIED_CODES = frozenset({1044, 1045, 1698})
+MAX_GRANT_NAMES = 32
 _READ_PRIVILEGES = frozenset({"SELECT", "SHOW VIEW", "SHOW DATABASES", "USAGE"})
 # Accept only simple SHOW GRANTS privilege rows. Role assignments, partial revokes,
 # authentication clauses and dialect extensions stay unknown, never read-only.
@@ -44,8 +48,44 @@ def classify_grants(rows: object, *, mariadb_authentication: bool = False) -> Gr
     return "unknown" if unknown or not has_select else "read_only"
 
 
-def probe(settings: dict[str, str]) -> GrantStatus:
-    # TLS verification is mandatory. No plaintext, local socket or writer fallback.
+def grant_names(rows: object) -> tuple[str, ...]:
+    if not isinstance(rows, (list, tuple)):
+        return ()
+    names: set[str] = set()
+    for row in rows:
+        text = row[0] if isinstance(row, (list, tuple)) and len(row) == 1 else None
+        match = _GRANT.fullmatch(text) if isinstance(text, str) else None
+        if match is not None:
+            names.update(part.strip() for part in match[1].split(",") if part.strip())
+    return tuple(sorted(names))[:MAX_GRANT_NAMES]
+
+
+def failure_kind(error: BaseException) -> ProbeFailure:
+    cause = getattr(error, "original_exception", error)
+    if isinstance(cause, socket.gaierror):
+        return "dns"
+    if isinstance(cause, ssl.SSLError):
+        return "tls"
+    if isinstance(cause, socket.timeout):
+        return "timeout"
+    if isinstance(cause, OSError):
+        return "tcp"
+    if error.args and error.args[0] in _MYSQL_ACCESS_DENIED_CODES:
+        return "auth"
+    return "driver"
+
+
+def _tls_context(settings: dict[str, str]) -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    if settings.get("ssl_verify") == "false":
+        # insecure-tls: only the trusted private Fishbowl source sends this; its certificate names no host.
+        # Decision: https://github.com/cbusillo/launchplane/issues/5810#issuecomment-6742151038
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    return context
+
+
+def observe(settings: dict[str, str]) -> tuple[GrantStatus, tuple[str, ...]]:
     connection = pymysql.connect(
         host=settings["host"],
         user=settings["user"],
@@ -54,7 +94,7 @@ def probe(settings: dict[str, str]) -> GrantStatus:
         connect_timeout=3,
         read_timeout=3,
         write_timeout=3,
-        ssl=ssl.create_default_context(),
+        ssl=_tls_context(settings),
         local_infile=False,
         autocommit=True,
     )
@@ -63,13 +103,21 @@ def probe(settings: dict[str, str]) -> GrantStatus:
             # Bare SHOW GRANTS includes mandatory roles on MySQL 8; any role
             # assignment is unexpanded and therefore unknown. No SET ROLE/write probe.
             cursor.execute("SHOW GRANTS")
-            return classify_grants(cursor.fetchmany(129))
+            rows = cursor.fetchmany(129)
+            return classify_grants(rows), grant_names(rows)
     finally:
         connection.close()
 
 
+def probe(settings: dict[str, str]) -> GrantStatus:
+    return observe(settings)[0]
+
+
 def main() -> None:
     result: GrantStatus = "unknown"
+    names: tuple[str, ...] = ()
+    failure: ProbeFailure | None = None
+    report_names = False
     try:
         raw = sys.stdin.read(65537)
         if len(raw) <= 65536:
@@ -77,12 +125,22 @@ def main() -> None:
             if isinstance(settings, dict) and all(
                 isinstance(key, str) and isinstance(value, str) for key, value in settings.items()
             ):
-                result = probe(settings)
-    except Exception:
+                report_names = settings.get("report_names") == "1"
+                if report_names:
+                    result, names = observe(settings)
+                else:
+                    result = probe(settings)
+    except Exception as error:
         # Source DNS/auth/TLS/driver messages may carry credentials, hosts or
         # authentication hashes. No exception chain or stderr leaves this process.
-        pass
-    sys.stdout.write(json.dumps({"grants": result}))
+        failure = failure_kind(error)
+    sys.stdout.write(
+        json.dumps(
+            {"grants": result, "names": list(names), "failure": failure}
+            if report_names
+            else {"grants": result}
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -891,7 +891,7 @@ class TestingPublicIngressHttpTests(TestingPublicIngressScenario, unittest.Isola
         with self.assertRaises(TestingIngressPrerequisiteError) as caught:
             self.edge().plan()
         with patch(
-            "control_plane.http_routes.testing_public_ingress.build_npmplus_ingress_client_from_env",
+            "control_plane.http_routes.testing_public_ingress.build_npmplus_ingress_client_from_records",
             return_value=self.client,
         ):
             response = await request(
@@ -908,7 +908,7 @@ class TestingPublicIngressHttpTests(TestingPublicIngressScenario, unittest.Isola
 
     async def test_only_director_agent_and_exact_testing_input_reach_planning(self) -> None:
         with patch(
-            "control_plane.http_routes.testing_public_ingress.build_npmplus_ingress_client_from_env",
+            "control_plane.http_routes.testing_public_ingress.build_npmplus_ingress_client_from_records",
             return_value=self.client,
         ):
             payload = self.edge_request.model_dump(mode="json")

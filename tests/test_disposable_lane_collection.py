@@ -97,6 +97,48 @@ class UsageEvidenceExpiryTests(unittest.TestCase):
         self.assertEqual(merged.usage_valid_until, collected.usage_valid_until)
         self.assertEqual(merged.current_usage(previous.expires_at), "in_use")
 
+    def test_fresh_non_use_replaces_a_stale_file_positive_but_not_data_protection(self) -> None:
+        now = datetime.now(timezone.utc)
+        previous = DisposableLaneSafety(
+            product="fixture",
+            context="fixture",
+            instance="testing",
+            observed_by="collector",
+            observer_kind="director_agent",
+            binding_sha256="a" * 64,
+            usage="in_use",
+            usage_actor="odoo-user:8, odoo-user:9",
+            usage_since=now - timedelta(days=16),
+            usage_valid_until=now + timedelta(minutes=5),
+            usage_evidence="fixture:session",
+            data="only_copy",
+            data_evidence="fixture:needed-copy",
+            production_resources="shared",
+            isolation_evidence="fixture:shared-resources",
+            observed_at=now,
+            expires_at=now + timedelta(minutes=5),
+        )
+        collected = previous.model_copy(
+            update={
+                "usage": "unused",
+                "usage_evidence": "fixture:complete-read",
+                "usage_actor": "",
+                "usage_since": None,
+                "usage_valid_until": None,
+                "data": "unknown",
+                "production_resources": "unknown",
+                "observed_at": now + timedelta(seconds=30),
+                "expires_at": now + timedelta(minutes=6),
+            }
+        )
+        merged = merge_collected_safety(previous, collected)
+        self.assertEqual(merged.current_usage(collected.observed_at), "unused")
+        self.assertEqual((merged.usage_actor, merged.usage_since), ("", None))
+        self.assertEqual(
+            (merged.data, merged.production_resources),
+            (previous.data, previous.production_resources),
+        )
+
     def test_recollection_preserves_use_deadline_and_independent_protection(self) -> None:
         now = datetime.now(timezone.utc)
         previous = DisposableLaneSafety(

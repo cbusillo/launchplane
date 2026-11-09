@@ -928,20 +928,36 @@ class ProductReconcileStoreTests(ProductReconcileTestCase):
 
 
 class ProductReconcileTestingTests(ProductReconcileTestCase):
-    def test_requested_migrated_release_cannot_select_an_ancestor_build(self) -> None:
+    def test_migrated_release_selects_its_pair_main_build_after_main_moves_on(self) -> None:
         from control_plane.product_reconcile import verified_testing_rebuild_artifact
 
         self._running_release(20, DEPLOYABLE)
         self.github.add_run(10, OLDER)
         profile = self.store.read_product_profile_record("site")
         lane = next(item for item in profile.lanes if item.instance == "testing")
-        current = verified_testing_rebuild_artifact(
-            self.store, profile, lane, artifact_id="artifact-cm-run-20-1", source_git_ref=DEPLOYABLE
+        older = verified_testing_rebuild_artifact(
+            self.store, profile, lane, artifact_id="artifact-cm-run-10-1", source_git_ref=OLDER
         )
-        self.assertEqual(current.manifest.source_commit, DEPLOYABLE)
+        assert older.manifest.source_build is not None
+        self.assertEqual(
+            (older.manifest.source_commit, older.manifest.source_build.purpose),
+            (OLDER, "release"),
+        )
+
+    def test_migrated_release_refuses_a_push_build_that_never_was_main_tip(self) -> None:
+        from control_plane.product_reconcile import verified_testing_rebuild_artifact
+
+        self._running_release(20, DEPLOYABLE)
+        self.github.add_run(50, PR_HEAD)
+        profile = self.store.read_product_profile_record("site")
+        lane = next(item for item in profile.lanes if item.instance == "testing")
         with self.assertRaises(BuildProvenanceError):
             verified_testing_rebuild_artifact(
-                self.store, profile, lane, artifact_id="artifact-cm-run-10-1", source_git_ref=OLDER
+                self.store,
+                profile,
+                lane,
+                artifact_id="artifact-cm-run-50-1",
+                source_git_ref=PR_HEAD,
             )
 
     def serving_candidate(
@@ -1166,10 +1182,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.assertEqual(verified.manifest.source_commit, NEWEST)
 
     def test_explicit_release_selection_keeps_release_baseline_while_candidate_serves(self) -> None:
-        from control_plane.product_reconcile import (
-            latest_verified_testing_release,
-            verified_testing_rebuild_artifact,
-        )
+        from control_plane.product_reconcile import latest_verified_testing_release
 
         statuses: tuple[Literal["pass", "reconciliation_required", "fail"], ...] = (
             "pass",
@@ -1198,10 +1211,6 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                     )
                     self.assertEqual((held["current_pull_request_number"], held["held"]), (5, True))
         self.github.add_run(10, OLDER)
-        with self.assertRaises(BuildProvenanceError):
-            verified_testing_rebuild_artifact(
-                self.store, profile, lane, artifact_id="artifact-cm-run-10-1", source_git_ref=OLDER
-            )
         self.github.add_run(40, NEWEST)
         self.assertEqual(
             latest_verified_testing_release(self.store, profile, lane).manifest.source_commit,
@@ -7224,6 +7233,48 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
 
         self.assertEqual(applied["preview_result_status"], "pass")
         self.assertEqual(applied["omitted_integration_credential_keys"], ["ODOO_SMTP_PASSWORD"])
+
+    def test_a_finished_schedule_failure_waits_for_a_new_build_with_its_reason(self) -> None:
+        applies: list[str] = []
+
+        def failed_schedule(**kwargs: Any) -> dict[str, object]:
+            applies.append("schedule")
+            kwargs["provider_effect_checkpoint"]("post_deploy_schedule_trigger")
+            return {
+                "status": "fail",
+                "error_message": "Odoo data workflow failed (deployment=abc).",
+                "provider_effect_attempted": True,
+                "schedule_failure_reason": "ValueError: Invalid API key 'demo-short-key-123'",
+            }
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch.object(self.provider, "execute_apply", side_effect=failed_schedule):
+            first = self.run_once()
+            self.request("preview", 5)
+            second = self.run_once()
+
+        self.assertEqual(applies, ["schedule"])
+        self.assertEqual(second.state, "failed")
+        self.assertNotEqual(second.last_plan["preview_operation_status"], "reconcile_required")
+        self.assertEqual(second.last_plan["last_failed_error_code"], "preview_build_failed")
+        for failed in (first, second):
+            self.assertIn("ValueError", failed.last_error)
+            self.assertIn("tries again when the PR has a new build", failed.last_error)
+            self.assertNotIn("demo-short-key-123", failed.model_dump_json())
+        self.assertEqual(
+            len(
+                self.store.list_held_odoo_preview_reservations(product="site"),
+            ),
+            0,
+        )
+
+        self.github.add_run(51, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        retried = self.run_once()
+
+        self.assertEqual(retried.state, "done", retried.last_error)
+        self.assertEqual(retried.last_plan["preview_result_status"], "pass")
 
     def test_preview_failure_after_the_provider_started_says_why(self) -> None:
         def failed_apply(**_kwargs: object) -> dict[str, object]:

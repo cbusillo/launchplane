@@ -306,7 +306,7 @@ def capability_program_body(script: str) -> str:
 
 
 def _capability_program_matches(observed: object, expected: str) -> bool:
-    if not isinstance(observed, str) or len(observed) != len(expected):
+    if not isinstance(observed, str):
         return False
     if observed == expected:
         return True
@@ -322,9 +322,13 @@ def _capability_program_matches(observed: object, expected: str) -> bool:
     if not observed.startswith(prefix) or not observed.endswith(suffix):
         return False
     tokens = observed[len(prefix) : -len(suffix)].split(", ")
-    return len(tokens) == len(credentials.PLATFORM_CREDENTIAL_KEYS) and set(tokens) == {
-        repr(key) for key in credentials.PLATFORM_CREDENTIAL_KEYS
-    }
+    return any(
+        len(tokens) == len(keys) and set(tokens) == {repr(key) for key in keys}
+        for keys in (
+            credentials.PLATFORM_CREDENTIAL_KEYS,
+            credentials.LEGACY_HOST_PROGRAM_CREDENTIAL_KEYS,
+        )
+    )
 
 
 def inspect_retained_application_capabilities(

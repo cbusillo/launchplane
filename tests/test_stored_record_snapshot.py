@@ -742,6 +742,26 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         self.assertEqual(diagnostics["rows_exported"], 0)
         self.assertNotIn("plaintext-sentinel", json.dumps(diagnostics))
 
+    def test_expired_budget_separates_wall_time_from_this_thread_cpu(self) -> None:
+        from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
+
+        with (
+            patch(
+                "control_plane.stored_record_snapshot.monotonic",
+                side_effect=chain([0], repeat(21)),
+            ),
+            patch(
+                "control_plane.stored_record_snapshot.thread_time",
+                side_effect=chain([5.0], repeat(7.5)),
+            ),
+        ):
+            with self.assertRaises(ValueError) as raised:
+                self.store.export_stored_record_snapshot()
+        diagnostics = snapshot_failure_diagnostics(raised.exception)
+        self.assertEqual(diagnostics["reason"], "snapshot_time_limit")
+        self.assertEqual(diagnostics["elapsed_wall_ms"], 21000)
+        self.assertEqual(diagnostics["thread_cpu_ms"], 2500)
+
     def test_database_statement_timeout_reports_reason_without_sql_or_inputs(self) -> None:
         from psycopg.errors import QueryCanceled
         from sqlalchemy.exc import OperationalError
