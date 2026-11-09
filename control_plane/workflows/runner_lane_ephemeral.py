@@ -88,7 +88,7 @@ def read_addon_job(
         or head_repository.get("id") != repository_id
         or run.get("id") != request.run_id
         or run.get("run_attempt") != request.run_attempt
-        or run.get("event") not in {"push", "pull_request"}
+        or run.get("event") not in {"push", "pull_request", "workflow_dispatch", "workflow_run"}
         or job.get("id") != request.job_id
         or job.get("run_id") != request.run_id
         or not isinstance(job.get("labels"), list)

@@ -76,8 +76,10 @@ Failed-job retries can reuse the most recent verified recipe from an earlier
 attempt of that same immutable source/run; they still create a fresh container
 for the current job/attempt. The recipe contains source, never job state.
 The job requests `self-hosted` plus `lp-addon-{run_id}-{run_attempt}`; its name
-and commands belong to the product. Fork runs, public repositories,
-`pull_request_target`, old job attempts, and mismatched recipe sources are refused.
+and commands belong to the product. Runs from `push`, `pull_request`,
+`workflow_dispatch` and `workflow_run` are admitted. Fork runs, public
+repositories, `pull_request_target`, old job attempts, and mismatched recipe
+sources are refused.
 
 The existing outbox worker scans queued addon jobs every minute. It uses the
 Runner Lifecycle App's existing repository-scoped Actions read permission to
