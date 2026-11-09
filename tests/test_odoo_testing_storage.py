@@ -519,7 +519,7 @@ class HostCapacityTests(unittest.TestCase):
 
         self.enterContext(patch.object(Path, "read_text", read))
 
-    def test_migrated_capacity_counts_only_real_attachments_and_only_remaining_archive_bytes(
+    def test_migrated_capacity_credits_all_regular_members_and_only_remaining_archive_bytes(
         self,
     ) -> None:
         namespace: dict[str, Any] = {}
@@ -530,9 +530,13 @@ class HostCapacityTests(unittest.TestCase):
             attachment = filestore / "aa" / ("a" * 40)
             attachment.parent.mkdir(parents=True)
             attachment.write_bytes(b"attachment")
-            (attachment.parent / ".lp-native-owned-temporary").write_bytes(b"not finished")
+            metadata = filestore / ".DS_Store"
+            metadata.write_bytes(b"synthetic metadata")
+            named_like_scratch = attachment.parent / ".lp-native-owned-member"
+            named_like_scratch.write_bytes(b"legitimate member")
             self.assertEqual(
-                namespace["populated_filestore_bytes"](filestore), attachment.stat().st_size
+                namespace["populated_filestore_bytes"](filestore),
+                sum(path.stat().st_size for path in (attachment, metadata, named_like_scratch)),
             )
             identity = "a" * 32
             source = {"database": {"size": 20}, "filestore": {"size": 40}}

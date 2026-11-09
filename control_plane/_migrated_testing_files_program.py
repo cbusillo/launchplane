@@ -7,6 +7,11 @@ if root.is_symlink() or (root.exists() and not root.is_dir()):
     raise RuntimeError('Migrated staging volume is unsafe')
 if not root.exists() and mode=='inspect':
     print(json.dumps({'chunks':[],'artifacts':{}}));sys.exit(0)
+if mode in ('prepare','cleanup'):
+    for temporary in root.glob('.lp-native-'+identity+'-*'):
+        if temporary.is_symlink() or not temporary.is_file():
+            raise RuntimeError('Interrupted migrated extraction contains an unsafe path')
+        temporary.unlink()
 if mode=='cleanup':
     for part in ('database','filestore'):
         (root/(part+'.artifact')).unlink(missing_ok=True)
@@ -36,10 +41,6 @@ filestore=Path('/volumes/data/filestore')/database
 if filestore.resolve()!=filestore.absolute():
     raise RuntimeError('Unsafe testing filestore')
 filestore.mkdir(parents=True,exist_ok=True)
-for temporary in root.glob('.lp-native-'+identity+'-*'):
-    if temporary.is_symlink() or not temporary.is_file():
-        raise RuntimeError('Interrupted migrated extraction contains an unsafe path')
-    temporary.unlink()
 seen=set();directories={filestore,filestore.parent,filestore.parent.parent};total=0
 with tarfile.open(artifacts['filestore'],'r|gz') as archive:
     for member in archive:
@@ -57,21 +58,21 @@ with tarfile.open(artifacts['filestore'],'r|gz') as archive:
             raise RuntimeError('Migrated filestore exceeds its declared inventory')
         path=filestore/name
         if path.resolve()!=path.absolute() or path.is_symlink():
-            raise RuntimeError('Unsafe migrated attachment destination')
+            raise RuntimeError('Unsafe migrated filestore member destination')
         path.parent.mkdir(parents=True,exist_ok=True)
         directories.update(parent for parent in path.parents if parent.is_relative_to(filestore))
         if path.exists():
             if not path.is_file() or path.stat().st_size!=member.size:
-                raise RuntimeError('Existing migrated attachment differs')
+                raise RuntimeError('Existing migrated filestore member differs')
             with path.open('rb') as original, archive.extractfile(member) as content:
                 while data:=content.read(1024*1024):
                     if original.read(len(data))!=data:
-                        raise RuntimeError('Existing migrated attachment differs')
+                        raise RuntimeError('Existing migrated filestore member differs')
                 if original.read(1):
-                    raise RuntimeError('Existing migrated attachment differs')
+                    raise RuntimeError('Existing migrated filestore member differs')
             continue
         if not path.exists() and shutil.disk_usage(filestore).free < member.size+spec.get('reserve_bytes',0):
-            raise RuntimeError('Insufficient space for the next migrated attachment')
+            raise RuntimeError('Insufficient space for the next migrated filestore member')
         temporary=None
         try:
             size=0
@@ -84,7 +85,7 @@ with tarfile.open(artifacts['filestore'],'r|gz') as archive:
                     size+=len(data);output.write(data)
                 output.flush();os.fsync(output.fileno())
             if size!=member.size:
-                raise RuntimeError('Migrated attachment content differs from its identity')
+                raise RuntimeError('Migrated filestore member content differs from its identity')
             os.link(temporary,path)
         finally:
             if temporary is not None:

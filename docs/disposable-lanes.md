@@ -2826,7 +2826,6 @@ including root metadata and checklist files, without an attachment-name filter.
 File names must be canonical relative paths; links, special files, aliases and
 duplicates are refused. Extraction scratch stays in the original per-operation
 artifact staging directory, so retry cleanup cannot remove filestore members.
-Producers must count and hash the complete output without filtering metadata.
 The existing credential boundary, quarantine, restore witness, private
 readiness, route cutover and clean snapshot remain the normal rebuild path.
 
