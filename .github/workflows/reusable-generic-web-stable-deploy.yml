@@ -289,7 +289,7 @@ jobs:
       - name: Inspect exact provider evidence
         id: provider_evidence
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/generic-web-deploy-recovery-dry-run@6bac61a1967c6adce8bdfd32cfbcdae362134a34 # main
+        uses: cbusillo/launchplane/.github/actions/generic-web-deploy-recovery-dry-run@c1eb0a7b7cb944a7891270ba3190db8b28c1c847 # main
         with:
           request-json: ${{ steps.request.outputs.request }}
           mode: provider-evidence
@@ -298,7 +298,7 @@ jobs:
 
       - name: Request Launchplane recovery dry run
         id: recovery
-        uses: cbusillo/launchplane/.github/actions/generic-web-deploy-recovery-dry-run@6bac61a1967c6adce8bdfd32cfbcdae362134a34 # main
+        uses: cbusillo/launchplane/.github/actions/generic-web-deploy-recovery-dry-run@c1eb0a7b7cb944a7891270ba3190db8b28c1c847 # main
         with:
           request-json: ${{ steps.request.outputs.request }}
           timeout-ms: ${{ inputs['timeout-ms'] }}

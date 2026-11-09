@@ -70,7 +70,7 @@ permissions:
 
 jobs:
   dry-run:
-    uses: cbusillo/launchplane/.github/workflows/reusable-ingress-route-dry-run.yml@b649f41982c478189aabb7c9e5a5e8649279b01b # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-ingress-route-dry-run.yml@c1eb0a7b7cb944a7891270ba3190db8b28c1c847 # main
     with:
       product: ${{ inputs.product }}
       context: ${{ inputs.context }}

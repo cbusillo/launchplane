@@ -87,7 +87,7 @@ permissions:
 
 jobs:
   apply:
-    uses: cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml@88584ae2800bceabc9d448eba7defddc5da75ec1 # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml@c1eb0a7b7cb944a7891270ba3190db8b28c1c847 # main
     with:
       mode: ${{ inputs.mode }}
       product: ${{ inputs.product }}

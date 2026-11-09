@@ -58,7 +58,7 @@ permissions:
 
 jobs:
   reconcile:
-    uses: cbusillo/launchplane/.github/workflows/reusable-external-route-binding-reconcile.yml@33801fbf510a1ab2cf858b7be5742b90bacc22a3 # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-external-route-binding-reconcile.yml@c1eb0a7b7cb944a7891270ba3190db8b28c1c847 # main
     with:
       mode: ${{ inputs.mode }}
       product: ${{ inputs.product }}

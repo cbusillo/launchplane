@@ -39,7 +39,7 @@ concurrency:
 jobs:
   verify:
     # yamllint disable-line rule:line-length
-    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-verification.yml@b0f389326cf372cd433b96a0c98365c4cae6c5f1  # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-verification.yml@c1eb0a7b7cb944a7891270ba3190db8b28c1c847  # main
     permissions:
       contents: read
       id-token: write
