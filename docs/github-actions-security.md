@@ -96,8 +96,12 @@ written to the workflow log by the upstream implementation.
 
 Container vulnerability scans pull current base-image references and invalidate
 only the named `runtime` build stage. This preserves cache for the frontend and
-GitHub CLI build stages while forcing runtime OS package upgrades and dependency
+artifact-scanner build stages while forcing runtime OS package upgrades and dependency
 installation to run against current security repositories on every scan.
+The service uses the GitHub HTTP adapter and does not package the GitHub CLI.
+Main push CI reuses successful proof for an identical tree; the daily scheduled
+CI run bypasses that reuse and applies the absolute vulnerability gates so new
+advisories are checked even when source inputs have not changed.
 
 The required CI `repository_pins` job enforces this policy on committed workflows
 and composite actions for both same-repository and fork pull requests. Security
