@@ -44,12 +44,12 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideValue,
 )
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
+from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsResult
 from control_plane.odoo_preview_apply_http import (
     _odoo_preview_service_environment,
     execute_odoo_preview_apply_result,
     _build_odoo_preview_apply_inputs,
     refresh_odoo_preview_issued_plan,
-    OdooPreviewApplyInputsResult,
     OdooPreviewPlanProvenanceError,
     issue_odoo_preview_apply_plan,
 )
