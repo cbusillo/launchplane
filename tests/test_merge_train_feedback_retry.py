@@ -20,6 +20,7 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
 import control_plane.merge_train_scheduler as merge_train_scheduler
 from control_plane.merge_train_scheduler import MergeTrainScheduledTargetResult
 from control_plane.merge_train_controller_run_once import MergeTrainControllerRunOnceResult
+from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_pr_feedback import (
     MergeTrainPrFeedbackEnvelope,
     build_merge_train_pr_feedback_record,
@@ -146,46 +147,65 @@ class MergeTrainFeedbackRetryTests(TestCase):
         policy = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True))
         )
-        deadlines = ("2026-10-01T06:05:00Z", "2026-10-01T06:02:00Z", "2026-10-01T06:05:00Z")
-        with (
-            TemporaryDirectory() as directory,
-            patch(
-                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
-                return_value={"action": "created", "comment_id": 123, "comment_url": ""},
-            ),
-        ):
-            records = [
-                _record(number=n, event="waiting").model_copy(
-                    update={"delivery_status": "failed", "provider_retry_at": deadline}
-                )
-                for n, deadline in zip((7, 8, 9), deadlines, strict=True)
-            ]
+        response: dict[str, object] = {
+            "result": {
+                "repository": "cbusillo/alpha",
+                "base_branch": "main",
+                "controller_action": "idle",
+                "dry_run_result": {
+                    "queue": [
+                        {
+                            "number": number,
+                            "eligible": False,
+                            "ready_handoff": {"comment_id": number, "head_sha": "a" * 40},
+                            "ineligible_reasons": ["Source needs engineering review"],
+                        }
+                        for number in (7, 8, 9)
+                    ]
+                },
+            }
+        }
+        headers = Message()
+        headers["Retry-After"] = "120"
+        quota = HTTPError("https://example.test/comment", 429, "quota", headers, None)
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            held = write_merge_train_pr_feedback_record(
+                store=store,
+                request=MergeTrainPrFeedbackEnvelope.model_validate(
+                    build_feedback_payloads(response=response)[1]
+                ),
+                policy_key="test",
+                policy_sha256="digest",
+                token="fixture",
+                recorded_at="2026-10-01T06:01:00Z",
+                response_trace_id="old-deferral",
+                defer_until="2026-10-01T06:02:00Z",
+            )
             with patch(
-                "control_plane.merge_train_scheduler.write_merge_train_pr_feedback_record",
-                side_effect=records,
-            ) as write:
+                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                side_effect=_failure(quota),
+            ) as deliver:
                 merge_train_scheduler._deliver_controller_feedback(
-                    record_store=FilesystemRecordStore(Path(directory)),
+                    record_store=store,
                     policy_record=policy,
                     repository_policy=policy.policy.policies[0],
                     token="fixture",
                     trace_id="pass",
-                    response={
-                        "result": {
-                            "repository": "cbusillo/alpha",
-                            "base_branch": "main",
-                            "controller_action": "wait_for_checks",
-                            "candidate": {
-                                "entries": [{"pull_request_number": n} for n in (7, 8, 9)]
-                            },
-                        }
-                    },
+                    response=response,
                     now=lambda: "2026-10-01T06:03:00Z",
                 )
-            self.assertEqual(
-                [call.kwargs["defer_until"] for call in write.call_args_list],
-                ["", deadlines[0], deadlines[0]],
+            self.assertEqual(deliver.call_count, 1)
+            first, second, third = (
+                store.list_merge_train_pr_feedback_records(pr_number=n, limit=1)[0]
+                for n in (7, 8, 9)
             )
+            self.assertEqual(second.feedback_id, held.feedback_id)
+            self.assertGreater(
+                datetime.fromisoformat(first.provider_retry_at),
+                datetime.fromisoformat(held.provider_retry_at),
+            )
+            self.assertEqual(third.provider_retry_at, first.provider_retry_at)
 
     def setUp(self) -> None:
         planning = patch(
