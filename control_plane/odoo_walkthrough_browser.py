@@ -16,6 +16,9 @@ from control_plane.testing_browser import launch_testing_browser
 
 
 _MODEL_RPC_PATH_PREFIXES = ("/web/dataset/call_kw", "/web/dataset/call_button")
+_UPLOAD_FILE_NAME = "launchplane-walkthrough.csv"
+_ORDINARY_CONTROL = "!['password', 'hidden', 'file'].includes(element.type)"
+_FILE_CONTROL = "element.localName === 'input' && element.type === 'file'"
 
 
 class ReadonlyBrowserCheckFailed(ValueError):
@@ -78,10 +81,18 @@ def readonly_browser_request(method: str, path: str, payload: object) -> bool:
     return True
 
 
-def require_safe_browser_control(locator: Locator) -> None:
-    safe = locator.evaluate("""element =>
+def commits_native_import(payload: object) -> bool:
+    params = payload.get("params") if isinstance(payload, dict) else None
+    if not isinstance(params, dict) or params.get("method") != "execute_import":
+        return False
+    kwargs = params.get("kwargs")
+    return not (isinstance(kwargs, dict) and kwargs.get("dryrun") is True)
+
+
+def require_safe_browser_control(locator: Locator, control: str = _ORDINARY_CONTROL) -> None:
+    safe = locator.evaluate(f"""element =>
         element.ownerDocument.defaultView === window.top &&
-        !['password', 'hidden', 'file'].includes(element.type) &&
+        {control} &&
         !element.closest('iframe') &&
         !/password|token|secret|api.?key/i.test(
             [element.name, element.id, element.autocomplete].join(' '))
@@ -122,7 +133,7 @@ def run_walkthrough_browser(
             and identity.instance != "testing"
         )
         or read_only
-        and any(step.action == "fill" for step in steps)
+        and any(step.action in {"fill", "upload"} for step in steps)
         or expected_origin.scheme != "https"
         or expected_origin.path not in {"", "/"}
     ):
@@ -151,19 +162,21 @@ def run_walkthrough_browser(
                     ):
                         route.abort()
                     else:
-                        if read_only:
-                            payload = None
-                            if request_url.path.startswith(_MODEL_RPC_PATH_PREFIXES):
-                                try:
-                                    payload = route.request.post_data_json
-                                except (ValueError, PlaywrightError):
-                                    route.abort()
-                                    return
-                            if not readonly_browser_request(
-                                route.request.method, request_url.path, payload
-                            ):
+                        payload = None
+                        if request_url.path.startswith(_MODEL_RPC_PATH_PREFIXES):
+                            try:
+                                payload = route.request.post_data_json
+                            except (ValueError, PlaywrightError):
                                 route.abort()
                                 return
+                        if commits_native_import(payload) or (
+                            read_only
+                            and not readonly_browser_request(
+                                route.request.method, request_url.path, payload
+                            )
+                        ):
+                            route.abort()
+                            return
                         route.continue_()
 
                 context.route("**/*", route_request)
@@ -289,9 +302,20 @@ def run_walkthrough_browser(
                     else:
                         locator = page.locator(step.selector)
                         # Browser scripts may not fill secrets or select an iframe.
-                        require_safe_browser_control(locator)
+                        require_safe_browser_control(
+                            locator,
+                            _FILE_CONTROL if step.action == "upload" else _ORDINARY_CONTROL,
+                        )
                         if step.action == "fill":
                             locator.fill(step.value)
+                        elif step.action == "upload":
+                            locator.set_input_files(
+                                {
+                                    "name": _UPLOAD_FILE_NAME,
+                                    "mimeType": "text/csv",
+                                    "buffer": step.value.encode(),
+                                }
+                            )
                         elif step.action == "click":
                             locator.click(no_wait_after=True)
                         else:
