@@ -57,7 +57,6 @@ ODOO_USAGE_PROBE_REASON_CODES = frozenset(
         "session_file_unreadable",
         "session_inventory_exceeds_bound",
         "session_layout_unsupported",
-        "session_lifetime_unavailable",
         "session_location_unavailable",
         "session_store_unavailable",
         "testing_environment_unavailable",
@@ -123,19 +122,15 @@ class OdooTestingUsage:
         }
 
 
-ODOO_SESSION_SOURCES = ("/odoo/odoo/http/session.py", "/odoo/odoo/http.py")
-
 # Runs inside the existing web container. No ORM, registry, HTTP authentication,
 # session-store get/save/GC, account names, tokens or session IDs leave it.
-ODOO_USAGE_CONTAINER_PROGRAM_TEMPLATE = (
-    r"""
-import argparse, ast, configparser, json, logging, os, re, stat, time
+ODOO_USAGE_CONTAINER_PROGRAM_TEMPLATE = r"""
+import argparse, configparser, json, logging, os, re, stat, time
 from datetime import datetime, timedelta, timezone
 EXPECTED_INSTANCE=__EXPECTED_INSTANCE__
 GENERATION_CREATED_AT=__GENERATION_CREATED_AT__
 from pathlib import Path
 CONFIG_PATH=__CONFIG_PATH__
-ODOO_SESSION_SOURCES=__ODOO_SESSION_SOURCES__
 SUPPORTED_SERVER_WIDE_MODULES=__SUPPORTED_SERVER_WIDE_MODULES__
 checkpoint='testing_environment_unavailable'
 
@@ -186,30 +181,6 @@ def serving_configured(process, options, database):
             and args.db_port==options.get('db_port','5432')
             and args.db_user==options['db_user']
             and args.db_filter=='^'+re.escape(database)+'$')
-
-def integer_product(node):
-    if isinstance(node,ast.Constant) and type(node.value) is int:
-        return node.value
-    if isinstance(node,ast.BinOp) and isinstance(node.op,ast.Mult):
-        return integer_product(node.left)*integer_product(node.right)
-    raise UsageUnavailable('session_lifetime_unavailable')
-
-def session_inactivity_limit(cursor):
-    source=next((Path(item) for item in ODOO_SESSION_SOURCES if Path(item).is_file()),None)
-    if source is None:
-        raise UsageUnavailable('session_lifetime_unavailable')
-    tree=ast.parse(source.read_text(encoding='utf-8'))
-    defaults=[node.value for node in tree.body if isinstance(node,ast.Assign)
-              and [getattr(target,'id','') for target in node.targets]==['SESSION_LIFETIME']]
-    if len(defaults)!=1:
-        raise UsageUnavailable('session_lifetime_unavailable')
-    default=integer_product(defaults[0])
-    cursor.execute('SELECT value FROM ir_config_parameter WHERE key = %s',('sessions.max_inactivity_seconds',))
-    row=cursor.fetchone()
-    try:
-        return int(row[0]) or default
-    except (TypeError,ValueError):
-        return default
 
 def abandoned_odoo_session(modified, data, active_after):
     retired_at=data.get('deletion_time')
@@ -303,13 +274,11 @@ def probe():
         checkpoint='login_history_unavailable'
         with connection.cursor() as cursor:
             cursor.execute('SET TRANSACTION READ ONLY')
-            checkpoint='session_lifetime_unavailable'
-            active_after=time.time()-session_inactivity_limit(cursor)
-            session_use=read_sessions(data_dir/'sessions',database,active_after,evidence)
-            checkpoint='login_history_unavailable'
             since=datetime.now(timezone.utc)-timedelta(hours=24)
             if GENERATION_CREATED_AT is not None:
                 since=max(since,datetime.fromtimestamp(GENERATION_CREATED_AT,timezone.utc))
+            active_after=since.timestamp()
+            session_use=read_sessions(data_dir/'sessions',database,active_after,evidence)
             parameters=(since.replace(tzinfo=None).isoformat(sep=' '),)
             cursor.execute("SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= %s)",parameters)
             recent=cursor.fetchone()[0]
@@ -345,9 +314,8 @@ if __name__=='__main__':
     except Exception:
         result={'type':'complete','unavailable':True,'reason_code':checkpoint}
     print(json.dumps(result),flush=True)
-""".replace("__CONFIG_PATH__", repr(ODOO_WEB_CONFIG_PATH))
-    .replace("__ODOO_SESSION_SOURCES__", repr(ODOO_SESSION_SOURCES))
-    .replace("__SUPPORTED_SERVER_WIDE_MODULES__", repr(sorted(SUPPORTED_SERVER_WIDE_MODULES)))
+""".replace("__CONFIG_PATH__", repr(ODOO_WEB_CONFIG_PATH)).replace(
+    "__SUPPORTED_SERVER_WIDE_MODULES__", repr(sorted(SUPPORTED_SERVER_WIDE_MODULES))
 )
 
 

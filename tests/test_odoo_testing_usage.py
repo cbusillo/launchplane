@@ -24,7 +24,6 @@ from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH, ODOO_WEB_START_C
 from control_plane.odoo_testing_usage import (
     ODOO_TESTING_USAGE_CONTAINER_PROGRAM,
     ODOO_TESTING_USAGE_HOST_PROGRAM,
-    ODOO_SESSION_SOURCES,
     read_odoo_testing_usage,
     odoo_usage_container_program,
     credential_candidates,
@@ -74,13 +73,6 @@ class SessionInventoryTests(unittest.TestCase):
             odoo_usage_container_program("testing", generation_created_at=self.created_at),
             self.namespace,
         )
-        self.http_source = Path(self.enterContext(TemporaryDirectory())) / "http.py"
-        self.http_source.write_text("SESSION_LIFETIME = 60 * 60 * 24 * 5\n")
-        self.session_sources = (
-            str(self.http_source.with_name("session.py")),
-            str(self.http_source),
-        )
-        self.namespace["ODOO_SESSION_SOURCES"] = self.session_sources
 
     def sessions(self) -> bool:
         return bool(self.namespace["read_sessions"](self.path, "testing_db", 0.0))
@@ -102,15 +94,6 @@ class SessionInventoryTests(unittest.TestCase):
         session.write_text(json.dumps({"db": "another_db", "uid": 2}))
         self.assertFalse(self.sessions())
         session.write_text(json.dumps({"db": "testing_db", "pre_uid": 2}))
-        self.assertTrue(self.sessions())
-
-    def test_current_generation_session_older_than_login_window_still_protects(self) -> None:
-        now = datetime.now(UTC)
-        self.namespace["GENERATION_CREATED_AT"] = (now - timedelta(days=3)).timestamp()
-        session = self.path / "session"
-        session.write_text(json.dumps({"db": "testing_db", "uid": 42}))
-        stamp = (now - timedelta(days=2)).timestamp()
-        os.utime(session, (stamp, stamp))
         self.assertTrue(self.sessions())
 
     def test_missing_corrupt_aliased_and_oversized_stores_cannot_mean_idle(self) -> None:
@@ -205,7 +188,6 @@ class SessionInventoryTests(unittest.TestCase):
         generation_created_at: datetime | None = None,
         login_rows: tuple[tuple[int, datetime], ...] | None = None,
         bounded: bool = True,
-        configured_lifetime: str | None = None,
     ) -> dict[str, Any]:
         """Execute the emitted container probe, including its bounded exception handler."""
         config = MagicMock()
@@ -227,20 +209,7 @@ class SessionInventoryTests(unittest.TestCase):
             options["server_wide_modules"] = "base,web,session_store_module"
         connection = MagicMock()
         fixed_cursor = connection.cursor.return_value.__enter__.return_value
-        queries = [""]
-        configured_row = None if configured_lifetime is None else (configured_lifetime,)
-
-        def remember_query(query: str, _parameters: tuple[object, ...] = ()) -> None:
-            queries.append(query)
-
-        fixed_cursor.execute.side_effect = remember_query
-        fixed_cursor.fetchone.side_effect = lambda: (
-            configured_row if "ir_config_parameter" in queries[-1] else (recent,)
-        )
-        if failure == "lifetime_unreadable":
-            self.http_source.unlink()
-        if failure == "lifetime_not_literal":
-            self.http_source.write_text("SESSION_LIFETIME = compute_lifetime()\n")
+        fixed_cursor.fetchone.return_value = (recent,)
         if login_rows is not None:
             database = sqlite3.connect(":memory:")
             self.addCleanup(database.close)
@@ -257,9 +226,6 @@ class SessionInventoryTests(unittest.TestCase):
             def execute_history(query: str, parameters: tuple[object, ...] = ()) -> None:
                 if query == "SET TRANSACTION READ ONLY":
                     return
-                if "ir_config_parameter" in query:
-                    cursor.fetchone.side_effect = lambda: configured_row
-                    return
                 translated = query.replace("%s", "?")
                 result = database.execute(translated, parameters)
                 cursor.fetchone.side_effect = lambda: (bool(result.fetchone()[0]),)
@@ -269,7 +235,6 @@ class SessionInventoryTests(unittest.TestCase):
         if actor_metadata_unavailable:
 
             def execute(query: str, _parameters: tuple[object, ...] = ()) -> None:
-                queries.append(query)
                 if query.startswith("SELECT create_uid"):
                     raise TimeoutError("private-fixture optional metadata")
 
@@ -310,7 +275,7 @@ class SessionInventoryTests(unittest.TestCase):
         ):
             program = odoo_usage_container_program(
                 instance, generation_created_at=self.created_at if bounded else None
-            ).replace(repr(ODOO_SESSION_SOURCES), repr(self.session_sources))
+            )
             if generation_created_at is None:
                 exec(program, {"__name__": "__main__"})
             else:
@@ -362,8 +327,8 @@ class SessionInventoryTests(unittest.TestCase):
         os.utime(session, (stamp, stamp))
         return session
 
-    def test_session_past_odoo_inactivity_limit_is_not_a_person(self) -> None:
-        session = self.stored_session(timedelta(days=16), pre_uid=9)
+    def test_session_untouched_for_a_day_is_not_a_person(self) -> None:
+        session = self.stored_session(timedelta(hours=26), pre_uid=9)
         original = session.read_bytes(), session.stat().st_mtime
         for bounded in (False, True):
             with self.subTest(bounded=bounded):
@@ -377,8 +342,8 @@ class SessionInventoryTests(unittest.TestCase):
                 self.assertIsNone(result["since"])
         self.assertEqual((session.read_bytes(), session.stat().st_mtime), original)
 
-    def test_long_lived_session_inside_odoo_limit_is_still_use_without_a_login(self) -> None:
-        self.stored_session(timedelta(days=4))
+    def test_session_touched_today_is_use_without_a_login(self) -> None:
+        self.stored_session(timedelta(hours=20))
         result = self.probe_result(bounded=False)
         self.assertIs(result["recent_signins"], False)
         self.assertIs(result["authenticated_sessions"], True)
@@ -393,29 +358,6 @@ class SessionInventoryTests(unittest.TestCase):
         self.assertIs(result["authenticated_sessions"], False)
         self.assertEqual(result["actors"], ["odoo-user:7"])
 
-    def test_odoo_lifetime_parameter_replaces_the_installed_default(self) -> None:
-        for age, configured, expected in (
-            (timedelta(days=2), "86400", False),
-            (timedelta(days=10), str(60 * 60 * 24 * 30), True),
-            (timedelta(days=2), "not-a-number", True),
-            (timedelta(days=10), "not-a-number", False),
-        ):
-            with self.subTest(age=age, configured=configured):
-                self.stored_session(age)
-                result = self.probe_result(bounded=False, configured_lifetime=configured)
-                self.assertIs(result["authenticated_sessions"], expected)
-
-    def test_package_layout_session_module_supplies_the_native_lifetime(self) -> None:
-        self.http_source.with_name("session.py").write_text("SESSION_LIFETIME = 60 * 60 * 24 * 1\n")
-        self.addCleanup(self.http_source.with_name("session.py").unlink, missing_ok=True)
-        self.stored_session(timedelta(days=2))
-        self.assertIs(self.probe_result(bounded=False)["authenticated_sessions"], False)
-
-    def test_configured_zero_keeps_the_protective_default(self) -> None:
-        self.stored_session(timedelta(days=4))
-        result = self.probe_result(bounded=False, configured_lifetime="0")
-        self.assertIs(result["authenticated_sessions"], True)
-
     def test_session_odoo_has_retired_is_not_use_but_a_malformed_one_stays_use(self) -> None:
         now = datetime.now(UTC).timestamp()
         for deletion_time, expected in (
@@ -427,18 +369,6 @@ class SessionInventoryTests(unittest.TestCase):
                 self.stored_session(timedelta(minutes=1), deletion_time=deletion_time)
                 result = self.probe_result(bounded=False)
                 self.assertIs(result["authenticated_sessions"], expected)
-
-    def test_unknown_native_lifetime_never_releases_a_session(self) -> None:
-        for failure in ("lifetime_unreadable", "lifetime_not_literal"):
-            with self.subTest(failure=failure), TemporaryDirectory() as directory:
-                self.path = Path(directory)
-                self.directory = directory
-                self.http_source.write_text("SESSION_LIFETIME = 60\n")
-                self.stored_session(timedelta(days=16))
-                result = self.probe_result(failure)
-                self.assertTrue(result["unavailable"])
-                self.assertEqual(result["reason_code"], "session_lifetime_unavailable")
-                self.assertNotIn("authenticated_sessions", result)
 
     def test_stale_files_reach_the_normal_usage_reader_as_unused(self) -> None:
         self.stored_session(timedelta(days=16))
@@ -477,14 +407,12 @@ class SessionInventoryTests(unittest.TestCase):
         self.assertEqual(result.usage, "unused")
         self.assertIsNone(result.valid_until)
 
-    def test_missing_boundary_probe_keeps_unexpired_sessions_and_recent_logins(
-        self,
-    ) -> None:
+    def test_missing_boundary_probe_keeps_recent_sessions_and_logins(self) -> None:
         sessions = self.path / "sessions"
         sessions.mkdir()
         session = sessions / "restored"
         session.write_text(json.dumps({"db": "testing_db", "uid": 42}))
-        stamp = (datetime.now(UTC) - timedelta(days=1)).timestamp()
+        stamp = (datetime.now(UTC) - timedelta(hours=12)).timestamp()
         os.utime(session, (stamp, stamp))
         result = self.probe_result(
             bounded=False, login_rows=((7, datetime.now(UTC) - timedelta(hours=1)),)
