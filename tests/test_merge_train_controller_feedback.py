@@ -5,11 +5,69 @@ from unittest import TestCase
 
 from control_plane import merge_train_controller_feedback as feedback
 from control_plane.merge_train import build_merge_train_dry_run_result
+from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train_handoff import MergeTrainReadyHandoff
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.merge_train_policy_fixtures import dependency_bot_policy
 from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
+from tests.test_merge_train import _pull_request
 
 
 class MergeTrainControllerFeedbackTests(TestCase):
+    def test_excluded_ready_gets_its_queue_reason_even_when_train_is_idle(self) -> None:
+        repository = "example/site"
+        policy = build_test_merge_train_policy(
+            repository=repository, trusted_automation_github_user_ids=(20,)
+        )
+        policy.policies[0].enqueue.dependency_update_bots = (dependency_bot_policy(20),)
+        head = "a" * 40
+        handoff = MergeTrainReadyHandoff(status="ready", head_sha=head, actor_id=20, comment_id=100)
+        refused = _pull_request(1, labels=(), actor_id=999, repository=repository).model_copy(
+            update={"head_sha": head, "actor_role": "unknown", "ready_handoff": handoff}
+        )
+        stale = refused.model_copy(
+            update={"actor_id": 20, "head_sha": "b" * 40, "dependency_update_class": "needs_review"}
+        )
+        unrequested = refused.model_copy(update={"number": 2, "ready_handoff": None})
+        for change in (refused, stale):
+            for another_candidate in (False, True):
+                with self.subTest(change=change, another_candidate=another_candidate):
+                    dry_run = build_merge_train_dry_run_result(
+                        policy=policy,
+                        snapshot=MergeTrainDryRunSnapshot(
+                            repository=repository,
+                            base_branch="main",
+                            pull_requests=(change, unrequested),
+                        ),
+                        batch_landing=True,
+                    )
+                    self.assertFalse(dry_run.queue_order)
+                    payloads = feedback.build_feedback_payloads(
+                        response={
+                            "result": {
+                                "repository": repository,
+                                "base_branch": "main",
+                                "controller_action": "plan_candidate"
+                                if another_candidate
+                                else "idle",
+                                "candidate": {
+                                    "status": "planned",
+                                    "entries": [{"pull_request_number": 3}],
+                                }
+                                if another_candidate
+                                else {},
+                                "dry_run_result": dry_run.model_dump(mode="json"),
+                            }
+                        }
+                    )
+                    excluded = [p for p in payloads if p["pull_request_number"] == change.number]
+                    self.assertEqual(len(excluded), 1)
+                    for reason in dry_run.queue[0].ineligible_reasons:
+                        self.assertIn(reason, cast(str, excluded[0]["message"]))
+                    self.assertNotIn(
+                        unrequested.number, [p["pull_request_number"] for p in payloads]
+                    )
+
     def test_unverified_base_retest_removal_does_not_claim_verified_recovery(self) -> None:
         for observation in ("absent_after_uncertain_attempt", "removed_by_foreign_actor"):
             with self.subTest(observation=observation):
