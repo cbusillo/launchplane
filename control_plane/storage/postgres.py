@@ -6571,10 +6571,10 @@ class PostgresRecordStore(HumanSessionStore):
                 caller_identity=identity,
             )
 
-    def write_preview_dns_secret_bundle(
+    def write_fixed_service_secret_bundle(
         self, bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity
     ) -> None:
-        from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION
+        from control_plane.secrets import FIXED_SERVICE_SECRET_SLOTS
         from control_plane.service_auth import (
             AuthorizationTarget,
             LocalOperatorIdentity,
@@ -6600,13 +6600,13 @@ class PostgresRecordStore(HumanSessionStore):
             or bundle.absent_secret_ids
             or bundle.expected_secret_records
             or any(
-                (record.scope, record.context, record.instance, record.integration, record.name)
-                != ("context", "launchplane", "", PREVIEW_DNS_INTEGRATION, PREVIEW_DNS_BINDING)
+                (record.scope, record.context, record.instance) != ("context", "launchplane", "")
+                or (record.integration, record.name) not in FIXED_SERVICE_SECRET_SLOTS
                 for record in bundle.secret_records
             )
             or any(
-                (binding.context, binding.instance, binding.integration, binding.binding_key)
-                != ("launchplane", "", PREVIEW_DNS_INTEGRATION, PREVIEW_DNS_BINDING)
+                (binding.context, binding.instance) != ("launchplane", "")
+                or (binding.integration, binding.binding_key) not in FIXED_SERVICE_SECRET_SLOTS
                 or binding.secret_id not in secret_ids
                 for binding in bundle.secret_bindings
             )
@@ -6616,7 +6616,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
         ):
             raise ServiceIdentityAuthorityError(
-                "Only the absent preview DNS service credential can be filled."
+                "Only an absent fixed service credential can be filled."
             )
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -6640,7 +6640,7 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             ):
                 raise ServiceIdentityAuthorityError(
-                    "The DNS credential transfer requires current Director-agent authority."
+                    "The service credential transfer requires current Director-agent authority."
                 )
             self._write_product_authority_bundle(
                 bundle.model_copy(update={"absent_secret_ids": tuple(secret_ids)}),
