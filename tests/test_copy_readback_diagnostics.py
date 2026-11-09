@@ -426,6 +426,15 @@ class CopyReadbackDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("hunter2", error.reason)
         self.assertLess(len(error.reason), 301)
 
+    def test_client_failure_kind_names_only_recognized_exception_types(self) -> None:
+        for line, expected in (
+            ("RuntimeError: bootstrap failed", "RuntimeError"),
+            ("psycopg2.errors.UndefinedColumn: column missing", "psycopg2.errors.UndefinedColumn"),
+            ("customer.AliceSmith: account lookup failed", ""),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(post_deploy.schedule_failure_kind(line), expected)
+
     def test_schedule_without_a_failed_terminal_status_is_not_a_finished_failure(self) -> None:
         for status in ("running", "canceled", "timeout", ""):
             with self.subTest(status=status):

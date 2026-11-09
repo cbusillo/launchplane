@@ -444,7 +444,7 @@ class OdooPostDeployScheduleFailed(OdooPostDeployReadbackFailure):
 
 _SCHEDULE_RAN_AND_FAILED_STATUSES = frozenset({"failed", "error"})
 _SCHEDULE_ERROR_LINE = re.compile(
-    r"^\s*(?P<kind>[A-Za-z_][\w.]*(?:Error|Exception)|[A-Za-z_]\w*(?:\.\w+)+):\s+\S"
+    r"^\s*(?P<kind>(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception)|psycopg2\.errors\.\w+):\s+\S"
 )
 _SCHEDULE_REASON_MAX_LENGTH = 300
 _SCHEDULE_REASON_FALLBACK = "The data schedule failed; its log had no recognizable error line."
