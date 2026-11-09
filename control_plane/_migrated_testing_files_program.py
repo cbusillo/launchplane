@@ -36,7 +36,7 @@ filestore=Path('/volumes/data/filestore')/database
 if filestore.resolve()!=filestore.absolute():
     raise RuntimeError('Unsafe testing filestore')
 filestore.mkdir(parents=True,exist_ok=True)
-for temporary in filestore.rglob('.lp-native-'+identity+'-*'):
+for temporary in root.glob('.lp-native-'+identity+'-*'):
     if temporary.is_symlink() or not temporary.is_file():
         raise RuntimeError('Interrupted migrated extraction contains an unsafe path')
     temporary.unlink()
@@ -50,8 +50,8 @@ with tarfile.open(artifacts['filestore'],'r|gz') as archive:
         if member.isdir():
             continue
         name=str(relative)
-        if not re.fullmatch(r'(?:checklist/)?[a-f0-9]{2}/[a-f0-9]{40}',name) or name in seen:
-            raise RuntimeError('Unsupported or duplicate migrated attachment')
+        if not relative.parts or name!=member.name or name in seen:
+            raise RuntimeError('Unsupported or duplicate migrated filestore member')
         seen.add(name);total+=member.size
         if total>source['filestore_expanded_bytes'] or len(seen)>source['filestore_files']:
             raise RuntimeError('Migrated filestore exceeds its declared inventory')
@@ -75,7 +75,7 @@ with tarfile.open(artifacts['filestore'],'r|gz') as archive:
         temporary=None
         try:
             size=0
-            with archive.extractfile(member) as content, tempfile.NamedTemporaryFile(dir=path.parent,prefix='.lp-native-'+identity+'-',delete=False) as output:
+            with archive.extractfile(member) as content, tempfile.NamedTemporaryFile(dir=root,prefix='.lp-native-'+identity+'-',delete=False) as output:
                 temporary=Path(output.name)
                 while data:=content.read(1024*1024):
                     space=os.fstatvfs(output.fileno())
