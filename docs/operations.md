@@ -5243,6 +5243,37 @@ The observation covers only the selected web-container origin, not a separate
 script-runner or other container. It grants no importer authorization and does
 not prove production-credential inequality or finish deployed credential safety.
 
+#### Host-bound Fishbowl grants
+
+`GET /v1/products/{product}/environments/testing/odoo-source-grants/host` reads
+the configured Fishbowl account's grants from the Docker host of the testing
+lane's Dokploy target. It needs no running testing or preview runtime and no
+Odoo identity, and it uses the existing product-scoped `operations.read`
+authority. It accepts no query parameters, so the source, host, image, SQL and
+credential all come from service records.
+
+The service selects the source the same way as the other reads: the exact
+current managed binding and version with a read-only allowance, and verified
+TLS settings. It refuses a host shared with this product's production lane. The
+image is the testing lane's recorded immutable digest, which must already be on
+the host; it is never pulled.
+
+One disposable container runs the fixed probe on the host network, so it uses
+the host's working name resolution. The container is read-only, drops all
+capabilities and has fixed memory, CPU and process limits. The password travels
+only through the existing managed terminal stream and the container's stdin. It
+is never in a command argument, host file or container environment.
+
+The result carries `grants` (`read_only`, `unsafe` or `unknown`), parsed
+privilege names, a value-free `failure_stage`, `container_cleanup` and
+`rechecks`. It never carries an account, host or raw grant row. Unrecognized
+rows, role grants, unverified cleanup and any change to the host or authority
+during the probe stay `unknown`. Failures cool down for a minute; successes are
+never cached.
+
+This proves the account's privileges only. It does not qualify an import copy
+or authorize an importer.
+
 ### Daily waiting-release digest
 
 The service's daily release-digest scheduler (UTC calendar days, rolling over at 8 PM EDT / 7 PM EST) lists source changes ahead of each
