@@ -9895,6 +9895,13 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
         return self._list_odoo_preview_reservations(product=product, limit=min(max(limit, 1), 1001))
 
+    def list_odoo_preview_disposal_reservations(
+        self, *, product: str
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        return self._list_odoo_preview_reservations(
+            product=product, limit=1001, include_failed=True
+        )
+
     def list_odoo_preview_cleanup_originals(
         self, *, product: str, number: int
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:

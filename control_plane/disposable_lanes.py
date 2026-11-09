@@ -180,6 +180,24 @@ def resolve_disposable_observation_binding(
     )
 
 
+def resolve_disposable_inspection_binding(
+    store: DisposableLaneStore,
+    *,
+    product: str,
+    context: str,
+    instance: str,
+    preview_id: str = "",
+) -> DisposableLaneObservationBinding:
+    profile = store.read_product_profile_record(product)
+    if preview_id and not _owned_preview_candidates(store, profile, context, instance):
+        return read_disposable_lane_binding(
+            store, profile=profile, context=context, instance=instance
+        )
+    return resolve_disposable_observation_binding(
+        store, product=product, context=context, instance=instance, preview_id=preview_id
+    )
+
+
 def read_disposable_lane_binding(
     store: DisposableLaneStore,
     *,

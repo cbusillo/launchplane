@@ -845,7 +845,7 @@ def _untracked_preview_warnings(
                 guidance = (
                     "Inspect the original operation before retrying or cleaning up."
                     if status["original_binding_available"]
-                    else "Original operation evidence is missing; retain resources and recover that evidence."
+                    else "Its original operation has no record. A closed pull request's preview is removed automatically."
                 )
                 warnings.add(
                     f"PR #{number}: Preview operation is recorded as {reservation.state}. {guidance}"
