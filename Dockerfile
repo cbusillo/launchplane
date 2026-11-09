@@ -29,7 +29,7 @@ COPY control_plane /app/control_plane
 COPY frontend /app/frontend
 RUN pnpm build
 
-FROM mirror.gcr.io/library/golang:1.27.2-bookworm AS github-cli-build
+FROM mirror.gcr.io/library/golang:1.27.3-bookworm AS github-cli-build
 
 ARG GITHUB_CLI_VERSION=v2.98.0
 ARG GITHUB_CLI_GRPC_VERSION=v1.83.2
