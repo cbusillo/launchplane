@@ -5,11 +5,11 @@ Normal previews still receive no source settings or integration allowances.
 """
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from control_plane.odoo_source_prerequisite_programs import FailureStage
 from control_plane.provider_key_adoption import looks_like_credential
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
     DokployTargetRecord,
@@ -114,9 +114,8 @@ def resolve_fishbowl_preview_source(
     profile: LaunchplaneProductProfileRecord,
     preview_slug: str,
     copy_from: ProductSecretCopyFrom,
+    manifest: ArtifactIdentityManifest | None,
     include_secret_value: bool = False,
-    control_plane_root: Path,
-    database_url: str | None,
 ) -> FishbowlPreviewSource:
     if (
         copy_from.instance != "testing"
@@ -165,23 +164,38 @@ def resolve_fishbowl_preview_source(
         raise PreviewImportSourceError(
             "allowance_required", "Preview import source requires an existing read-only allowance."
         )
-    from control_plane.odoo_runtime_source_prerequisites import read_source_consumers
-
-    qualified = read_source_consumers(
-        store=cast("PrerequisiteStore", store),
-        product=profile.product,
-        control_plane_root=control_plane_root,
-        database_url=database_url,
-        mode="preview",
-        sources=("fishbowl",),
+    from control_plane.odoo_runtime_source_prerequisites import (
+        PrerequisiteReadUnavailable,
+        read_fishbowl_preview_settings,
     )
-    source = next((item for item in qualified.sources if item.source == "fishbowl"), None)
-    if qualified.runtime != "verified" or source is None or not source.parameters:
+
+    build = manifest.source_build if manifest is not None else None
+    if (
+        build is not None
+        and build.pull_request_number is not None
+        and profile.preview.slug_template.format(number=build.pull_request_number) != preview_slug
+    ):
         raise PreviewImportSourceError(
             "source_unqualified",
-            "The testing import source requires current installed producer and payload agreement.",
-            failure_stage=qualified.failure_stage or (source.failure_stage if source else None),
+            "The preview import source requires a build of this preview's pull request.",
+            failure_stage="artifact",
         )
+    try:
+        settings, qualification = read_fishbowl_preview_settings(
+            store=cast("PrerequisiteStore", store),
+            product=profile.product,
+            repository=profile.repository,
+            manifest=manifest,
+            binding=binding,
+            version_id=version.version_id,
+        )
+    except PrerequisiteReadUnavailable as error:
+        raise PreviewImportSourceError(
+            "source_unqualified",
+            "The preview import source requires this preview's recorded artifact and one "
+            "agreeing managed source setting.",
+            failure_stage=error.stage,
+        ) from None
     current = resolve_copy_source(
         store,
         product=profile.product,
@@ -202,7 +216,7 @@ def resolve_fishbowl_preview_source(
         )
     parameters: list[OdooConfigParameterOverride] = []
     selected_values: dict[str, str] = {}
-    for name, value in source.parameters.items():
+    for name, value in settings.items():
         parameter_key = f"fishbowl.{name}"
         if looks_like_credential(parameter_key, value):
             raise PreviewImportSourceError(
@@ -221,7 +235,7 @@ def resolve_fishbowl_preview_source(
         )
     )
     authority = {
-        "qualification": qualified.evidence_sha256,
+        "qualification": qualification,
         "copy_from": copy_from.model_dump(mode="json"),
         "binding": binding.model_dump(mode="json"),
         "allowance": allowances[0].model_dump(mode="json"),

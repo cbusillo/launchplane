@@ -14,25 +14,18 @@ def validate_result(value,names):
         raise ValueError()
     found=[]
     for source in value['sources']:
-        if (not isinstance(source,dict) or set(source)-{'source','producer','failure_stage','grants','parameters'}
+        if (not isinstance(source,dict) or set(source)-{'source','producer','failure_stage','grants'}
             or source.get('source') not in names or source.get('producer') not in (None,'verified')
             or source.get('failure_stage') not in (None,*failure_stages)
             or source.get('grants','unknown') not in ('unknown','read_only','unsafe')):
             raise ValueError()
         found.append(source['source'])
-        parameters=source.get('parameters',{})
-        if (not isinstance(parameters,dict) or set(parameters)-{'host','user','db','port','ssl_verify'}
-            or parameters and set(parameters)!={'host','user','db','port','ssl_verify'}
-            or parameters and source['source']!='fishbowl'
-            or any(not isinstance(item,str) or not item or len(item)>16384 for item in parameters.values())):
-            raise ValueError()
     if set(found)!=set(names) or len(found)!=len(set(found)):
         raise ValueError()
 """
 
 CONSUMER_LIBRARY = r"""
 import subprocess
-consumer_mode=__CONSUMER_MODE__
 
 def source_tls_accepted(name,options,raw_verify):
     return (tls(options)=='enabled_with_verification'
@@ -71,10 +64,7 @@ def effective_settings(name,module,payload_producer,payload,applied):
     delivered_options=options_projection(module,effective)
     if projection(resolved)!=options or projection(selected)!=delivered_options or not source_tls_accepted(name,options,current.get(prefix+'ssl_verify','')):
         raise ValueError()
-    fields=(*__GRANT_FIELDS__,'use_ssl','password')
-    if consumer_mode=='preview':
-        fields=(*fields,'database')
-    for field in fields:
+    for field in (*__GRANT_FIELDS__,'use_ssl','password'):
         left=getattr(resolved,field)
         right=getattr(selected,field)
         if type(left) is not type(right) or (not hmac.compare_digest(left.encode(),right.encode()) if isinstance(left,str) else left!=right):
@@ -84,11 +74,6 @@ def effective_settings(name,module,payload_producer,payload,applied):
 def source_result(name,module,payload_producer,payload,applied):
     with open(os.devnull,'w') as sink,contextlib.redirect_stdout(sink),contextlib.redirect_stderr(sink):
         settings=effective_settings(name,module,payload_producer,payload,applied)
-    if consumer_mode=='preview':
-        if name!='fishbowl':
-            return {'source':name}
-        return {'source':name,'parameters':{'host':settings.host,'user':settings.user,'db':settings.database,
-                'port':str(settings.port),'ssl_verify':'True' if settings.ssl_verify else 'False'}}
     child=subprocess.run([sys.executable,'-I','-c',__PROBE__],
         input=json.dumps({'host':settings.host,'user':settings.user,'password':settings.password,'port':str(settings.port),
             **({} if settings.ssl_verify else {'ssl_verify':'false'})}),
