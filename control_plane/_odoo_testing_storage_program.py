@@ -43,11 +43,12 @@ def copy_filestore(source, destination, clone):
     arguments = ['cp', '-a', '--reflink=always' if clone else '--reflink=auto', str(source) + '/.', str(destination)]
     try:
         command(arguments)
+        return
     except RuntimeError:
         if not clone:
             raise
         time.sleep(__TXG_SYNC_WAIT_SECONDS__)
-        command(arguments)
+    command(arguments)
 
 
 def storage_maintenance(spec, containers):

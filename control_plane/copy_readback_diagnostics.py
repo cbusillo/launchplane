@@ -95,7 +95,7 @@ def copy_failure_storage_is_private(containers):
         for container in containers:
             mounts = container.get('Mounts') if isinstance(container, dict) else None
             if not isinstance(mounts, list) or any(
-                not isinstance(mount, dict) or not copy_failure_mount_is_private(mount.get('Source'))
+                not isinstance(mount, dict) or mount.get('Type') not in {'tmpfs', 'image'} and not copy_failure_mount_is_private(mount.get('Source'))
                 for mount in mounts):
                 return False
     except (OSError, RuntimeError, ValueError):
@@ -159,7 +159,7 @@ def copy_failure_cause(error):
     while not chain[-1].__suppress_context__ and chain[-1].__context__ is not None:
         chain.append(chain[-1].__context__)
     error = next((cause for cause in reversed(chain) if isinstance(cause, CopyReadbackRefused)), chain[-1])
-    command = next((cause for cause in reversed(chain)
+    command = next((cause for cause in reversed(chain[chain.index(error):])
         if hasattr(cause, 'copy_command_result') or hasattr(cause, 'copy_failure_markers')), error)
     result = getattr(command, 'copy_command_result', None)
     if result is not None:

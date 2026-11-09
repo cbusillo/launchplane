@@ -34,6 +34,59 @@ from control_plane.odoo_connection_isolation import (
 
 
 class CopyFailureEvidenceTests(unittest.TestCase):
+    def test_cleanup_command_does_not_replace_noncommand_refusal(self) -> None:
+        from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
+
+        namespace: dict[str, Any] = {"copy_failure_containers": []}
+        exec(VOLUME_BACKING_INSPECTION_LIBRARY, namespace)
+        cleanup = subprocess.CompletedProcess([], 9, stdout=b"", stderr=b"private cleanup")
+        with (
+            TemporaryDirectory() as temporary,
+            patch.object(Path, "home", return_value=Path(temporary)),
+        ):
+            try:
+                try:
+                    raise namespace["CopyReadbackRefused"](ReadbackPredicate.BACKING_STORAGE)
+                finally:
+                    raise namespace["copy_command_failure"](RuntimeError(), cleanup, {})
+            except RuntimeError as error:
+                frame = namespace["copy_readback_failure_frame"](error)
+                self.assertEqual(frame["predicate"], ReadbackPredicate.BACKING_STORAGE)
+                self.assertEqual(frame["kind"], "refused")
+                self.assertNotIn(COPY_FAILURE_EVIDENCE_MARKER, frame)
+                self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_filestore_retry_failure_retains_the_terminal_attempt(self) -> None:
+        from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
+        from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
+
+        namespace: dict[str, Any] = {"copy_failure_containers": []}
+        exec(VOLUME_BACKING_INSPECTION_LIBRARY + STORAGE_MAINTENANCE_LIBRARY, namespace)
+        with (
+            TemporaryDirectory() as temporary,
+            patch.object(Path, "home", return_value=Path(temporary)),
+        ):
+            attempts = [
+                subprocess.CompletedProcess([], code, stdout=b"", stderr=str(code).encode())
+                for code in (7, 9)
+            ]
+
+            def command(_arguments: list[str]) -> None:
+                raise namespace["copy_command_failure"](RuntimeError(), attempts.pop(0), {})
+
+            namespace["command"] = command
+            with patch("time.sleep"), self.assertRaises(RuntimeError) as raised:
+                namespace["copy_filestore"](
+                    Path(temporary) / "source", Path(temporary) / "destination", True
+                )
+            frame = namespace["copy_readback_failure_frame"](raised.exception)
+            directory = Path(temporary) / COPY_FAILURE_STATE_DIRECTORY
+            evidence = json.loads(
+                (directory / (frame[COPY_FAILURE_EVIDENCE_MARKER] + ".json")).read_text()
+            )
+            self.assertEqual(base64.b64decode(evidence["stderr"]), b"9")
+            self.assertEqual(len(list(directory.iterdir())), 1)
+
     def test_wrapped_refusal_and_cleanup_preserve_original_command_evidence(self) -> None:
         from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
 
@@ -76,11 +129,14 @@ class CopyFailureEvidenceTests(unittest.TestCase):
             TemporaryDirectory() as temporary,
             patch.object(Path, "home", return_value=Path(temporary)),
         ):
-            for containers in (
-                None,
-                [{"Mounts": [{}]}],
-                [{"Mounts": [{"Source": temporary, "RW": False}]}],
-            ):
+            inventories: tuple[tuple[list[dict[str, Any]] | None, bool], ...] = (
+                (None, False),
+                ([{"Mounts": [{}]}], False),
+                ([{"Mounts": [{"Source": temporary, "RW": False}]}], False),
+                ([{"Mounts": [{"Type": "tmpfs", "Source": ""}]}], True),
+                ([{"Mounts": [{"Type": "image", "Source": "fixture-image"}]}], True),
+            )
+            for containers, retained in inventories:
                 with self.subTest(containers=containers):
                     error = namespace["copy_command_failure"](
                         RuntimeError(), result, {}, containers=containers
@@ -91,9 +147,12 @@ class CopyFailureEvidenceTests(unittest.TestCase):
                     markers = post_deploy.extract_odoo_post_deploy_readback_markers(
                         {"logs": output.getvalue()}
                     )
-                    self.assertEqual(markers[COPY_FAILURE_EVIDENCE_MARKER], "unavailable")
+                    if retained:
+                        self.assertNotEqual(markers[COPY_FAILURE_EVIDENCE_MARKER], "unavailable")
+                    else:
+                        self.assertEqual(markers[COPY_FAILURE_EVIDENCE_MARKER], "unavailable")
+                        self.assertEqual(list(Path(temporary).iterdir()), [])
                     self.assertEqual(markers["copy_failure_exit_status"], str(result.returncode))
-                    self.assertEqual(list(Path(temporary).iterdir()), [])
                     self.assertNotIn("private", output.getvalue())
 
     def test_operation_cause_includes_only_first_valid_copy_markers(self) -> None:
