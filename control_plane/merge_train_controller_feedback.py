@@ -124,7 +124,7 @@ def _queue_feedback(
             continue
         deferred = _as_list(entry.get("deferred_reasons"))
         handoff = _as_dict(entry.get("ready_handoff"))
-        if not deferred and not handoff.get("comment_id"):
+        if not deferred and not (handoff.get("comment_id") and handoff.get("head_sha")):
             continue
         reasons = deferred or _as_list(entry.get("ineligible_reasons"))
         if not reasons:

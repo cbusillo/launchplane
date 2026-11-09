@@ -39,7 +39,12 @@ class MergeTrainControllerFeedbackTests(TestCase):
             }
         )
         pending = refused.model_copy(update={"actor_id": 20, "required_checks_status": "pending"})
-        for change in (refused, stale, blocked, client_wait, pending):
+        edited = refused.model_copy(
+            update={
+                "ready_handoff": handoff.model_copy(update={"status": "edited", "head_sha": ""}),
+            }
+        )
+        for change in (refused, stale, blocked, client_wait, pending, edited):
             for another_candidate in (False, True):
                 with self.subTest(change=change, another_candidate=another_candidate):
                     dry_run = build_merge_train_dry_run_result(
@@ -59,6 +64,9 @@ class MergeTrainControllerFeedbackTests(TestCase):
                         )
                     payloads = feedback.build_feedback_payloads(
                         response={
+                            "records": {
+                                "merge_train_batch_candidate_record_id": "unrelated-candidate"
+                            },
                             "result": {
                                 "repository": repository,
                                 "base_branch": "main",
@@ -72,11 +80,11 @@ class MergeTrainControllerFeedbackTests(TestCase):
                                 if another_candidate
                                 else {},
                                 "dry_run_result": dry_run.model_dump(mode="json"),
-                            }
+                            },
                         }
                     )
                     excluded = [p for p in payloads if p["pull_request_number"] == change.number]
-                    if change is blocked:
+                    if change is blocked or change is edited:
                         self.assertFalse(excluded)
                         continue
                     self.assertEqual(len(excluded), 1)

@@ -239,15 +239,26 @@ def write_merge_train_pr_feedback_record(
                 base_branch=request.base_branch,
                 pull_request_number=request.pull_request_number,
             )
-            if (
-                previous
-                and previous[0].delivery_status == "delivered"
-                and (
-                    previous[0].comment_markdown
-                    == render_merge_train_pr_feedback_markdown(marker=marker, request=request)
-                )
+            if previous and (
+                previous[0].comment_markdown
+                == render_merge_train_pr_feedback_markdown(marker=marker, request=request)
             ):
-                return previous[0]
+                record = previous[0]
+                if (
+                    record.delivery_status == "failed"
+                    and record.retry_at
+                    and _timestamp(record.retry_at) <= _timestamp(recorded_at)
+                    and not (defer_until and _timestamp(defer_until) > _timestamp(recorded_at))
+                ):
+                    record = deliver_merge_train_pr_feedback_record(
+                        record=record,
+                        token=token,
+                        attempted_at=recorded_at,
+                        planning_author_ids=planning_author_ids,
+                        planning_scope_resolver=planning_scope_resolver,
+                    )
+                    store.write_merge_train_pr_feedback_record(record)
+                return record
         record = build_merge_train_pr_feedback_record(
             request=request,
             policy_key=policy_key,

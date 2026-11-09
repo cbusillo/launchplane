@@ -15,6 +15,7 @@ import time
 from contextlib import nullcontext
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 from threading import Event
 from typing import cast
@@ -542,7 +543,11 @@ def _deliver_controller_feedback(
         )
         if feedback_record.delivery_status == "failed":
             failed += 1
-            if feedback_record.provider_retry_at:
+            if feedback_record.provider_retry_at and (
+                not backoff
+                or datetime.fromisoformat(feedback_record.provider_retry_at)
+                > datetime.fromisoformat(backoff)
+            ):
                 backoff = feedback_record.provider_retry_at
         else:
             delivered += 1

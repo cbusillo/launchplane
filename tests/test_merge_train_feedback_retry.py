@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
@@ -82,42 +82,109 @@ class MergeTrainFeedbackRetryTests(TestCase):
             "comment_id": 123,
             "comment_url": "https://github.com/cbusillo/alpha/pull/7#issuecomment-123",
         }
+        start = datetime.fromisoformat(_TIME)
+        for kind in ("transient", "permanent", "quota"):
+            failure = (
+                _failure(URLError("fixture outage"))
+                if kind == "transient"
+                else click.ClickException("permanent refusal")
+            )
+            with (
+                self.subTest(kind=kind),
+                TemporaryDirectory() as directory,
+                patch(
+                    "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                    side_effect=[comment, comment]
+                    if kind == "quota"
+                    else [failure, comment, comment],
+                ) as deliver,
+            ):
+                store = FilesystemRecordStore(Path(directory))
+                results = []
+                calls = []
+                for index, seconds in enumerate((0, 10, 60, 120, 180, 240)):
+                    defer_until = (
+                        (start + timedelta(seconds=60 if index == 0 else 120)).isoformat()
+                        if kind == "quota" and index in (0, 2)
+                        else ""
+                    )
+                    results.append(
+                        write_merge_train_pr_feedback_record(
+                            store=store,
+                            request=request
+                            if index < 5
+                            else request.model_copy(
+                                update={"message": "Changed source needs review."}
+                            ),
+                            policy_key="test",
+                            policy_sha256="digest",
+                            token="fixture",
+                            recorded_at=(start + timedelta(seconds=seconds)).isoformat(),
+                            response_trace_id=f"trace-{index}",
+                            defer_until=defer_until,
+                        )
+                    )
+                    calls.append(deliver.call_count)
+                self.assertEqual(results[0].delivery_status, "failed")
+                self.assertEqual(calls[1], calls[0])
+                self.assertEqual({r.feedback_id for r in results[:5]}, {results[0].feedback_id})
+                if kind == "permanent":
+                    self.assertEqual(calls[4], 1)
+                    self.assertEqual(results[4].delivery_status, "failed")
+                else:
+                    self.assertEqual(results[4].delivery_status, "delivered")
+                    self.assertGreater(results[4].delivery_attempts, results[0].delivery_attempts)
+                if kind == "quota":
+                    self.assertEqual(calls[2], 0)
+                self.assertNotEqual(results[5].feedback_id, results[0].feedback_id)
+                self.assertEqual(
+                    len(store.list_merge_train_pr_feedback_records(repository=request.repository)),
+                    2,
+                )
+
+    def test_held_older_feedback_does_not_shorten_current_provider_backoff(self) -> None:
+        policy = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        )
+        deadlines = ("2026-10-01T06:05:00Z", "2026-10-01T06:02:00Z", "2026-10-01T06:05:00Z")
         with (
             TemporaryDirectory() as directory,
             patch(
                 "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
-                side_effect=[click.ClickException("provider unavailable"), comment, comment],
-            ) as deliver,
+                return_value={"action": "created", "comment_id": 123, "comment_url": ""},
+            ),
         ):
-            store = FilesystemRecordStore(Path(directory))
-            results = [
-                write_merge_train_pr_feedback_record(
-                    store=store,
-                    request=current,
-                    policy_key="test",
-                    policy_sha256="digest",
-                    token="fixture",
-                    recorded_at=f"2026-10-01T06:0{index}:00Z",
-                    response_trace_id=f"trace-{index}",
+            records = [
+                _record(number=n, event="waiting").model_copy(
+                    update={"delivery_status": "failed", "provider_retry_at": deadline}
                 )
-                for index, current in enumerate(
-                    (
-                        request,
-                        request,
-                        request,
-                        request.model_copy(
-                            update={"message": "The changed source head needs engineering review."}
-                        ),
-                    )
-                )
+                for n, deadline in zip((7, 8, 9), deadlines, strict=True)
             ]
-            self.assertEqual(results[0].delivery_status, "failed")
-            self.assertEqual(results[1].delivery_status, "delivered")
-            self.assertEqual(results[2].feedback_id, results[1].feedback_id)
-            self.assertNotEqual(results[3].feedback_id, results[1].feedback_id)
-            self.assertEqual(deliver.call_count, 3)
+            with patch(
+                "control_plane.merge_train_scheduler.write_merge_train_pr_feedback_record",
+                side_effect=records,
+            ) as write:
+                merge_train_scheduler._deliver_controller_feedback(
+                    record_store=FilesystemRecordStore(Path(directory)),
+                    policy_record=policy,
+                    repository_policy=policy.policy.policies[0],
+                    token="fixture",
+                    trace_id="pass",
+                    response={
+                        "result": {
+                            "repository": "cbusillo/alpha",
+                            "base_branch": "main",
+                            "controller_action": "wait_for_checks",
+                            "candidate": {
+                                "entries": [{"pull_request_number": n} for n in (7, 8, 9)]
+                            },
+                        }
+                    },
+                    now=lambda: "2026-10-01T06:03:00Z",
+                )
             self.assertEqual(
-                len(store.list_merge_train_pr_feedback_records(repository=request.repository)), 3
+                [call.kwargs["defer_until"] for call in write.call_args_list],
+                ["", deadlines[0], deadlines[0]],
             )
 
     def setUp(self) -> None:
