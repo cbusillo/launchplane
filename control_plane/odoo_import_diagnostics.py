@@ -60,6 +60,9 @@ FIELDS = ("host", "user", "db", "port", "ssl_verify")
 GRANT_FIELDS = tuple(field for field in FIELDS if field != "db")
 Agreement = Literal["match", "mismatch", "missing", "unknown"]
 ProbeKey = tuple[str, str, str, str, str]
+ManagedProbeRefusal = Literal[
+    "settings_host", "settings_account", "settings_password", "settings_tls"
+]
 _PROBE_LOCK = threading.Lock()
 _ACTIVE_PROBES: set[ProbeKey] = set()
 _FAILED_PROBES: dict[ProbeKey, float] = {}
@@ -330,11 +333,19 @@ def finish_probe(key: ProbeKey, *, failed: bool) -> None:
             _FAILED_PROBES[key] = time.monotonic() + 60
 
 
-def managed_probe_input(settings: dict[str, str]) -> dict[str, str] | None:
-    if not all(settings.get(key) for key in ("host", "user", "password")):
-        return None
+def managed_probe_refusal(settings: dict[str, str]) -> ManagedProbeRefusal | None:
+    if not settings.get("host"):
+        return "settings_host"
+    if not settings.get("user"):
+        return "settings_account"
+    if not settings.get("password"):
+        return "settings_password"
     if settings.get("ssl_verify", "").lower() not in {"", "true", "1"}:
-        return None
+        return "settings_tls"
+    return None
+
+
+def managed_probe_credentials(settings: dict[str, str]) -> dict[str, str]:
     return {
         key: value
         for key, value in settings.items()
@@ -343,9 +354,9 @@ def managed_probe_input(settings: dict[str, str]) -> dict[str, str] | None:
 
 
 def _run_managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsafe", "unknown"]:
-    private_input = managed_probe_input(settings)
-    if private_input is None:
+    if managed_probe_refusal(settings) is not None:
         return "unknown"
+    private_input = managed_probe_credentials(settings)
     try:
         completed = subprocess.run(
             [sys.executable, "-I", str(Path(__file__).with_name("odoo_source_probe.py"))],

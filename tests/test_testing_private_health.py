@@ -3,7 +3,6 @@
 from dataclasses import replace
 from datetime import datetime, timedelta
 import json
-import os
 import socket
 from typing import Any, cast
 from unittest.mock import Mock, patch
@@ -21,14 +20,99 @@ from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditRecord,
     TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
 )
-from control_plane.workflows.ingress_provider import NPMPLUS_BASE_URL_ENV_KEY
+from control_plane.npmplus import NPMPLUS_BASE_URL_ENV_KEY
 import click
 from tests.test_testing_private_ingress import PrivateIngressFixture
-from tests.support.ingress import _npmplus_proxy_host
+from tests.support.ingress import _npmplus_proxy_host, npmplus_service_endpoint
 from tests.test_outbound_http import _FakeConnection, _FakeResponse, _resolver_for
 
 
 class TestingPrivateHealthTests(PrivateIngressFixture):
+    def test_probe_accepts_unchanged_credentials_and_refuses_rotation_or_disable(self) -> None:
+        import os
+        from control_plane import secrets
+        from control_plane.npmplus import (
+            NpmplusClient,
+            NPMPLUS_IDENTITY_ENV_KEY,
+            NPMPLUS_SECRET_ENV_KEY,
+        )
+        from control_plane.workflows.ingress_provider import (
+            build_npmplus_ingress_client_from_records,
+        )
+
+        self.create()
+        self.enterContext(
+            patch(
+                "socket.create_connection", side_effect=AssertionError("Unexpected network access.")
+            )
+        )
+        with patch.dict(
+            os.environ, {secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "fixture-health-key"}
+        ):
+            for name in (
+                "list_proxy_hosts",
+                "get_certificate",
+                "get_access_list",
+                "list_other_host_domains",
+            ):
+                self.enterContext(patch.object(NpmplusClient, name, getattr(self.client, name)))
+            self.enterContext(
+                patch.object(
+                    NpmplusClient,
+                    "get_proxy_host",
+                    new=lambda _client, host_id, **_flags: next(
+                        host for host in self.client.proxy_hosts if host.id == host_id
+                    ),
+                )
+            )
+            with patch(
+                "control_plane.testing_private_health.build_npmplus_ingress_client_from_records",
+                side_effect=build_npmplus_ingress_client_from_records,
+            ):
+                for change in (None, NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY, "disabled"):
+                    with self.subTest(change=change):
+                        self.transport.reset_mock()
+                        for key in (NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY):
+                            secrets.write_secret_value(
+                                record_store=self.store,
+                                scope="context",
+                                context_name="launchplane",
+                                integration=secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                                name=key,
+                                binding_key=key,
+                                plaintext_value="fixture-" + key,
+                            )
+
+                        def change_credential(*args: Any, **kwargs: Any) -> PublicHttpResponse:
+                            if change == "disabled":
+                                binding = next(
+                                    binding
+                                    for binding in self.store.list_secret_bindings()
+                                    if binding.binding_key == NPMPLUS_SECRET_ENV_KEY
+                                )
+                                self.store.write_secret_binding(
+                                    binding.model_copy(update={"status": "disabled"})
+                                )
+                            elif change is not None:
+                                secrets.write_secret_value(
+                                    record_store=self.store,
+                                    scope="context",
+                                    context_name="launchplane",
+                                    integration=secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                                    name=change,
+                                    binding_key=change,
+                                    plaintext_value="rotated-fixture",
+                                )
+                            return PublicHttpResponse(200, self.endpoint.url, 0, (), b"healthy")
+
+                        self.transport.side_effect = change_credential
+                        if change is None:
+                            self.assertEqual(self.fetch().status_code, 200)
+                        else:
+                            with self.assertRaises(PublicHttpDestinationError):
+                                self.fetch()
+                        self.transport.assert_called_once()
+
     def setUp(self) -> None:
         super().setUp()
         self.transport = self.enterContext(
@@ -39,13 +123,11 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         )
         self.enterContext(
             patch(
-                "control_plane.testing_private_health.build_npmplus_ingress_client_from_env",
+                "control_plane.testing_private_health.build_npmplus_ingress_client_from_records",
                 return_value=self.client,
             )
         )
-        self.enterContext(
-            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "http://10.77.0.9:81"})
-        )
+        self.enterContext(npmplus_service_endpoint(self.store, self.client, "http://10.77.0.9:81"))
 
     def fetch(self, **changes: Any) -> PublicHttpResponse:
         return fetch_testing_private_health(
@@ -202,7 +284,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         self.create()
         self.assertEqual(self.fetch().status_code, 200)
         self.transport.assert_called_once_with(
-            self.endpoint.url, edge_url=os.environ[NPMPLUS_BASE_URL_ENV_KEY], timeout_seconds=3
+            self.endpoint.url, edge_url=self.client.base_url, timeout_seconds=3
         )
         for fields in (
             {"url": "https://arbitrary.example.test/health"},
@@ -223,7 +305,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         self.client.proxy_hosts.append(api_host)
         self.transport.side_effect = outbound_http.request_private_edge_health
         with (
-            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "https://edge-api.example.test"}),
+            npmplus_service_endpoint(self.store, self.client, "https://edge-api.example.test"),
             patch(
                 "control_plane.outbound_http._system_address_resolver",
                 _resolver_for("10.77.0.9"),
@@ -245,7 +327,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                     self.assertEqual(self.fetch().status_code, 200)
                     self.transport.assert_called_once_with(
                         self.endpoint.url,
-                        edge_url=os.environ[NPMPLUS_BASE_URL_ENV_KEY],
+                        edge_url=self.client.base_url,
                         timeout_seconds=3,
                     )
         self.client.proxy_hosts[-1] = api_host
@@ -258,7 +340,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         )
         self.transport.side_effect = outbound_http.request_private_edge_health
         with (
-            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "https://edge-api.example.test"}),
+            npmplus_service_endpoint(self.store, self.client, "https://edge-api.example.test"),
             patch("control_plane.outbound_http._system_address_resolver", resolve),
             patch(
                 "control_plane.outbound_http._private_http_connection", return_value=connection
@@ -322,7 +404,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         )
         self.client.proxy_hosts.append(api_host)
         with (
-            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "https://edge-api.example.test"}),
+            npmplus_service_endpoint(self.store, self.client, "https://edge-api.example.test"),
             patch(
                 "control_plane.outbound_http._system_address_resolver",
                 _resolver_for("93.184.216.34"),
@@ -424,7 +506,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         )
         self.client.proxy_hosts.append(api_host)
         with (
-            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "https://edge-api.example.test"}),
+            npmplus_service_endpoint(self.store, self.client, "https://edge-api.example.test"),
             patch(
                 "control_plane.outbound_http._system_address_resolver",
                 side_effect=_resolver_for("93.184.216.34"),
@@ -449,7 +531,19 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                         elif change == "dns_failure":
                             resolve.side_effect = socket.gaierror
                         else:
-                            os.environ[NPMPLUS_BASE_URL_ENV_KEY] = "https://foreign.example.test"
+                            (setting,) = self.store.list_runtime_environment_records(
+                                scope="context", context_name="launchplane"
+                            )
+                            self.store.write_runtime_environment_record(
+                                setting.model_copy(
+                                    update={
+                                        "env": {
+                                            **setting.env,
+                                            NPMPLUS_BASE_URL_ENV_KEY: "https://foreign.example.test",
+                                        }
+                                    }
+                                )
+                            )
                         return response
 
                     self.transport.side_effect = change_api
@@ -460,6 +554,19 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                         "dns_failure" if change == "dns_failure" else "private_url",
                     )
                     self.client.proxy_hosts = [self.client.proxy_hosts[0], api_host]
+                    (setting,) = self.store.list_runtime_environment_records(
+                        scope="context", context_name="launchplane"
+                    )
+                    self.store.write_runtime_environment_record(
+                        setting.model_copy(
+                            update={
+                                "env": {
+                                    **setting.env,
+                                    NPMPLUS_BASE_URL_ENV_KEY: self.client.base_url,
+                                }
+                            }
+                        )
+                    )
                     resolve.side_effect = _resolver_for("93.184.216.34")
 
     async def test_monitor_uses_verified_edge_and_preserves_identity_check(self) -> None:
