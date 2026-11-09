@@ -1,7 +1,7 @@
 import base64
 import json
 import subprocess
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from unittest.mock import patch
 
 from control_plane import odoo_runtime_source_prerequisites as reader
@@ -222,7 +222,7 @@ class RuntimeSourceTests(PrerequisiteFixture):
             with self.subTest(mode=mode):
                 source = next(
                     item
-                    for item in self.consume(cast(Literal["grants", "preview"], mode)).sources
+                    for item in self.consume(mode).sources
                     if item.source == "fishbowl"
                 )
                 self.assertFalse(source.parameters)
