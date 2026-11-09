@@ -57,6 +57,7 @@ ODOO_USAGE_PROBE_REASON_CODES = frozenset(
         "session_file_unreadable",
         "session_inventory_exceeds_bound",
         "session_layout_unsupported",
+        "session_lifetime_unavailable",
         "session_location_unavailable",
         "session_store_unavailable",
         "testing_environment_unavailable",
@@ -122,15 +123,20 @@ class OdooTestingUsage:
         }
 
 
+# Odoo 20 moved odoo/http.py into a package; the session limit is in session.py.
+ODOO_SESSION_SOURCES = ("/odoo/odoo/http/session.py", "/odoo/odoo/http.py")
+
 # Runs inside the existing web container. No ORM, registry, HTTP authentication,
 # session-store get/save/GC, account names, tokens or session IDs leave it.
-ODOO_USAGE_CONTAINER_PROGRAM_TEMPLATE = r"""
-import argparse, configparser, json, logging, os, re, stat
+ODOO_USAGE_CONTAINER_PROGRAM_TEMPLATE = (
+    r"""
+import argparse, ast, configparser, json, logging, os, re, stat, time
 from datetime import datetime, timedelta, timezone
 EXPECTED_INSTANCE=__EXPECTED_INSTANCE__
 GENERATION_CREATED_AT=__GENERATION_CREATED_AT__
 from pathlib import Path
 CONFIG_PATH=__CONFIG_PATH__
+ODOO_SESSION_SOURCES=__ODOO_SESSION_SOURCES__
 SUPPORTED_SERVER_WIDE_MODULES=__SUPPORTED_SERVER_WIDE_MODULES__
 checkpoint='testing_environment_unavailable'
 
@@ -182,7 +188,33 @@ def serving_configured(process, options, database):
             and args.db_user==options['db_user']
             and args.db_filter=='^'+re.escape(database)+'$')
 
-def read_sessions(path, database, evidence=None):
+def integer_product(node):
+    if isinstance(node,ast.Constant) and type(node.value) is int:
+        return node.value
+    if isinstance(node,ast.BinOp) and isinstance(node.op,ast.Mult):
+        return integer_product(node.left)*integer_product(node.right)
+    raise UsageUnavailable('session_lifetime_unavailable')
+
+def session_inactivity_limit(cursor):
+    # Odoo's get_session_max_inactivity, read without importing Odoo: its session
+    # cleanup and cookie lifetime use this value, so a later file is no live session.
+    source=next((Path(item) for item in ODOO_SESSION_SOURCES if Path(item).is_file()),None)
+    if source is None:
+        raise UsageUnavailable('session_lifetime_unavailable')
+    tree=ast.parse(source.read_text(encoding='utf-8'))
+    defaults=[node.value for node in tree.body if isinstance(node,ast.Assign)
+              and [getattr(target,'id','') for target in node.targets]==['SESSION_LIFETIME']]
+    if len(defaults)!=1:
+        raise UsageUnavailable('session_lifetime_unavailable')
+    default=integer_product(defaults[0])
+    cursor.execute('SELECT value FROM ir_config_parameter WHERE key = %s',('sessions.max_inactivity_seconds',))
+    row=cursor.fetchone()
+    try:
+        return int(row[0]) or default
+    except (TypeError,ValueError):
+        return default
+
+def read_sessions(path, database, active_after, evidence=None):
     global checkpoint
     checkpoint='session_store_unavailable'
     if path.is_symlink() or not path.is_dir():
@@ -216,6 +248,10 @@ def read_sessions(path, database, evidence=None):
             if not isinstance(data,dict):
                 raise UsageUnavailable('session_file_unreadable')
             if GENERATION_CREATED_AT is not None and info.st_mtime < GENERATION_CREATED_AT:
+                continue
+            # Odoo refuses both: expired by inactivity, or retired by session rotation.
+            deletion=data.get('deletion_time')
+            if info.st_mtime < active_after or (type(deletion) in (int,float) and deletion<=time.time()):
                 continue
             if data.get('db')==database and (data.get('uid') or data.get('pre_uid')):
                 used=True
@@ -257,7 +293,6 @@ def probe():
     if not all(serving_configured(p,options,database) for p in odoo_processes):
         raise UsageUnavailable('serving_configuration_mismatch')
     evidence={}
-    session_use=read_sessions(data_dir/'sessions',database,evidence)
     checkpoint='database_connection_unavailable'
     connection=psycopg2.connect(
         host='database',port=options.get('db_port') or '5432',
@@ -269,6 +304,10 @@ def probe():
         checkpoint='login_history_unavailable'
         with connection.cursor() as cursor:
             cursor.execute('SET TRANSACTION READ ONLY')
+            checkpoint='session_lifetime_unavailable'
+            active_after=time.time()-session_inactivity_limit(cursor)
+            session_use=read_sessions(data_dir/'sessions',database,active_after,evidence)
+            checkpoint='login_history_unavailable'
             since=datetime.now(timezone.utc)-timedelta(hours=24)
             if GENERATION_CREATED_AT is not None:
                 since=max(since,datetime.fromtimestamp(GENERATION_CREATED_AT,timezone.utc))
@@ -294,7 +333,7 @@ def probe():
         connection.close()
     # Scan again after SQL: a login during collection must not be hidden behind
     # an earlier empty session inventory. No scan refreshes session timestamps.
-    session_use=read_sessions(data_dir/'sessions',database,evidence) or session_use
+    session_use=read_sessions(data_dir/'sessions',database,active_after,evidence) or session_use
     return {'type':'complete','recent_signins':recent,'authenticated_sessions':session_use,
             'actors':sorted(evidence.get('actors',()))[:256],
             'since':datetime.fromtimestamp(evidence['since'],timezone.utc).isoformat() if 'since' in evidence else None}
@@ -307,8 +346,9 @@ if __name__=='__main__':
     except Exception:
         result={'type':'complete','unavailable':True,'reason_code':checkpoint}
     print(json.dumps(result),flush=True)
-""".replace("__CONFIG_PATH__", repr(ODOO_WEB_CONFIG_PATH)).replace(
-    "__SUPPORTED_SERVER_WIDE_MODULES__", repr(sorted(SUPPORTED_SERVER_WIDE_MODULES))
+""".replace("__CONFIG_PATH__", repr(ODOO_WEB_CONFIG_PATH))
+    .replace("__ODOO_SESSION_SOURCES__", repr(ODOO_SESSION_SOURCES))
+    .replace("__SUPPORTED_SERVER_WIDE_MODULES__", repr(sorted(SUPPORTED_SERVER_WIDE_MODULES)))
 )
 
 
