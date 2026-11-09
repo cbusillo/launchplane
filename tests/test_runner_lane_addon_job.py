@@ -75,6 +75,12 @@ class AddonJobReaderTests(unittest.TestCase):
         assert isinstance(recipe, dict)
         self.assertEqual(recipe["Dockerfile"], "FROM fixture")
 
+    def test_reads_jobs_from_dispatched_and_chained_workflow_runs(self) -> None:
+        for event in ("workflow_dispatch", "workflow_run"):
+            with self.subTest(event=event):
+                self.workflow_run["event"] = event
+                self.assertIn("recipe", self.read())
+
     def test_failed_job_retry_reuses_only_the_same_run_and_source_recipe(self) -> None:
         self.artifact["name"] = f"{ADDON_RECIPE_ARTIFACT_PREFIX}1"
         self.assertIn("recipe", self.read())
