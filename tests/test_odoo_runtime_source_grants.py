@@ -221,9 +221,7 @@ class RuntimeSourceTests(PrerequisiteFixture):
         for mode in ("preview", "grants"):
             with self.subTest(mode=mode):
                 source = next(
-                    item
-                    for item in self.consume(mode).sources
-                    if item.source == "fishbowl"
+                    item for item in self.consume(mode).sources if item.source == "fishbowl"
                 )
                 self.assertFalse(source.parameters)
                 self.assertEqual(source.grants, "unknown")
