@@ -123,7 +123,6 @@ class OdooTestingUsage:
         }
 
 
-# Odoo 20 moved odoo/http.py into a package; the session limit is in session.py.
 ODOO_SESSION_SOURCES = ("/odoo/odoo/http/session.py", "/odoo/odoo/http.py")
 
 # Runs inside the existing web container. No ORM, registry, HTTP authentication,
@@ -196,8 +195,6 @@ def integer_product(node):
     raise UsageUnavailable('session_lifetime_unavailable')
 
 def session_inactivity_limit(cursor):
-    # Odoo's get_session_max_inactivity, read without importing Odoo: its session
-    # cleanup and cookie lifetime use this value. Zero keeps the default, as in Odoo 20.
     source=next((Path(item) for item in ODOO_SESSION_SOURCES if Path(item).is_file()),None)
     if source is None:
         raise UsageUnavailable('session_lifetime_unavailable')
@@ -213,6 +210,10 @@ def session_inactivity_limit(cursor):
         return int(row[0]) or default
     except (TypeError,ValueError):
         return default
+
+def abandoned_odoo_session(modified, data, active_after):
+    retired_at=data.get('deletion_time')
+    return modified < active_after or (type(retired_at) in (int,float) and retired_at<=time.time())
 
 def read_sessions(path, database, active_after, evidence=None):
     global checkpoint
@@ -249,9 +250,7 @@ def read_sessions(path, database, active_after, evidence=None):
                 raise UsageUnavailable('session_file_unreadable')
             if GENERATION_CREATED_AT is not None and info.st_mtime < GENERATION_CREATED_AT:
                 continue
-            # Odoo refuses both: expired by inactivity, or retired by session rotation.
-            deletion=data.get('deletion_time')
-            if info.st_mtime < active_after or (type(deletion) in (int,float) and deletion<=time.time()):
+            if abandoned_odoo_session(info.st_mtime,data,active_after):
                 continue
             if data.get('db')==database and (data.get('uid') or data.get('pre_uid')):
                 used=True

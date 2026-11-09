@@ -74,7 +74,6 @@ class SessionInventoryTests(unittest.TestCase):
             odoo_usage_container_program("testing", generation_created_at=self.created_at),
             self.namespace,
         )
-        # Deliberately not Odoo's value: the probe must read the installed source.
         self.http_source = Path(self.enterContext(TemporaryDirectory())) / "http.py"
         self.http_source.write_text("SESSION_LIFETIME = 60 * 60 * 24 * 5\n")
         self.session_sources = (
