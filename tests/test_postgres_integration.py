@@ -1027,6 +1027,7 @@ class RealPostgresOdooUsageTests(unittest.TestCase):
                 owner.execute(
                     "CREATE TABLE res_users_log (create_uid integer, create_date timestamp)"
                 )
+                owner.execute("CREATE TABLE ir_config_parameter (key varchar, value text)")
                 owner.execute(
                     "INSERT INTO res_users_log VALUES (2, (now() AT TIME ZONE 'UTC') - interval '2 days')"
                 )

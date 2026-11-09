@@ -125,7 +125,7 @@ class OdooTestingUsage:
 # Runs inside the existing web container. No ORM, registry, HTTP authentication,
 # session-store get/save/GC, account names, tokens or session IDs leave it.
 ODOO_USAGE_CONTAINER_PROGRAM_TEMPLATE = r"""
-import argparse, configparser, json, logging, os, re, stat
+import argparse, configparser, json, logging, os, re, stat, time
 from datetime import datetime, timedelta, timezone
 EXPECTED_INSTANCE=__EXPECTED_INSTANCE__
 GENERATION_CREATED_AT=__GENERATION_CREATED_AT__
@@ -182,7 +182,11 @@ def serving_configured(process, options, database):
             and args.db_user==options['db_user']
             and args.db_filter=='^'+re.escape(database)+'$')
 
-def read_sessions(path, database, evidence=None):
+def abandoned_odoo_session(modified, data, active_after):
+    retired_at=data.get('deletion_time')
+    return modified < active_after or (type(retired_at) in (int,float) and retired_at<=time.time())
+
+def read_sessions(path, database, active_after, evidence=None):
     global checkpoint
     checkpoint='session_store_unavailable'
     if path.is_symlink() or not path.is_dir():
@@ -216,6 +220,8 @@ def read_sessions(path, database, evidence=None):
             if not isinstance(data,dict):
                 raise UsageUnavailable('session_file_unreadable')
             if GENERATION_CREATED_AT is not None and info.st_mtime < GENERATION_CREATED_AT:
+                continue
+            if abandoned_odoo_session(info.st_mtime,data,active_after):
                 continue
             if data.get('db')==database and (data.get('uid') or data.get('pre_uid')):
                 used=True
@@ -257,7 +263,6 @@ def probe():
     if not all(serving_configured(p,options,database) for p in odoo_processes):
         raise UsageUnavailable('serving_configuration_mismatch')
     evidence={}
-    session_use=read_sessions(data_dir/'sessions',database,evidence)
     checkpoint='database_connection_unavailable'
     connection=psycopg2.connect(
         host='database',port=options.get('db_port') or '5432',
@@ -272,6 +277,8 @@ def probe():
             since=datetime.now(timezone.utc)-timedelta(hours=24)
             if GENERATION_CREATED_AT is not None:
                 since=max(since,datetime.fromtimestamp(GENERATION_CREATED_AT,timezone.utc))
+            active_after=since.timestamp()
+            session_use=read_sessions(data_dir/'sessions',database,active_after,evidence)
             parameters=(since.replace(tzinfo=None).isoformat(sep=' '),)
             cursor.execute("SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= %s)",parameters)
             recent=cursor.fetchone()[0]
@@ -294,7 +301,7 @@ def probe():
         connection.close()
     # Scan again after SQL: a login during collection must not be hidden behind
     # an earlier empty session inventory. No scan refreshes session timestamps.
-    session_use=read_sessions(data_dir/'sessions',database,evidence) or session_use
+    session_use=read_sessions(data_dir/'sessions',database,active_after,evidence) or session_use
     return {'type':'complete','recent_signins':recent,'authenticated_sessions':session_use,
             'actors':sorted(evidence.get('actors',()))[:256],
             'since':datetime.fromtimestamp(evidence['since'],timezone.utc).isoformat() if 'since' in evidence else None}

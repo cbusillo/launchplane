@@ -4944,8 +4944,9 @@ optional `inputs.fishbowl_source` reference: `context`, `instance` and
 from `product-secret-bindings-read`; select the product's existing **testing**
 Fishbowl password binding, never production's binding or a plaintext value.
 This option is for a disposable PR preview nobody is using. Qualification reads
-the testing database through a read-only session and requires its installed
-importer and shared payload addons. It does not write testing data, run an import,
+only Launchplane's records and the preview's own build provenance. It does not
+select, connect to or read the stable testing runtime or database, whose addon
+state does not affect this route. It does not write testing data, run an import,
 promote or release anything.
 
 The service requires an exact testing binding classified `shared_safe`, with
@@ -4957,21 +4958,26 @@ write. Both plan and apply retain managed-copy source-value read authority;
 ordinary metadata-read authority alone is insufficient. No grant, user,
 credential reclassification or external secret copy is part of this route.
 
-Supply the exact PR manifest and digest-pinned image through the normal preview
-inputs. The issued plan fingerprints the selected source settings, binding
-version, allowance and qualified testing runtime. The source settings come from
-the exact verified installed importer and shared payload producer, typed testing
-overrides, the actual delivered payload and persisted testing parameters. Omitted
-overrides preserve persisted parameters; installed producer defaults apply only
-when the parameter is absent. Legacy field environments and copied defaults are
-not a fallback. Uninstalled addons, missing password delivery, conflicting or
-secret-backed non-secret authority, unverified TLS and drift refuse the optional
-source. The existing `source_unqualified` refusal includes the bounded failure
-stage when proved, such as `capacity`, `addon_state` or `source_resolution`.
-An absent stage remains unknown; it does not establish a missing binding.
-Ordinary previews without the source remain available. Planning compares the
-selected managed password with delivered metadata in memory; it does not copy
-the password into its response or evidence digest.
+Send `pr_number`, the PR's current head as `source_git_ref` and that build's
+digest-pinned `image_reference`, and omit `manifest`: Launchplane reads the
+manifest from the open PR's successful current-head Build run and refuses when
+the image or head differs. A supplied manifest must equal that proven manifest.
+A PR build is never recorded in the release artifact store; a release build's
+manifest must equal the one Launchplane recorded. Its file inventory must
+include the Fishbowl importer and shared payload producer. The issued plan fingerprints the selected source settings, binding
+version, allowance, managed records and that artifact.
+
+`host`, `user`, `db`, `port` and `ssl_verify` come from testing's managed records:
+its runtime environment and typed overrides. Each must be set in one of them,
+and if both set it they must agree. Launchplane copies no producer default.
+Blank, secret-backed, retired or conflicting settings, a Fishbowl password
+override that does not select this binding and drift refuse the optional source.
+`fishbowl.ssl_verify` may be an explicit false value for this source.
+
+The existing `source_unqualified` refusal includes the bounded failure stage:
+`artifact`, `producer_inventory`, `authority` or `source_resolution`. Ordinary
+previews without the source remain available. Planning does not copy the
+password into its response or evidence digest.
 
 Apply that service-issued plan through the existing
 `POST /v1/drivers/odoo/preview-apply` route with its plan id as the idempotency
@@ -5201,7 +5207,8 @@ source inventory, installed producer, canonical payload parser and addon-state
 checks. Non-secret authority comes from typed instance overrides, with no legacy
 per-field environment fallback. Omitted overrides keep persisted parameters;
 defaults apply only when the corresponding parameter is absent. Explicit
-mismatches, missing password delivery and disabled or unverified TLS stay unknown.
+mismatches, missing password delivery, disabled TLS and, on any source but
+Fishbowl, unverified TLS stay unknown.
 Database-name keys differ by producer and are not required
 by this account-wide SHOW GRANTS read, which selects no default database; their
 agreement remains with import-override reconciliation. It sends only fixed code and non-secret identity metadata
@@ -5253,8 +5260,11 @@ authority. It accepts no query parameters, so the source, host, image, SQL and
 credential all come from service records.
 
 The service selects the source the same way as the other reads: the exact
-current managed binding and version with a read-only allowance, and verified
-TLS settings. It refuses a host shared with this product's production lane. The
+current managed binding and version with a read-only allowance. The probe
+verifies the server certificate unless the source's own `fishbowl.ssl_verify`
+is explicitly `false` or `0`, as the Director decided for this source in
+[Q1327](https://github.com/cbusillo/launchplane/issues/5810#issuecomment-6742151038). An unrecognized value
+is refused. It refuses a host shared with this product's production lane. The
 image is the testing lane's recorded immutable digest, which must already be on
 the host; it is never pulled.
 

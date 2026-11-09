@@ -32,7 +32,6 @@ def runtime_grants(
         product=product,
         control_plane_root=control_plane_root,
         database_url=database_url,
-        mode="grants",
         sources=sources,
         expected_runtime=connection,
     )

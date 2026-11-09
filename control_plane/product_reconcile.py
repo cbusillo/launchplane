@@ -75,6 +75,7 @@ from control_plane.dokploy.memory_capacity import (
 from control_plane.contracts.host_network_capacity import PREVIEW_MEMORY_FAILURE_MESSAGES
 from control_plane.contracts.host_network_capacity import HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+from control_plane.dokploy.post_deploy import schedule_failure_kind
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
     BuildProvenanceError,
@@ -89,7 +90,7 @@ from control_plane.build_provenance import (
     verify_generic_web_build,
     verify_requested_build_artifact,
 )
-from control_plane.contracts.record_failures import record_failure_summary
+from control_plane.contracts.record_failures import record_failure, record_failure_summary
 from control_plane.contracts.promotion_record import env_key_names
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest, ArtifactSourceBuild
 from control_plane.contracts.odoo_target_replacement_failures import (
@@ -2752,6 +2753,18 @@ def _run_preview_operation(
                 and operation_result.status == "reconcile_required"
             ):
                 return _hold_preview_destroy(plan, previous_plan, failed_attempts)
+            schedule_failure_reason = str(driver_result.get("schedule_failure_reason") or "")
+            if schedule_failure_reason:
+                _LOGGER.warning(
+                    "Preview data schedule failed trace=%s: %s", trace_id, schedule_failure_reason
+                )
+                kind = schedule_failure_kind(schedule_failure_reason)
+                plan["preview_schedule_failure_note"] = (
+                    f"The data schedule failed with {kind}."
+                    if kind
+                    else "The data schedule failed."
+                )
+                return _preview_failure(plan, "preview_build_failed")
             return _preview_failure(
                 plan,
                 "reconcile_required"
@@ -2929,7 +2942,17 @@ def _retained_preview_operation_plan(
 
 
 def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
-    summary = record_failure_summary(code)
+    failure = record_failure(code)
+    schedule_failure_note = (
+        str(plan.get("preview_schedule_failure_note") or "")
+        if code == "preview_build_failed"
+        else ""
+    )
+    summary = (
+        f"{failure.code}: {schedule_failure_note} {failure.description}"
+        if schedule_failure_note
+        else record_failure_summary(code)
+    )
     if code in PREVIEW_MEMORY_FAILURE_MESSAGES:
         summary += preview_memory_failure_details(plan)
     if code == "preview_config_refused":
@@ -3923,11 +3946,10 @@ def verified_testing_rebuild_artifact(
     if profile.driver_id != "odoo" or lane.instance != "testing":
         raise ValueError("Requested build selection requires an Odoo testing lane.")
     identity = product_repository_identity(record_store, profile)
+    transport = _TestingRebuildBuildReads(resolve_build_provenance_transport(record_store, profile))
     try:
         return verify_requested_build_artifact(
-            transport=_TestingRebuildBuildReads(
-                resolve_build_provenance_transport(record_store, profile)
-            ),
+            transport=transport,
             repository=profile.repository,
             repository_id=identity.repository_id,
             commit=source_git_ref,
@@ -3938,15 +3960,44 @@ def verified_testing_rebuild_artifact(
     except BuildProvenanceError as error:
         if error.code != "build_purpose_mismatch":
             raise
-    verified = latest_verified_testing_build(record_store, profile, lane)
-    if (verified.manifest.artifact_id, verified.manifest.source_commit) != (
-        artifact_id,
-        source_git_ref,
-    ):
+    verified = verify_build_artifact(
+        transport=transport,
+        repository=profile.repository,
+        repository_id=identity.repository_id,
+        commit=source_git_ref,
+        purpose="release",
+        context=lane.context,
+        image_repository=profile.image.repository,
+    )
+    if verified.manifest.artifact_id != artifact_id:
         raise BuildProvenanceError(
-            "The selected build is not the current testing release.", code="build_purpose_mismatch"
+            "The selected build run or attempt changed.", code="manifest_commit_mismatch"
         )
     return verified
+
+
+def verified_preview_build_artifact(
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    *,
+    pull_request_number: int,
+    source_git_ref: str,
+) -> VerifiedBuildArtifact:
+    """The manifest the open pull request's current-head Build run proves; never recorded."""
+    identity = product_repository_identity(record_store, profile)
+    return verify_build_artifact(
+        transport=_TestingRebuildBuildReads(
+            resolve_build_provenance_transport(record_store, profile)
+        ),
+        repository=profile.repository,
+        repository_id=identity.repository_id,
+        commit=source_git_ref,
+        purpose="preview",
+        context=profile.preview.context.strip(),
+        image_repository=profile.image.repository,
+        pull_request_number=pull_request_number,
+        require_open_pull_request=True,
+    )
 
 
 def latest_verified_testing_build(

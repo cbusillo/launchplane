@@ -75,7 +75,7 @@ class SessionInventoryTests(unittest.TestCase):
         )
 
     def sessions(self) -> bool:
-        return bool(self.namespace["read_sessions"](self.path, "testing_db"))
+        return bool(self.namespace["read_sessions"](self.path, "testing_db", 0.0))
 
     def test_empty_anonymous_and_restored_sessions_are_idle(self) -> None:
         self.assertFalse(self.sessions())
@@ -96,15 +96,6 @@ class SessionInventoryTests(unittest.TestCase):
         session.write_text(json.dumps({"db": "testing_db", "pre_uid": 2}))
         self.assertTrue(self.sessions())
 
-    def test_current_generation_session_older_than_login_window_still_protects(self) -> None:
-        now = datetime.now(UTC)
-        self.namespace["GENERATION_CREATED_AT"] = (now - timedelta(days=3)).timestamp()
-        session = self.path / "session"
-        session.write_text(json.dumps({"db": "testing_db", "uid": 42}))
-        stamp = (now - timedelta(days=2)).timestamp()
-        os.utime(session, (stamp, stamp))
-        self.assertTrue(self.sessions())
-
     def test_missing_corrupt_aliased_and_oversized_stores_cannot_mean_idle(self) -> None:
         for mode in ("missing", "corrupt", "alias", "oversized"):
             with self.subTest(mode=mode), TemporaryDirectory() as directory:
@@ -121,7 +112,7 @@ class SessionInventoryTests(unittest.TestCase):
                             json.dumps({"db": "another_db", "padding": "x" * (1024 * 1024)})
                         )
                 with self.assertRaises((ValueError, OSError)):
-                    self.namespace["read_sessions"](path, "testing_db")
+                    self.namespace["read_sessions"](path, "testing_db", 0.0)
 
     def test_probe_uses_read_only_connection_and_rolls_back_without_signing_in(self) -> None:
         connection = MagicMock()
@@ -217,7 +208,8 @@ class SessionInventoryTests(unittest.TestCase):
         if failure == "server_wide_config":
             options["server_wide_modules"] = "base,web,session_store_module"
         connection = MagicMock()
-        connection.cursor.return_value.__enter__.return_value.fetchone.return_value = (recent,)
+        fixed_cursor = connection.cursor.return_value.__enter__.return_value
+        fixed_cursor.fetchone.return_value = (recent,)
         if login_rows is not None:
             database = sqlite3.connect(":memory:")
             self.addCleanup(database.close)
@@ -326,14 +318,102 @@ class SessionInventoryTests(unittest.TestCase):
                 self.assertEqual(session.read_bytes(), original[0])
                 self.assertEqual(session.stat().st_mtime, stamp.timestamp())
 
-    def test_missing_boundary_probe_keeps_old_authenticated_sessions_and_recent_logins(
-        self,
-    ) -> None:
+    def stored_session(self, age: timedelta, **fields: object) -> Path:
+        sessions = self.path / "sessions"
+        sessions.mkdir(exist_ok=True)
+        session = sessions / "stored"
+        session.write_text(json.dumps({"db": "testing_db", "uid": 42, **fields}))
+        stamp = (datetime.now(UTC) - age).timestamp()
+        os.utime(session, (stamp, stamp))
+        return session
+
+    def test_session_untouched_for_a_day_is_not_a_person(self) -> None:
+        session = self.stored_session(timedelta(hours=26), pre_uid=9)
+        original = session.read_bytes(), session.stat().st_mtime
+        for bounded in (False, True):
+            with self.subTest(bounded=bounded):
+                created = datetime.now(UTC) - timedelta(days=30)
+                result = self.probe_result(
+                    bounded=bounded, generation_created_at=created if bounded else None
+                )
+                self.assertIs(result["recent_signins"], False)
+                self.assertIs(result["authenticated_sessions"], False)
+                self.assertEqual(result["actors"], [])
+                self.assertIsNone(result["since"])
+        self.assertEqual((session.read_bytes(), session.stat().st_mtime), original)
+
+    def test_session_touched_today_is_use_without_a_login(self) -> None:
+        self.stored_session(timedelta(hours=20))
+        result = self.probe_result(bounded=False)
+        self.assertIs(result["recent_signins"], False)
+        self.assertIs(result["authenticated_sessions"], True)
+        self.assertEqual(result["actors"], ["odoo-user:42"])
+
+    def test_recent_login_stays_use_when_every_session_file_is_stale(self) -> None:
+        self.stored_session(timedelta(days=16))
+        result = self.probe_result(
+            bounded=False, login_rows=((7, datetime.now(UTC) - timedelta(hours=1)),)
+        )
+        self.assertIs(result["recent_signins"], True)
+        self.assertIs(result["authenticated_sessions"], False)
+        self.assertEqual(result["actors"], ["odoo-user:7"])
+
+    def test_session_odoo_has_retired_is_not_use_but_a_malformed_one_stays_use(self) -> None:
+        now = datetime.now(UTC).timestamp()
+        for deletion_time, expected in (
+            (now - 60, False),
+            (now + 60, True),
+            ("not-a-time", True),
+        ):
+            with self.subTest(deletion_time=deletion_time):
+                self.stored_session(timedelta(minutes=1), deletion_time=deletion_time)
+                result = self.probe_result(bounded=False)
+                self.assertIs(result["authenticated_sessions"], expected)
+
+    def test_stale_files_reach_the_normal_usage_reader_as_unused(self) -> None:
+        self.stored_session(timedelta(days=16))
+        frame = self.probe_result(bounded=False)
+        target = DokployTargetRecord(
+            context="fixture",
+            instance="testing",
+            target_name="fixture-testing",
+            updated_at="2026-10-16T00:00:00Z",
+        )
+        target_id = DokployTargetIdRecord(
+            context="fixture",
+            instance="testing",
+            target_id="fixture-target",
+            updated_at=target.updated_at,
+        )
+        module = "control_plane.odoo_testing_usage."
+        with (
+            patch(module + "source.read_dokploy_config", return_value=("https://p.invalid", "t")),
+            patch(
+                module + "api.fetch_dokploy_target_payload",
+                return_value={
+                    "name": target.target_name,
+                    "appName": "fixture-project",
+                    "serverId": "remote",
+                },
+            ),
+            patch(module + "_read_remote", side_effect=lambda **kw: kw["receive"](frame)),
+        ):
+            result = read_odoo_testing_usage(
+                target=target,
+                target_id=target_id,
+                control_plane_root=Path("/fixture"),
+                database_url="sqlite+pysqlite://",
+            )
+        self.assertEqual(result.usage, "unused")
+        self.assertIsNone(result.valid_until)
+
+    def test_missing_boundary_probe_keeps_recent_sessions_and_logins(self) -> None:
         sessions = self.path / "sessions"
         sessions.mkdir()
         session = sessions / "restored"
         session.write_text(json.dumps({"db": "testing_db", "uid": 42}))
-        os.utime(session, (1, 1))
+        stamp = (datetime.now(UTC) - timedelta(hours=12)).timestamp()
+        os.utime(session, (stamp, stamp))
         result = self.probe_result(
             bounded=False, login_rows=((7, datetime.now(UTC) - timedelta(hours=1)),)
         )

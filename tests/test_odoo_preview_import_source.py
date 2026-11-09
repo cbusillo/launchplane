@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from typing import Any, cast
 from unittest.mock import patch
 
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -19,9 +20,13 @@ from tests.test_odoo_preview_apply_execution import _issued_plan
 from control_plane.odoo_preview_import_source import PreviewImportSourceError
 from control_plane import secrets
 from control_plane.odoo_runtime_source_prerequisites import (
-    SourceConsumerResult,
-    SourceConsumerEvidence,
+    PAYLOAD_ADDON,
+    PAYLOAD_FILES,
+    SOURCE_ADDONS,
 )
+from control_plane.build_provenance import BuildProvenanceError, VerifiedBuildArtifact
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.artifact_release_compatibility import ReleaseInputFile
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
@@ -36,10 +41,12 @@ from control_plane.odoo_instance_overrides import (
     build_post_deploy_environment,
 )
 from control_plane.contracts.odoo_instance_override_record import (
+    OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
 )
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
+from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsResult
 from control_plane.odoo_preview_apply_http import (
     _odoo_preview_service_environment,
     execute_odoo_preview_apply_result,
@@ -63,6 +70,7 @@ from tests.support.stores import (
     _write_runtime_key_safety_policy,
 )
 from tests.test_odoo_preview_apply_execution import _refresh_payload
+from tests.test_release_compatibility import artifact
 from control_plane.odoo_preview_apply_http import OdooPreviewApplyEnvelope
 
 
@@ -147,40 +155,166 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 config_parameter_runtime_key("fishbowl.user"): "readonly",
                 config_parameter_runtime_key("fishbowl.db"): "inventory",
                 config_parameter_runtime_key("fishbowl.port"): 3306,
+                config_parameter_runtime_key("fishbowl.ssl_verify"): "True",
                 config_parameter_runtime_key("repairshopr.sync_db.password"): "must-not-copy",
             },
         )
         self.store.write_runtime_environment_record(self.runtime)
+        self.manifest = self.recorded_manifest("preview-artifact")
+        self.built = self.manifest
+        proof = patch(
+            "control_plane.product_reconcile.verified_preview_build_artifact",
+            side_effect=self.build_run_proof,
+        )
+        self.proof = proof.start()
+        self.addCleanup(proof.stop)
 
-        self.qualification = SourceConsumerResult(
-            runtime="verified",
-            evidence_sha256="a" * 64,
-            sources=(
-                SourceConsumerEvidence(
-                    source="fishbowl",
-                    parameters={
-                        "host": "source.example.test",
-                        "user": "readonly",
-                        "db": "inventory",
-                        "port": "3306",
-                        "ssl_verify": "True",
-                    },
-                ),
+    def build_run_proof(
+        self,
+        _store: object,
+        _profile: LaunchplaneProductProfileRecord,
+        *,
+        pull_request_number: int,
+        source_git_ref: str,
+    ) -> VerifiedBuildArtifact:
+        built = self.built.source_build
+        assert built is not None
+        if (pull_request_number, source_git_ref) != (
+            built.pull_request_number,
+            self.built.source_commit,
+        ):
+            raise BuildProvenanceError("No successful Build run.", code="build_run_missing")
+        return VerifiedBuildArtifact(manifest=self.built)
+
+    def recorded_manifest(
+        self,
+        artifact_id: str,
+        *,
+        producer: bool = True,
+        payload: bool = True,
+        repository: str = "",
+        complete: bool = True,
+        pull_request: int | None = 42,
+    ) -> ArtifactIdentityManifest:
+        addon, model, client = SOURCE_ADDONS["fishbowl"]
+        files = (
+            (
+                "__init__.py",
+                "__manifest__.py",
+                "models/__init__.py",
+                f"models/{model}.py",
+                "services/__init__.py",
+                f"services/{client}.py",
+                "services/connection_settings.py",
+            )
+            if producer
+            else ()
+        )
+        manifest = artifact(
+            artifact_id,
+            files=tuple(
+                ReleaseInputFile(path=f"addons/{addon}/{path}", kind="unknown", sha256="a" * 64)
+                for path in files
+            ),
+            shared_files=tuple(
+                ReleaseInputFile(path=f"{PAYLOAD_ADDON}/{path}", kind="unknown", sha256="b" * 64)
+                for path in (PAYLOAD_FILES if payload else ("unrelated.py",))
             ),
         )
-        qualifier = patch(
-            "control_plane.odoo_runtime_source_prerequisites.read_source_consumers",
-            side_effect=lambda **kwargs: self.qualification,
+        assert manifest.source_build is not None
+        assert manifest.release_compatibility is not None
+        source_repository = repository or self.profile.repository
+        manifest.source_build = manifest.source_build.model_copy(
+            update={
+                "repository": source_repository,
+                "event": "push" if pull_request is None else "pull_request",
+                "purpose": "release" if pull_request is None else "preview",
+                "pull_request_number": pull_request,
+            }
         )
-        self.qualifier = qualifier.start()
-        self.addCleanup(qualifier.stop)
+        manifest.release_compatibility = manifest.release_compatibility.model_copy(
+            update={
+                "complete": complete,
+                "sources": tuple(
+                    source.model_copy(update={"repository": source_repository})
+                    if source.input_name == "tenant"
+                    else source
+                    for source in manifest.release_compatibility.sources
+                ),
+            }
+        )
+        if pull_request is None:
+            self.store.write_artifact_manifest(manifest)
+        return manifest
+
+    def envelope(self) -> OdooPreviewApplyEnvelope:
+        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        image = self.manifest.image
+        return request.model_copy(
+            update={
+                "apply": request.apply.model_copy(
+                    update={
+                        "manifest": self.manifest,
+                        "image_reference": f"{image.repository}@{image.digest}",
+                    }
+                )
+            }
+        )
+
+    def plan(self) -> OdooPreviewApplyInputsResult:
+        return self.planned_with(_issued_plan(self.envelope()))
+
+    def planned_with(self, planned: OdooPreviewApplyInputsResult) -> OdooPreviewApplyInputsResult:
+        inputs = planned.plan_request.model_copy(
+            update={"fishbowl_source": self.reference, "manifest": self.manifest}
+        )
+        return planned.model_copy(update={"plan_request": inputs, "plan_provenance": None})
+
+    def write_setting(self, field: str, value: str | int | None) -> None:
+        env = dict(self.runtime.env)
+        key = config_parameter_runtime_key(f"fishbowl.{field}")
+        env.pop(key, None)
+        if value is not None:
+            env[key] = value
+        self.runtime = self.runtime.model_copy(update={"env": env})
+        self.store.write_runtime_environment_record(self.runtime)
+
+    def write_override(self, key: str, value: OdooOverrideValue) -> None:
+        self.store.write_odoo_instance_override_record(
+            OdooInstanceOverrideRecord(
+                context="cm",
+                instance="testing",
+                config_parameters=(OdooConfigParameterOverride(key=key, value=value),),
+                updated_at=self.profile.updated_at,
+            )
+        )
+
+    def test_unavailable_stable_testing_consumer_does_not_stop_the_preview(self) -> None:
+        planned = self.plan()
+        refused = AssertionError("Stable testing must not be read for an independent preview")
+        with (
+            patch(
+                "control_plane.odoo_preview_apply_http.build_odoo_preview_apply_inputs",
+                return_value=planned,
+            ),
+            patch("control_plane.odoo_runtime_reads.select_stable_runtime", side_effect=refused),
+            patch("control_plane.odoo_runtime_reads.connect_runtime", side_effect=refused),
+        ):
+            result = _build_odoo_preview_apply_inputs(
+                control_plane_root=self.root,
+                record_store=self.store,
+                profile=self.profile,
+                request=planned.plan_request,
+                database_url=self.store.database_url,
+            )
+        self.assertTrue(result.fishbowl_source_sha256)
 
     def test_source_capture_does_not_resolve_import_secret_before_reservation(self) -> None:
         from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
 
         _write_odoo_preview_template_runtime_environment(store=self.store)
         self.profile.preview.data_transport_mode = "driver"
-        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        request = self.envelope()
         issued = _issued_plan(request)
         issued.plan_request.fishbowl_source = self.reference
         operation = prepare_odoo_preview_apply_operation(
@@ -211,9 +345,8 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
             profile=self.profile,
             preview_slug="pr-42",
             copy_from=self.reference,
+            manifest=self.manifest,
             include_secret_value=include_secret_value,
-            control_plane_root=self.root,
-            database_url=self.store.database_url,
         )
 
     def test_exact_preview_withdrawal_also_controls_import_source_composition(self) -> None:
@@ -232,7 +365,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
         )
-        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        request = self.envelope()
         template = OdooInstanceOverrideRecord(
             context=self.profile.preview.context,
             instance=self.profile.preview.template_instance,
@@ -280,7 +413,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
         )
-        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        request = self.envelope()
         addon_settings = [
             {
                 "addon": "authentik_sso",
@@ -355,8 +488,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                     profile=self.profile,
                     preview_slug=slug,
                     copy_from=reference,
-                    control_plane_root=self.root,
-                    database_url=self.store.database_url,
+                    manifest=self.manifest,
                     include_secret_value=True,
                 )
 
@@ -440,7 +572,10 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotEqual(self.resolve().authority_sha256, original.authority_sha256)
         self.store.write_dokploy_target_record(self.target)
-        self.qualification = self.qualification.model_copy(update={"evidence_sha256": "b" * 64})
+        self.write_setting("port", 3499)
+        self.assertNotEqual(self.resolve().authority_sha256, original.authority_sha256)
+        self.write_setting("port", 3306)
+        self.manifest = self.built = self.recorded_manifest("another-preview-artifact")
         self.assertNotEqual(self.resolve().authority_sha256, original.authority_sha256)
         self.store.write_secret_record(
             self.record.model_copy(update={"current_version_id": "rotated"})
@@ -448,37 +583,106 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             self.resolve()
 
-    def test_unqualified_source_cannot_fall_back_to_legacy_settings(self) -> None:
-        self.qualification = self.qualification.model_copy(update={"runtime": "unknown"})
-        with self.assertRaises(ValueError):
-            self.resolve()
+    def assert_unqualified(self, stage: str) -> None:
+        with self.assertRaises(PreviewImportSourceError) as caught:
+            self.resolve(include_secret_value=True)
+        self.assertEqual(caught.exception.code, "source_unqualified")
+        self.assertEqual(caught.exception.failure_stage, stage)
+        self.assertIn(stage, str(caught.exception))
+        self.assertNotIn("source.example.test", str(caught.exception))
+        self.assertNotIn("private-fixture-source-password", str(caught.exception))
 
-    def test_unqualified_source_reports_only_proven_failure_stage(self) -> None:
-        original = self.qualification
-        for stage in ("capacity", "producer_inventory", "addon_state", "source_resolution", None):
-            with self.subTest(stage=stage):
-                self.qualification = original.model_copy(
-                    update={
-                        "runtime": "unknown" if stage == "capacity" else "verified",
-                        "failure_stage": stage if stage == "capacity" else None,
-                        "sources": (
-                            original.sources[0].model_copy(
-                                update={
-                                    "parameters": {},
-                                    "failure_stage": None if stage == "capacity" else stage,
-                                }
-                            ),
-                        ),
-                    }
-                )
-                with self.assertRaises(PreviewImportSourceError) as caught:
-                    self.resolve()
-                self.assertEqual(caught.exception.code, "source_unqualified")
-                self.assertEqual(caught.exception.failure_stage, stage)
-                if stage:
-                    self.assertIn(stage, str(caught.exception))
-                self.assertNotIn("source.example.test", str(caught.exception))
-                self.assertNotIn("private-fixture-source-password", str(caught.exception))
+    def test_pull_request_build_qualifies_by_its_build_run_not_the_release_store(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.manifest.artifact_id)
+        self.assertIn("fishbowl.password", {item.key for item in self.resolve().parameters})
+        self.assertEqual(
+            self.proof.call_args.kwargs,
+            {"pull_request_number": 42, "source_git_ref": self.manifest.source_commit},
+        )
+
+    def test_only_the_exact_proven_build_of_this_product_qualifies(self) -> None:
+        proven = self.manifest
+        changed = proven.model_copy(update={"source_commit": "c" * 40})
+        foreign = self.recorded_manifest("foreign-artifact", repository="another/product")
+        other_attempt = proven.model_copy(update={"artifact_id": "another-run-attempt"})
+        release = self.recorded_manifest("release-artifact", pull_request=None)
+        unrecorded_release = release.model_copy(update={"artifact_id": "never-recorded"})
+        for name, manifest in (
+            ("missing", None),
+            ("another_run_attempt", other_attempt),
+            ("changed_after_build", changed),
+            ("another_product", foreign),
+            ("another_pull_request", self.recorded_manifest("other-pr", pull_request=43)),
+            ("unrecorded_release", unrecorded_release),
+        ):
+            with self.subTest(name=name), patch.object(self, "manifest", manifest):
+                self.assert_unqualified("artifact")
+        self.manifest = release
+        self.assertIn("fishbowl.password", {item.key for item in self.resolve().parameters})
+
+    def test_preview_artifact_must_carry_the_source_and_payload_producers(self) -> None:
+        for name, manifest in (
+            ("no_importer", self.recorded_manifest("no-importer", producer=False)),
+            ("no_payload_producer", self.recorded_manifest("no-payload", payload=False)),
+            ("incomplete_inventory", self.recorded_manifest("incomplete", complete=False)),
+        ):
+            with self.subTest(name=name):
+                self.manifest = self.built = manifest
+                self.assert_unqualified("producer_inventory")
+
+    def test_unknown_or_unsafe_effective_inputs_refuse_without_a_default(self) -> None:
+        for field, value in (
+            ("host", None),
+            ("user", None),
+            ("db", None),
+            ("port", None),
+            ("port", "not-a-port"),
+            ("port", "70000"),
+            ("ssl_verify", None),
+            ("ssl_verify", "flase"),
+        ):
+            with self.subTest(field=field, value=value):
+                previous = self.runtime
+                self.write_setting(field, value)
+                self.assert_unqualified("source_resolution")
+                self.runtime = previous
+                self.store.write_runtime_environment_record(previous)
+
+    def test_conflicting_managed_authority_refuses(self) -> None:
+        literal = OdooOverrideValue(source="literal", value="other.example.test")
+        secret = OdooOverrideValue(source="secret_binding", secret_binding_id="wrong")
+        for key, value, stage in (
+            ("fishbowl.host", literal, "source_resolution"),
+            (
+                "fishbowl.host",
+                OdooOverrideValue(source="literal", value=""),
+                "source_resolution",
+            ),
+            ("fishbowl.user", secret, "source_resolution"),
+            ("fishbowl.password", secret, "authority"),
+            (
+                "fishbowl.password",
+                OdooOverrideValue(source="literal", value="not-the-binding"),
+                "authority",
+            ),
+        ):
+            with self.subTest(key=key, source=value.source):
+                self.write_override(key, value)
+                self.assert_unqualified(stage)
+
+    def test_typed_setting_supplies_only_what_the_lane_record_omits(self) -> None:
+        self.write_setting("db", None)
+        self.write_override(
+            "fishbowl.db", OdooOverrideValue(source="literal", value="typed-inventory")
+        )
+        parameters = {item.key: item.value.value for item in self.resolve().parameters}
+        self.assertEqual(parameters["fishbowl.db"], "typed-inventory")
+
+    def test_source_verification_off_stays_only_on_its_explicit_setting(self) -> None:
+        self.write_setting("ssl_verify", "false")
+        parameters = {item.key: item.value.value for item in self.resolve().parameters}
+        self.assertEqual(parameters["fishbowl.ssl_verify"], "False")
 
     @scoped_agent_test
     async def test_preview_read_and_standing_metadata_read_cannot_move_source_value(self) -> None:
@@ -571,7 +775,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         prepare.assert_not_called()
 
     def test_plan_never_copies_password_and_rotated_source_becomes_stale_before_apply(self) -> None:
-        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        request = self.envelope()
         planned = _issued_plan(request)
         inputs = planned.plan_request.model_copy(update={"fishbowl_source": self.reference})
         planned = planned.model_copy(update={"plan_request": inputs, "plan_provenance": None})
@@ -615,49 +819,59 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(refused.exception.code, "odoo_preview_plan_stale")
 
-    def test_credential_shaped_non_secret_settings_are_refused(self) -> None:
-        source = self.qualification.sources[0]
-        self.qualification = self.qualification.model_copy(
+    def test_plan_without_a_manifest_takes_the_preview_head_build_run_manifest(self) -> None:
+        planned = self.plan()
+        image = self.manifest.image
+        inputs = planned.plan_request.model_copy(
             update={
-                "sources": (
-                    source.model_copy(
-                        update={
-                            "parameters": {
-                                **source.parameters,
-                                "host": "https://user:private@source.example.test",
-                            }
-                        }
-                    ),
-                )
+                "manifest": None,
+                "pr_number": 42,
+                "source_git_ref": self.manifest.source_commit,
+                "image_reference": f"{image.repository}@{image.digest}",
             }
         )
+
+        def plan_with(request: object) -> object:
+            with patch(
+                "control_plane.odoo_preview_apply_http.build_odoo_preview_apply_inputs",
+                return_value=planned,
+            ) as build:
+                _build_odoo_preview_apply_inputs(
+                    control_plane_root=self.root,
+                    record_store=self.store,
+                    profile=self.profile,
+                    request=cast(Any, request),
+                    database_url=self.store.database_url,
+                )
+            return build.call_args.kwargs["request"]
+
+        self.assertEqual(cast(Any, plan_with(inputs)).manifest, self.manifest)
+        for name, update in (
+            ("another_image", {"image_reference": f"{image.repository}@sha256:{'e' * 64}"}),
+            ("another_head", {"source_git_ref": "c" * 40}),
+            ("no_head", {"source_git_ref": ""}),
+        ):
+            with self.subTest(name=name), self.assertRaises(PreviewImportSourceError) as caught:
+                plan_with(inputs.model_copy(update=update))
+            self.assertEqual(caught.exception.failure_stage, "artifact")
+
+    def test_credential_shaped_non_secret_settings_are_refused(self) -> None:
+        self.write_setting("host", "https://user:private@source.example.test")
         with self.assertRaises(ValueError):
             self.resolve()
 
     def test_effective_source_options_are_copied_without_local_defaults(self) -> None:
-        source = self.qualification.sources[0]
-        self.qualification = self.qualification.model_copy(
-            update={
-                "sources": (
-                    source.model_copy(update={"parameters": {**source.parameters, "port": "3499"}}),
-                )
-            }
-        )
+        self.write_setting("port", 3499)
         parameters = {item.key: item.value.value for item in self.resolve().parameters}
-        self.assertEqual(
-            parameters["fishbowl.port"], self.qualification.sources[0].parameters["port"]
-        )
+        self.assertEqual(parameters["fishbowl.port"], "3499")
 
     def test_authority_change_during_environment_resolution_refuses_before_provider(self) -> None:
         _write_odoo_preview_template_runtime_environment(store=self.store)
-        self.store.write_runtime_environment_record(
-            self.runtime.model_copy(
-                update={
-                    "env": {**self.runtime.env, "ODOO_DB_USER": "odoo"},
-                }
-            )
+        self.runtime = self.runtime.model_copy(
+            update={"env": {**self.runtime.env, "ODOO_DB_USER": "odoo"}}
         )
-        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        self.store.write_runtime_environment_record(self.runtime)
+        request = self.envelope()
         issued = _issued_plan(request)
         issued = issued.model_copy(
             update={
@@ -667,7 +881,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 "fishbowl_source_sha256": self.resolve().authority_sha256,
             }
         )
-        self.qualification = self.qualification.model_copy(update={"evidence_sha256": "b" * 64})
+        self.write_setting("port", 3499)
         with (
             patch(
                 "control_plane.odoo_preview_apply_http.refresh_odoo_preview_issued_plan",

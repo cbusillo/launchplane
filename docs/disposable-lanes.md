@@ -638,10 +638,12 @@ cutoff or adding a positive-unused admission requirement. Positive use stays
 protective when a generation lookup fails or changes during the probe. An
 otherwise negative result stays UNKNOWN with the failed or changed lookup's
 reason code, preserving any independent current-use observation.
-Authenticated or partially authenticated session files count when their modification
-time is at or after that boundary. Restored earlier login/session history stays
-intact and does not establish current use. Current sessions remain protective
-regardless of the 24-hour login window. Session contents, identifiers, account names and credentials never leave
+Authenticated or partially authenticated session files count when Odoo touched
+them in the same window as logins: the last 24 hours, and at or after that
+boundary. Odoo touches a session file while it is in use, so an older file, or
+one whose `deletion_time` has passed, is stale state rather than a person.
+Restored earlier login/session history stays intact and does not establish
+current use. A recent login remains use on its own. Session contents, identifiers, account names and credentials never leave
 the container. The result exposes only two booleans and a bounded `reason_code`. The filesystem check follows
 [Odoo's session storage contract](https://github.com/odoo/odoo/blob/19.0/odoo/http.py),
 without calling methods that create, refresh, migrate or delete session files.
@@ -2782,7 +2784,10 @@ major matching and production release eligibility are unchanged.
 Automatic release reconciliation still holds behind a serving PR candidate until
 source history proves forward movement. An explicit rebuild can select the newest
 verified release independently; selection retains the recorded release baseline
-for complete run/history checks and refuses an older requested release.
+for complete run/history checks. A migrated pair can instead name the main build
+it was produced with, even after main moves on; that build must still be a
+verified release of the default branch's first-parent history, and the pair must
+match its image. Reconciliation then moves testing forward on the restored data.
 
 Once the normal worker has recorded its private candidate application, the
 original authenticated testing caller uploads one part at a time to

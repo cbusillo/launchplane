@@ -293,6 +293,12 @@ def read_dokploy_target_placement(
     )
 
 
+def read_dokploy_project_membership(
+    *, host: str, token: str, clock: Callable[[], float] = time.monotonic
+) -> list[InventoryProject]:
+    return _read_inventory_membership(host=host, token=token, deadline=clock() + 25, clock=clock)[0]
+
+
 def read_dokploy_inventory(
     *,
     host: str,
