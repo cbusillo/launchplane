@@ -1895,6 +1895,10 @@ class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
                 description = response.json()["operation"]["error_description"]
                 for marker in markers.split():
                     self.assertIn(marker, description)
+                self.assertEqual(
+                    dict(part.split("=", 1) for part in description.split() if "=" in part),
+                    dict(part.split("=", 1) for part in markers.split()),
+                )
                 self.assertNotIn("private", description)
             self.assertEqual(
                 store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
