@@ -281,7 +281,7 @@ def require_first_production_target_creation(
     _require_no_target_authority(record_store, request)
     requested_hosts = {retained_hostname_identity(host) for host in request.domains}
     for target in record_store.list_dokploy_target_records():
-        if requested_hosts.intersection(retained_hostname_identity(h) for h in target.domains):
+        if requested_hosts & target.hostname_claims:
             raise ValueError("First production setup cannot claim another lane's hostname.")
 
 

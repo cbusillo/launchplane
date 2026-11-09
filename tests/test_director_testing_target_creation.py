@@ -591,50 +591,63 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
                 self.assertIn(result.status_code, (400, 422), result.text)
                 self.assert_nothing_staged()
 
-    async def test_a_prior_or_partial_production_lane_is_refused(self) -> None:
-        target = DokployTargetRecord(
-            context="staged-site", instance="prod", updated_at=self.profile.updated_at
+    def failed_deploy(self) -> DeploymentEvidence:
+        return DeploymentEvidence(
+            target_name="staged-site-prod",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+            status="fail",
         )
-        deployment = DeploymentRecord(
-            record_id="staged-prod-deploy",
-            context="staged-site",
-            instance="prod",
-            source_git_ref="abc123",
-            deploy=DeploymentEvidence(
-                target_name="staged-site-prod",
-                target_type="compose",
-                deploy_mode="dokploy-compose-api",
-                status="fail",
-            ),
+
+    async def test_partial_target_authority_is_refused(self) -> None:
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="staged-site", instance="prod", updated_at=self.profile.updated_at
+            )
         )
-        inventory = EnvironmentInventory(
-            context="staged-site",
-            instance="prod",
-            source_git_ref="abc123",
-            deploy=deployment.deploy,
-            updated_at=self.profile.updated_at,
-            deployment_record_id=deployment.record_id,
-        )
-        self.store.write_dokploy_target_record(target)
         result = await self.post()
-        self.assertEqual(result.status_code, 400, result.text)
-        self.provider.assert_not_called()
-        self.store.delete_dokploy_target_record(expected_record=target)
-        self.store.write_deployment_record(deployment)
-        result = await self.post(idempotency_key="after-deploy")
-        self.assertEqual(result.status_code, 400, result.text)
-        self.store.write_environment_inventory(inventory)
-        result = await self.post(idempotency_key="after-inventory")
         self.assertEqual(result.status_code, 400, result.text)
         self.provider.assert_not_called()
 
-    async def test_a_hostname_recorded_on_another_lane_is_refused(self) -> None:
-        self.store.write_dokploy_target_record(
-            self.production.model_copy(update={"domains": ("PROD.staged-site.example",)})
+    async def test_a_lane_with_a_failed_deployment_is_refused(self) -> None:
+        self.store.write_deployment_record(
+            DeploymentRecord(
+                record_id="staged-prod-deploy",
+                context="staged-site",
+                instance="prod",
+                source_git_ref="abc123",
+                deploy=self.failed_deploy(),
+            )
         )
         result = await self.post()
         self.assertEqual(result.status_code, 400, result.text)
         self.provider.assert_not_called()
+
+    async def test_a_lane_that_served_is_refused(self) -> None:
+        self.store.write_environment_inventory(
+            EnvironmentInventory(
+                context="staged-site",
+                instance="prod",
+                source_git_ref="abc123",
+                deploy=self.failed_deploy(),
+                updated_at=self.profile.updated_at,
+                deployment_record_id="staged-prod-deploy",
+            )
+        )
+        result = await self.post()
+        self.assertEqual(result.status_code, 400, result.text)
+        self.provider.assert_not_called()
+
+    async def test_a_hostname_claimed_by_another_lane_is_refused(self) -> None:
+        for claim in (
+            {"domains": ("PROD.staged-site.example",)},
+            {"public_hosts": ("prod.staged-site.example",)},
+        ):
+            with self.subTest(claim=claim):
+                self.store.write_dokploy_target_record(self.production.model_copy(update=claim))
+                result = await self.post()
+                self.assertEqual(result.status_code, 400, result.text)
+                self.provider.assert_not_called()
 
     async def test_unconfirmed_occupied_shared_or_foreign_placement_is_refused(self) -> None:
         staged, testing = self.inventory[0]["environments"]
