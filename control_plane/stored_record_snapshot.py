@@ -11,7 +11,7 @@ import hmac
 import json
 import re
 import secrets
-from time import monotonic
+from time import monotonic, thread_time
 from typing import Any, Literal, NamedTuple, overload
 
 from pydantic import BaseModel, ValidationError
@@ -90,7 +90,13 @@ def snapshot_failure_diagnostics(error: Exception) -> dict[str, Any]:
         result["reason"] = "snapshot_statement_canceled"
     if isinstance(error, SnapshotUnavailable):
         result["reason"] = str(error)
-        for key in ("rows_exported", "source_row_bytes", "scrubbed_bytes"):
+        for key in (
+            "rows_exported",
+            "source_row_bytes",
+            "scrubbed_bytes",
+            "elapsed_wall_ms",
+            "thread_cpu_ms",
+        ):
             value = error.budgets.get(key)
             if isinstance(value, int) and value >= 0:
                 result[key] = value
@@ -437,7 +443,9 @@ def export_stored_record_snapshot(
     scrubbed_bytes = 0
     source_row_bytes = 0
     family = ""
-    deadline = monotonic() + 20
+    started = monotonic()
+    cpu_started = thread_time()
+    deadline = started + 20
     encoder = SnapshotRowEncoder() if format_version == 2 else None
     active_policy_count = 0
     nested_schemas = {
@@ -453,6 +461,8 @@ def export_stored_record_snapshot(
             rows_exported=row_count,
             source_row_bytes=source_row_bytes,
             scrubbed_bytes=scrubbed_bytes,
+            elapsed_wall_ms=int((monotonic() - started) * 1000),
+            thread_cpu_ms=int((thread_time() - cpu_started) * 1000),
         )
 
     # One consistent, explicitly read-only PostgreSQL transaction. CI never
