@@ -339,8 +339,7 @@ def _build_odoo_preview_apply_inputs(
             profile=profile,
             preview_slug=result.preview_slug,
             copy_from=request.fishbowl_source,
-            control_plane_root=control_plane_root,
-            database_url=database_url,
+            manifest=result.plan_request.manifest,
         )
         return result.model_copy(update={"fishbowl_source_sha256": source.authority_sha256})
     try:
@@ -1700,8 +1699,7 @@ def _odoo_preview_service_environment(
             profile=profile,
             preview_slug=plan.preview_slug,
             copy_from=fishbowl_source,
-            control_plane_root=control_plane_root_path,
-            database_url=database_url,
+            manifest=manifest,
             include_secret_value=True,
         )
     if import_source is not None:

@@ -18,14 +18,20 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH
 from control_plane.dokploy.native_copy_stream import _read_remote
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.odoo_import_diagnostics import (
     DiagnosticStore,
+    FIELDS,
     GRANT_FIELDS,
     SOURCE_PREFIXES,
+    SourceAuthority,
     import_authority,
+    parameter_agreement,
 )
 from control_plane.odoo_import_overrides import import_runtime_authority
 from control_plane.odoo_secret_references import (
+    ConfigParameterSecretReferenceError,
+    TestingSecretReferenceRefusal,
     read_secret_reference_authority,
     selected_config_parameter_bindings,
 )
@@ -145,7 +151,13 @@ def producer_files(
         or f"{manifest.image.repository}@{manifest.image.digest}" != identity.image_reference
     ):
         raise ValueError("Unverified prerequisite artifact")
-    inventory = _files(manifest)
+    return _producer_inventory(manifest)
+
+
+def _producer_inventory(
+    manifest: ArtifactIdentityManifest, *, allow_preview_build: bool = False
+) -> dict[str, dict[str, str]]:
+    inventory = _files(manifest, allow_preview_build=allow_preview_build)
     result = {}
     for name, (addon, model, client) in SOURCE_ADDONS.items():
         paths = (
@@ -197,6 +209,7 @@ class _Authority:
     snapshot: str
     options: dict[str, dict[str, dict[str, object]]]
     metadata: dict[str, dict[str, str]]
+    sources: dict[str, SourceAuthority]
 
 
 def _authority(store: PrerequisiteStore, product: str) -> _Authority:
@@ -269,6 +282,8 @@ def _authority(store: PrerequisiteStore, product: str) -> _Authority:
                     )
                     else "mismatch"
                 )
+            except (ConfigParameterSecretReferenceError, TestingSecretReferenceRefusal):
+                reference = "mismatch"
             except ValueError:
                 reference = "unknown"
         metadata[name] = {
@@ -291,7 +306,7 @@ def _authority(store: PrerequisiteStore, product: str) -> _Authority:
         },
         sort_keys=True,
     )
-    return _Authority(snapshot, options, metadata)
+    return _Authority(snapshot, options, metadata, authority.sources)
 
 
 class PrerequisiteReadUnavailable(ValueError):
@@ -426,11 +441,9 @@ class SourceConsumerEvidence(BaseModel):
     producer: Literal["verified"] | None = None
     failure_stage: FailureStage | None = None
     grants: Literal["read_only", "unsafe", "unknown"] = "unknown"
-    parameters: dict[str, str] = Field(default_factory=dict, repr=False)
 
 
 class SourceConsumerResult(BaseModel):
-    evidence_sha256: str = ""
     model_config = ConfigDict(extra="forbid", strict=True)
     runtime: Literal["verified", "unknown"]
     failure_stage: FailureStage | None = None
@@ -443,7 +456,6 @@ def read_source_consumers(
     product: str,
     control_plane_root: Path,
     database_url: str | None,
-    mode: Literal["grants", "preview"],
     sources: tuple[str, ...],
     expected_runtime: reads.OdooRuntimeConnection | None = None,
 ) -> SourceConsumerResult:
@@ -532,7 +544,6 @@ def read_source_consumers(
         for key, value in {
             "__CONFIG_PATH__": repr(ODOO_WEB_CONFIG_PATH),
             "__IDENTITY_KEY__": repr(RUNTIME_IDENTITY_ENV_KEY),
-            "__CONSUMER_MODE__": repr(mode),
             "__GRANT_FIELDS__": repr(GRANT_FIELDS),
             "__PROBE__": repr(Path(__file__).with_name("odoo_source_probe.py").read_text()),
         }.items():
@@ -578,20 +589,12 @@ def read_source_consumers(
         ) != len(SOURCE_ADDONS):
             return unknown(stage)
         for source in result.sources:
-            if source.parameters and (
-                mode != "preview"
-                or source.source != "fishbowl"
-                or set(source.parameters) != {"host", "user", "db", "port", "ssl_verify"}
-                or any(not value or len(value) > 16384 for value in source.parameters.values())
-            ):
-                return unknown(stage)
             if (
                 source.source not in sources
                 or metadata[source.source]["binding"] != "selected"
                 or metadata[source.source]["secret_reference"] != "match"
-            ):
-                if source.parameters or source.grants != "unknown":
-                    return unknown(stage)
+            ) and source.grants != "unknown":
+                return unknown(stage)
         stage = "drift"
         reads.assert_selection_current(store, selection)
         after = reads.inspect_runtime_container(
@@ -611,17 +614,72 @@ def read_source_consumers(
         ):
             return unknown(stage)
         reads.assert_selection_current(store, selection)
-        digest = nonvalidating_compact_sorted_json_sha256(
-            {
-                "authority": authority.snapshot,
-                "identity": selection.identity.model_dump(mode="json"),
-                "artifact": manifest.model_dump(mode="json"),
-                "result": result.model_dump(mode="json"),
-            }
-        )
-        return result.model_copy(update={"evidence_sha256": digest})
+        return result
     except Exception:
         _logger.debug("Qualified source read unavailable.")
         return unknown(stage)
     finally:
         _READ_SLOTS.release()
+
+
+def _preview_setting(field: str, managed: str, fact: dict[str, object]) -> str:
+    literal = None if fact["value"] is None else str(fact["value"])
+    if (fact["present"] and literal is None) or (not managed and not fact["known"]):
+        raise ValueError("Secret-backed or retired setting")
+    if managed and literal is not None and parameter_agreement(field, managed, literal) != "match":
+        raise ValueError("Conflicting managed setting")
+    value = managed or literal
+    if not value:
+        raise ValueError("Unknown managed setting")
+    if field == "ssl_verify":
+        return {"true": "True", "1": "True", "false": "False", "0": "False"}[value.lower()]
+    if field == "port" and not (value.isascii() and value.isdigit() and 0 < int(value) <= 65535):
+        raise ValueError("Invalid port")
+    return value
+
+
+def read_fishbowl_preview_settings(
+    *,
+    store: PrerequisiteStore,
+    product: str,
+    repository: str,
+    manifest: ArtifactIdentityManifest | None,
+    binding: SecretBinding,
+    version_id: str,
+) -> tuple[dict[str, str], str]:
+    stage: FailureStage = "artifact"
+    try:
+        if (
+            manifest is None
+            or manifest.source_build is None
+            or manifest.source_build.repository != repository
+            or store.read_artifact_manifest(manifest.artifact_id) != manifest
+        ):
+            raise ValueError("Unverified preview artifact")
+        stage = "producer_inventory"
+        inventory = _producer_inventory(manifest, allow_preview_build=True)
+        if not inventory["fishbowl"] or not inventory["payload"]:
+            raise ValueError("Preview artifact lacks the source producers")
+        stage = "authority"
+        authority = _authority(store, product)
+        selected = authority.sources["fishbowl"]
+        if (
+            selected.binding != binding
+            or selected.version.version_id != version_id
+            or authority.metadata["fishbowl"]["secret_reference"] == "mismatch"
+        ):
+            raise ValueError("Conflicting managed source binding")
+        stage = "source_resolution"
+        prefix = SOURCE_PREFIXES["fishbowl"]
+        settings = {
+            field: _preview_setting(
+                field, selected.settings[field], authority.options["fishbowl"][f"{prefix}.{field}"]
+            )
+            for field in FIELDS
+        }
+    except Exception:
+        _logger.debug("Preview source settings unavailable.")
+        raise PrerequisiteReadUnavailable(stage) from None
+    return settings, nonvalidating_compact_sorted_json_sha256(
+        {"authority": authority.snapshot, "artifact": manifest.model_dump(mode="json")}
+    )

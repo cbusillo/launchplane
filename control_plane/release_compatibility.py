@@ -21,9 +21,12 @@ def _image(manifest: ArtifactIdentityManifest | None) -> str:
     return f"{manifest.image.repository}@{manifest.image.digest}" if manifest else ""
 
 
-def _source_inputs(manifest: ArtifactIdentityManifest) -> dict[str, tuple[str, str]]:
+def _source_inputs(
+    manifest: ArtifactIdentityManifest, *, allow_preview_build: bool = False
+) -> dict[str, tuple[str, str]]:
     build = manifest.source_build
-    if build is None or build.purpose != "release" or manifest.schema_version != 2:
+    purposes = ("release", "preview") if allow_preview_build else ("release",)
+    if build is None or build.purpose not in purposes or manifest.schema_version != 2:
         raise ValueError("unverified_artifact")
     sources = {"tenant": (build.repository, manifest.source_commit)}
     for source in manifest.addon_sources:
@@ -50,8 +53,10 @@ def _source_inputs(manifest: ArtifactIdentityManifest) -> dict[str, tuple[str, s
     return sources
 
 
-def _files(manifest: ArtifactIdentityManifest) -> dict[tuple[str, str], ReleaseInputFile]:
-    expected = _source_inputs(manifest)
+def _files(
+    manifest: ArtifactIdentityManifest, *, allow_preview_build: bool = False
+) -> dict[tuple[str, str], ReleaseInputFile]:
+    expected = _source_inputs(manifest, allow_preview_build=allow_preview_build)
     declaration = manifest.release_compatibility
     if declaration is None or not declaration.complete:
         raise ValueError("missing_complete_declaration")
