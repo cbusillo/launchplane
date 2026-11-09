@@ -7235,7 +7235,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
                 "status": "fail",
                 "error_message": "Odoo data workflow failed (deployment=abc).",
                 "provider_effect_attempted": True,
-                "schedule_failure_reason": "RuntimeError: settings step failed",
+                "schedule_failure_reason": "ValueError: Invalid API key 'demo-short-key-123'",
             }
 
         self.github.add_run(50, PR_HEAD, event="pull_request")
@@ -7250,8 +7250,9 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertNotEqual(second.last_plan["preview_operation_status"], "reconcile_required")
         self.assertEqual(second.last_plan["last_failed_error_code"], "preview_build_failed")
         for failed in (first, second):
-            self.assertIn("RuntimeError: settings step failed", failed.last_error)
+            self.assertIn("ValueError", failed.last_error)
             self.assertIn("tries again when the PR has a new build", failed.last_error)
+            self.assertNotIn("demo-short-key-123", failed.model_dump_json())
         self.assertEqual(
             len(
                 self.store.list_held_odoo_preview_reservations(product="site"),

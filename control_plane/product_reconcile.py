@@ -75,6 +75,7 @@ from control_plane.dokploy.memory_capacity import (
 from control_plane.contracts.host_network_capacity import PREVIEW_MEMORY_FAILURE_MESSAGES
 from control_plane.contracts.host_network_capacity import HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+from control_plane.dokploy.post_deploy import schedule_failure_kind
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
     BuildProvenanceError,
@@ -2754,7 +2755,15 @@ def _run_preview_operation(
                 return _hold_preview_destroy(plan, previous_plan, failed_attempts)
             schedule_failure_reason = str(driver_result.get("schedule_failure_reason") or "")
             if schedule_failure_reason:
-                plan["preview_schedule_failure_reason"] = schedule_failure_reason
+                _LOGGER.warning(
+                    "Preview data schedule failed trace=%s: %s", trace_id, schedule_failure_reason
+                )
+                kind = schedule_failure_kind(schedule_failure_reason)
+                plan["preview_schedule_failure_note"] = (
+                    f"The data schedule failed with {kind}."
+                    if kind
+                    else "The data schedule failed."
+                )
                 return _preview_failure(plan, "preview_build_failed")
             return _preview_failure(
                 plan,
@@ -2934,14 +2943,14 @@ def _retained_preview_operation_plan(
 
 def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
     failure = record_failure(code)
-    schedule_failure_reason = (
-        str(plan.get("preview_schedule_failure_reason") or "").rstrip(". ")
+    schedule_failure_note = (
+        str(plan.get("preview_schedule_failure_note") or "")
         if code == "preview_build_failed"
         else ""
     )
     summary = (
-        f"{failure.code}: Data schedule error: {schedule_failure_reason}. {failure.description}"
-        if schedule_failure_reason
+        f"{failure.code}: {schedule_failure_note} {failure.description}"
+        if schedule_failure_note
         else record_failure_summary(code)
     )
     if code in PREVIEW_MEMORY_FAILURE_MESSAGES:
