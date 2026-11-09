@@ -242,7 +242,6 @@ def require_first_production_target_creation(
     *,
     product: str,
 ) -> None:
-    """Stage one empty compose for a product not marked Live, and nothing more."""
     from control_plane.authz_candidate_preparation import (
         is_exclusive_product_lane_context,
         product_context_owners,
@@ -291,7 +290,6 @@ def require_empty_owned_environment(
     *,
     control_plane_root_path: Path,
 ) -> None:
-    """Refuse an existing environment unless the provider confirms it is empty and this lane's."""
     if not request.environment_id:
         return
     from control_plane.dokploy_inventory import (
@@ -315,21 +313,25 @@ def require_empty_owned_environment(
     project, environment = matches[0]
     if environment.targets:
         raise ValueError("The provider environment is not empty.")
-    project_targets = {
+    project_target_ids = {
         target.target_id for sibling in project.environments for target in sibling.targets
     }
-    # Previews can be unrecorded, so ownership needs one of this context's targets and no other's.
-    contexts = {
+    if _contexts_recording_targets(record_store, project_target_ids) != {request.context}:
+        raise ValueError("The provider project does not belong only to this product's context.")
+
+
+def _contexts_recording_targets(
+    record_store: PostgresRecordStore, target_ids: set[str]
+) -> set[str]:
+    return {
         record.context
         for record in record_store.list_dokploy_target_id_records()
-        if record.target_id in project_targets
+        if record.target_id in target_ids
     } | {
         record.context
         for record in record_store.list_physical_provider_target_records()
-        if record.target_id in project_targets
+        if record.target_id in target_ids
     }
-    if contexts != {request.context}:
-        raise ValueError("The provider project does not belong only to this product's context.")
 
 
 class DokployTargetSetupEnvelope(BaseModel):

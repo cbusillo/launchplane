@@ -395,8 +395,6 @@ class DirectorTestingTargetCreationTests(_DirectorTestingSetupFixture):
 
 
 class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
-    """A product not marked Live staging its first empty compose in its own empty environment."""
-
     def setUp(self) -> None:
         super().setUp()
         staged = LaunchplaneProductProfileRecord.model_validate(
@@ -496,7 +494,7 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
             self.store.read_provider_target_record(context_name="staged-site", instance_name="prod")
         self.assert_production_unchanged()
 
-    async def test_director_stages_first_empty_compose_in_existing_environment(self) -> None:
+    async def test_director_stages_first_empty_compose_beside_unrecorded_previews(self) -> None:
         dry = await self.post(mode="dry-run")
         self.assertEqual(dry.status_code, 202, dry.text)
         self.provider.assert_not_called()
