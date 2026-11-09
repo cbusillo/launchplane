@@ -1698,6 +1698,35 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 self.assertEqual(result.plan["reason"], "preview_cleanup_safety_unknown")
                 self.assert_stays_held_without_destroy(result)
 
+    def test_refusal_after_supersession_leaves_the_preview_disposable_later(self) -> None:
+        from control_plane.preview_reservation_recovery import (
+            previews_without_original,
+            require_closed_preview_without_original as recheck,
+        )
+
+        self.remove_original_intent()
+        self.observe_inventory("pr-42")
+        refused: list[str] = []
+
+        def refuse_after_supersession(*args: object, **kwargs: object) -> None:
+            old = self.store.read_idempotency_record_by_id(self.reservation.record_id)
+            if old is not None and old.state == "completed":
+                refused.append(old.record_id)
+                raise ValueError("A protection arrived after supersession.")
+            recheck(*args, **kwargs)  # type: ignore[arg-type]
+
+        with patch(
+            "control_plane.preview_reservation_recovery.require_closed_preview_without_original",
+            refuse_after_supersession,
+        ):
+            first = self.cleanup()
+        self.assertEqual(refused, [self.reservation.record_id])
+        self.assertFalse(self.provider.applied, first.plan)
+        self.assertEqual(list(previews_without_original(self.store, profile=self.profile)), [42])
+        result = self.cleanup()
+        self.assertFalse(result.error, result.plan)
+        self.assertEqual(self.provider.applied, [("destroy", 42)])
+
     def test_missing_original_disposal_refuses_shared_target_and_active_executor(self) -> None:
         from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 

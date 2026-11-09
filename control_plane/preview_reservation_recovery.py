@@ -525,16 +525,17 @@ def _require_unrecorded_preview_target(
 def previews_without_original(
     store: PostgresRecordStore, *, profile: LaunchplaneProductProfileRecord
 ) -> dict[int, LaunchplaneIdempotencyRecord]:
-    """Held previews the provider currently shows, by PR, whose reservation keeps no intent.
+    """Previews the provider currently shows, by PR, whose reservation keeps no intent.
 
     Their target name and today's inventory identify what exists. Nothing here
     says what the lost operation did, so it can only be disposed of, never settled.
+    A disposal refused after supersession stays listed until the preview is gone.
     """
     observed = _currently_observed_preview_slugs(store, profile)
+    if not observed:
+        return {}
     previews: dict[int, LaunchplaneIdempotencyRecord] = {}
-    for reservation in store.list_held_odoo_preview_reservations(
-        product=profile.product, limit=1001
-    ):
+    for reservation in store.list_odoo_preview_disposal_reservations(product=profile.product):
         number = _preview_number_without_original(store, profile, reservation)
         if number and profile.preview.slug_template.format(number=number) in observed:
             previews[number] = reservation
