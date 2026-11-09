@@ -103,8 +103,11 @@ from control_plane.dokploy_target_setup_http import (
     DokployComposeDomainPartialError,
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
+    first_production_target_lock_name,
     first_testing_replacement_lock_name,
+    require_empty_owned_environment,
     require_empty_testing_target_creation,
+    require_first_production_target_creation,
     TestingTargetSourceEvidenceUnavailable,
 )
 from control_plane import product_config as control_plane_product_config
@@ -26706,6 +26709,14 @@ def create_launchplane_fastapi_app(
             and not setup_request.replaces_operation_id
             and bool(lane_owner)
         )
+        first_production_setup = (
+            director_agent_identity(identity)
+            and setup_request.mode == "apply"
+            and setup_request.operation == "create-compose"
+            and setup_request.instance == "prod"
+            and bool(lane_owner)
+            and database_store.read_product_profile_record(lane_owner).production_use != "live"
+        )
         director_source_completion = (
             director_agent_identity(identity)
             and setup_request.operation == "complete-compose-source"
@@ -26724,6 +26735,7 @@ def create_launchplane_fastapi_app(
             and setup_request.mode == "apply"
             and not disposable_rebuild_setup
             and not first_testing_setup
+            and not first_production_setup
             and not director_source_completion
             and not director_testing_domain
             and not native_onboarding
@@ -26757,6 +26769,9 @@ def create_launchplane_fastapi_app(
         first_testing_setup = first_testing_setup and (
             isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
         )
+        first_production_setup = first_production_setup and (
+            isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
+        )
         director_source_completion = director_source_completion and (
             isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
         )
@@ -26768,6 +26783,7 @@ def create_launchplane_fastapi_app(
             or lane_scoped_only
             or disposable_rebuild_setup
             or first_testing_setup
+            or first_production_setup
             or director_source_completion
             or director_testing_domain
             or native_onboarding
@@ -27026,6 +27042,11 @@ def create_launchplane_fastapi_app(
                     control_plane_root_path=resolved_control_plane_root,
                 )
                 return
+            if first_production_setup:
+                require_first_production_target_creation(
+                    database_store, setup_request, product=lane_owner
+                )
+                return
             if not disposable_rebuild_setup or setup_request.mode != "apply":
                 return
             operation = database_store.read_odoo_stable_target_replacement_operation_record(
@@ -27080,6 +27101,8 @@ def create_launchplane_fastapi_app(
             replacement_lock = (
                 first_testing_replacement_lock_name(database_store, setup_request)
                 if first_testing_setup
+                else first_production_target_lock_name(setup_request.context)
+                if first_production_setup
                 else None
             )
             lock = (
@@ -27093,7 +27116,7 @@ def create_launchplane_fastapi_app(
             )
             with lock as check:
                 if check is None:
-                    raise ValueError("A testing executor for this target is still active.")
+                    raise ValueError("Another executor for this target is still active.")
 
                 def checkpoint() -> None:
                     check()
@@ -27112,10 +27135,20 @@ def create_launchplane_fastapi_app(
                         or role_only_setup
                         or disposable_rebuild_setup
                         or first_testing_setup
+                        or first_production_setup
                         else None
                     ),
                     disposable_checkpoint=checkpoint
-                    if disposable_rebuild_setup or first_testing_setup
+                    if disposable_rebuild_setup or first_testing_setup or first_production_setup
+                    else None,
+                    disposable_before_create=(
+                        lambda _path: require_empty_owned_environment(
+                            database_store,
+                            setup_request,
+                            control_plane_root_path=resolved_control_plane_root,
+                        )
+                    )
+                    if first_production_setup
                     else None,
                 )
         except BridgeNetworkCapacityRefused as error:

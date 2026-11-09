@@ -371,6 +371,28 @@ Other agent identities retain their scoped policy rules. No grant or credential
 is installed, and general setup, production, backup and promotion authority do
 not change.
 
+### First production target creation
+
+A product is Live only when its profile records `production_use: live`. The
+authenticated Director agent may stage the first production compose of an active
+product that is not Live, without a policy grant, through the same endpoint. It
+creates one empty raw compose on the named server and records any domains on the
+target only. Repository source, a route or published port, a target ID, a
+replacement reference and a state volume are refused.
+
+The placement is new, or one existing environment. The service reads the
+provider's complete project membership just before the create. The environment
+must be empty, and the project's recorded targets must belong to this context and
+no other, with at least one of them. Unknown provider state refuses. Unrecorded
+siblings are tolerated because previews can be unrecorded.
+
+All three target authority records must be absent, the lane must never have
+deployed or served, and no other lane may record a requested hostname. The
+service rechecks the product before each provider effect, holds a per-context
+lock and compares ownership when committing. Lane registration, backup policy,
+credentials, deployment and release remain separate operations with their own
+gates; staging an empty target proves none of them.
+
 ### Testing-copy connection isolation
 
 The Odoo post-deploy endpoint classifies validated `connection_isolation`
