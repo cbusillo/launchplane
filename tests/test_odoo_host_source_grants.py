@@ -52,6 +52,7 @@ class SimulatedDocker:
         )
         self.start_returncode = 0
         self.fail_create = False
+        self.create_timeout = False
         self.keep_after_remove = False
 
     def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
@@ -71,6 +72,8 @@ class SimulatedDocker:
 
     def _create(self, arguments: list[str]) -> subprocess.CompletedProcess[bytes]:
         name = arguments[arguments.index("--name") + 1]
+        if self.create_timeout:
+            raise subprocess.TimeoutExpired("docker", 20)
         if self.fail_create:
             self.containers[name] = name + "-id"
             return self._reply(returncode=1)
@@ -243,6 +246,12 @@ class HostSourceGrantTests(unittest.TestCase):
         self.assertEqual((result.grants, result.failure_stage), ("unknown", "create"))
         self.assertEqual(result.container_cleanup, "removed")
         self.assertEqual(self.docker.containers, {})
+
+    def test_timed_out_create_never_reports_removal_from_absence(self) -> None:
+        self.docker.create_timeout = True
+        result = self.diagnose()
+        self.assertEqual((result.grants, result.failure_stage), ("unknown", "cleanup"))
+        self.assertEqual(result.container_cleanup, "unverified")
 
     def test_cleanup_refuses_a_container_it_does_not_own(self) -> None:
         self.docker.labels_override = {PROBE_LABEL: "someone-else"}

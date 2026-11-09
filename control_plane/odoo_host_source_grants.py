@@ -63,13 +63,16 @@ def checked(*args):
 def owned_containers():
     return checked('ps','-aq','--filter','name=^/'+name+'$').split()
 
-def remove_owned_container():
+def remove_owned_container(create_confirmed):
     try:
-        for candidate in owned_containers():
+        found=owned_containers()
+        for candidate in found:
             if json.loads(checked('inspect',candidate))[0]['Config']['Labels'].get(label_key)!=name:
                 return 'unverified'
             checked('rm','-f',candidate)
-        return 'unverified' if owned_containers() else 'removed'
+        if owned_containers():
+            return 'unverified'
+        return 'removed' if create_confirmed or found else 'unverified'
     except Exception:
         return 'unverified'
 
@@ -89,6 +92,7 @@ try:
     if immutable_local_image(spec['image']):
         outcome['failure']='create'
         outcome['cleanup']='unverified'
+        identifier=''
         try:
             identifier=checked('create','--interactive','--pull','never','--name',name,'--label',label_key+'='+name,
                 '--network','host','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges',
@@ -101,7 +105,7 @@ try:
                 if well_formed(observed):
                     outcome.update(grants=observed['grants'],names=observed['names'],failure=observed['failure'])
         finally:
-            outcome['cleanup']=remove_owned_container()
+            outcome['cleanup']=remove_owned_container(bool(identifier))
 except Exception:
     pass
 print(prefix+json.dumps({'type':'complete','result':outcome}),flush=True)
