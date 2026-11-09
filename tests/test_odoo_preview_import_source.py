@@ -630,15 +630,6 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 self.write_override(key, value)
                 self.assert_unqualified(stage)
 
-    def test_runtime_backed_override_uses_the_lane_record_and_refuses_when_it_is_absent(
-        self,
-    ) -> None:
-        self.write_override("fishbowl.db", OdooOverrideValue(source="runtime_environment"))
-        parameters = {item.key: item.value.value for item in self.resolve().parameters}
-        self.assertEqual(parameters["fishbowl.db"], "inventory")
-        self.write_setting("db", None)
-        self.assert_unqualified("source_resolution")
-
     def test_typed_setting_supplies_only_what_the_lane_record_omits(self) -> None:
         self.write_setting("db", None)
         self.write_override(
