@@ -1070,9 +1070,6 @@ class RealPostgresOdooUsageTests(unittest.TestCase):
                     patch.object(Path, "glob", return_value=[process]),
                 ):
                     exec(ODOO_TESTING_USAGE_CONTAINER_PROGRAM, namespace)
-                    http_source = root / "http.py"
-                    http_source.write_text("SESSION_LIFETIME = 60 * 60\n")
-                    namespace["ODOO_SESSION_SOURCES"] = (str(http_source),)
                     self.assertFalse(namespace["probe"]()["recent_signins"])
                     owner.execute("INSERT INTO res_users_log VALUES (2, now() AT TIME ZONE 'UTC')")
                     owner.commit()

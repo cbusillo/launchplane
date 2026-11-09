@@ -638,14 +638,12 @@ cutoff or adding a positive-unused admission requirement. Positive use stays
 protective when a generation lookup fails or changes during the probe. An
 otherwise negative result stays UNKNOWN with the failed or changed lookup's
 reason code, preserving any independent current-use observation.
-Authenticated or partially authenticated session files count when their modification
-time is at or after that boundary and inside Odoo's inactivity limit. That limit
-is `sessions.max_inactivity_seconds` when set, otherwise the running
-image's `SESSION_LIFETIME`. Files past that limit, or whose `deletion_time` has
-passed, are stale state rather than a person. An unreadable limit leaves usage
-UNKNOWN. Restored earlier login/session history stays
-intact and does not establish current use. Sessions inside Odoo's limit remain protective
-regardless of the 24-hour login window, and a recent login remains use on its own. Session contents, identifiers, account names and credentials never leave
+Authenticated or partially authenticated session files count when Odoo touched
+them in the same window as logins: the last 24 hours, and at or after that
+boundary. Odoo touches a session file while it is in use, so an older file, or
+one whose `deletion_time` has passed, is stale state rather than a person.
+Restored earlier login/session history stays intact and does not establish
+current use. A recent login remains use on its own. Session contents, identifiers, account names and credentials never leave
 the container. The result exposes only two booleans and a bounded `reason_code`. The filesystem check follows
 [Odoo's session storage contract](https://github.com/odoo/odoo/blob/19.0/odoo/http.py),
 without calling methods that create, refresh, migrate or delete session files.
@@ -692,7 +690,7 @@ no qualifying Odoo process (for example, it is waiting at a startup gate);
 `serving_configuration_mismatch` means the observed process arguments do not
 qualify the configured session store. Neither permits treating an empty or
 unreadable store as historical non-use. `web_configuration_unavailable`,
-`session_store_unavailable`, `session_file_unreadable`, `session_lifetime_unavailable`,
+`session_store_unavailable`, `session_file_unreadable`,
 `database_connection_unavailable` and `login_history_unavailable` identify the
 missing read. Provider transport, ambiguous/stopped services and changed runtime
 snapshots have separate codes. All these failures leave usage UNKNOWN with null
