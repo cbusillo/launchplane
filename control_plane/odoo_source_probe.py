@@ -75,8 +75,17 @@ def failure_kind(error: BaseException) -> ProbeFailure:
     return "driver"
 
 
+def _tls_context(settings: dict[str, str]) -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    if settings.get("ssl_verify") == "false":
+        # insecure-tls: only the trusted private Fishbowl source sends this; its certificate names no host.
+        # Decision: https://github.com/cbusillo/launchplane/issues/5810#issuecomment-6742151038
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    return context
+
+
 def observe(settings: dict[str, str]) -> tuple[GrantStatus, tuple[str, ...]]:
-    # TLS verification is mandatory. No plaintext, local socket or writer fallback.
     connection = pymysql.connect(
         host=settings["host"],
         user=settings["user"],
@@ -85,7 +94,7 @@ def observe(settings: dict[str, str]) -> tuple[GrantStatus, tuple[str, ...]]:
         connect_timeout=3,
         read_timeout=3,
         write_timeout=3,
-        ssl=ssl.create_default_context(),
+        ssl=_tls_context(settings),
         local_infile=False,
         autocommit=True,
     )

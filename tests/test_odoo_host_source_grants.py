@@ -325,8 +325,6 @@ class HostSourceGrantTests(unittest.TestCase):
         for field, value, stage in (
             ("host", "", "settings_host"),
             ("user", "", "settings_account"),
-            ("ssl_verify", "False", "settings_tls"),
-            ("ssl_verify", "0", "settings_tls"),
             ("ssl_verify", PRIVATE, "settings_tls"),
         ):
             with self.subTest(field=field, value=value[:5]):
@@ -343,14 +341,45 @@ class HostSourceGrantTests(unittest.TestCase):
         with patch.object(host_grants, "_decrypt_secret_value", side_effect=RuntimeError(PRIVATE)):
             self.assert_refused_before_transport("settings_password")
 
+    def probe_stdin(self) -> dict[str, str]:
+        starts = [stdin for argv, stdin in self.docker.calls if argv[1] == "start"]
+        self.assertEqual(len(starts), 1)
+        settings: dict[str, str] = json.loads(starts[0] or b"{}")
+        return settings
+
     def test_verified_tls_values_are_still_admitted(self) -> None:
         for value in ("", "True", "true", "1"):
             with self.subTest(value=value):
                 self.remote_calls.clear()
+                self.docker.calls.clear()
                 self.set_fishbowl_setting("ssl_verify", value)
                 result = self.diagnose()
                 self.assertEqual(result.grants, "read_only", result)
                 self.assertEqual(len(self.remote_calls), 1)
+                self.assertNotIn("ssl_verify", self.probe_stdin())
+
+    def test_explicit_verification_off_reaches_the_probe_through_stdin_only(self) -> None:
+        for value in ("False", "false", "0"):
+            with self.subTest(value=value):
+                self.remote_calls.clear()
+                self.docker.calls.clear()
+                self.set_fishbowl_setting("ssl_verify", value)
+                result = self.diagnose()
+                self.assertEqual(result.grants, "read_only", result)
+                self.assertEqual(result.container_cleanup, "removed")
+                self.assertEqual(self.probe_stdin()["ssl_verify"], "false")
+                self.assertEqual(self.probe_stdin()["password"], PRIVATE)
+                self.assertEqual(
+                    [argv for argv, _ in self.docker.calls if PRIVATE in " ".join(argv)], []
+                )
+                self.assertEqual(self.docker.containers, {})
+
+    def test_verification_off_does_not_turn_unsafe_grants_into_a_pass(self) -> None:
+        self.set_fishbowl_setting("ssl_verify", "false")
+        self.docker.probe_stdout = json.dumps(
+            {"grants": "unsafe", "names": ["INSERT", "SELECT"], "failure": None}
+        )
+        self.assertEqual(self.diagnose().grants, "unsafe")
 
     def test_host_change_during_probe_discards_the_result(self) -> None:
         original = self.remote
@@ -449,6 +478,27 @@ class ProbeReportTests(unittest.TestCase):
                 setattr(wrapped, "original_exception", cause)
                 report = self.report(error=wrapped)
                 self.assertEqual(report, {"grants": "unknown", "names": [], "failure": expected})
+
+    def connected_context(self, settings: dict[str, str]) -> ssl.SSLContext:
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value.fetchmany.return_value = (
+            ("GRANT SELECT ON *.* TO 'reader'@'%'",),
+        )
+        with patch.object(pymysql, "connect", return_value=connection) as connect:
+            probe.observe(settings)
+        context: ssl.SSLContext = connect.call_args.kwargs["ssl"]
+        return context
+
+    def test_certificate_is_skipped_only_on_the_explicit_off_signal(self) -> None:
+        base = {"host": "h", "user": "u", "password": PRIVATE}
+        off = self.connected_context({**base, "ssl_verify": "false"})
+        self.assertEqual((off.check_hostname, off.verify_mode), (False, ssl.CERT_NONE))
+        for settings in (base, {**base, "ssl_verify": "true"}, {**base, "ssl_verify": PRIVATE}):
+            with self.subTest(keys=sorted(settings)):
+                strict = self.connected_context(settings)
+                self.assertEqual(
+                    (strict.check_hostname, strict.verify_mode), (True, ssl.CERT_REQUIRED)
+                )
 
     def test_rejected_login_is_auth_and_carries_no_server_text(self) -> None:
         report = self.report(error=pymysql.err.OperationalError(1045, f"denied {PRIVATE}"))

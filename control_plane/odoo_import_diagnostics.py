@@ -340,21 +340,28 @@ def managed_probe_refusal(settings: dict[str, str]) -> ManagedProbeRefusal | Non
         return "settings_account"
     if not settings.get("password"):
         return "settings_password"
-    if settings.get("ssl_verify", "").lower() not in {"", "true", "1"}:
+    if settings.get("ssl_verify", "").lower() not in {"", "true", "1", "false", "0"}:
         return "settings_tls"
     return None
 
 
+def _verification_disabled(settings: dict[str, str]) -> bool:
+    return settings.get("ssl_verify", "").lower() in {"false", "0"}
+
+
 def managed_probe_credentials(settings: dict[str, str]) -> dict[str, str]:
-    return {
+    credentials = {
         key: value
         for key, value in settings.items()
         if key in {"host", "user", "password", "port"} and value
     }
+    return (
+        {**credentials, "ssl_verify": "false"} if _verification_disabled(settings) else credentials
+    )
 
 
 def _run_managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsafe", "unknown"]:
-    if managed_probe_refusal(settings) is not None:
+    if managed_probe_refusal(settings) is not None or _verification_disabled(settings):
         return "unknown"
     private_input = managed_probe_credentials(settings)
     try:

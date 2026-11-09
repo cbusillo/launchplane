@@ -4965,8 +4965,8 @@ overrides, the actual delivered payload and persisted testing parameters. Omitte
 overrides preserve persisted parameters; installed producer defaults apply only
 when the parameter is absent. Legacy field environments and copied defaults are
 not a fallback. Uninstalled addons, missing password delivery, conflicting or
-secret-backed non-secret authority, unverified TLS and drift refuse the optional
-source. The existing `source_unqualified` refusal includes the bounded failure
+secret-backed non-secret authority, TLS without verification on any source but
+Fishbowl and drift refuse the optional source. The existing `source_unqualified` refusal includes the bounded failure
 stage when proved, such as `capacity`, `addon_state` or `source_resolution`.
 An absent stage remains unknown; it does not establish a missing binding.
 Ordinary previews without the source remain available. Planning compares the
@@ -5201,7 +5201,8 @@ source inventory, installed producer, canonical payload parser and addon-state
 checks. Non-secret authority comes from typed instance overrides, with no legacy
 per-field environment fallback. Omitted overrides keep persisted parameters;
 defaults apply only when the corresponding parameter is absent. Explicit
-mismatches, missing password delivery and disabled or unverified TLS stay unknown.
+mismatches, missing password delivery, disabled TLS and, on any source but
+Fishbowl, unverified TLS stay unknown.
 Database-name keys differ by producer and are not required
 by this account-wide SHOW GRANTS read, which selects no default database; their
 agreement remains with import-override reconciliation. It sends only fixed code and non-secret identity metadata
@@ -5253,8 +5254,11 @@ authority. It accepts no query parameters, so the source, host, image, SQL and
 credential all come from service records.
 
 The service selects the source the same way as the other reads: the exact
-current managed binding and version with a read-only allowance, and verified
-TLS settings. It refuses a host shared with this product's production lane. The
+current managed binding and version with a read-only allowance. The probe
+verifies the server certificate unless the source's own `fishbowl.ssl_verify`
+is explicitly `false` or `0`, as the Director decided for this source in
+[Q1327](https://github.com/cbusillo/launchplane/issues/5810#issuecomment-6742151038). An unrecognized value
+is refused. It refuses a host shared with this product's production lane. The
 image is the testing lane's recorded immutable digest, which must already be on
 the host; it is never pulled.
 
