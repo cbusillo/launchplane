@@ -66,8 +66,9 @@ provider materializer bound with the archive's actual bytes.
 
 ## Private copy failure evidence
 
-When any preview-snapshot or fresh-testing host command fails, the host retains its
-captured stdout and stderr before discarding the in-memory result. The schedule
+When a preview-snapshot or fresh-testing host command fails, its exception carries
+the captured output until the failure escapes the program. The host then retains
+that output before discarding the in-memory result. The schedule
 and service expose only an allowlisted `copy_failure_stage`, `copy_failure_kind`,
 exit status and an opaque
 `copy_failure_evidence_id`. The private JSON file is on that same execution host:
@@ -76,12 +77,13 @@ private (0700), each new file is 0600, and aliases or unsafe permissions
 refuse retention. Storage failure reports `unavailable` without replacing the
 original copy failure or its recovery classification.
 
-Diagnostics are emitted when the failure escapes the host program, so a recovered
-optional command does not become the restore's cause. On the scheduled path,
+Recovered optional commands create no diagnostic file or failure markers. On the scheduled path,
 non-command failures report their current stage and `unavailable` or `refused`
 without publishing exception text. A terminal candidate restore carries the
 validated markers into its preparation failure receipt and the operation's
 `result.error_message`, returned by the target-replacement operation read.
+Snapshot dump failures retain the existing bounded stderr tail; dump bytes do
+not enter the diagnostic archive.
 
 Failed canonical-address `docker exec` reads and writers use this same private
 archive, including read-only native inspections. Their failure frame and the trace's

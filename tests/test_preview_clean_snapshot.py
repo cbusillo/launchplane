@@ -1096,6 +1096,25 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                         with self.assertRaises(library["CopyReadbackRefused"]) as refused:
                             library["inspect_volume_backings"]({"preview-data"}, [foreign], set())
                         self.assertEqual(refused.exception.predicate, predicate)
+                        if result.returncode:
+                            output = io.StringIO()
+                            with (
+                                patch.object(Path, "home", return_value=self.root),
+                                redirect_stdout(output),
+                            ):
+                                library["emit_copy_failure"](refused.exception)
+                            markers = post_deploy.extract_odoo_post_deploy_readback_markers(
+                                {"logs": output.getvalue()}
+                            )
+                            evidence = json.loads(
+                                (
+                                    self.root
+                                    / COPY_FAILURE_STATE_DIRECTORY
+                                    / (markers[COPY_FAILURE_EVIDENCE_MARKER] + ".json")
+                                ).read_text()
+                            )
+                            self.assertEqual(base64.b64decode(evidence["stderr"]), stderr)
+                            self.assertNotIn(stderr.decode().strip(), output.getvalue())
                 batch.assert_called_once()
 
     def test_private_preview_render_passes_snapshot_runtime_inspection(self) -> None:
@@ -1403,12 +1422,14 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 "logs": self.script_output.getvalue()
                 + f"{COPY_FAILURE_STAGE_MARKER}={CopyFailureStage.RESTORE}\n"
                 + f"{COPY_FAILURE_EXIT_MARKER}=-9\n"
+                + "copy_failure_kind=unavailable\n"
                 + f"{COPY_FAILURE_STAGE_MARKER}=private-fixture-detail\n"
                 + f"{COPY_FAILURE_EXIT_MARKER}=private-fixture-detail\n"
             }
         )
         self.assertEqual(evidence[COPY_FAILURE_STAGE_MARKER], stage)
         self.assertEqual(evidence[COPY_FAILURE_EXIT_MARKER], str(exit_status))
+        self.assertEqual(evidence["copy_failure_kind"], "command_failed")
         self.assertNotIn("private-fixture-detail", str(evidence))
 
     def test_host_command_outside_runner_retains_safe_diagnostics(self) -> None:

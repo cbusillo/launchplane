@@ -317,7 +317,12 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             patch(
                 "subprocess.Popen",
                 side_effect=lambda arguments, **kwargs: popen(
-                    [sys.executable, "-c", "raise SystemExit(1)"], **kwargs
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys;sys.stderr.write('private dump failure');sys.exit(1)",
+                    ],
+                    **kwargs,
                 ),
             ),
             patch.object(self, "command", side_effect=snapshot_command),
@@ -327,6 +332,21 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertNotIn(["docker", "start", "web"], self.calls)
         self.assertFalse((snapshot.parent / self.spec["copy_binding_sha256"]).exists())
         self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"production attachment")
+
+        from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+
+        markers = extract_odoo_post_deploy_readback_markers({"logs": output})
+        self.assertEqual(markers[COPY_FAILURE_STAGE_MARKER], CopyFailureStage.SNAPSHOT)
+        self.assertEqual(markers["copy_failure_kind"], "command_failed")
+        evidence = json.loads(
+            (
+                self.root
+                / COPY_FAILURE_STATE_DIRECTORY
+                / (markers[COPY_FAILURE_EVIDENCE_MARKER] + ".json")
+            ).read_text()
+        )
+        self.assertEqual(base64.b64decode(evidence["stderr"]), b"private dump failure")
+        self.assertNotIn("private dump failure", output)
 
     def test_attachment_refusal_reaches_schedule_readback_without_private_output(self) -> None:
         original = self.command
@@ -425,6 +445,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         evidence = extract_odoo_post_deploy_readback_markers({"logs": output})
         self.assertEqual(evidence[COPY_FAILURE_STAGE_MARKER], CopyFailureStage.MODULE_UPDATE)
         self.assertEqual(evidence[COPY_FAILURE_EXIT_MARKER], str(runner_exit))
+        self.assertEqual(len(list((self.root / COPY_FAILURE_STATE_DIRECTORY).iterdir())), 1)
         self.assertNotIn("private", output)
         self.assertNotIn(["docker", "start", "web"], self.calls)
 

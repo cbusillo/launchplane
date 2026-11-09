@@ -47,6 +47,7 @@ import subprocess
 
 
 def copy_readback_failure_frame(error: Exception, predicate: str = ReadbackPredicate.NATIVE_READ) -> dict[str, object]:
+    error = copy_failure_cause(error)
     frame = {'type': 'failed', 'predicate': error.predicate if isinstance(error, CopyReadbackRefused) else predicate,
         'kind': 'refused' if isinstance(error, CopyReadbackRefused) else 'unavailable'}
     sites = []
@@ -73,7 +74,7 @@ def foreign_volume_inventory(containers, own):
     if result.returncode and not (result.stderr.strip() and all(
         re.fullmatch(r'Error response from daemon: (?:volume .+ not found|no such volume: .+)', line, re.IGNORECASE)
         for line in result.stderr.decode().splitlines() if line.strip())):
-        raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
+        raise copy_command_failure(CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE), result, globals().get('spec', {}))
     rows = json.loads(result.stdout)
     found = {row.get('Name'): row for row in rows}
     if len(found) != len(rows) or not set(found) <= names or not result.returncode and set(found) != names:

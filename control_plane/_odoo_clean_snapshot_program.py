@@ -215,12 +215,14 @@ def capture_clean_snapshot(spec, containers, clone):
     expected_tree = snapshot_tree_digest(filestore, budget['filestore_bytes'])
     with tempfile.TemporaryDirectory(prefix=snapshot_id + '-', dir=destination.parent) as temporary:
         path = Path(temporary)
-        status, _, _ = capture_snapshot_file(
-            ['docker', 'exec', containers['database'][0], 'sh', '-c',
-             'pg_dump -Fc --no-owner --no-acl -U "$POSTGRES_USER" -- "$1"', '_', spec['database_name']],
+        arguments = ['docker', 'exec', containers['database'][0], 'sh', '-c',
+             'pg_dump -Fc --no-owner --no-acl -U "$POSTGRES_USER" -- "$1"', '_', spec['database_name']]
+        status, errors, _ = capture_snapshot_file(
+            arguments,
             path / 'database.dump', budget['database_bytes'])
         if status:
-            raise RuntimeError('Clean snapshot database capture failed')
+            raise copy_command_failure(RuntimeError('Clean snapshot database capture failed'),
+                subprocess.CompletedProcess(arguments, status, stdout=b'', stderr=errors), spec)
         if clone is None:
             clone = filestore_clone_proved(mountpoint, destination.parent)
         copy_filestore(filestore, path / 'filestore', clone)

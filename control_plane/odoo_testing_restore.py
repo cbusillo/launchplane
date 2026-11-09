@@ -837,7 +837,7 @@ def command(arguments, *, stdin=None, stdout=None):
             error = CopyReadbackRefused(ReadbackPredicate.ATTACHMENTS)
         else:
             error = RuntimeError("Fresh testing copy command did not pass")
-        raise retain_copy_failure(error, result, spec)
+        raise copy_command_failure(error, result, spec)
     return result.stdout or b""
 
 
@@ -1252,6 +1252,7 @@ def restore_main():
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
         if spec.get('native_capture') is not None:
+            copy_failure_stage = CopyFailureStage.CLEANUP
             docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':spec['native_capture'],'mode':'cleanup'}).encode()).decode(),stdin=spec['native_files_program'].encode())
         if gen.get('clean_snapshot_enabled'):
             copy_failure_stage = CopyFailureStage.SNAPSHOT
@@ -1319,6 +1320,7 @@ except TestingProviderDenied as error:
     print('testing_copy_sanitized=false')
     sys.exit(1)
 except Exception as error:
+    error = copy_failure_cause(error)
     if len(sys.argv)>2:
         frame = copy_readback_failure_frame(error, inspection_predicate)
         if not inspection_only and not isinstance(error, CopyReadbackRefused):

@@ -24,6 +24,7 @@ from control_plane.copy_readback_diagnostics import (
     CopyFailureStage,
     ReadbackPredicate,
     copy_failure_diagnostics_library,
+    copy_failure_summary,
 )
 from control_plane.odoo_connection_isolation import (
     OdooConnectionIsolationMode,
@@ -32,6 +33,21 @@ from control_plane.odoo_connection_isolation import (
 
 
 class CopyFailureEvidenceTests(unittest.TestCase):
+    def test_operation_cause_includes_only_first_valid_copy_markers(self) -> None:
+        identity = "e" * 32
+        receipt = (
+            f"private schedule:copy_failure_evidence_id={identity}:copy_failure_evidence_id=../../private:"
+            f"copy_failure_stage={CopyFailureStage.RESTORE}:copy_failure_stage={CopyFailureStage.SNAPSHOT}:"
+            "copy_failure_kind=command_failed:copy_failure_kind=unavailable:copy_failure_exit_status=7:password=private"
+        )
+        summary = copy_failure_summary(receipt)
+        markers = dict(part.split("=", 1) for part in summary.split())
+        self.assertEqual(markers[COPY_FAILURE_STAGE_MARKER], CopyFailureStage.RESTORE)
+        self.assertEqual(markers["copy_failure_kind"], "command_failed")
+        self.assertEqual(markers[COPY_FAILURE_EVIDENCE_MARKER], identity)
+        self.assertEqual(markers["copy_failure_exit_status"], "7")
+        self.assertNotIn("private", summary)
+
     def test_symlinked_home_uses_its_verified_real_directory(self) -> None:
         namespace: dict[str, Any] = {"spec": {}}
         exec(copy_failure_diagnostics_library(), namespace)
@@ -80,10 +96,10 @@ class CopyFailureEvidenceTests(unittest.TestCase):
             root = Path(temporary).resolve()
             with patch.object(Path, "home", return_value=root), redirect_stdout(output):
                 namespace["emit_copy_failure"](
-                    namespace["retain_copy_failure"](RuntimeError(), result, namespace["spec"])
+                    namespace["copy_command_failure"](RuntimeError(), result, namespace["spec"])
                 )
                 namespace["emit_copy_failure"](
-                    namespace["retain_copy_failure"](RuntimeError(), result, namespace["spec"])
+                    namespace["copy_command_failure"](RuntimeError(), result, namespace["spec"])
                 )
             identifiers = [
                 line.partition("=")[2]
@@ -138,7 +154,7 @@ class CopyFailureEvidenceTests(unittest.TestCase):
                     redirect_stdout(output),
                 ):
                     namespace["emit_copy_failure"](
-                        namespace["retain_copy_failure"](RuntimeError(), result, namespace["spec"])
+                        namespace["copy_command_failure"](RuntimeError(), result, namespace["spec"])
                     )
                 markers = post_deploy.extract_odoo_post_deploy_readback_markers(
                     {"logs": output.getvalue()}

@@ -70,7 +70,7 @@ def command(arguments, *, stdin=None):
     result = subprocess.run(arguments, input=stdin, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, check=False, pass_fds=inherited_lock_descriptors)
     if result.returncode:
-        raise retain_copy_failure(RuntimeError('Clean snapshot preview operation failed'), result, spec)
+        raise copy_command_failure(RuntimeError('Clean snapshot preview operation failed'), result, spec)
     return result.stdout
 
 
@@ -99,6 +99,7 @@ def wait_for_idle_preview_runner(containers):
 
 
 def restore_preview_snapshot(containers, source_lock):
+    global copy_failure_stage
     wait_for_idle_preview_runner(containers)
     snapshot = spec['snapshot']
     attempt = preview_restore_attempt(spec['compose_project'], spec['database_name'],
@@ -145,6 +146,7 @@ def restore_preview_snapshot(containers, source_lock):
         write_preview_restore_attempt(attempt, completed=False)
     dump = '/tmp/preview-snapshot-' + uuid.uuid4().hex + '.dump'
     try:
+        copy_failure_stage = CopyFailureStage.SOURCE_TRANSFER
         if present == '0':
             docker('cp', str(path / 'database.dump'), runner + ':' + dump)
         uid = docker('exec', runner, 'id', '-u').decode().strip()
@@ -163,6 +165,7 @@ def restore_preview_snapshot(containers, source_lock):
             if not re.fullmatch(r'[A-Z][A-Z0-9_]*', key):
                 raise RuntimeError('Invalid preview workflow environment key')
             arguments.extend(['-e', key + '=' + value])
+        copy_failure_stage = CopyFailureStage.RESTORE
         output = docker(*arguments, runner, 'python3', '-I', '-', dump, database, spec['readback_spec'],
             base64.b64encode(spec['readback_program'].encode()).decode(), 'resume' if present == '1' else 'fresh', witness,
             'clean-snapshot', stdin=spec['runner'].encode()).decode()
@@ -171,11 +174,13 @@ def restore_preview_snapshot(containers, source_lock):
             'testing_copy_pre_registry_sanitized', 'odoo_module_update_completed',
             'odoo_module_update_modules_configured')):
             raise RuntimeError('Snapshot preview lacks its sanitization and module update proof')
+        copy_failure_stage = CopyFailureStage.INTEGRATION_READBACK
         readback = docker(*arguments, runner, 'python3', '-I', '-', database, spec['readback_spec'],
             stdin=spec['readback_program'].encode()).decode()
         if 'integration_readback_ok=true' not in readback.splitlines():
             raise RuntimeError('Snapshot preview connection readback failed')
         write_preview_restore_attempt(attempt, completed=True, overlay_filestore=overlay is not None)
+        copy_failure_stage = CopyFailureStage.RUNTIME_START
         docker(*arguments, runner, 'python3', '-I', '-c',
             "import hashlib,os;from pathlib import Path;Path(" + repr(spec['web_gate_path']) + ").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+chr(10)+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
         docker('start', containers['web'][0])
