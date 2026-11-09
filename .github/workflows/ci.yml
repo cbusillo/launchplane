@@ -509,7 +509,7 @@ jobs:
           LAUNCHPLANE_CI_BUILDER: ${{ steps.buildx.outputs.name }}
         run: bash scripts/build-ci-runtime-image.sh
 
-      - name: Verify runtime worker clients
+      - name: Verify runtime SSH client
         run: |
           docker run --rm --entrypoint ssh "$LAUNCHPLANE_CI_IMAGE_TAG" -V
 
@@ -603,7 +603,7 @@ jobs:
           LAUNCHPLANE_CI_BUILDER: ${{ steps.buildx.outputs.name }}
         run: bash scripts/build-ci-runtime-image.sh
 
-      - name: Verify runtime worker clients
+      - name: Verify runtime SSH client
         run: |
           docker run --rm --entrypoint ssh "$LAUNCHPLANE_CI_IMAGE_TAG" -V
 
