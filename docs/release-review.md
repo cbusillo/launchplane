@@ -704,7 +704,7 @@ same reviewed Client setting. This explicitly records that the named Client is
 the Director and that the Director's standing acceptance starts releases.
 Admin permission never implies that a Client is the Director. The attestation
 also covers that Client's change acceptance on their other products, described
-in [owner-acceptance.md](owner-acceptance.md); it starts no release there. A machine caller
+in [Client review](owner-acceptance.md); it starts no release there. A machine caller
 can prepare a dry run but cannot apply this mode. Changing the recorded Client's
 immutable identity resets this mode to `held`.
 
