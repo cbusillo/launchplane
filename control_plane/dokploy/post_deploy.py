@@ -1,4 +1,5 @@
 from control_plane._preview_fixture_program import PREVIEW_FIXTURE_RESULT_MARKER
+from control_plane.child_process_errors import redact_untrusted_text
 from control_plane.host_package_runtime import (
     HOST_PACKAGE_VERSION_MARKER,
     HOST_PROGRAM_VERSION_MARKER,
@@ -435,6 +436,34 @@ class OdooPostDeployReadbackFailure(click.ClickException):
                 self.evidence[key] = value
 
 
+class OdooPostDeployScheduleFailed(OdooPostDeployReadbackFailure):
+    def __init__(self, message: str, *, evidence: Mapping[str, str], reason: str) -> None:
+        super().__init__(message, evidence=evidence)
+        self.reason = reason
+
+
+_SCHEDULE_RAN_AND_FAILED_STATUSES = frozenset({"failed", "error"})
+_SCHEDULE_ERROR_LINE = re.compile(
+    r"^\s*(?:[A-Za-z_][\w.]*(?:Error|Exception)|[A-Za-z_]\w*(?:\.\w+)+):\s+\S"
+)
+_SCHEDULE_REASON_MAX_LENGTH = 300
+_SCHEDULE_REASON_FALLBACK = "The data schedule failed; its log had no recognizable error line."
+
+
+def _schedule_failure_reason(
+    recent_output: tuple[str, ...], *, integration_refusal_detail: str
+) -> str:
+    candidate = integration_refusal_detail or next(
+        (line.strip() for line in reversed(recent_output) if _SCHEDULE_ERROR_LINE.match(line)),
+        "",
+    )
+    return redact_untrusted_text(
+        candidate,
+        fallback=_SCHEDULE_REASON_FALLBACK,
+        maximum_length=_SCHEDULE_REASON_MAX_LENGTH,
+    )
+
+
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
     if key == CAPABILITY_FAILURE_SITES_MARKER:
         sites = value.split(",")
@@ -655,16 +684,22 @@ def run_manual_data_schedule(
             schedule_deployment_key=error.deployment_id,
             deployment_id=error.deployment_id,
         )
-        raise OdooPostDeployReadbackFailure(
-            "Odoo data workflow failed (deployment="
-            + error.deployment_id
-            + ")"
-            + (
-                ": " + integration_readback_refusal_detail(evidence)
-                if evidence.get("integration_readback_refused")
-                else "."
-            ),
+        integration_refusal = (
+            integration_readback_refusal_detail(evidence)
+            if evidence.get("integration_readback_refused")
+            else ""
+        )
+        message = f"Odoo data workflow failed (deployment={error.deployment_id})" + (
+            f": {integration_refusal}" if integration_refusal else "."
+        )
+        if error.deployment_status not in _SCHEDULE_RAN_AND_FAILED_STATUSES:
+            raise OdooPostDeployReadbackFailure(message, evidence=evidence) from None
+        raise OdooPostDeployScheduleFailed(
+            message,
             evidence=evidence,
+            reason=_schedule_failure_reason(
+                error.recent_output, integration_refusal_detail=integration_refusal
+            ),
         ) from None
     if not completed_schedule_deployment_key:
         raise click.ClickException("Dokploy schedule deployment completed without a deployment id.")

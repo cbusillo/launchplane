@@ -89,7 +89,7 @@ from control_plane.build_provenance import (
     verify_generic_web_build,
     verify_requested_build_artifact,
 )
-from control_plane.contracts.record_failures import record_failure_summary
+from control_plane.contracts.record_failures import record_failure, record_failure_summary
 from control_plane.contracts.promotion_record import env_key_names
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest, ArtifactSourceBuild
 from control_plane.contracts.odoo_target_replacement_failures import (
@@ -2752,6 +2752,10 @@ def _run_preview_operation(
                 and operation_result.status == "reconcile_required"
             ):
                 return _hold_preview_destroy(plan, previous_plan, failed_attempts)
+            schedule_failure_reason = str(driver_result.get("schedule_failure_reason") or "")
+            if schedule_failure_reason:
+                plan["preview_schedule_failure_reason"] = schedule_failure_reason
+                return _preview_failure(plan, "preview_build_failed")
             return _preview_failure(
                 plan,
                 "reconcile_required"
@@ -2929,7 +2933,17 @@ def _retained_preview_operation_plan(
 
 
 def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
-    summary = record_failure_summary(code)
+    failure = record_failure(code)
+    schedule_failure_reason = (
+        str(plan.get("preview_schedule_failure_reason") or "").rstrip(". ")
+        if code == "preview_build_failed"
+        else ""
+    )
+    summary = (
+        f"{failure.code}: Data schedule error: {schedule_failure_reason}. {failure.description}"
+        if schedule_failure_reason
+        else record_failure_summary(code)
+    )
     if code in PREVIEW_MEMORY_FAILURE_MESSAGES:
         summary += preview_memory_failure_details(plan)
     if code == "preview_config_refused":
