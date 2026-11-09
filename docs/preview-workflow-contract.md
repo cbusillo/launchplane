@@ -245,9 +245,19 @@ record, refresh also renders a preview-scoped copy of that website intent,
 replaces its canonical URL with the exact preview URL, and passes it through the
 same devkit application/readback path used by stable lanes. The copy excludes
 stable config parameters, addon settings, and secret bindings, and never writes
-the PR-specific canonical URL back to the stable record. The refresh fails when
-the required website-bootstrap application and canonical readback markers are
-missing or false.
+the PR-specific canonical URL back to the stable record. Inherited template
+website intent is optional for a preview: a database without the Website module
+skips it and logs the skip instead of failing. Exact preview intent stays
+required, and the refresh fails when its website-bootstrap application and
+canonical readback markers are missing or false.
+
+An Odoo refresh whose data schedule ran and ended with a provider-reported
+`failed` or `error` status is recorded as a completed failed preview with the
+schedule's last error line, and the same build and binding is not applied
+again; a new build or changed binding tries again. A schedule with no terminal
+failed status, an unreadable provider, or an interrupted executor keeps the
+guarded `reconcile_required` recovery.
+
 Like resolved runtime-environment values and managed secrets, the bootstrap
 contents come from current DB authority during apply; plan provenance binds the
 preview route, target, and artifact facts rather than freezing mutable runtime

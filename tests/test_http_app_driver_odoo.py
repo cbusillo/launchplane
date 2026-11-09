@@ -1323,9 +1323,9 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             decoded_override_payload["website_bootstrap"]["canonical_url"],
             "https://pr-42.cm-preview.example.test",
         )
-        self.assertEqual(
-            applied_request.environment_values[LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY],
-            "true",
+        self.assertNotIn(
+            LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+            applied_request.environment_values,
         )
         self.assertNotIn(
             LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,

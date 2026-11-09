@@ -369,6 +369,78 @@ class CopyReadbackDiagnosticsTests(unittest.TestCase):
                     )
                     self.assertNotIn("private-provider-detail", json.dumps(markers))
 
+    def _run_failed_schedule(
+        self, *, deployment_status: str, recent_output: tuple[str, ...]
+    ) -> Exception:
+        target = DokployTargetDefinition(context="example", instance="testing", target_id="fixture")
+        with (
+            patch.object(api, "upsert_dokploy_schedule", return_value={"scheduleId": "schedule"}),
+            patch.object(
+                api,
+                "run_dokploy_schedule",
+                side_effect=api.DokployScheduleExecutionFailed(
+                    schedule_id="schedule",
+                    deployment_id="job",
+                    deployment_status=deployment_status,
+                    cause="remote_command_exit",
+                    recent_output=recent_output,
+                ),
+            ),
+            patch.object(post_deploy, "_read_odoo_post_deploy_log_markers", return_value={}),
+            self.assertRaises(post_deploy.OdooPostDeployReadbackFailure) as raised,
+        ):
+            post_deploy.run_manual_data_schedule(
+                host="fixture",
+                token="fixture",
+                target_definition=target,
+                schedule_lookup_id="fixture",
+                schedule_type="server",
+                schedule_name="fixture",
+                schedule_app_name="fixture",
+                schedule_payload={},
+                resolved_schedule_execution_timeout_seconds=30,
+            )
+        return raised.exception
+
+    def test_schedule_that_ran_and_failed_reports_its_last_error_line(self) -> None:
+        error = self._run_failed_schedule(
+            deployment_status="error",
+            recent_output=(
+                "Traceback (most recent call last):",
+                "psycopg2.errors.UndefinedColumn: column res_partner.additional_identifiers does not exist",
+                "ERROR: data workflow step did not finish",
+            ),
+        )
+        assert isinstance(error, post_deploy.OdooPostDeployScheduleFailed)
+        self.assertIn("UndefinedColumn", error.reason)
+
+    def test_failed_schedule_reason_stays_inside_the_client_text_bound(self) -> None:
+        error = self._run_failed_schedule(
+            deployment_status="failed",
+            recent_output=(
+                "RuntimeError: cannot reach https://db.internal/odoo?password=hunter2 " + "x" * 500,
+            ),
+        )
+        assert isinstance(error, post_deploy.OdooPostDeployScheduleFailed)
+        self.assertNotIn("db.internal", error.reason)
+        self.assertNotIn("hunter2", error.reason)
+        self.assertLess(len(error.reason), 301)
+
+    def test_client_failure_kind_names_only_recognized_exception_types(self) -> None:
+        for line, expected in (
+            ("RuntimeError: bootstrap failed", "RuntimeError"),
+            ("psycopg2.errors.UndefinedColumn: column missing", "psycopg2.errors.UndefinedColumn"),
+            ("customer.AliceSmith: account lookup failed", ""),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(post_deploy.schedule_failure_kind(line), expected)
+
+    def test_schedule_without_a_failed_terminal_status_is_not_a_finished_failure(self) -> None:
+        for status in ("running", "canceled", "timeout", ""):
+            with self.subTest(status=status):
+                error = self._run_failed_schedule(deployment_status=status, recent_output=())
+                self.assertNotIsInstance(error, post_deploy.OdooPostDeployScheduleFailed)
+
     def test_failed_schedule_without_markers_keeps_a_diagnostic(self) -> None:
         target = DokployTargetDefinition(context="example", instance="testing", target_id="fixture")
         with (
