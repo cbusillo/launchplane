@@ -7,7 +7,7 @@ import unittest
 from types import SimpleNamespace
 from typing import Callable, cast
 import click
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from control_plane import secrets as control_plane_secrets
 from control_plane import odoo_preview_apply_http as preview_http
@@ -24,7 +24,10 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooWebsiteBootstrapPayload,
 )
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
-from control_plane.odoo_preview_apply_execution import run_odoo_preview_apply_operation
+from control_plane.odoo_preview_apply_execution import (
+    OdooPreviewProviderMutationAdapter,
+    run_odoo_preview_apply_operation,
+)
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
     OdooPreviewApplyConfigError,
@@ -36,7 +39,11 @@ from control_plane.odoo_preview_apply_http import (
     preview_has_completed_restore,
     validate_odoo_preview_issued_plan,
 )
-from control_plane.provider_operations import DurableProviderOperationResult
+from control_plane.provider_operations import (
+    DurableProviderOperationResult,
+    ProviderMutationUnknownError,
+    ProviderOperationLease,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsRequest,
@@ -233,6 +240,126 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             self.assertEqual(diagnostics[0]["trace_id"], "fixture-trace")
             self.assertEqual(diagnostics[0]["evidence"], evidence)
             self.assertNotIn("private", " ".join(logs.output))
+
+    def _run_failed_schedule_operation(
+        self,
+        *,
+        store: PostgresRecordStore,
+        root: Path,
+        driver_result: dict[str, object],
+        request_fingerprint: str,
+    ) -> DurableProviderOperationResult:
+        profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        request, issued = _validated_refresh_request()
+
+        def failed_apply(**kwargs: object) -> dict[str, object]:
+            checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
+            checkpoint(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
+            return dict(driver_result)
+
+        return run_odoo_preview_apply_operation(
+            store=store,
+            control_plane_root=root,
+            record_store=store,
+            profile=profile,
+            apply_request=request,
+            issued_plan=issued,
+            reservation_scope=_WORKER_SCOPE,
+            idempotency_key=_PLAN_ID,
+            request_fingerprint=request_fingerprint,
+            trace_id="fixture-trace",
+            execute_apply=Mock(side_effect=failed_apply),
+            observe_apply=Mock(return_value=("unknown", None, False)),
+        )
+
+    def _preview_store(self, root: Path) -> PostgresRecordStore:
+        store = PostgresRecordStore(database_url=_sqlite_database_url(root / "state.sqlite3"))
+        self.addCleanup(store.close)
+        store.ensure_schema()
+        return store
+
+    def test_a_schedule_that_ran_and_failed_is_a_finished_failed_preview(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._preview_store(root)
+            with self.assertLogs(level="WARNING"):
+                result = self._run_failed_schedule_operation(
+                    store=store,
+                    root=root,
+                    driver_result={
+                        "status": "fail",
+                        "provider_effect_attempted": True,
+                        "schedule_failure_reason": "RuntimeError: settings failed",
+                    },
+                    request_fingerprint="finished-failure",
+                )
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.response_status_code, 502)
+            self.assertEqual(
+                cast(dict[str, object], result.response_payload["result"])[
+                    "schedule_failure_reason"
+                ],
+                "RuntimeError: settings failed",
+            )
+            record = store.read_idempotency_record(
+                scope=_WORKER_SCOPE,
+                route_path=ODOO_PREVIEW_APPLY_ROUTE,
+                idempotency_key=_PLAN_ID,
+            )
+            assert record is not None
+            self.assertEqual(record.state, "completed")
+            self.assertEqual(record.response_status_code, 502)
+
+    def test_a_preserved_preview_schedule_failure_keeps_its_recovery_gates(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._preview_store(root)
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            request, issued = _validated_refresh_request()
+            preserved = request.model_copy(
+                update={"preserve_original_reservation_id": "original-reservation"}
+            )
+            execute = Mock(
+                return_value={
+                    "status": "fail",
+                    "provider_effect_attempted": True,
+                    "schedule_failure_reason": "RuntimeError: settings failed",
+                }
+            )
+            adapter = OdooPreviewProviderMutationAdapter(
+                control_plane_root=root,
+                record_store=store,
+                profile=profile,
+                apply_request=preserved,
+                issued_plan=issued,
+                database_url=store.database_url,
+                trace_id="fixture-trace",
+                deployment_record_id="fixture-operation",
+                execute_apply=execute,
+            )
+            adapter.source_decision = Mock()
+            with (
+                patch("control_plane.preview_preservation.require_preview_preservation_admission"),
+                self.assertLogs(level="WARNING"),
+                self.assertRaises(ProviderMutationUnknownError),
+            ):
+                adapter.apply("fixture-key", MagicMock(spec=ProviderOperationLease))
+            execute.assert_called_once()
+
+    def test_a_failed_driver_result_without_a_schedule_reason_stays_unknown(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._preview_store(root)
+            with self.assertLogs(level="WARNING"):
+                result = self._run_failed_schedule_operation(
+                    store=store,
+                    root=root,
+                    driver_result={"status": "fail", "provider_effect_attempted": True},
+                    request_fingerprint="unknown-failure",
+                )
+            self.assertEqual(result.status, "reconcile_required")
 
     def test_failed_native_diagnostics_reject_unvalidated_values(self) -> None:
         from control_plane.odoo_preview_apply_execution import _log_failed_preview_evidence
@@ -1083,6 +1210,44 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
         values = self._service_environment(manifest_odoo_version="19.0", website_bootstrap=True)
         decoded = json.loads(base64.b64decode(values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))
         self.assertEqual(decoded["addon_settings"], [])
+
+    def test_template_website_intent_is_optional_for_a_preview(self) -> None:
+        from control_plane.odoo_instance_overrides import (
+            LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+        )
+
+        for template_extra in ({}, {LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY: "true"}):
+            with self.subTest(template_extra=template_extra):
+                values = self._service_environment(
+                    manifest_odoo_version="19.0",
+                    site_odoo_version="19.0",
+                    website_bootstrap=True,
+                    template_extra=template_extra,
+                )
+                self.assertNotIn(LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY, values)
+                self.assertTrue(
+                    json.loads(base64.b64decode(values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))[
+                        "website_bootstrap"
+                    ]
+                )
+
+    def test_exact_preview_website_intent_stays_required(self) -> None:
+        from control_plane.odoo_instance_overrides import (
+            LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+        )
+
+        plan = OdooPreviewApplyEnvelope.model_validate(_refresh_payload()).apply.dry_run_plan
+        values = self._service_environment(
+            manifest_odoo_version="19.0",
+            preview_override=OdooInstanceOverrideRecord(
+                context="cm",
+                instance=plan.preview_slug,
+                apply_on=("preview",),
+                website_bootstrap=OdooWebsiteBootstrapPayload(name="Exact preview site"),
+                updated_at="2026-10-28T00:00:00Z",
+            ),
+        )
+        self.assertEqual(values[LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY], "true")
 
     def test_exact_preview_can_withdraw_inherited_website_intent(self) -> None:
         from control_plane.odoo_instance_overrides import (

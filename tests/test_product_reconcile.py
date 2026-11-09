@@ -7225,6 +7225,48 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(applied["preview_result_status"], "pass")
         self.assertEqual(applied["omitted_integration_credential_keys"], ["ODOO_SMTP_PASSWORD"])
 
+    def test_a_finished_schedule_failure_waits_for_a_new_build_with_its_reason(self) -> None:
+        applies: list[str] = []
+
+        def failed_schedule(**kwargs: Any) -> dict[str, object]:
+            applies.append("schedule")
+            kwargs["provider_effect_checkpoint"]("post_deploy_schedule_trigger")
+            return {
+                "status": "fail",
+                "error_message": "Odoo data workflow failed (deployment=abc).",
+                "provider_effect_attempted": True,
+                "schedule_failure_reason": "ValueError: Invalid API key 'demo-short-key-123'",
+            }
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch.object(self.provider, "execute_apply", side_effect=failed_schedule):
+            first = self.run_once()
+            self.request("preview", 5)
+            second = self.run_once()
+
+        self.assertEqual(applies, ["schedule"])
+        self.assertEqual(second.state, "failed")
+        self.assertNotEqual(second.last_plan["preview_operation_status"], "reconcile_required")
+        self.assertEqual(second.last_plan["last_failed_error_code"], "preview_build_failed")
+        for failed in (first, second):
+            self.assertIn("ValueError", failed.last_error)
+            self.assertIn("tries again when the PR has a new build", failed.last_error)
+            self.assertNotIn("demo-short-key-123", failed.model_dump_json())
+        self.assertEqual(
+            len(
+                self.store.list_held_odoo_preview_reservations(product="site"),
+            ),
+            0,
+        )
+
+        self.github.add_run(51, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        retried = self.run_once()
+
+        self.assertEqual(retried.state, "done", retried.last_error)
+        self.assertEqual(retried.last_plan["preview_result_status"], "pass")
+
     def test_preview_failure_after_the_provider_started_says_why(self) -> None:
         def failed_apply(**_kwargs: object) -> dict[str, object]:
             return {

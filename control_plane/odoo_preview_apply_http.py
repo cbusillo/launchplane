@@ -1489,12 +1489,18 @@ class _OdooPreviewServiceEnvironment:
     fishbowl_source_sha256: str = ""
 
 
+_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY = (
+    control_plane_odoo_instance_overrides.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY
+)
+
+
 @dataclass(frozen=True)
 class _OdooPreviewBaseEnvironment:
     values: dict[str, str]
     omitted_keys: tuple[str, ...]
     encoded_preview: str
     website_bootstrap: OdooWebsiteBootstrapPayload | None
+    website_bootstrap_inherited: bool
 
 
 def _odoo_preview_base_environment(
@@ -1573,8 +1579,11 @@ def _odoo_preview_base_environment(
             preview_url=plan.preview_url,
         )
     )
+    website_bootstrap_inherited = preview_bootstrap_environment is not None and not bootstrap_sha256
     if preview_bootstrap_environment is not None:
         environment_values.update(preview_bootstrap_environment.inline_environment)
+    if website_bootstrap_inherited:
+        environment_values.pop(_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY, None)
     environment_values["ODOO_PROJECT_NAME"] = plan.compose_name
     environment_values["ODOO_STACK_NAME"] = plan.compose_name
     from control_plane.odoo_preview_resources import preview_resource_environment
@@ -1655,6 +1664,7 @@ def _odoo_preview_base_environment(
         website_bootstrap=preview_bootstrap_environment.payload.website_bootstrap
         if preview_bootstrap_environment is not None
         else None,
+        website_bootstrap_inherited=website_bootstrap_inherited,
     )
 
 
@@ -1709,6 +1719,8 @@ def _odoo_preview_service_environment(
                 preview_import_source=import_source,
             ).inline_environment
         )
+        if prepared.website_bootstrap_inherited:
+            environment_values.pop(_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY, None)
         environment_values.update(import_source.environment)
         environment_values[PREVIEW_FISHBOWL_SOURCE_ENV_KEY] = "true"
         omitted_keys = tuple(key for key in omitted_keys if key not in import_source.environment)
