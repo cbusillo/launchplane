@@ -5268,7 +5268,9 @@ The result carries `grants` (`read_only`, `unsafe` or `unknown`), parsed
 privilege names, a value-free `failure_stage`, `container_cleanup` and
 `rechecks`. It never carries an account, host or raw grant row. Unrecognized
 rows, role grants, unverified cleanup and any change to the host or authority
-during the probe stay `unknown`. Failures cool down for a minute; successes are
+during the probe stay `unknown`. A refused setting is named in `failure_stage`
+as `settings_host`, `settings_account`, `settings_password` or `settings_tls`,
+checked in that order, before any credential leaves the service. Failures cool down for a minute; successes are
 never cached.
 
 This proves the account's privileges only. It does not qualify an import copy

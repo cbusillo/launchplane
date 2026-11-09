@@ -14,7 +14,9 @@ from control_plane.odoo_import_diagnostics import (
     DiagnosticStore,
     finish_probe,
     import_authority,
-    managed_probe_input,
+    ManagedProbeRefusal,
+    managed_probe_credentials,
+    managed_probe_refusal,
     reserve_probe,
 )
 from control_plane.odoo_source_probe import MAX_GRANT_NAMES, GrantStatus, ProbeFailure
@@ -35,13 +37,13 @@ FailureStage = (
         "runtime_selection",
         "target",
         "production_host",
-        "settings",
         "transport",
         "result_validation",
         "cleanup",
         "drift",
     ]
     | HostProbeFailure
+    | ManagedProbeRefusal
 )
 
 HOST_PROGRAM = r"""
@@ -230,15 +232,15 @@ def diagnose_host_source_grants(
         )
         stage = "target"
         server_id = _testing_server(store, authority.profile, host, token)
-        stage = "settings"
-        credentials = managed_probe_input(
-            {
-                **source.settings,
-                "password": _decrypt_secret_value(source.version.ciphertext, source.version.key_id),
-            }
-        )
-        if credentials is None:
-            return _unknown("settings")
+        stage = "settings_password"
+        settings = {
+            **source.settings,
+            "password": _decrypt_secret_value(source.version.ciphertext, source.version.key_id),
+        }
+        refusal = managed_probe_refusal(settings)
+        if refusal is not None:
+            return _unknown(refusal)
+        credentials = managed_probe_credentials(settings)
         stage = "capacity"
         key = (source.binding.binding_id, source.version.version_id, server_id, "host", SOURCE)
         if not reserve_probe(key):
