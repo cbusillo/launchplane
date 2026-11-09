@@ -875,6 +875,7 @@ from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
     disposable_lane_configuration,
     require_disposable_lane,
+    resolve_disposable_inspection_binding,
     resolve_disposable_observation_binding,
     disposable_lane_observation_sha256,
 )
@@ -24264,13 +24265,17 @@ def create_launchplane_fastapi_app(
                         "provider_mutation": False,
                     },
                 )
-            binding = resolve_disposable_observation_binding(
+            resolve_binding = (
+                resolve_disposable_inspection_binding
+                if observation.mode == "inspect"
+                else resolve_disposable_observation_binding
+            )
+            binding = resolve_binding(
                 store,
                 product=observation.product,
                 context=observation.context,
                 instance=observation.instance,
                 preview_id=observation.preview_id,
-                read_only=observation.mode == "inspect",
             )
             profile, target, target_id, preview = (
                 binding.profile,

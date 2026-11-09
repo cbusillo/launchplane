@@ -489,7 +489,6 @@ def _require_unrecorded_preview_target(
     reservation: LaunchplaneIdempotencyRecord,
     target_id: str = "",
 ) -> None:
-    """The preview's own resources: no live record, lane or other product's claim on them."""
     from control_plane.disposable_lanes import require_lane_target_ownership
 
     context = profile.preview.context
@@ -525,12 +524,6 @@ def _require_unrecorded_preview_target(
 def previews_without_original(
     store: PostgresRecordStore, *, profile: LaunchplaneProductProfileRecord
 ) -> dict[int, LaunchplaneIdempotencyRecord]:
-    """Previews the provider currently shows, by PR, whose reservation keeps no intent.
-
-    Their target name and today's inventory identify what exists. Nothing here
-    says what the lost operation did, so it can only be disposed of, never settled.
-    A disposal refused after supersession stays listed until the preview is gone.
-    """
     observed = _currently_observed_preview_slugs(store, profile)
     if not observed:
         return {}
@@ -545,7 +538,6 @@ def previews_without_original(
 def _currently_observed_preview_slugs(
     store: PostgresRecordStore, profile: LaunchplaneProductProfileRecord
 ) -> tuple[str, ...]:
-    """Slugs in a fresh, complete provider scan; an unreadable scan observes nothing."""
     inventory = read_preview_inventory_evidence(
         record_store=store,
         context=profile.preview.context,
@@ -579,11 +571,6 @@ def require_closed_preview_without_original(
     number: int,
     reservation_id: str,
 ) -> None:
-    """Recheck today's facts just before the provider is touched.
-
-    The executor has already superseded the held reservation here, so it is read
-    by id rather than through the held list.
-    """
     from control_plane.disposable_lanes import require_unprotected_preview
 
     reservation = store.read_idempotency_record_by_id(reservation_id)

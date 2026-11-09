@@ -311,7 +311,6 @@ def build_preview_lifecycle_sweep(
             for record in holds[:100]
         ]
         entry["held_reservations_truncated"] = len(holds) > 100
-        # A hold with no original left cannot be recovered; reconcile disposes of it.
         recoverable_holds = len(holds) > 100 or any(
             reservation["classification"] != "original_evidence_unavailable"
             for reservation in cast(list[dict[str, object]], entry["held_reservations"])

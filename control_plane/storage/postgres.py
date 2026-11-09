@@ -9898,7 +9898,6 @@ class PostgresRecordStore(HumanSessionStore):
     def list_odoo_preview_disposal_reservations(
         self, *, product: str
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
-        """Held, failed or superseded reservations; a refused disposal must stay findable."""
         return self._list_odoo_preview_reservations(
             product=product, limit=1001, include_failed=True
         )

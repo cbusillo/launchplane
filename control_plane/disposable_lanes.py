@@ -163,23 +163,38 @@ def resolve_disposable_observation_binding(
     context: str,
     instance: str,
     preview_id: str = "",
-    read_only: bool = False,
 ) -> DisposableLaneObservationBinding:
     """Use the same exact lane and binding for inspection and evidence writes."""
     profile = store.read_product_profile_record(product)
     preview = None
     if preview_id:
-        # Reading a preview's lane never depends on a lifecycle record existing.
-        if not read_only or _owned_preview_candidates(store, profile, context, instance):
-            preview = resolve_disposable_preview(store, profile, context, instance)
-            if preview.preview_id != preview_id:
-                raise ValueError("Observation does not match the owned preview.")
+        preview = resolve_disposable_preview(store, profile, context, instance)
+        if preview.preview_id != preview_id:
+            raise ValueError("Observation does not match the owned preview.")
     elif instance != "testing" or not any(
         (lane.context, lane.instance) == (context, instance) for lane in profile.lanes
     ):
         raise ValueError("Observation requires an exact owned testing lane.")
     return read_disposable_lane_binding(
         store, profile=profile, context=context, instance=instance, preview=preview
+    )
+
+
+def resolve_disposable_inspection_binding(
+    store: DisposableLaneStore,
+    *,
+    product: str,
+    context: str,
+    instance: str,
+    preview_id: str = "",
+) -> DisposableLaneObservationBinding:
+    profile = store.read_product_profile_record(product)
+    if preview_id and not _owned_preview_candidates(store, profile, context, instance):
+        return read_disposable_lane_binding(
+            store, profile=profile, context=context, instance=instance
+        )
+    return resolve_disposable_observation_binding(
+        store, product=product, context=context, instance=instance, preview_id=preview_id
     )
 
 
