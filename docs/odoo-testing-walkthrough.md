@@ -234,6 +234,19 @@ No reusable browser context is handed to the harness. Receipt step counts
 prove completed interactions, not business correctness: the product checklist
 still owns its pass/fail observations and screenshot interpretation.
 
+Native file controls take an `upload` step with a selector for one file input
+and up to 2000 characters of CSV text in `value`. Read-only identities and
+previews refuse it. The service always names the file
+`launchplane-walkthrough.csv` with type `text/csv`, so a caller cannot choose a
+filename or send another format. The plan digest binds the exact text between
+dry run and apply. Receipts, the durable operation record and error responses
+keep none of it, but a screenshot of the native import preview shows its rows,
+so use invented data only. A `fill` value's rules do not apply: a native import
+header owns the file's first line. Native import's Test can run and may save a
+wizard and column mapping. Any `execute_import` without `dryrun: true` is
+aborted in the browser on every walkthrough, so the Import and Resume buttons
+cannot commit rows through this route.
+
 ## Cleanup, interruption and maintenance
 
 After browser work, dry-run and apply `operation=cleanup` for the same task.

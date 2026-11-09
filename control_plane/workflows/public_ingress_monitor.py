@@ -3210,7 +3210,7 @@ def _check_deploy_fence(
             summary=(
                 f"Preview reservation {fence.record_id} remains held ({fence.state}, attempt "
                 f"{fence.attempt}, since {fence.created_at}). Use the product preview-reservations "
-                "classification read and original-intent recovery; missing proof keeps the fence."
+                "classification read. A closed pull request's preview is removed automatically."
             ),
         )
     phase = fence.provider_effect_phase or "no provider effect"

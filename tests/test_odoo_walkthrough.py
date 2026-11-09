@@ -206,6 +206,33 @@ class TaskContractTests(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 task_request(groups=(group,))
 
+    def test_upload_step_is_bounded_csv_text_for_writable_testing_tasks(self) -> None:
+        step: dict[str, Any] = {
+            "action": "upload",
+            "selector": "input[name=ufile]",
+            "value": "id,name\nx,Y\n",
+        }
+        request = task_request(operation="run", steps=(step,))
+        self.assertEqual(request.steps[0].value, step["value"])
+        for invalid in (
+            step | {"selector": ""},
+            step | {"value": " \n"},
+            step | {"value": "x" * 2001},
+            step | {"filename": "module.zip"},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                WalkthroughStep(**invalid)
+        with self.assertRaises(ValidationError):
+            task_request(
+                operation="run",
+                steps=(step,),
+                read_only=True,
+                instance="example-pr-1",
+                preview_id="preview-one",
+                generation_id="generation-one",
+                task_id=canonical_json_sha256("example-odoo")[:32],
+            )
+
 
 class TaskRouteTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -923,6 +950,37 @@ class TaskRouteTests(unittest.TestCase):
         )
         assert stored is not None
         self.assertNotIn(png, json.dumps(stored.response_payload))
+
+    def test_uploaded_csv_reaches_the_browser_but_no_receipt_or_stored_record(self) -> None:
+        self.invoke(task_request(mode="apply", reviewed_plan_sha256=self.plan.digest), "provision")
+        marker = "Fictional CSV marker"
+        run = task_request(
+            operation="run",
+            mode="apply",
+            reviewed_plan_sha256=self.plan.digest,
+            steps=(
+                {
+                    "action": "upload",
+                    "selector": "input[name=ufile]",
+                    "value": f"id,name\n__import__.fixture,{marker}\n",
+                },
+            ),
+        )
+        status, receipt = self.invoke(run, "upload")
+        self.assertEqual((status, receipt["result"]["status"]), (200, "pass"))
+        self.assertEqual(self.browser.call_args.kwargs["steps"], run.steps)
+        stored = self.store.read_idempotency_record(
+            scope=walkthrough_activity_scope(run.product),
+            route_path=WALKTHROUGH_ROUTE,
+            idempotency_key="upload",
+        )
+        assert stored is not None
+        for retained in (
+            json.dumps(receipt),
+            stored.model_dump_json(),
+            json.dumps(self.store.read_original_mutation_intent(stored)),
+        ):
+            self.assertNotIn(marker, retained)
 
     def test_changed_task_cannot_reuse_a_key(self) -> None:
         first = task_request(mode="apply", reviewed_plan_sha256=self.plan.digest)

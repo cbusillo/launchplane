@@ -113,6 +113,19 @@ class _DisposableRuntimeAuthorityFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
+    async def test_inspect_reads_a_preview_lane_without_a_lifecycle_record(self) -> None:
+        scope = {"instance": "pr-404", "preview_id": "preview-without-record"}
+        inspected = await self.observe(**scope)
+        self.assertEqual(inspected.status_code, 202, inspected.text)
+        self.assertEqual(inspected.json()["result"]["usage"], "unknown")
+        collected = await self.observe(
+            mode="collect",
+            expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+            **scope,
+        )
+        self.assertEqual(collected.status_code, 409, collected.text)
+        self.assertEqual(collected.json()["error"]["code"], "disposable_observation_refused")
+
     async def test_down_lane_runtime_recovery_rechecks_without_running_copy_safety(self) -> None:
         record_lane_health(self.store, "example-site", self.context, datetime.now(timezone.utc))
         record_safety(

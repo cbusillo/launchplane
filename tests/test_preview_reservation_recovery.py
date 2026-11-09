@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
-from typing import cast
+from typing import Any, cast
 from collections.abc import Callable
 
 from fastapi import FastAPI, HTTPException
@@ -621,7 +621,8 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 guidance = attention[0].partition(". ")[2]
                 if missing_original:
                     self.assertNotEqual(guidance, available_guidance)
-                    self.assertIn("retain", guidance.lower())
+                    self.assertNotIn("retain", guidance.lower())
+                    self.assertNotIn("recover", guidance.lower())
                 else:
                     available_guidance = guidance
                 self.assertNotIn("without a current status", " ".join(overview.warnings))
@@ -1616,33 +1617,196 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         observer.assert_not_called()
         quiescence.assert_not_called()
 
-    def test_missing_original_without_current_preview_lifecycle_stays_fenced(
-        self,
-    ) -> None:
+    def observe_inventory(self, *slugs: str, scanned_at: datetime | None = None) -> None:
+        from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+
+        stamp = (scanned_at or datetime.now(timezone.utc)).isoformat()
+        self.store.write_preview_inventory_scan_record(
+            PreviewInventoryScanRecord(
+                scan_id=f"inventory-{stamp}",
+                context=self.profile.preview.context,
+                product=self.profile.product,
+                repository=self.profile.repository,
+                scanned_at=stamp,
+                source="provider",
+                status="pass",
+                preview_count=len(slugs),
+                preview_slugs=slugs,
+            )
+        )
+
+    def assert_stays_held_without_destroy(self, result: ReconcileOutcome) -> None:
+        self.assertFalse(self.provider.applied, result.plan)
+        self.assertEqual(
+            held_preview_reservations(self.store, product=self.profile.product), (self.reservation,)
+        )
+        self.assertEqual(self.store.list_preview_records(), ())
+
+    def test_closed_observed_preview_without_record_or_original_is_disposed(self) -> None:
         self.remove_original_intent()
-        transport, observer, planner = Mock(), Mock(), Mock(side_effect=ValueError("fresh plan"))
+        self.observe_inventory("pr-42")
+        result = self.cleanup()
+        self.assertFalse(result.error, result.plan)
+        self.assertEqual(self.provider.applied, [("destroy", 42)], result.plan)
+        self.assertEqual(held_preview_reservations(self.store, product=self.profile.product), ())
+        self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
+        old = self.store.read_idempotency_record(
+            scope=self.reservation.scope,
+            route_path=self.reservation.route_path,
+            idempotency_key=self.reservation.idempotency_key,
+        )
+        assert old is not None
+        self.assertEqual(self.store.read_original_mutation_intent(old), {})
+        self.assertNotEqual(old.response_payload["result"]["status"], "pass")
+
+    def test_missing_original_disposal_needs_a_current_inventory_observation(self) -> None:
+        self.remove_original_intent()
+        stale = datetime.now(timezone.utc) - timedelta(hours=2)
+        for name, slugs, scanned_at in (
+            ("no_scan", None, None),
+            ("stale_scan", ("pr-42",), stale),
+            ("not_observed", ("pr-7",), None),
+        ):
+            with self.subTest(name):
+                if slugs is not None:
+                    self.observe_inventory(*slugs, scanned_at=scanned_at)
+                self.assert_stays_held_without_destroy(self.cleanup())
+
+    def test_missing_original_disposal_requires_a_closed_pull_request(self) -> None:
+        self.remove_original_intent()
+        self.observe_inventory("pr-42")
+        for state in ("open", None):
+            with self.subTest(state=state):
+                self.assert_stays_held_without_destroy(self.cleanup(pr_state=state))
+
+    def test_missing_original_disposal_preserves_current_protections(self) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        self.remove_original_intent()
+        self.observe_inventory("pr-42")
+        for facts in (
+            {"usage": "in_use"},
+            {"data": "only_copy"},
+            {"production_resources": "shared"},
+        ):
+            with self.subTest(facts=facts):
+                record_safety(
+                    self.store, self.profile.product, self.profile.preview.context, "pr-42", **facts
+                )
+                result = self.cleanup()
+                self.assertTrue(result.plan["held"], result.plan)
+                self.assertEqual(result.plan["reason"], "preview_cleanup_safety_unknown")
+                self.assert_stays_held_without_destroy(result)
+
+    def test_refusal_after_supersession_leaves_the_preview_disposable_later(self) -> None:
+        from control_plane.preview_reservation_recovery import (
+            previews_without_original,
+            require_closed_preview_without_original as recheck,
+        )
+
+        self.remove_original_intent()
+        self.observe_inventory("pr-42")
+        refused: list[str] = []
+
+        def refuse_after_supersession(*args: object, **kwargs: object) -> None:
+            old = self.store.read_idempotency_record_by_id(self.reservation.record_id)
+            if old is not None and old.state == "completed":
+                refused.append(old.record_id)
+                raise ValueError("A protection arrived after supersession.")
+            recheck(*args, **kwargs)  # type: ignore[arg-type]
+
+        with patch(
+            "control_plane.preview_reservation_recovery.require_closed_preview_without_original",
+            refuse_after_supersession,
+        ):
+            first = self.cleanup()
+        self.assertEqual(refused, [self.reservation.record_id])
+        self.assertFalse(self.provider.applied, first.plan)
+        self.assertEqual(list(previews_without_original(self.store, profile=self.profile)), [42])
+        result = self.cleanup()
+        self.assertFalse(result.error, result.plan)
+        self.assertEqual(self.provider.applied, [("destroy", 42)])
+
+    def test_missing_original_disposal_refuses_shared_target_and_active_executor(self) -> None:
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
+        self.remove_original_intent()
+        self.observe_inventory("pr-42")
+        with self.store.testing_replacement_execution_lock(
+            preview_execution_lock_name(self.reservation.provider_target_key)
+        ):
+            self.assert_stays_held_without_destroy(self.cleanup())
+        for instance in ("prod", "pr-42"):
+            self.store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context=self.profile.preview.context,
+                    instance=instance,
+                    target_id="production-shared-target",
+                    updated_at=self.profile.updated_at,
+                )
+            )
+        result = self.cleanup()
+        self.assertEqual(result.plan["reason"], "preview_cleanup_safety_unknown")
+        self.assert_stays_held_without_destroy(result)
+
+    def test_missing_original_disposal_never_reaches_another_preview(self) -> None:
+        self.remove_original_intent()
+        self.observe_inventory("pr-42", "pr-43")
+        transport = Mock()
         transport.get_json.return_value = {"state": "closed", "head": {"sha": "a" * 40}}
+        planner = Mock(side_effect=ValueError("no plan"))
+        provider_hooks = PreviewProviderHooks(build_inputs=planner)
         result = reconcile_preview_target(
             record_store=self.store,
             profile=self.profile,
             repository_id="repo",
             transport=transport,
-            pull_request_number=self.issued.plan_request.pr_number,
+            pull_request_number=43,
             control_plane_root=self.root,
-            preview_hooks=PreviewProviderHooks(build_inputs=planner, observe_apply=observer),
+            preview_hooks=provider_hooks,
         )
-        self.assertEqual(result.plan["reason"], "held_preview_recovery_required")
-        held = cast(list[dict[str, object]], result.plan["held_reservations"])[0]
-        self.assertFalse(held["original_action_available"])
-        self.assertFalse(held["original_plan_available"])
-        self.assertEqual(held["target_pull_request_number"], self.issued.plan_request.pr_number)
-        self.assertEqual(held["action"], "unavailable")
-        self.assertEqual(held["pull_request_number"], 0)
+        self.assertEqual(result.plan["action"], "none")
         planner.assert_not_called()
-        observer.assert_not_called()
+
+    def test_sweep_requests_only_observed_previews_without_their_original(self) -> None:
+        from control_plane.preview_reservation_recovery import previews_without_original
+
+        self.remove_original_intent()
+        self.assertEqual(previews_without_original(self.store, profile=self.profile), {})
+        self.observe_inventory("pr-7")
+        self.assertEqual(previews_without_original(self.store, profile=self.profile), {})
+        self.observe_inventory("pr-42")
         self.assertEqual(
-            held_preview_reservations(self.store, product=self.profile.product), (self.reservation,)
+            previews_without_original(self.store, profile=self.profile), {42: self.reservation}
         )
+
+    def test_sweep_reports_a_hold_without_original_but_only_blocks_recoverable_ones(self) -> None:
+        from control_plane.preview_lifecycle_cleanup_routes import (
+            PreviewLifecycleSweepEnvelope,
+            build_preview_lifecycle_sweep,
+        )
+
+        def sweep() -> dict[str, object]:
+            return cast(
+                list[dict[str, object]],
+                build_preview_lifecycle_sweep(
+                    control_plane_root=self.root,
+                    record_store=cast(Any, self.store),
+                    request=PreviewLifecycleSweepEnvelope(apply=True),
+                )["profiles"],
+            )[0]
+
+        self.assertEqual(sweep()["status"], "blocked")
+        self.remove_original_intent()
+        entry = sweep()
+        self.assertNotEqual(entry["status"], "blocked")
+        self.assertEqual(len(cast(list[object], entry["held_reservations"])), 1)
+
+    def test_retained_original_is_not_a_missing_original_disposal(self) -> None:
+        from control_plane.preview_reservation_recovery import previews_without_original
+
+        self.observe_inventory("pr-42")
+        self.assertEqual(previews_without_original(self.store, profile=self.profile), {})
 
     def test_legacy_target_attribution_requires_exact_current_context_name_and_hash(self) -> None:
         self.remove_original_intent()
