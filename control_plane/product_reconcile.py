@@ -3976,6 +3976,30 @@ def verified_testing_rebuild_artifact(
     return verified
 
 
+def verified_preview_build_artifact(
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    *,
+    pull_request_number: int,
+    source_git_ref: str,
+) -> VerifiedBuildArtifact:
+    """The manifest the open pull request's current-head Build run proves; never recorded."""
+    identity = product_repository_identity(record_store, profile)
+    return verify_build_artifact(
+        transport=_TestingRebuildBuildReads(
+            resolve_build_provenance_transport(record_store, profile)
+        ),
+        repository=profile.repository,
+        repository_id=identity.repository_id,
+        commit=source_git_ref,
+        purpose="preview",
+        context=profile.preview.context.strip(),
+        image_repository=profile.image.repository,
+        pull_request_number=pull_request_number,
+        require_open_pull_request=True,
+    )
+
+
 def latest_verified_testing_build(
     record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
 ) -> VerifiedBuildArtifact:

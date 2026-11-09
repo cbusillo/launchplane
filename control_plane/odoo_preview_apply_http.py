@@ -39,6 +39,7 @@ from control_plane.odoo_preview_import_source import (
     PreviewImportSourceStore,
     PreviewImportSourceError,
     resolve_fishbowl_preview_source,
+    with_preview_build_manifest,
     PREVIEW_FISHBOWL_SOURCE_ENV_KEY,
 )
 from control_plane.runtime_key_safety import (
@@ -298,7 +299,9 @@ def _build_odoo_preview_apply_inputs(
         control_plane_root=control_plane_root,
         record_store=cast(Any, record_store),
         profile=profile,
-        request=request,
+        request=with_preview_build_manifest(
+            cast(PreviewImportSourceStore, record_store), profile, request
+        ),
         database_url=database_url,
     )
     if result.status != "ready" or result.operation != "refresh":
