@@ -4944,8 +4944,9 @@ optional `inputs.fishbowl_source` reference: `context`, `instance` and
 from `product-secret-bindings-read`; select the product's existing **testing**
 Fishbowl password binding, never production's binding or a plaintext value.
 This option is for a disposable PR preview nobody is using. Qualification reads
-the testing database through a read-only session and requires its installed
-importer and shared payload addons. It does not write testing data, run an import,
+only Launchplane's records and the preview's own recorded artifact. It does not
+select, connect to or read the stable testing runtime or database, whose addon
+state does not affect this route. It does not write testing data, run an import,
 promote or release anything.
 
 The service requires an exact testing binding classified `shared_safe`, with
@@ -4958,20 +4959,23 @@ ordinary metadata-read authority alone is insufficient. No grant, user,
 credential reclassification or external secret copy is part of this route.
 
 Supply the exact PR manifest and digest-pinned image through the normal preview
-inputs. The issued plan fingerprints the selected source settings, binding
-version, allowance and qualified testing runtime. The source settings come from
-the exact verified installed importer and shared payload producer, typed testing
-overrides, the actual delivered payload and persisted testing parameters. Omitted
-overrides preserve persisted parameters; installed producer defaults apply only
-when the parameter is absent. Legacy field environments and copied defaults are
-not a fallback. Uninstalled addons, missing password delivery, conflicting or
-secret-backed non-secret authority, TLS without verification on any source but
-Fishbowl and drift refuse the optional source. The existing `source_unqualified` refusal includes the bounded failure
-stage when proved, such as `capacity`, `addon_state` or `source_resolution`.
-An absent stage remains unknown; it does not establish a missing binding.
-Ordinary previews without the source remain available. Planning compares the
-selected managed password with delivered metadata in memory; it does not copy
-the password into its response or evidence digest.
+inputs. The manifest must be the one Launchplane recorded for that verified
+build of this product, for this preview's pull request when the build names one.
+Its file inventory must include the Fishbowl importer and shared payload
+producer. The issued plan fingerprints the selected source settings, binding
+version, allowance, managed records and that artifact.
+
+`host`, `user`, `db`, `port` and `ssl_verify` come from testing's managed records:
+its runtime environment and typed overrides. Each must be set in one of them,
+and if both set it they must agree. Launchplane copies no producer default.
+Blank, secret-backed, retired or conflicting settings, a Fishbowl password
+override that does not select this binding and drift refuse the optional source.
+`fishbowl.ssl_verify` may be an explicit false value for this source.
+
+The existing `source_unqualified` refusal includes the bounded failure stage:
+`artifact`, `producer_inventory`, `authority` or `source_resolution`. Ordinary
+previews without the source remain available. Planning does not copy the
+password into its response or evidence digest.
 
 Apply that service-issued plan through the existing
 `POST /v1/drivers/odoo/preview-apply` route with its plan id as the idempotency
