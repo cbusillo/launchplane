@@ -19,6 +19,7 @@ from control_plane import odoo_import_diagnostics as diagnostic
 from control_plane import odoo_runtime_reads as reads
 from control_plane import odoo_source_probe as probe
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.dokploy import api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.http_routes.odoo_runtime import (
@@ -306,18 +307,50 @@ class HostSourceGrantTests(unittest.TestCase):
         self.assertEqual(result.failure_stage, "binding")
         self.assertEqual(self.remote_calls, [])
 
-    def test_unverified_tls_setting_is_refused(self) -> None:
+    def set_fishbowl_setting(self, field: str, value: str) -> None:
+        key = config_parameter_runtime_key(diagnostic.SOURCE_PREFIXES["fishbowl"] + "." + field)
         self.fixture.runtime = self.fixture.runtime.model_copy(
-            update={
-                "env": {
-                    **self.fixture.runtime.env,
-                    "ENV_OVERRIDE_CONFIG_PARAM__FISHBOWL__SSL_VERIFY": "False",
-                }
-            }
+            update={"env": {**self.fixture.runtime.env, key: value}}
         )
+
+    def assert_refused_before_transport(self, stage: str) -> None:
         result = self.diagnose()
-        self.assertEqual((result.grants, result.failure_stage), ("unknown", "settings"))
+        self.assertEqual((result.grants, result.failure_stage), ("unknown", stage))
+        self.assertEqual(result.container_cleanup, "not_started")
         self.assertEqual(self.remote_calls, [])
+        self.assertEqual(self.docker.calls, [])
+        self.assertNotIn(PRIVATE, result.model_dump_json())
+
+    def test_each_failed_setting_names_its_own_stage_without_values(self) -> None:
+        for field, value, stage in (
+            ("host", "", "settings_host"),
+            ("user", "", "settings_account"),
+            ("ssl_verify", "False", "settings_tls"),
+            ("ssl_verify", "0", "settings_tls"),
+            ("ssl_verify", PRIVATE, "settings_tls"),
+        ):
+            with self.subTest(field=field, value=value[:5]):
+                original = self.fixture.runtime
+                self.set_fishbowl_setting(field, value)
+                self.assert_refused_before_transport(stage)
+                self.fixture.runtime = original
+
+    def test_blank_password_is_named_without_transport(self) -> None:
+        with patch.object(host_grants, "_decrypt_secret_value", return_value=""):
+            self.assert_refused_before_transport("settings_password")
+
+    def test_decrypt_failure_is_named_without_exception_text(self) -> None:
+        with patch.object(host_grants, "_decrypt_secret_value", side_effect=RuntimeError(PRIVATE)):
+            self.assert_refused_before_transport("settings_password")
+
+    def test_verified_tls_values_are_still_admitted(self) -> None:
+        for value in ("", "True", "true", "1"):
+            with self.subTest(value=value):
+                self.remote_calls.clear()
+                self.set_fishbowl_setting("ssl_verify", value)
+                result = self.diagnose()
+                self.assertEqual(result.grants, "read_only", result)
+                self.assertEqual(len(self.remote_calls), 1)
 
     def test_host_change_during_probe_discards_the_result(self) -> None:
         original = self.remote
