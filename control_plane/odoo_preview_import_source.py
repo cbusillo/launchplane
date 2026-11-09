@@ -34,6 +34,7 @@ from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_
 
 if TYPE_CHECKING:
     from control_plane.odoo_runtime_source_prerequisites import PrerequisiteStore
+    from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsRequest
 
 
 FISHBOWL_CONNECTION_PARAMETERS = ("host", "user", "db", "port", "ssl_verify", "password")
@@ -106,6 +107,57 @@ class FishbowlPreviewSource:
             )
         ):
             raise ValueError("Preview override must match its qualified import source delivery.")
+
+
+def _proven_manifest(
+    store: PreviewImportSourceStore,
+    profile: LaunchplaneProductProfileRecord,
+    manifest: ArtifactIdentityManifest,
+) -> ArtifactIdentityManifest:
+    """A pull request build is proven by its Build run; only release builds are recorded."""
+    build = manifest.source_build
+    if build is None or build.pull_request_number is None:
+        return cast("PrerequisiteStore", store).read_artifact_manifest(manifest.artifact_id)
+    from control_plane.product_reconcile import verified_preview_build_artifact
+
+    return verified_preview_build_artifact(
+        store,
+        profile,
+        pull_request_number=build.pull_request_number,
+        source_git_ref=manifest.source_commit,
+    ).manifest
+
+
+def with_preview_build_manifest(
+    store: PreviewImportSourceStore,
+    profile: LaunchplaneProductProfileRecord,
+    request: "OdooPreviewApplyInputsRequest",
+) -> "OdooPreviewApplyInputsRequest":
+    """Fill an omitted manifest from the preview head's Build run; the source check still runs."""
+    if request.fishbowl_source is None or request.manifest is not None:
+        return request
+    from control_plane.product_reconcile import verified_preview_build_artifact
+
+    try:
+        manifest = verified_preview_build_artifact(
+            store,
+            profile,
+            pull_request_number=request.pr_number,
+            source_git_ref=request.source_git_ref,
+        ).manifest
+        return type(request).model_validate(
+            {
+                **request.model_dump(mode="json"),
+                "manifest": manifest.model_dump(mode="json"),
+            }
+        )
+    except Exception:
+        raise PreviewImportSourceError(
+            "source_unqualified",
+            "The preview import source requires the image and head of this pull request's "
+            "successful Build run.",
+            failure_stage="artifact",
+        ) from None
 
 
 def resolve_fishbowl_preview_source(
@@ -186,13 +238,14 @@ def resolve_fishbowl_preview_source(
             product=profile.product,
             repository=profile.repository,
             manifest=manifest,
+            proven_manifest=lambda candidate: _proven_manifest(store, profile, candidate),
             binding=binding,
             version_id=version.version_id,
         )
     except PrerequisiteReadUnavailable as error:
         raise PreviewImportSourceError(
             "source_unqualified",
-            "The preview import source requires this preview's recorded artifact and one "
+            "The preview import source requires this preview's proven build artifact and one "
             "agreeing managed source setting.",
             failure_stage=error.stage,
         ) from None

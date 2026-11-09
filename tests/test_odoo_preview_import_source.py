@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from typing import Any, cast
 from unittest.mock import patch
 
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -23,6 +24,7 @@ from control_plane.odoo_runtime_source_prerequisites import (
     PAYLOAD_FILES,
     SOURCE_ADDONS,
 )
+from control_plane.build_provenance import BuildProvenanceError, VerifiedBuildArtifact
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.artifact_release_compatibility import ReleaseInputFile
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -159,6 +161,30 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.store.write_runtime_environment_record(self.runtime)
         self.manifest = self.recorded_manifest("preview-artifact")
+        self.built = self.manifest
+        proof = patch(
+            "control_plane.product_reconcile.verified_preview_build_artifact",
+            side_effect=self.build_run_proof,
+        )
+        self.proof = proof.start()
+        self.addCleanup(proof.stop)
+
+    def build_run_proof(
+        self,
+        _store: object,
+        _profile: LaunchplaneProductProfileRecord,
+        *,
+        pull_request_number: int,
+        source_git_ref: str,
+    ) -> VerifiedBuildArtifact:
+        built = self.built.source_build
+        assert built is not None
+        if (pull_request_number, source_git_ref) != (
+            built.pull_request_number,
+            self.built.source_commit,
+        ):
+            raise BuildProvenanceError("No successful Build run.", code="build_run_missing")
+        return VerifiedBuildArtifact(manifest=self.built)
 
     def recorded_manifest(
         self,
@@ -168,7 +194,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         payload: bool = True,
         repository: str = "",
         complete: bool = True,
-        pull_request: int = 42,
+        pull_request: int | None = 42,
     ) -> ArtifactIdentityManifest:
         addon, model, client = SOURCE_ADDONS["fishbowl"]
         files = (
@@ -201,8 +227,8 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         manifest.source_build = manifest.source_build.model_copy(
             update={
                 "repository": source_repository,
-                "event": "pull_request",
-                "purpose": "preview",
+                "event": "push" if pull_request is None else "pull_request",
+                "purpose": "release" if pull_request is None else "preview",
                 "pull_request_number": pull_request,
             }
         )
@@ -217,7 +243,8 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 ),
             }
         )
-        self.store.write_artifact_manifest(manifest)
+        if pull_request is None:
+            self.store.write_artifact_manifest(manifest)
         return manifest
 
     def envelope(self) -> OdooPreviewApplyEnvelope:
@@ -548,7 +575,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         self.write_setting("port", 3499)
         self.assertNotEqual(self.resolve().authority_sha256, original.authority_sha256)
         self.write_setting("port", 3306)
-        self.manifest = self.recorded_manifest("another-preview-artifact")
+        self.manifest = self.built = self.recorded_manifest("another-preview-artifact")
         self.assertNotEqual(self.resolve().authority_sha256, original.authority_sha256)
         self.store.write_secret_record(
             self.record.model_copy(update={"current_version_id": "rotated"})
@@ -565,20 +592,34 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("source.example.test", str(caught.exception))
         self.assertNotIn("private-fixture-source-password", str(caught.exception))
 
-    def test_only_the_exact_recorded_build_of_this_product_qualifies(self) -> None:
-        recorded = self.manifest
-        changed = recorded.model_copy(update={"source_commit": "c" * 40})
+    def test_pull_request_build_qualifies_by_its_build_run_not_the_release_store(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.manifest.artifact_id)
+        self.assertIn("fishbowl.password", {item.key for item in self.resolve().parameters})
+        self.assertEqual(
+            self.proof.call_args.kwargs,
+            {"pull_request_number": 42, "source_git_ref": self.manifest.source_commit},
+        )
+
+    def test_only_the_exact_proven_build_of_this_product_qualifies(self) -> None:
+        proven = self.manifest
+        changed = proven.model_copy(update={"source_commit": "c" * 40})
         foreign = self.recorded_manifest("foreign-artifact", repository="another/product")
-        unrecorded = recorded.model_copy(update={"artifact_id": "never-recorded"})
+        other_attempt = proven.model_copy(update={"artifact_id": "another-run-attempt"})
+        release = self.recorded_manifest("release-artifact", pull_request=None)
+        unrecorded_release = release.model_copy(update={"artifact_id": "never-recorded"})
         for name, manifest in (
             ("missing", None),
-            ("unrecorded", unrecorded),
-            ("changed_after_recording", changed),
+            ("another_run_attempt", other_attempt),
+            ("changed_after_build", changed),
             ("another_product", foreign),
             ("another_pull_request", self.recorded_manifest("other-pr", pull_request=43)),
+            ("unrecorded_release", unrecorded_release),
         ):
             with self.subTest(name=name), patch.object(self, "manifest", manifest):
                 self.assert_unqualified("artifact")
+        self.manifest = release
+        self.assertIn("fishbowl.password", {item.key for item in self.resolve().parameters})
 
     def test_preview_artifact_must_carry_the_source_and_payload_producers(self) -> None:
         for name, manifest in (
@@ -587,7 +628,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
             ("incomplete_inventory", self.recorded_manifest("incomplete", complete=False)),
         ):
             with self.subTest(name=name):
-                self.manifest = manifest
+                self.manifest = self.built = manifest
                 self.assert_unqualified("producer_inventory")
 
     def test_unknown_or_unsafe_effective_inputs_refuse_without_a_default(self) -> None:
@@ -777,6 +818,42 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 database_url=self.store.database_url,
             )
         self.assertEqual(refused.exception.code, "odoo_preview_plan_stale")
+
+    def test_plan_without_a_manifest_takes_the_preview_head_build_run_manifest(self) -> None:
+        planned = self.plan()
+        image = self.manifest.image
+        inputs = planned.plan_request.model_copy(
+            update={
+                "manifest": None,
+                "pr_number": 42,
+                "source_git_ref": self.manifest.source_commit,
+                "image_reference": f"{image.repository}@{image.digest}",
+            }
+        )
+
+        def plan_with(request: object) -> object:
+            with patch(
+                "control_plane.odoo_preview_apply_http.build_odoo_preview_apply_inputs",
+                return_value=planned,
+            ) as build:
+                _build_odoo_preview_apply_inputs(
+                    control_plane_root=self.root,
+                    record_store=self.store,
+                    profile=self.profile,
+                    request=cast(Any, request),
+                    database_url=self.store.database_url,
+                )
+            return build.call_args.kwargs["request"]
+
+        self.assertEqual(cast(Any, plan_with(inputs)).manifest, self.manifest)
+        for name, update in (
+            ("another_image", {"image_reference": f"{image.repository}@sha256:{'e' * 64}"}),
+            ("another_head", {"source_git_ref": "c" * 40}),
+            ("no_head", {"source_git_ref": ""}),
+        ):
+            with self.subTest(name=name), self.assertRaises(PreviewImportSourceError) as caught:
+                plan_with(inputs.model_copy(update=update))
+            self.assertEqual(caught.exception.failure_stage, "artifact")
 
     def test_credential_shaped_non_secret_settings_are_refused(self) -> None:
         self.write_setting("host", "https://user:private@source.example.test")

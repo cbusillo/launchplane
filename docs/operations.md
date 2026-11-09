@@ -4944,7 +4944,7 @@ optional `inputs.fishbowl_source` reference: `context`, `instance` and
 from `product-secret-bindings-read`; select the product's existing **testing**
 Fishbowl password binding, never production's binding or a plaintext value.
 This option is for a disposable PR preview nobody is using. Qualification reads
-only Launchplane's records and the preview's own recorded artifact. It does not
+only Launchplane's records and the preview's own build provenance. It does not
 select, connect to or read the stable testing runtime or database, whose addon
 state does not affect this route. It does not write testing data, run an import,
 promote or release anything.
@@ -4958,11 +4958,13 @@ write. Both plan and apply retain managed-copy source-value read authority;
 ordinary metadata-read authority alone is insufficient. No grant, user,
 credential reclassification or external secret copy is part of this route.
 
-Supply the exact PR manifest and digest-pinned image through the normal preview
-inputs. The manifest must be the one Launchplane recorded for that verified
-build of this product, for this preview's pull request when the build names one.
-Its file inventory must include the Fishbowl importer and shared payload
-producer. The issued plan fingerprints the selected source settings, binding
+Send `pr_number`, the PR's current head as `source_git_ref` and that build's
+digest-pinned `image_reference`, and omit `manifest`: Launchplane reads the
+manifest from the open PR's successful current-head Build run and refuses when
+the image or head differs. A supplied manifest must equal that proven manifest.
+A PR build is never recorded in the release artifact store; a release build's
+manifest must equal the one Launchplane recorded. Its file inventory must
+include the Fishbowl importer and shared payload producer. The issued plan fingerprints the selected source settings, binding
 version, allowance, managed records and that artifact.
 
 `host`, `user`, `db`, `port` and `ssl_verify` come from testing's managed records:
