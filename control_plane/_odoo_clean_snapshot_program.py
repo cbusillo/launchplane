@@ -217,12 +217,13 @@ def capture_clean_snapshot(spec, containers, clone):
         path = Path(temporary)
         arguments = ['docker', 'exec', containers['database'][0], 'sh', '-c',
              'pg_dump -Fc --no-owner --no-acl -U "$POSTGRES_USER" -- "$1"', '_', spec['database_name']]
-        status, errors, _ = capture_snapshot_file(
+        status, errors, truncated = capture_snapshot_file(
             arguments,
             path / 'database.dump', budget['database_bytes'])
         if status:
-            raise copy_command_failure(RuntimeError('Clean snapshot database capture failed'),
-                subprocess.CompletedProcess(arguments, status, stdout=b'', stderr=errors), spec)
+            result = subprocess.CompletedProcess(arguments, status, stdout=b'', stderr=errors)
+            result.stderr_capture_truncated = truncated
+            raise copy_command_failure(RuntimeError('Clean snapshot database capture failed'), result, spec)
         if clone is None:
             clone = filestore_clone_proved(mountpoint, destination.parent)
         copy_filestore(filestore, path / 'filestore', clone)

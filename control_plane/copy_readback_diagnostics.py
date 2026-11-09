@@ -79,6 +79,30 @@ def copy_failure_diagnostics_library() -> str:
         + f"COPY_FAILURE_OUTPUT_BYTES = {COPY_FAILURE_OUTPUT_BYTES!r}\n"
         + f"COPY_FAILURE_STATE_DIRECTORY = {COPY_FAILURE_STATE_DIRECTORY!r}\n"
         + """
+def copy_failure_mount_is_private(source):
+    from pathlib import Path
+    if not isinstance(source, str) or not Path(source).is_absolute():
+        return False
+    private = Path.home().resolve(strict=True) / COPY_FAILURE_STATE_DIRECTORY
+    path = Path(source).resolve(strict=False)
+    return not (private.is_relative_to(path) or path.is_relative_to(private))
+
+
+def copy_failure_storage_is_private(containers):
+    if not isinstance(containers, list):
+        return False
+    try:
+        for container in containers:
+            mounts = container.get('Mounts') if isinstance(container, dict) else None
+            if not isinstance(mounts, list) or any(
+                not isinstance(mount, dict) or not copy_failure_mount_is_private(mount.get('Source'))
+                for mount in mounts):
+                return False
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
 def retain_copy_command_failure(result, stage, spec):
     import base64
     from contextlib import suppress
@@ -109,8 +133,9 @@ def retain_copy_command_failure(result, stage, spec):
         for stream in ('stdout', 'stderr'):
             output = getattr(result, stream) or b''
             evidence[stream] = base64.b64encode(output[-COPY_FAILURE_OUTPUT_BYTES:]).decode()
-            evidence[stream + '_bytes'] = len(output)
-            evidence[stream + '_truncated'] = len(output) > COPY_FAILURE_OUTPUT_BYTES
+            pretruncated = getattr(result, stream + '_capture_truncated', False)
+            evidence[stream + '_bytes'] = None if pretruncated else len(output)
+            evidence[stream + '_truncated'] = pretruncated or len(output) > COPY_FAILURE_OUTPUT_BYTES
         path = directory / (identity + '.json')
         descriptor = os.open(path,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -126,20 +151,27 @@ def retain_copy_command_failure(result, stage, spec):
 
 
 copy_failure_stage = CopyFailureStage.HOST_PREPARATION
+copy_failure_containers = globals().get('copy_failure_containers')
 
 
 def copy_failure_cause(error):
-    while error.__context__ is not None:
-        error = error.__context__
-    result = getattr(error, 'copy_command_result', None)
+    chain = [error]
+    while not chain[-1].__suppress_context__ and chain[-1].__context__ is not None:
+        chain.append(chain[-1].__context__)
+    error = next((cause for cause in reversed(chain) if isinstance(cause, CopyReadbackRefused)), chain[-1])
+    command = next((cause for cause in reversed(chain)
+        if hasattr(cause, 'copy_command_result') or hasattr(cause, 'copy_failure_markers')), error)
+    result = getattr(command, 'copy_command_result', None)
     if result is not None:
-        stage = error.copy_command_stage
-        identity = retain_copy_command_failure(result, stage, error.copy_command_spec)
-        error.copy_failure_markers = {COPY_FAILURE_STAGE_MARKER: stage,
+        stage = command.copy_command_stage
+        identity = retain_copy_command_failure(result, stage, command.copy_command_spec) if command.copy_command_private else 'unavailable'
+        command.copy_failure_markers = {COPY_FAILURE_STAGE_MARKER: stage,
             COPY_FAILURE_KIND_MARKER: 'command_failed', COPY_FAILURE_EXIT_MARKER: str(result.returncode),
             COPY_FAILURE_EVIDENCE_MARKER: identity}
-        setattr(error, COPY_FAILURE_EVIDENCE_MARKER, identity)
-        del error.copy_command_result, error.copy_command_spec
+        del command.copy_command_result, command.copy_command_spec
+    if hasattr(command, 'copy_failure_markers'):
+        error.copy_failure_markers = command.copy_failure_markers
+        setattr(error, COPY_FAILURE_EVIDENCE_MARKER, command.copy_failure_markers[COPY_FAILURE_EVIDENCE_MARKER])
     return error
 
 
@@ -153,7 +185,7 @@ def emit_copy_failure(error):
         print(key + '=' + value, flush=True)
 
 
-def copy_command_failure(error, result, spec):
+def copy_command_failure(error, result, spec, containers=None):
     stage = copy_failure_stage
     for line in (result.stdout or b'').decode(errors='replace').splitlines():
         key, separator, value = line.partition('=')
@@ -163,6 +195,7 @@ def copy_command_failure(error, result, spec):
     error.copy_command_result = result
     error.copy_command_spec = spec
     error.copy_command_stage = stage
+    error.copy_command_private = copy_failure_storage_is_private(copy_failure_containers if containers is None else containers)
     return error
 """
     )

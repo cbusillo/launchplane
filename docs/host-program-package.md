@@ -83,7 +83,13 @@ without publishing exception text. A terminal candidate restore carries the
 validated markers into its preparation failure receipt and the operation's
 `result.error_message`, returned by the target-replacement operation read.
 Snapshot dump failures retain the existing bounded stderr tail; dump bytes do
-not enter the diagnostic archive.
+not enter the diagnostic archive. A pre-truncated tail has a true truncation flag
+and a null original byte count when that count is unknown.
+Private capture uses the existing container inventory to rule out mounts exposing
+the diagnostic directory. Before inventory is complete, or when its mount facts
+are unsafe or unavailable, the cause still reports stage/kind/status with evidence
+ID `unavailable`; it writes no diagnostic file and adds no operation gate or
+provider read.
 
 Failed canonical-address `docker exec` reads and writers use this same private
 archive, including read-only native inspections. Their failure frame and the trace's

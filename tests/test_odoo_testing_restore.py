@@ -320,7 +320,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     [
                         sys.executable,
                         "-c",
-                        "import sys;sys.stderr.write('private dump failure');sys.exit(1)",
+                        "import sys;sys.stderr.write('x'*20000+'private dump failure');sys.exit(1)",
                     ],
                     **kwargs,
                 ),
@@ -345,7 +345,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 / (markers[COPY_FAILURE_EVIDENCE_MARKER] + ".json")
             ).read_text()
         )
-        self.assertEqual(base64.b64decode(evidence["stderr"]), b"private dump failure")
+        self.assertTrue(base64.b64decode(evidence["stderr"]).endswith(b"private dump failure"))
+        self.assertTrue(evidence["stderr_truncated"])
+        self.assertIsNone(evidence["stderr_bytes"])
         self.assertNotIn("private dump failure", output)
 
     def test_attachment_refusal_reaches_schedule_readback_without_private_output(self) -> None:
@@ -588,6 +590,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     {
                         "Type": "volume",
                         "Name": self.gen.namespace + "-" + suffix,
+                        "Source": str(
+                            self.volumes[self.gen.namespace + "-" + suffix]["Mountpoint"]
+                        ),
                         "Destination": ODOO_DATABASE_DATA_DIRECTORY
                         if service == "database"
                         else "/volumes/" + suffix,

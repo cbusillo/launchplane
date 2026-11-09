@@ -22,6 +22,7 @@ from control_plane.copy_readback_diagnostics import (
     COPY_FAILURE_STAGE_MARKER,
     COPY_FAILURE_STATE_DIRECTORY,
     CopyFailureStage,
+    CopyReadbackRefused,
     ReadbackPredicate,
     copy_failure_diagnostics_library,
     copy_failure_summary,
@@ -33,6 +34,68 @@ from control_plane.odoo_connection_isolation import (
 
 
 class CopyFailureEvidenceTests(unittest.TestCase):
+    def test_wrapped_refusal_and_cleanup_preserve_original_command_evidence(self) -> None:
+        from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
+
+        namespace: dict[str, Any] = {"copy_failure_containers": []}
+        exec(VOLUME_BACKING_INSPECTION_LIBRARY, namespace)
+        result = subprocess.CompletedProcess([], 7, stdout=b"", stderr=b"private original")
+        cleanup = subprocess.CompletedProcess([], 9, stdout=b"", stderr=b"private cleanup")
+        with (
+            TemporaryDirectory() as temporary,
+            patch.object(Path, "home", return_value=Path(temporary)),
+        ):
+            try:
+                try:
+                    try:
+                        raise namespace["copy_command_failure"](RuntimeError(), result, {})
+                    except RuntimeError:
+                        raise namespace["CopyReadbackRefused"](ReadbackPredicate.BACKING_STORAGE)
+                finally:
+                    raise namespace["copy_command_failure"](RuntimeError(), cleanup, {})
+            except RuntimeError as error:
+                frame = namespace["copy_readback_failure_frame"](error)
+                self.assertEqual(frame["predicate"], ReadbackPredicate.BACKING_STORAGE)
+                self.assertEqual(frame["kind"], "refused")
+                directory = Path(temporary) / COPY_FAILURE_STATE_DIRECTORY
+                evidence = json.loads(
+                    (directory / (frame[COPY_FAILURE_EVIDENCE_MARKER] + ".json")).read_text()
+                )
+                self.assertEqual(base64.b64decode(evidence["stderr"]), b"private original")
+                self.assertEqual(evidence["exit_status"], result.returncode)
+                self.assertEqual(len(list(directory.iterdir())), 1)
+                self.assertNotIn("private", json.dumps(frame))
+
+    def test_unqualified_or_exposed_mounts_keep_command_failure_without_writing_evidence(
+        self,
+    ) -> None:
+        namespace: dict[str, Any] = {"CopyReadbackRefused": CopyReadbackRefused}
+        exec(copy_failure_diagnostics_library(), namespace)
+        result = subprocess.CompletedProcess([], 7, stdout=b"", stderr=b"private original")
+        with (
+            TemporaryDirectory() as temporary,
+            patch.object(Path, "home", return_value=Path(temporary)),
+        ):
+            for containers in (
+                None,
+                [{"Mounts": [{}]}],
+                [{"Mounts": [{"Source": temporary, "RW": False}]}],
+            ):
+                with self.subTest(containers=containers):
+                    error = namespace["copy_command_failure"](
+                        RuntimeError(), result, {}, containers=containers
+                    )
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        namespace["emit_copy_failure"](error)
+                    markers = post_deploy.extract_odoo_post_deploy_readback_markers(
+                        {"logs": output.getvalue()}
+                    )
+                    self.assertEqual(markers[COPY_FAILURE_EVIDENCE_MARKER], "unavailable")
+                    self.assertEqual(markers["copy_failure_exit_status"], str(result.returncode))
+                    self.assertEqual(list(Path(temporary).iterdir()), [])
+                    self.assertNotIn("private", output.getvalue())
+
     def test_operation_cause_includes_only_first_valid_copy_markers(self) -> None:
         identity = "e" * 32
         receipt = (
@@ -49,7 +112,11 @@ class CopyFailureEvidenceTests(unittest.TestCase):
         self.assertNotIn("private", summary)
 
     def test_symlinked_home_uses_its_verified_real_directory(self) -> None:
-        namespace: dict[str, Any] = {"spec": {}}
+        namespace: dict[str, Any] = {
+            "spec": {},
+            "CopyReadbackRefused": CopyReadbackRefused,
+            "copy_failure_containers": [],
+        }
         exec(copy_failure_diagnostics_library(), namespace)
         result = subprocess.CompletedProcess(["fixture"], 1, stdout=b"", stderr=b"cause")
         with TemporaryDirectory() as temporary:
@@ -64,7 +131,11 @@ class CopyFailureEvidenceTests(unittest.TestCase):
             self.assertTrue((home / COPY_FAILURE_STATE_DIRECTORY / (identity + ".json")).is_file())
 
     def test_partial_write_does_not_leave_unreferenced_private_output(self) -> None:
-        namespace: dict[str, Any] = {"spec": {}}
+        namespace: dict[str, Any] = {
+            "spec": {},
+            "CopyReadbackRefused": CopyReadbackRefused,
+            "copy_failure_containers": [],
+        }
         exec(copy_failure_diagnostics_library(), namespace)
         result = subprocess.CompletedProcess(["fixture"], 1, stdout=b"", stderr=b"cause")
 
@@ -84,7 +155,11 @@ class CopyFailureEvidenceTests(unittest.TestCase):
 
     def test_private_evidence_retains_bounded_tails_and_only_an_input_digest(self) -> None:
         spec = {"fixture_input": "private settings", "runner": "fixture source"}
-        namespace: dict[str, Any] = {"spec": spec}
+        namespace: dict[str, Any] = {
+            "spec": spec,
+            "CopyReadbackRefused": CopyReadbackRefused,
+            "copy_failure_containers": [],
+        }
         exec(copy_failure_diagnostics_library(), namespace)
         stdout = (f"{COPY_FAILURE_STAGE_MARKER}={CopyFailureStage.MODULE_UPDATE}\n").encode()
         stderr = b"x" * COPY_FAILURE_OUTPUT_BYTES + b"\nValueError: private fixture cause\n"
@@ -126,7 +201,11 @@ class CopyFailureEvidenceTests(unittest.TestCase):
             self.assertEqual(markers[COPY_FAILURE_EVIDENCE_MARKER], identifiers[0])
 
     def test_unsafe_or_unwritable_evidence_storage_keeps_closed_failure_diagnostics(self) -> None:
-        namespace: dict[str, Any] = {"spec": {}}
+        namespace: dict[str, Any] = {
+            "spec": {},
+            "CopyReadbackRefused": CopyReadbackRefused,
+            "copy_failure_containers": [],
+        }
         exec(copy_failure_diagnostics_library(), namespace)
         result = subprocess.CompletedProcess(
             ["fixture"],
