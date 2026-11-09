@@ -114,6 +114,12 @@ def require_empty_testing_target_creation(
         lane.instance == request.instance for lane in profile.lanes
     ) and _lane_has_usage_or_data_commitments(record_store, request):
         raise ValueError("First testing setup cannot change a lane that has deployed.")
+    _require_no_target_authority(record_store, request)
+
+
+def _require_no_target_authority(
+    record_store: PostgresRecordStore, request: "DokployTargetSetupEnvelope"
+) -> None:
     for read in (
         record_store.read_dokploy_target_record,
         record_store.read_dokploy_target_id_record,
@@ -123,7 +129,7 @@ def require_empty_testing_target_creation(
             read(context_name=request.context, instance_name=request.instance)
         except FileNotFoundError:
             continue
-        raise ValueError("First testing setup cannot replace existing target authority.")
+        raise ValueError("First target setup cannot replace existing target authority.")
 
 
 def _lane_has_usage_or_data_commitments(
@@ -224,6 +230,106 @@ def _require_never_deployed_testing_target(
         except (OSError, ValueError, click.ClickException) as error:
             raise TestingTargetSourceEvidenceUnavailable() from error
         require_empty_compose_source(live, current.target_id)
+
+
+def first_production_target_lock_name(context: str) -> str:
+    return f"first-production-target:{context}"
+
+
+def require_first_production_target_creation(
+    record_store: PostgresRecordStore,
+    request: "DokployTargetSetupEnvelope",
+    *,
+    product: str,
+) -> None:
+    """Stage one empty compose for a product not marked Live, and nothing more."""
+    from control_plane.authz_candidate_preparation import (
+        is_exclusive_product_lane_context,
+        product_context_owners,
+    )
+
+    new_placement = bool(request.project_name and request.environment_name)
+    if (
+        request.operation != "create-compose"
+        or request.instance != "prod"
+        or request.target_id
+        or request.replaces_operation_id
+        or request.expected_current_provider_target is not None
+        or request.state_volume_path
+        or request.onboarding is not None
+        or request.source_type != "raw"
+        or request.custom_git_branch
+        or request.runtime_port is not None
+        or not request.server_id
+        or bool(request.environment_id) == new_placement
+        or (request.project_id and not request.environment_id)
+    ):
+        raise ValueError("First production setup only creates one empty compose.")
+    profile = record_store.read_product_profile_record(product)
+    if (
+        profile.lifecycle_state != "active"
+        or profile.production_use == "live"
+        or not is_exclusive_product_lane_context(
+            context=request.context,
+            product=product,
+            owners=product_context_owners(record_store),
+        )
+    ):
+        raise ValueError("First production setup requires an active owner that is not Live.")
+    if _lane_has_usage_or_data_commitments(record_store, request):
+        raise ValueError("First production setup cannot change a lane that has deployed.")
+    _require_no_target_authority(record_store, request)
+    requested_hosts = {retained_hostname_identity(host) for host in request.domains}
+    for target in record_store.list_dokploy_target_records():
+        if requested_hosts.intersection(retained_hostname_identity(h) for h in target.domains):
+            raise ValueError("First production setup cannot claim another lane's hostname.")
+
+
+def require_empty_owned_environment(
+    record_store: PostgresRecordStore,
+    request: "DokployTargetSetupEnvelope",
+    *,
+    control_plane_root_path: Path,
+) -> None:
+    """Refuse an existing environment unless the provider confirms it is empty and this lane's."""
+    if not request.environment_id:
+        return
+    from control_plane.dokploy_inventory import (
+        InventoryUnavailable,
+        read_dokploy_project_membership,
+    )
+
+    try:
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root_path)
+        projects = read_dokploy_project_membership(host=host, token=token)
+    except (InventoryUnavailable, OSError, ValueError, click.ClickException) as error:
+        raise ValueError("The provider environment could not be confirmed empty.") from error
+    matches = [
+        (project, environment)
+        for project in projects
+        for environment in project.environments
+        if environment.environment_id == request.environment_id
+    ]
+    if len(matches) != 1 or request.project_id not in {"", matches[0][0].project_id}:
+        raise ValueError("The provider environment was not found in the named project.")
+    project, environment = matches[0]
+    if environment.targets:
+        raise ValueError("The provider environment is not empty.")
+    project_targets = {
+        target.target_id for sibling in project.environments for target in sibling.targets
+    }
+    # Previews can be unrecorded, so ownership needs one of this context's targets and no other's.
+    contexts = {
+        record.context
+        for record in record_store.list_dokploy_target_id_records()
+        if record.target_id in project_targets
+    } | {
+        record.context
+        for record in record_store.list_physical_provider_target_records()
+        if record.target_id in project_targets
+    }
+    if contexts != {request.context}:
+        raise ValueError("The provider project does not belong only to this product's context.")
 
 
 class DokployTargetSetupEnvelope(BaseModel):

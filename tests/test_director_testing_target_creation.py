@@ -12,9 +12,11 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.dokploy_inventory import TARGET_COLLECTIONS
 from control_plane.dokploy_target_setup_http import (
     CREATE_COMPOSE_SOURCE_LABEL,
     DokployTargetSetupEnvelope,
+    first_production_target_lock_name,
 )
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.testing_lane_hold import (
@@ -390,6 +392,330 @@ class DirectorTestingTargetCreationTests(_DirectorTestingSetupFixture):
         self.assertEqual(result.status_code, 400, result.text)
         self.provider.assert_called_once()
         self.assert_production_unchanged()
+
+
+class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
+    """A product not marked Live staging its first empty compose in its own empty environment."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        staged = LaunchplaneProductProfileRecord.model_validate(
+            _generic_site_profile_payload("staged-site")
+        )
+        self.staged = staged.model_copy(
+            update={
+                "production_use": "unknown",
+                "lanes": tuple(lane for lane in staged.lanes if lane.instance == "testing"),
+                "expected_config": staged.expected_config.model_copy(
+                    update={"runtime_environment_keys": (), "managed_secret_bindings": ()}
+                ),
+            }
+        )
+        self.store.write_product_profile_record(self.staged)
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context="staged-site",
+                instance="testing",
+                target_id="tracked-testing-compose",
+                updated_at=self.profile.updated_at,
+            )
+        )
+        self.payload = {
+            "mode": "apply",
+            "operation": "create-compose",
+            "context": "staged-site",
+            "instance": "prod",
+            "target_name": "staged-site-prod",
+            "environment_id": "empty-production-environment",
+            "server_id": "production-server",
+            "healthcheck_path": "/health",
+            "domains": ["prod.staged-site.example"],
+            "reason": "Stage the first empty production compose.",
+        }
+        self.payload["confirmation"] = DokployTargetSetupEnvelope.model_validate(
+            self.payload
+        ).expected_confirmation
+        self.inventory: list[dict[str, Any]] = [
+            self.project(
+                "staged-project",
+                self.environment("empty-production-environment"),
+                self.environment(
+                    "testing-environment",
+                    compose=[
+                        {"composeId": "tracked-testing-compose"},
+                        {"composeId": "unrecorded-preview-compose"},
+                    ],
+                ),
+            )
+        ]
+        self.provider_read = self.enterContext(
+            patch(
+                "control_plane.dokploy_inventory.api.dokploy_request",
+                side_effect=lambda **_kwargs: self.inventory,
+            )
+        )
+        self.route = self.enterContext(
+            patch(
+                "control_plane.dokploy_target_setup_http.dokploy_compose.ensure_compose_web_domain_route"
+            )
+        )
+        self.enterContext(
+            patch(
+                "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                return_value={
+                    "composeId": "created-compose",
+                    "name": "staged-site-prod",
+                    "environmentId": "empty-production-environment",
+                    "serverId": "production-server",
+                    "sourceType": "raw",
+                },
+            )
+        )
+
+    @staticmethod
+    def environment(environment_id: str, **collections: list[dict[str, str]]) -> dict[str, Any]:
+        return {
+            "environmentId": environment_id,
+            "name": environment_id,
+            **{collection: [] for collection in TARGET_COLLECTIONS},
+            **collections,
+        }
+
+    @staticmethod
+    def project(project_id: str, *environments: dict[str, Any]) -> dict[str, Any]:
+        return {"projectId": project_id, "name": project_id, "environments": list(environments)}
+
+    def mark_production_use(self, production_use: Literal["prelaunch", "live"]) -> None:
+        self.staged = self.staged.model_copy(update={"production_use": production_use})
+        self.store.write_product_profile_record(self.staged)
+
+    def assert_nothing_staged(self) -> None:
+        self.provider.assert_not_called()
+        self.route.assert_not_called()
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_provider_target_record(context_name="staged-site", instance_name="prod")
+        self.assert_production_unchanged()
+
+    async def test_director_stages_first_empty_compose_in_existing_environment(self) -> None:
+        dry = await self.post(mode="dry-run")
+        self.assertEqual(dry.status_code, 202, dry.text)
+        self.provider.assert_not_called()
+        first = await self.post()
+        self.assertEqual(first.status_code, 202, first.text)
+        self.assertEqual(
+            [call.args[2] for call in self.provider.call_args_list], [COMPOSE_CREATE_PATH]
+        )
+        created = self.provider.call_args_list[0].args[3]
+        self.assertEqual(created["environmentId"], "empty-production-environment")
+        self.assertEqual(created["serverId"], "production-server")
+        self.assertEqual(
+            self.store.read_provider_target_record(
+                context_name="staged-site", instance_name="prod"
+            ).target_id,
+            "created-compose",
+        )
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name="staged-site", instance_name="prod"
+            ).domains,
+            ("prod.staged-site.example",),
+        )
+        self.route.assert_not_called()
+        self.assertEqual(self.store.list_deployment_records(context_name="staged-site"), ())
+        self.provider.reset_mock()
+        replay = await self.post()
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.provider.assert_not_called()
+        second = await self.post(idempotency_key="different-key")
+        self.assertEqual(second.status_code, 400, second.text)
+        self.provider.assert_not_called()
+        self.assert_production_unchanged()
+
+    async def test_prelaunch_product_and_new_placement_also_stage(self) -> None:
+        self.mark_production_use("prelaunch")
+        result = await self.post(
+            environment_id="", project_name="staged-project", environment_name="production"
+        )
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertEqual(
+            [call.args[2] for call in self.provider.call_args_list],
+            [PROJECT_CREATE_PATH, ENVIRONMENT_CREATE_PATH, COMPOSE_CREATE_PATH],
+        )
+
+    async def test_terminal_director_stages_and_a_scoped_agent_cannot(self) -> None:
+        with scoped_agent_transport():
+            denied = await self.post()
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assert_nothing_staged()
+        self.app = self.make_app(
+            _local_operator_bearer_config().model_copy(
+                update={
+                    "local_operator_token": "",
+                    "terminal_agent_token": "local-operator-token",
+                    "terminal_agent_subject": "fixture-director",
+                    "terminal_agent_token_label": "fixture-terminal",
+                }
+            )
+        )
+        result = await self.post()
+        self.assertEqual(result.status_code, 202, result.text)
+
+    async def test_live_and_retired_products_are_refused(self) -> None:
+        for update in (
+            {"production_use": "live"},
+            {
+                "lifecycle_state": "retired",
+                "preview": self.staged.preview.model_copy(update={"enabled": False}),
+            },
+        ):
+            with self.subTest(update=update):
+                self.store.write_product_profile_record(self.staged.model_copy(update=update))
+                result = await self.post()
+                self.assertIn(result.status_code, (400, 403), result.text)
+                self.assert_nothing_staged()
+
+    async def test_setup_cannot_become_a_deploy_or_a_replacement(self) -> None:
+        provider = self.production_provider.to_deployed_target_reference().model_dump(mode="json")
+        for changes in (
+            {"source_type": "git"},
+            {"custom_git_branch": "main", "compose_path": "docker-compose.yml"},
+            {"runtime_port": 8069},
+            {"target_id": "existing-compose"},
+            {"expected_current_provider_target": provider},
+            {"environment_id": "", "project_id": "staged-project", "environment_name": "other"},
+            {"environment_id": "", "project_name": "new-project"},
+            {"server_id": ""},
+        ):
+            with self.subTest(changes=changes):
+                result = await self.post(**changes)
+                self.assertIn(result.status_code, (400, 422), result.text)
+                self.assert_nothing_staged()
+
+    async def test_a_prior_or_partial_production_lane_is_refused(self) -> None:
+        target = DokployTargetRecord(
+            context="staged-site", instance="prod", updated_at=self.profile.updated_at
+        )
+        deployment = DeploymentRecord(
+            record_id="staged-prod-deploy",
+            context="staged-site",
+            instance="prod",
+            source_git_ref="abc123",
+            deploy=DeploymentEvidence(
+                target_name="staged-site-prod",
+                target_type="compose",
+                deploy_mode="dokploy-compose-api",
+                status="fail",
+            ),
+        )
+        inventory = EnvironmentInventory(
+            context="staged-site",
+            instance="prod",
+            source_git_ref="abc123",
+            deploy=deployment.deploy,
+            updated_at=self.profile.updated_at,
+            deployment_record_id=deployment.record_id,
+        )
+        self.store.write_dokploy_target_record(target)
+        result = await self.post()
+        self.assertEqual(result.status_code, 400, result.text)
+        self.provider.assert_not_called()
+        self.store.delete_dokploy_target_record(expected_record=target)
+        self.store.write_deployment_record(deployment)
+        result = await self.post(idempotency_key="after-deploy")
+        self.assertEqual(result.status_code, 400, result.text)
+        self.store.write_environment_inventory(inventory)
+        result = await self.post(idempotency_key="after-inventory")
+        self.assertEqual(result.status_code, 400, result.text)
+        self.provider.assert_not_called()
+
+    async def test_a_hostname_recorded_on_another_lane_is_refused(self) -> None:
+        self.store.write_dokploy_target_record(
+            self.production.model_copy(update={"domains": ("PROD.staged-site.example",)})
+        )
+        result = await self.post()
+        self.assertEqual(result.status_code, 400, result.text)
+        self.provider.assert_not_called()
+
+    async def test_unconfirmed_occupied_shared_or_foreign_placement_is_refused(self) -> None:
+        staged, testing = self.inventory[0]["environments"]
+        missing_collection = {key: value for key, value in staged.items() if key != "libsql"}
+        cases: dict[str, list[dict[str, Any]]] = {
+            "absent": [self.project("staged-project", testing)],
+            "occupied": [
+                self.project(
+                    "staged-project",
+                    self.environment(
+                        "empty-production-environment", compose=[{"composeId": "occupying"}]
+                    ),
+                    testing,
+                )
+            ],
+            "database": [
+                self.project(
+                    "staged-project",
+                    self.environment(
+                        "empty-production-environment", postgres=[{"postgresId": "database"}]
+                    ),
+                    testing,
+                )
+            ],
+            "collection unknown": [self.project("staged-project", missing_collection, testing)],
+            "shared with a live lane": [
+                self.project(
+                    "staged-project",
+                    staged,
+                    testing,
+                    self.environment(
+                        "live-environment",
+                        compose=[{"composeId": self.production_id.target_id}],
+                    ),
+                )
+            ],
+            "no target owned by this product": [
+                self.project(
+                    "foreign-project",
+                    staged,
+                    self.environment("foreign-environment", compose=[{"composeId": "unrecorded"}]),
+                )
+            ],
+            "entirely empty project": [self.project("foreign-project", staged)],
+        }
+        for name, inventory in cases.items():
+            with self.subTest(name):
+                self.inventory = inventory
+                result = await self.post()
+                self.assertEqual(result.status_code, 400, result.text)
+                self.assert_nothing_staged()
+
+    async def test_unreadable_provider_or_wrong_project_is_refused(self) -> None:
+        wrong_project = await self.post(project_id="foreign-project")
+        self.assertEqual(wrong_project.status_code, 400, wrong_project.text)
+        self.assert_nothing_staged()
+        self.provider_read.side_effect = TimeoutError("fixture unavailable")
+        result = await self.post()
+        self.assertEqual(result.status_code, 400, result.text)
+        self.assert_nothing_staged()
+
+    async def test_going_live_mid_setup_stops_the_next_provider_effect(self) -> None:
+        def create_project(*_args: Any) -> dict[str, str]:
+            self.mark_production_use("live")
+            return {"projectId": "created-project"}
+
+        self.provider.side_effect = create_project
+        result = await self.post(
+            environment_id="", project_name="staged-project", environment_name="production"
+        )
+        self.assertEqual(result.status_code, 400, result.text)
+        self.provider.assert_called_once()
+
+    async def test_a_concurrent_first_setup_is_refused(self) -> None:
+        with self.store.testing_replacement_execution_lock(
+            first_production_target_lock_name("staged-site")
+        ) as held:
+            self.assertIsNotNone(held)
+            result = await self.post()
+        self.assertIn(result.status_code, (400, 409), result.text)
+        self.assert_nothing_staged()
 
 
 class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
