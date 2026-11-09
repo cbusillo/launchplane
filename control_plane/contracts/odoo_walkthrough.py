@@ -36,7 +36,9 @@ def walkthrough_activity_scope(product: str) -> str:
 class WalkthroughStep(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["open", "click", "fill", "visible", "screenshot", "sign_out", "sign_in"]
+    action: Literal[
+        "open", "click", "fill", "visible", "screenshot", "sign_out", "sign_in", "upload"
+    ]
     selector: str = Field(default="", max_length=500)
     value: str = Field(default="", max_length=2000)
 
@@ -59,6 +61,12 @@ class WalkthroughStep(BaseModel):
                 raise ValueError("Open accepts only the testing web client and its fragment.")
         elif self.action not in {"screenshot", "sign_out", "sign_in"} and not self.selector.strip():
             raise ValueError("A browser interaction requires a selector.")
+        if self.action == "upload":
+            # CSV text only: the browser fixes the file's name and type, and a
+            # native import's header owns its first line, so no TEST prefix.
+            if not self.value.strip():
+                raise ValueError("A file step requires CSV text.")
+            return self
         if self.action in {"sign_out", "sign_in"} and self.selector:
             raise ValueError("Sign-in controls do not accept selectors.")
         if self.action == "fill" and not self.value.startswith("TEST"):
@@ -108,8 +116,8 @@ class OdooWalkthroughRequest(BaseModel):
             if self.groups not in {("base.group_user",), (WALKTHROUGH_READONLY_GROUP,)}:
                 raise ValueError("Read-only identities cannot select business roles.")
             self.groups = (WALKTHROUGH_READONLY_GROUP,)
-            if any(step.action == "fill" for step in self.steps):
-                raise ValueError("Read-only checks cannot fill forms.")
+            if any(step.action in {"fill", "upload"} for step in self.steps):
+                raise ValueError("Read-only checks cannot fill forms or supply files.")
 
         if self.mode == "apply" and not self.reviewed_plan_sha256:
             raise ValueError("Apply requires the reviewed plan digest.")

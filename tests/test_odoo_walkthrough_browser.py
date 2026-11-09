@@ -109,6 +109,55 @@ class OpaqueBrowserTests(unittest.TestCase):
         self.context.request.post.assert_not_called()
         self.context.close.assert_called_once()
 
+    def test_upload_gives_the_checked_file_input_a_csv_built_from_the_step(self) -> None:
+        step = WalkthroughStep(
+            action="upload", selector="input[name=ufile]", value="id,name\nx,Y\n"
+        )
+        passed, _ = self.run_browser(step)
+        self.assertEqual(passed, 1)
+        control = self.page.locator.return_value
+        control.evaluate.assert_called_once()
+        file = control.set_input_files.call_args.args[0]
+        self.assertEqual(file["buffer"], b"id,name\nx,Y\n")
+        self.assertEqual(file["mimeType"], "text/csv")
+        self.assertTrue(file["name"].endswith(".csv"))
+
+    def test_unsafe_or_readonly_file_step_never_supplies_a_file(self) -> None:
+        step = WalkthroughStep(action="upload", selector="input", value="id\nx\n")
+        control = self.page.locator.return_value
+        control.evaluate.return_value = False
+        with self.assertRaises(ValueError):
+            self.run_browser(step)
+        control.set_input_files.assert_not_called()
+        self.context.request.post.reset_mock()
+        with self.assertRaises(ValueError):
+            self.run_browser(step, read_only=True)
+        self.context.request.post.assert_not_called()
+
+    def test_writable_task_reaches_native_import_test_but_not_its_commit(self) -> None:
+        self.run_browser()
+        handle = self.context.route.call_args.args[1]
+        url = "https://testing.example/web/dataset/call_kw/base_import.import/execute_import"
+        for kwargs, allowed in (
+            ({"dryrun": True}, True),
+            ({"dryrun": False}, False),
+            ({}, False),
+        ):
+            with self.subTest(kwargs=kwargs):
+                route = MagicMock()
+                route.request.url = url
+                route.request.post_data_json = {
+                    "params": {"method": "execute_import", "args": [1], "kwargs": kwargs}
+                }
+                handle(route)
+                self.assertEqual(route.continue_.called, allowed)
+                self.assertEqual(route.abort.called, not allowed)
+        upload = MagicMock()
+        upload.request.url = "https://testing.example/base_import/set_file"
+        type(upload.request).post_data_json = PropertyMock(side_effect=PlaywrightError("multipart"))
+        handle(upload)
+        upload.continue_.assert_called_once()
+
     def test_external_requests_websockets_and_login_pages_are_blocked(self) -> None:
         self.run_browser()
         handle = self.context.route.call_args.args[1]
