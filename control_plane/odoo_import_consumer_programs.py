@@ -34,6 +34,10 @@ CONSUMER_LIBRARY = r"""
 import subprocess
 consumer_mode=__CONSUMER_MODE__
 
+def source_tls_accepted(name,options,raw_verify):
+    return (tls(options)=='enabled_with_verification'
+        or (name=='fishbowl' and tls(options)=='verification_disabled' and raw_verify.lower() in ('false','0')))
+
 def effective_settings(name,module,payload_producer,payload,applied):
     prefix=spec['prefixes'][name]+'.'
     metadata=spec['metadata'][name]
@@ -65,7 +69,7 @@ def effective_settings(name,module,payload_producer,payload,applied):
         raise ValueError()
     options=options_projection(module,current)
     delivered_options=options_projection(module,effective)
-    if projection(resolved)!=options or projection(selected)!=delivered_options or tls(options)!='enabled_with_verification':
+    if projection(resolved)!=options or projection(selected)!=delivered_options or not source_tls_accepted(name,options,current.get(prefix+'ssl_verify','')):
         raise ValueError()
     fields=(*__GRANT_FIELDS__,'use_ssl','password')
     if consumer_mode=='preview':
@@ -86,7 +90,8 @@ def source_result(name,module,payload_producer,payload,applied):
         return {'source':name,'parameters':{'host':settings.host,'user':settings.user,'db':settings.database,
                 'port':str(settings.port),'ssl_verify':'True' if settings.ssl_verify else 'False'}}
     child=subprocess.run([sys.executable,'-I','-c',__PROBE__],
-        input=json.dumps({'host':settings.host,'user':settings.user,'password':settings.password,'port':str(settings.port)}),
+        input=json.dumps({'host':settings.host,'user':settings.user,'password':settings.password,'port':str(settings.port),
+            **({} if settings.ssl_verify else {'ssl_verify':'false'})}),
         text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
         env={key:os.environ[key] for key in ('SSL_CERT_FILE','SSL_CERT_DIR') if os.environ.get(key)},timeout=10,check=False)
     result={'source':name}

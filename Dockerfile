@@ -33,9 +33,9 @@ FROM mirror.gcr.io/library/golang:1.26.10-bookworm AS github-cli-build
 
 ARG GITHUB_CLI_VERSION=v2.98.0
 ARG GITHUB_CLI_GRPC_VERSION=v1.83.2
-ARG GITHUB_CLI_X_CRYPTO_VERSION=v0.57.0
-ARG GITHUB_CLI_X_TEXT_VERSION=v0.42.0
-ARG GITHUB_CLI_X_NET_VERSION=v0.60.0
+ARG GITHUB_CLI_X_CRYPTO_VERSION=v0.58.0
+ARG GITHUB_CLI_X_TEXT_VERSION=v0.43.0
+ARG GITHUB_CLI_X_NET_VERSION=v0.62.0
 
 ENV CGO_ENABLED=0 \
     GOTOOLCHAIN=local
@@ -62,6 +62,7 @@ FROM mirror.gcr.io/library/golang:1.27.3-bookworm AS artifact-scanner
 
 ARG TRIVY_VERSION=v0.76.0
 ARG TRIVY_GO_JOSE_VERSION=v4.1.6
+ARG TRIVY_X_NET_VERSION=v0.62.0
 
 ENV CGO_ENABLED=0 \
     GOTOOLCHAIN=local
@@ -71,11 +72,13 @@ RUN mkdir -p /tmp/artifact-scanner-build \
     && go mod init launchplane.local/artifact-scanner-build \
     && go get "github.com/aquasecurity/trivy/cmd/trivy@${TRIVY_VERSION}" \
     && go get "github.com/go-jose/go-jose/v4@${TRIVY_GO_JOSE_VERSION}" \
+    && go get "golang.org/x/net@${TRIVY_X_NET_VERSION}" \
     && go build -trimpath -o /go/bin/trivy \
         -ldflags="-s -w -extldflags=-static -X github.com/aquasecurity/trivy/pkg/version/app.ver=${TRIVY_VERSION#v}" \
         github.com/aquasecurity/trivy/cmd/trivy \
     && go version -m /go/bin/trivy | grep -F "github.com/aquasecurity/trivy" | grep -F "${TRIVY_VERSION}" \
     && go version -m /go/bin/trivy | grep -F "github.com/go-jose/go-jose/v4" | grep -F "${TRIVY_GO_JOSE_VERSION}" \
+    && go version -m /go/bin/trivy | grep -F "golang.org/x/net" | grep -F "${TRIVY_X_NET_VERSION}" \
     && /go/bin/trivy --version
 
 FROM python-base AS runtime

@@ -184,7 +184,7 @@ class RuntimeSourceTests(PrerequisiteFixture):
                 self.assertEqual(self.probes, [])
 
     def test_applied_password_tls_and_payload_disagreement_remain_unknown(self) -> None:
-        for kind in ("delivered_password", "disabled_tls", "payload_mismatch"):
+        for kind in ("delivered_password", "payload_mismatch"):
             with self.subTest(kind=kind):
                 self.probes.clear()
                 self.set_overrides({"fishbowl.db": "inventory"})
@@ -192,8 +192,6 @@ class RuntimeSourceTests(PrerequisiteFixture):
                 self.env[config_parameter_secret_env_key("fishbowl.password")] = PRIVATE
                 if kind == "delivered_password":
                     self.values["fishbowl.password"] = "different-value"
-                elif kind == "disabled_tls":
-                    self.values["fishbowl.ssl_verify"] = "false"
                 elif kind == "payload_mismatch":
                     payload = json.loads(
                         base64.b64decode(self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY])
@@ -211,6 +209,36 @@ class RuntimeSourceTests(PrerequisiteFixture):
                 self.assertFalse(source.parameters)
                 self.assertEqual(source.failure_stage, "source_resolution")
                 self.values["fishbowl.password"] = PRIVATE
+
+    def test_fishbowl_verification_off_reaches_the_importer_settings(self) -> None:
+        self.values["fishbowl.ssl_verify"] = "false"
+        source = next(item for item in self.consume("preview").sources if item.source == "fishbowl")
+        self.assertEqual(source.parameters["ssl_verify"], "False")
+        self.assertIsNone(source.failure_stage)
+
+    def test_misspelled_fishbowl_setting_is_not_an_opt_out(self) -> None:
+        self.values["fishbowl.ssl_verify"] = "flase"
+        for mode in ("preview", "grants"):
+            with self.subTest(mode=mode):
+                source = next(
+                    item for item in self.consume(mode).sources if item.source == "fishbowl"
+                )
+                self.assertFalse(source.parameters)
+                self.assertEqual(source.grants, "unknown")
+                self.assertEqual(source.failure_stage, "source_resolution")
+        self.assertNotIn("fishbowl.invalid", {probe["host"] for probe in self.probes})
+
+    def test_runtime_probe_honors_fishbowl_verification_off_and_no_other_source(self) -> None:
+        self.values["fishbowl.ssl_verify"] = "false"
+        self.values[SOURCE_PREFIXES["cm_data"] + ".ssl_verify"] = "false"
+        sources = {item.source: item for item in self.consume().sources}
+        self.assertEqual(sources["fishbowl"].grants, "read_only")
+        self.assertEqual(sources["cm_data"].grants, "unknown")
+        self.assertEqual(sources["cm_data"].failure_stage, "source_resolution")
+        hosts = {probe["host"]: probe for probe in self.probes}
+        self.assertEqual(hosts["fishbowl.invalid"]["ssl_verify"], "false")
+        self.assertNotIn("cm_data.invalid", hosts)
+        self.assertNotIn("ssl_verify", hosts["repairshopr.invalid"])
 
     def test_parameter_and_container_drift_discards_the_observation(self) -> None:
         for kind in ("parameter", "container", "image"):

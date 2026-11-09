@@ -906,6 +906,23 @@ class GrantTests(unittest.TestCase):
         self.assertTrue(connect.call_args.kwargs["ssl"].check_hostname)
         connection.close.assert_called_once()
 
+    def test_service_origin_read_never_connects_with_verification_off(self) -> None:
+        settings = {"host": "source.invalid", "user": "reader", "password": PRIVATE}
+        for value in ("false", "0"):
+            with (
+                self.subTest(value=value),
+                patch("control_plane.odoo_import_diagnostics.subprocess.run") as run,
+            ):
+                self.assertEqual(
+                    diagnostic.managed_grants(
+                        {**settings, "ssl_verify": value},
+                        binding_id="fixture-binding",
+                        version_id=f"verification-off-{value}",
+                    ),
+                    "unknown",
+                )
+                run.assert_not_called()
+
     def test_child_masks_auth_dns_and_driver_failures(self) -> None:
         for index, error in enumerate(
             (OSError(PRIVATE), ValueError(PRIVATE), RuntimeError(PRIVATE))
