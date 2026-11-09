@@ -130,6 +130,16 @@ through [pending request withdrawal](#withdrawing-a-pending-request). Withdrawal
 returns the change to standing acceptance; a saved Client rejection still vetoes it.
 Production release remains on the gated path described in [release-review.md](release-review.md), including its checklist-note validation.
 
+Recording `director_standing` attests that the named Client is the Director, and
+that attestation names an immutable GitHub ID. Merge admission, preview review
+and the Client-review check therefore apply the same rule to any active product
+whose recorded Client has that ID, whatever its own release mode. Such a product
+can stay `held`: only its own `release_on_acceptance` decides what a release
+acceptance starts. Clearing or changing a Client ID, or removing every active
+`director_standing` record for it, returns that Client's products to ordinary
+Client review. `GET /v1/product-profiles/{product}` reports the result as
+`client_is_director`, which the shared Ready helper reads.
+
 The Client named on the product profile reviews a preview at `/ui/owner-review`.
 Accept appears only when the serving preview is verified for the open PR's
 exact current head. The Client opens that preview and confirms “I looked at

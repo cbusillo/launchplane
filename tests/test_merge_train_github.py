@@ -3997,9 +3997,11 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 repository="example/site",
                 release_on_acceptance=mode,
                 preview=SimpleNamespace(enabled=False, context=""),
-                owner=SimpleNamespace(is_set=True, review_label="owner-review"),
+                owner=SimpleNamespace(
+                    is_set=True, github_id=github_id, review_label="owner-review"
+                ),
             )
-            for mode in ("director_standing", "held")
+            for mode, github_id in (("director_standing", "1"), ("held", "2"))
         )
         reader = GitHubMergeTrainSnapshotReader(
             transport=RecordingMergeTrainGitHubTransport(responses=()),
@@ -4012,6 +4014,48 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         )
         self.assertTrue(intent.review_required)
         self.assertFalse(intent.error)
+
+    def test_held_product_of_the_standing_client_merges_without_a_preview_review(self) -> None:
+        for held_client_id, labels, review_required in (
+            ("1", (), False),
+            ("1", ("owner-review",), True),
+            ("2", (), True),
+        ):
+            with self.subTest(held_client_id=held_client_id, labels=labels):
+                profiles = (
+                    SimpleNamespace(
+                        is_active=True,
+                        repository="example/standing-tool",
+                        release_on_acceptance="director_standing",
+                        driver_id="generic-web",
+                        lanes=(),
+                        owner=SimpleNamespace(
+                            is_set=True, github_id="1", review_label="owner-review"
+                        ),
+                    ),
+                    SimpleNamespace(
+                        is_active=True,
+                        repository="example/held-site",
+                        release_on_acceptance="held",
+                        driver_id="odoo",
+                        lanes=(),
+                        owner=SimpleNamespace(
+                            is_set=True, github_id=held_client_id, review_label="owner-review"
+                        ),
+                    ),
+                )
+                reader = GitHubMergeTrainSnapshotReader(
+                    transport=RecordingMergeTrainGitHubTransport(responses=()),
+                    branch_refresh_store=cast(
+                        Any, SimpleNamespace(list_product_profile_records=lambda: profiles)
+                    ),
+                )
+                intent = reader.client_review_intent(
+                    labels=labels,
+                    repository="example/held-site",
+                    body="## Client test notes\nTry the changed page.",
+                )
+                self.assertIs(intent.review_required, review_required)
 
     def test_client_review_requires_the_current_head_advisory_check_without_status_fallback(
         self,

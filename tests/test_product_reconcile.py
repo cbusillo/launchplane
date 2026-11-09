@@ -7717,6 +7717,32 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         self.assertEqual(self.reconcile()["action"], "wait")
 
+    def test_held_product_of_the_standing_client_invites_no_preview_review(self) -> None:
+        owner = {"github_login": "site-owner", "github_id": "4242"}
+        payload = _generic_web_preview_profile().model_dump(mode="json")
+        payload["owner"] = owner
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        standing = _generic_web_preview_profile().model_dump(mode="json")
+        standing["product"] = "standing-tool"
+        standing["repository"] = "example/standing-tool"
+        standing["owner"] = owner
+        standing["release_on_acceptance"] = "director_standing"
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(standing)
+        )
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.pull_request.update(
+            body="## Client test notes\nTry the approval buttons.", labels=[]
+        )
+        self.request("preview", 5)
+
+        result = self.reconcile()
+
+        self.assertIn(result["action"], ("apply", "none"))
+        self.assertIs(result["owner_review_requested"], False)
+
     def test_reset_preview_head_keeps_the_serving_build(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)

@@ -7,7 +7,40 @@ from unittest.mock import patch
 
 from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
 
+from control_plane.client_release_repositories import client_is_director
 from control_plane.client_test_notes import change_client_review, client_test_notes
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductOwnerProfile,
+)
+from tests.support.profiles import product_profile_payload
+
+
+def _client_profile(product: str, github_id: str = "4242") -> LaunchplaneProductProfileRecord:
+    payload = product_profile_payload(product)
+    payload["owner"] = {"github_login": "client", "github_id": github_id}
+    return LaunchplaneProductProfileRecord.model_validate(payload)
+
+
+def _standing(profile: LaunchplaneProductProfileRecord) -> LaunchplaneProductProfileRecord:
+    return profile.model_copy(update={"release_on_acceptance": "director_standing"})
+
+
+class ClientIsDirectorTests(unittest.TestCase):
+    def test_only_an_active_attestation_for_the_same_client_counts(self) -> None:
+        held = _client_profile("held-site")
+        attested = _standing(_client_profile("tool"))
+        self.assertTrue(client_is_director(held, (held, attested)))
+        self.assertTrue(client_is_director(attested, ()))
+        self.assertFalse(client_is_director(held, (held,)))
+        self.assertFalse(
+            client_is_director(held, (attested.model_copy(update={"lifecycle_state": "retired"}),))
+        )
+        self.assertFalse(client_is_director(held, (_standing(_client_profile("tool", "9002")),)))
+
+    def test_a_product_without_a_client_is_never_the_directors(self) -> None:
+        no_client = _client_profile("held-site").model_copy(update={"owner": ProductOwnerProfile()})
+        self.assertFalse(client_is_director(no_client, (_standing(no_client),)))
 
 
 class ClientTestNotesTests(unittest.TestCase):

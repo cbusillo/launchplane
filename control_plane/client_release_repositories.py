@@ -1,5 +1,6 @@
 """Resolve Client release inputs from product and artifact records, never a catalog."""
 
+from collections.abc import Iterable
 from typing import Protocol
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -14,6 +15,20 @@ class ClientReleaseRepositoryStore(Protocol):
         self, *, context_name: str, channel_name: str
     ) -> ReleaseTupleRecord: ...
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
+
+
+def client_is_director(
+    profile: LaunchplaneProductProfileRecord,
+    profiles: Iterable[LaunchplaneProductProfileRecord],
+) -> bool:
+    if profile.release_on_acceptance == "director_standing":
+        return True
+    return profile.owner.is_set and any(
+        other.is_active
+        and other.release_on_acceptance == "director_standing"
+        and other.owner.github_id == profile.owner.github_id
+        for other in profiles
+    )
 
 
 def client_release_profiles(

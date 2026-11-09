@@ -352,6 +352,20 @@ class ClientReleaseTests(unittest.TestCase):
             current.model_copy(update={"release_on_acceptance": mode})
         )
 
+    def test_held_product_of_the_standing_client_still_starts_no_release(self) -> None:
+        self.switch("held")
+        current = self.store.read_product_profile_record(PRODUCT)
+        self.store.write_product_profile_record(
+            current.model_copy(
+                update={
+                    "product": "standing-tool",
+                    "repository": "example/standing-tool",
+                    "release_on_acceptance": "director_standing",
+                }
+            )
+        )
+        self.assertEqual(release_start_for_acceptance(store=self.store, profile=current), "")
+
     def accept(self, *, date: str = "2026-09-23T01:00:00Z") -> ReleaseReviewDecisionRecord:
         accepted = decision(self.store, date=date).model_copy(
             update={

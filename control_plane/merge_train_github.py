@@ -80,6 +80,7 @@ from control_plane.contracts.merge_train_policy import MergeTrainEnqueuePolicy
 from control_plane.artifact_release_inputs import repository_key
 from control_plane.client_release_repositories import (
     ClientReleaseRepositoryStore,
+    client_is_director,
     client_release_profiles,
     recorded_train_candidate,
 )
@@ -5060,13 +5061,14 @@ class GitHubMergeTrainSnapshotReader:
             store=cast(ClientReleaseRepositoryStore, self._branch_refresh_store),
             repository=repository,
         )
+        inventory = cast(
+            ClientReleaseRepositoryStore, self._branch_refresh_store
+        ).list_product_profile_records()
         # Preserve the explicit override even before a product has a Client:
         # a missing Client cannot make a marked change engineering-only.
         profiles += tuple(
             profile
-            for profile in cast(
-                ClientReleaseRepositoryStore, self._branch_refresh_store
-            ).list_product_profile_records()
+            for profile in inventory
             if profile.is_active
             and not profile.owner.is_set
             and repository_key(profile.repository) == repository_key(repository)
@@ -5089,7 +5091,7 @@ class GitHubMergeTrainSnapshotReader:
                 labels=labels,
                 review_label=profile.owner.review_label,
                 pure_dependency_update=dependency_only,
-                director_standing=profile.release_on_acceptance == "director_standing",
+                director_standing=client_is_director(profile, inventory),
             )
             for profile in profiles
         )

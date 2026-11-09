@@ -862,6 +862,60 @@ class OwnerReviewStatusTests(unittest.TestCase):
                     )
                 )
 
+    def test_held_product_of_the_standing_client_publishes_the_standing_status(self) -> None:
+        standing = product_profile_payload("standing-tool")
+        standing["owner"] = {"github_login": "site-owner", "github_id": str(_OWNER_GITHUB_ID)}
+        standing["release_on_acceptance"] = "director_standing"
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(standing)
+        )
+        github = _GitHub(labels=())
+        github.body = "## Client test notes\nTry the approval buttons."
+        profile = _profile().model_copy(update={"release_on_acceptance": "held"})
+
+        result = _publisher(github).publish(
+            store=require_product_review_store(self.store),
+            profile=profile,
+            pull_request_number=_PULL_REQUEST,
+        )
+
+        assert result is not None
+        self.assertEqual(result.state, "neutral")
+        self.assertEqual(
+            result.description, "Director standing acceptance; no Client preview review required"
+        )
+        self.assertEqual(profile.release_on_acceptance, "held")
+
+        self.store.write_product_review_decision_record(
+            _decision(decision="changes_requested", decided_at="2026-09-20T10:00:00Z")
+        )
+        vetoed = _publisher(github).publish(
+            store=require_product_review_store(self.store),
+            profile=profile,
+            pull_request_number=_PULL_REQUEST,
+        )
+        assert vetoed is not None
+        self.assertEqual(vetoed.state, "failure")
+
+    def test_another_clients_standing_product_leaves_this_client_waiting(self) -> None:
+        standing = product_profile_payload("standing-tool")
+        standing["owner"] = {"github_login": "other-owner", "github_id": "9002"}
+        standing["release_on_acceptance"] = "director_standing"
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(standing)
+        )
+        github = _GitHub(labels=())
+        github.body = "## Client test notes\nTry the approval buttons."
+
+        result = _publisher(github).publish(
+            store=require_product_review_store(self.store),
+            profile=_profile(),
+            pull_request_number=_PULL_REQUEST,
+        )
+
+        assert result is not None
+        self.assertEqual(result.state, "pending")
+
     def test_decision_for_the_current_head_decides_the_status(self) -> None:
         cases: tuple[tuple[ProductReviewDecision, str, str], ...] = (
             ("accepted", "success", "Accepted by @site-owner"),
@@ -1692,15 +1746,33 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no Client is set", feedback.comment_markdown)
 
     async def test_director_standing_ready_feedback_sends_no_client_invitation(self) -> None:
-        from contextlib import nullcontext
-        from control_plane.workflows.preview_pr_feedback import pull_request_client_review
-
         payload = product_profile_payload("verireel")
         payload["release_on_acceptance"] = "director_standing"
         payload["owner"] = {"github_login": "site-owner", "github_id": str(_OWNER_GITHUB_ID)}
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(payload)
         )
+        await self._assert_ready_feedback_invites_no_client()
+
+    async def test_held_product_of_the_standing_client_ready_feedback_invites_no_client(
+        self,
+    ) -> None:
+        owner = {"github_login": "site-owner", "github_id": str(_OWNER_GITHUB_ID)}
+        held = product_profile_payload("verireel")
+        held["owner"] = owner
+        standing = product_profile_payload("standing-tool")
+        standing["owner"] = owner
+        standing["release_on_acceptance"] = "director_standing"
+        for payload in (held, standing):
+            self.store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(payload)
+            )
+        await self._assert_ready_feedback_invites_no_client()
+
+    async def _assert_ready_feedback_invites_no_client(self) -> None:
+        from contextlib import nullcontext
+        from control_plane.workflows.preview_pr_feedback import pull_request_client_review
+
         app = create_launchplane_fastapi_app(
             verifier=StubVerifier(_preview_pr_feedback_identity()),
             authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
