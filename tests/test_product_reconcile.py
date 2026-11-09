@@ -928,12 +928,9 @@ class ProductReconcileStoreTests(ProductReconcileTestCase):
 
 
 class ProductReconcileTestingTests(ProductReconcileTestCase):
-    def test_requested_migrated_release_selects_the_main_build_its_pair_was_made_for(
-        self,
-    ) -> None:
+    def test_migrated_release_selects_its_pair_main_build_after_main_moves_on(self) -> None:
         from control_plane.product_reconcile import verified_testing_rebuild_artifact
 
-        # Main moved on after the pair was produced; the pair's own build still qualifies.
         self._running_release(20, DEPLOYABLE)
         self.github.add_run(10, OLDER)
         profile = self.store.read_product_profile_record("site")
@@ -946,8 +943,14 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             (older.manifest.source_commit, older.manifest.source_build.purpose),
             (OLDER, "release"),
         )
-        # A push build of a commit that never was main's tip is still refused.
+
+    def test_migrated_release_refuses_a_push_build_that_never_was_main_tip(self) -> None:
+        from control_plane.product_reconcile import verified_testing_rebuild_artifact
+
+        self._running_release(20, DEPLOYABLE)
         self.github.add_run(50, PR_HEAD)
+        profile = self.store.read_product_profile_record("site")
+        lane = next(item for item in profile.lanes if item.instance == "testing")
         with self.assertRaises(BuildProvenanceError):
             verified_testing_rebuild_artifact(
                 self.store,

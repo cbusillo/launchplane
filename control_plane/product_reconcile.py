@@ -3960,9 +3960,6 @@ def verified_testing_rebuild_artifact(
     except BuildProvenanceError as error:
         if error.code != "build_purpose_mismatch":
             raise
-    # A migrated pair is bound to the image it was produced with, so any verified main
-    # build qualifies, not only the newest. Reconciliation then moves testing forward on
-    # the restored data like any other release.
     verified = verify_build_artifact(
         transport=transport,
         repository=profile.repository,
