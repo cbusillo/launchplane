@@ -26,9 +26,7 @@ RUNNER_LOSS_MESSAGES = (
     "received a shutdown signal",
     "was not acquired by runner",
 )
-# A step environment line, as GitHub echoes it, holding only `needs.<job>.result`
-# values; `abandoned` is the result of a needed job GitHub never created.
-ABANDONED_NEEDS_RESULT = re.compile(
+STEP_ENV_LINE_OF_JOB_RESULTS_WITH_ABANDONED = re.compile(
     r"^\S*\s+[A-Z][A-Z0-9_]*: (?:(?:success|failure|cancelled|skipped|abandoned) )*"
     r"abandoned(?: (?:success|failure|cancelled|skipped|abandoned))*\r?$",
     re.MULTILINE,
@@ -203,7 +201,7 @@ def _gate_needed_jobs_never_ran(
     ):
         return False
     log = read_job_log(failure.check_run_id)
-    return log is not None and ABANDONED_NEEDS_RESULT.search(log) is not None
+    return log is not None and STEP_ENV_LINE_OF_JOB_RESULTS_WITH_ABANDONED.search(log) is not None
 
 
 def _sole_failed_check_run_ids(check_runs: list[dict[str, object]]) -> set[int]:
