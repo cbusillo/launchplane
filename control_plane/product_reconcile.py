@@ -58,7 +58,7 @@ from control_plane.client_test_notes import (
     open_client_questions,
 )
 from control_plane.dependency_update_review import pure_dependency_update
-from control_plane.client_release_repositories import recorded_train_candidate
+from control_plane.client_release_repositories import client_is_director, recorded_train_candidate
 from control_plane.product_reconcile_read import preview_refresh_failure
 from control_plane import secrets
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
@@ -2333,7 +2333,7 @@ def _plan_preview_target(
             read=transport.get_json,
             store=record_store,
         ),
-        director_standing=profile.release_on_acceptance == "director_standing",
+        director_standing=client_is_director(profile, record_store.list_product_profile_records()),
     )
     train_candidate = recorded_train_candidate(
         store=record_store,

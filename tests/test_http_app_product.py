@@ -2290,6 +2290,43 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["profiles"], [profile.model_dump(mode="json")])
         self.assertEqual(response.json()["coverage"]["status"], "complete")
 
+    async def test_show_product_profile_reports_a_held_product_of_the_standing_client(self) -> None:
+        owner = {"github_login": "the-director", "github_id": "4242"}
+        for standing_owner, expected in ((owner, True), ({**owner, "github_id": "9002"}, None)):
+            with self.subTest(standing_owner=standing_owner):
+                with TemporaryDirectory() as temporary_directory_name:
+                    record_store = FilesystemRecordStore(
+                        state_dir=Path(temporary_directory_name) / "state"
+                    )
+                    record_store.write_product_profile_record(
+                        LaunchplaneProductProfileRecord.model_validate(
+                            {**_product_profile_payload(), "owner": owner}
+                        )
+                    )
+                    record_store.write_product_profile_record(
+                        LaunchplaneProductProfileRecord.model_validate(
+                            {
+                                **_product_profile_payload(),
+                                "product": "standing-tool",
+                                "repository": "example/standing-tool",
+                                "owner": standing_owner,
+                                "release_on_acceptance": "director_standing",
+                            }
+                        )
+                    )
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(_identity()),
+                        authz_policy=_product_profile_read_policy(product="sellyouroutboard"),
+                        record_store_factory=lambda: record_store,
+                    )
+
+                    response = await _get_product_profile(app)
+
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertEqual(payload.get("client_is_director"), expected)
+                self.assertEqual(payload["profile"].get("release_on_acceptance", "held"), "held")
+
     async def test_show_product_profile_returns_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

@@ -40,7 +40,7 @@ from control_plane.client_test_notes import (
     owner_test_notes,
 )
 from control_plane.dependency_update_review import pure_dependency_update
-from control_plane.client_release_repositories import recorded_train_candidate
+from control_plane.client_release_repositories import client_is_director, recorded_train_candidate
 from control_plane.product_review import (
     ProductReviewStore,
     applicable_product_review_decisions,
@@ -236,7 +236,9 @@ class OwnerReviewStatusPublisher:
                             labels=facts.labels,
                             review_label=profile.owner.review_label,
                             pure_dependency_update=facts.pure_dependency_update,
-                            director_standing=profile.release_on_acceptance == "director_standing",
+                            director_standing=client_is_director(
+                                profile, store.list_product_profile_records()
+                            ),
                         )
                         synthetic = not intent.explicit_override and recorded_train_candidate(
                             store=store,
@@ -398,12 +400,13 @@ class OwnerReviewStatusPublisher:
         existing_only: bool = False,
         preview_request: ProductReconcileRequestRecord | None = None,
     ) -> tuple[OwnerReviewStatus, bool] | None:
+        director_is_client = client_is_director(profile, store.list_product_profile_records())
         intent = change_client_review(
             body=facts.body,
             labels=facts.labels,
             review_label=profile.owner.review_label,
             pure_dependency_update=facts.pure_dependency_update,
-            director_standing=profile.release_on_acceptance == "director_standing",
+            director_standing=director_is_client,
         )
         carry_checked = False
         if existing_only:
@@ -428,7 +431,7 @@ class OwnerReviewStatusPublisher:
             status = OwnerReviewStatus(
                 state="neutral",
                 description="Director standing acceptance; no Client preview review required"
-                if profile.release_on_acceptance == "director_standing"
+                if director_is_client
                 else "Engineering-only change; no Client preview review required",
             )
             if current is not None and current.decision == "changes_requested":

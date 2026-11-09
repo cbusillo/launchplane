@@ -7,7 +7,7 @@ from typing import Annotated, Literal, Protocol, cast
 
 import click
 from fastapi import Depends, Path, Query, Response
-from pydantic import AwareDatetime, BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from control_plane.lane_health_history import (
     HistoryQueryError,
@@ -57,6 +57,7 @@ from control_plane.contracts.product_incident_read_model import (
     require_product_incident_read_store,
     preview_fence_incident_scope,
 )
+from control_plane.client_release_repositories import client_is_director
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     product_profile_record_sha256,
@@ -278,6 +279,11 @@ class ProductProfileResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     profile: LaunchplaneProductProfileRecord
+    client_is_director: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class ProductReconcileRequestsResponse(BaseModel):
@@ -1903,7 +1909,13 @@ def register_product_profile_read_routes(
             )
         response.headers["ETag"] = f'"{product_profile_record_sha256(profile)}"'
         response.headers["Cache-Control"] = "no-store"
-        return ProductProfileResponse(trace_id=trace_id, profile=profile)
+        return ProductProfileResponse(
+            trace_id=trace_id,
+            profile=profile,
+            client_is_director=client_is_director(
+                profile, profile_store.list_product_profile_records()
+            ),
+        )
 
     def read_product_profile_mutation_receipt(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],

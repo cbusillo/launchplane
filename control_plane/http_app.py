@@ -530,6 +530,7 @@ from control_plane.launchplane_github_delivery import (
     DeliveryGitHubCredentialsUnavailable,
     delivery_github_credentials_ready,
 )
+from control_plane.client_release_repositories import client_is_director
 from control_plane.client_test_notes import ClientTestNotesRequired
 from control_plane.product_review_status import (
     OwnerReviewStatusPublisher,
@@ -25780,7 +25781,12 @@ def create_launchplane_fastapi_app(
                     label=owner_profile.owner.review_label,
                     record_store=record_store,
                     client_set=owner_profile.owner.is_set,
-                    director_standing=owner_profile.release_on_acceptance == "director_standing",
+                    director_standing=client_is_director(
+                        owner_profile,
+                        require_product_profile_read_store(
+                            record_store
+                        ).list_product_profile_records(),
+                    ),
                 )
                 if owner_review_requested and owner_profile.owner.is_set:
                     owner_login = owner_profile.owner.github_login
