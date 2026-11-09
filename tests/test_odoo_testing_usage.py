@@ -412,7 +412,7 @@ class SessionInventoryTests(unittest.TestCase):
         self.stored_session(timedelta(days=2))
         self.assertIs(self.probe_result(bounded=False)["authenticated_sessions"], False)
 
-    def test_configured_zero_keeps_the_native_default(self) -> None:
+    def test_configured_zero_keeps_the_protective_default(self) -> None:
         self.stored_session(timedelta(days=4))
         result = self.probe_result(bounded=False, configured_lifetime="0")
         self.assertIs(result["authenticated_sessions"], True)

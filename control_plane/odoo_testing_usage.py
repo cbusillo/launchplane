@@ -197,7 +197,7 @@ def integer_product(node):
 
 def session_inactivity_limit(cursor):
     # Odoo's get_session_max_inactivity, read without importing Odoo: its session
-    # cleanup and cookie lifetime use this value, so a later file is no live session.
+    # cleanup and cookie lifetime use this value. Zero keeps the default, as in Odoo 20.
     source=next((Path(item) for item in ODOO_SESSION_SOURCES if Path(item).is_file()),None)
     if source is None:
         raise UsageUnavailable('session_lifetime_unavailable')

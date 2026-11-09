@@ -639,8 +639,8 @@ protective when a generation lookup fails or changes during the probe. An
 otherwise negative result stays UNKNOWN with the failed or changed lookup's
 reason code, preserving any independent current-use observation.
 Authenticated or partially authenticated session files count when their modification
-time is at or after that boundary and Odoo would still honor them. Odoo's own limit
-decides that: `sessions.max_inactivity_seconds` when set, otherwise the running
+time is at or after that boundary and inside Odoo's inactivity limit. That limit
+is `sessions.max_inactivity_seconds` when set, otherwise the running
 image's `SESSION_LIFETIME`. Files past that limit, or whose `deletion_time` has
 passed, are stale state rather than a person. An unreadable limit leaves usage
 UNKNOWN. Restored earlier login/session history stays
