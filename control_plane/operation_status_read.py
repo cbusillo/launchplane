@@ -18,6 +18,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.contracts.odoo_target_replacement_failures import (
     deploy_failure_description,
 )
+from control_plane.copy_readback_diagnostics import copy_failure_summary
 
 OPERATION_STATUS_READ_ACTION = "operations.read"
 OPERATION_STATUS_READ_PRODUCT = "launchplane"
@@ -64,6 +65,18 @@ def operation_status_read_view(operation: BaseModel, *, poll_url: str) -> dict[s
     view["error_code"] = safe_operation_error_code(str(error_source.get("error_code") or ""))
     # Launchplane's fixed description of the code; stored text is never copied.
     view["error_description"] = deploy_failure_description(str(view["error_code"]))
+    if view["error_code"] == "candidate_preparation_failed":
+        result = error_source.get("result")
+        runtime = result.get("runtime_source") if isinstance(result, dict) else None
+        cause = (
+            copy_failure_summary(str(runtime.get("copy_failure") or "").replace(" ", ":"))
+            if isinstance(runtime, dict)
+            else ""
+        )
+        if cause:
+            view["error_description"] = (
+                f"{view['error_description']} Preparation failure: {cause}.".strip()
+            )
     view["error_detail_keys"] = list(
         safe_error_detail_keys(error_source.get("error_detail_keys") or ())
     )

@@ -568,6 +568,10 @@ def register_operation_status_read_routes(
         )
         if full_record:
             status_view = odoo_stable_target_replacement_operation_status_payload(operation)
+            if operation.error_code == "candidate_preparation_failed":
+                status_view["error_description"] = operation_status_read_view(
+                    operation, poll_url=str(status_view["poll_url"])
+                )["error_description"]
             result = execution_result.model_dump(mode="json") if execution_result else None
         else:
             status_view = operation_status_read_view(

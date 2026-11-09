@@ -2707,13 +2707,11 @@ def rebuild_result(
             "testing_rebuild": record.plan.operation_id,
             "testing_candidate": allocation.namespace,
             "copy_source": app.plan.source if app else record.plan.source,
+            **({"copy_failure": cause} if cause else {}),
         },
         error_code=record.error,
         error_message=record.admission_refusal
-        or (
-            "The candidate failed; the original testing copy remains selected."
-            + (f" Preparation failure: {cause}." if cause else "")
-        )
+        or "The candidate failed; the original testing copy remains selected."
         if not complete
         else "The new testing copy failed its final health check and remains selected."
         if record.error == "candidate_public_health_failed_after_retirement"

@@ -81,7 +81,9 @@ Recovered optional commands create no diagnostic file or failure markers. On the
 non-command failures report their current stage and `unavailable` or `refused`
 without publishing exception text. A terminal candidate restore carries the
 validated markers into its preparation failure receipt and the operation's
-`result.error_message`, returned by the target-replacement operation read.
+`result.runtime_source.copy_failure`. Both grants on the target-replacement
+operation read return the revalidated cause in `operation.error_description`,
+which the existing bounded read helper exposes while omitting free-text errors.
 Snapshot dump failures retain the existing bounded stderr tail; dump bytes do
 not enter the diagnostic archive. A pre-truncated tail has a true truncation flag
 and a null original byte count when that count is unknown.
