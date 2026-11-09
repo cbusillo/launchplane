@@ -1411,6 +1411,32 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertEqual(evidence[COPY_FAILURE_EXIT_MARKER], str(exit_status))
         self.assertNotIn("private-fixture-detail", str(evidence))
 
+    def test_host_command_outside_runner_retains_safe_diagnostics(self) -> None:
+        original = self.command
+
+        def refuse(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if arguments == ["docker", "stop", "web"]:
+                return subprocess.CompletedProcess(
+                    arguments, 1, stdout=b"", stderr=b"private host failure"
+                )
+            return original(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=refuse), self.assertRaises(RuntimeError):
+            self.run_script()
+        output = self.script_output.getvalue()
+        markers = post_deploy.extract_odoo_post_deploy_readback_markers({"logs": output})
+        self.assertEqual(markers[COPY_FAILURE_STAGE_MARKER], CopyFailureStage.HOST_PREPARATION)
+        self.assertEqual(markers["copy_failure_kind"], "command_failed")
+        evidence = json.loads(
+            (
+                self.root
+                / COPY_FAILURE_STATE_DIRECTORY
+                / (markers[COPY_FAILURE_EVIDENCE_MARKER] + ".json")
+            ).read_text()
+        )
+        self.assertEqual(base64.b64decode(evidence["stderr"]), b"private host failure")
+        self.assertNotIn("private host failure", output)
+
     def test_foreign_readonly_mount_cannot_reach_private_copy_failure_evidence(self) -> None:
         self.containers["foreign"] = {
             "Id": "foreign",

@@ -2708,7 +2708,14 @@ def rebuild_result(
         },
         error_code=record.error,
         error_message=record.admission_refusal
-        or "The candidate failed; the original testing copy remains selected."
+        or (
+            "The candidate failed; the original testing copy remains selected."
+            + (
+                f" Preparation failure: {record.preparation_failure_evidence}."
+                if record.preparation_failure_evidence
+                else ""
+            )
+        )
         if not complete
         else "The new testing copy failed its final health check and remains selected."
         if record.error == "candidate_public_health_failed_after_retirement"

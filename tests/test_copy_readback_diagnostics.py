@@ -79,8 +79,12 @@ class CopyFailureEvidenceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             with patch.object(Path, "home", return_value=root), redirect_stdout(output):
-                namespace["emit_copy_command_failure"](result, namespace["spec"])
-                namespace["emit_copy_command_failure"](result, namespace["spec"])
+                namespace["emit_copy_failure"](
+                    namespace["retain_copy_failure"](RuntimeError(), result, namespace["spec"])
+                )
+                namespace["emit_copy_failure"](
+                    namespace["retain_copy_failure"](RuntimeError(), result, namespace["spec"])
+                )
             identifiers = [
                 line.partition("=")[2]
                 for line in output.getvalue().splitlines()
@@ -133,7 +137,9 @@ class CopyFailureEvidenceTests(unittest.TestCase):
                     else nullcontext(),
                     redirect_stdout(output),
                 ):
-                    namespace["emit_copy_command_failure"](result, namespace["spec"])
+                    namespace["emit_copy_failure"](
+                        namespace["retain_copy_failure"](RuntimeError(), result, namespace["spec"])
+                    )
                 markers = post_deploy.extract_odoo_post_deploy_readback_markers(
                     {"logs": output.getvalue()}
                 )

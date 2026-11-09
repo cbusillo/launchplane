@@ -8,6 +8,12 @@ NATIVE_PROGRAM_SOURCE_SITE_LIMIT = 8
 
 
 class CopyFailureStage(StrEnum):
+    HOST_PREPARATION = "host_preparation"
+    SOURCE_TRANSFER = "source_transfer"
+    WEBSITE_SETTINGS = "website_settings"
+    INTEGRATION_READBACK = "integration_readback"
+    SNAPSHOT = "snapshot"
+    RUNTIME_START = "runtime_start"
     RESTORE = "restore"
     ATTACHMENTS = "attachments"
     PRE_REGISTRY_SANITIZE = "pre_registry_sanitize"
@@ -18,6 +24,7 @@ class CopyFailureStage(StrEnum):
 
 
 COPY_FAILURE_STAGE_MARKER = "copy_failure_stage"
+COPY_FAILURE_KIND_MARKER = "copy_failure_kind"
 COPY_FAILURE_EXIT_MARKER = "copy_failure_exit_status"
 COPY_FAILURE_EVIDENCE_MARKER = "copy_failure_evidence_id"
 COPY_FAILURE_OUTPUT_BYTES = 1024 * 1024
@@ -34,6 +41,8 @@ def copy_failure_evidence_id(value: object) -> str:
 
 
 def copy_failure_marker_is_safe(key: str, value: str) -> bool:
+    if key == COPY_FAILURE_KIND_MARKER:
+        return value in {"command_failed", "refused", "unavailable"}
     if key == COPY_FAILURE_STAGE_MARKER:
         return value in CopyFailureStage
     if key == COPY_FAILURE_EVIDENCE_MARKER:
@@ -54,6 +63,7 @@ def copy_failure_diagnostics_library() -> str:
         + "\n".join(f"    {stage.name} = {stage.value!r}" for stage in CopyFailureStage)
         + f"\nCOPY_FAILURE_STAGES = {tuple(stage.value for stage in CopyFailureStage)!r}\n"
         + f"COPY_FAILURE_STAGE_MARKER = {COPY_FAILURE_STAGE_MARKER!r}\n"
+        + f"COPY_FAILURE_KIND_MARKER = {COPY_FAILURE_KIND_MARKER!r}\n"
         + f"COPY_FAILURE_EXIT_MARKER = {COPY_FAILURE_EXIT_MARKER!r}\n"
         + f"COPY_FAILURE_EVIDENCE_MARKER = {COPY_FAILURE_EVIDENCE_MARKER!r}\n"
         + f"COPY_FAILURE_OUTPUT_BYTES = {COPY_FAILURE_OUTPUT_BYTES!r}\n"
@@ -105,18 +115,33 @@ def retain_copy_command_failure(result, stage, spec):
         return 'unavailable'
 
 
-def emit_copy_command_failure(result, spec):
-    stage = None
+copy_failure_stage = CopyFailureStage.HOST_PREPARATION
+
+
+def emit_copy_failure(error):
+    while error.__context__ is not None:
+        error = error.__context__
+    markers = getattr(error, 'copy_failure_markers', None)
+    if markers is None:
+        markers = {COPY_FAILURE_STAGE_MARKER: copy_failure_stage,
+            COPY_FAILURE_KIND_MARKER: 'refused' if isinstance(error, CopyReadbackRefused) else 'unavailable'}
+    for key, value in markers.items():
+        print(key + '=' + value, flush=True)
+
+
+def retain_copy_failure(error, result, spec):
+    stage = copy_failure_stage
     for line in (result.stdout or b'').decode(errors='replace').splitlines():
         key, separator, value = line.partition('=')
         if separator and key == COPY_FAILURE_STAGE_MARKER and value in COPY_FAILURE_STAGES:
             stage = value
-            print(key + '=' + value, flush=True)
             break
-    print(COPY_FAILURE_EXIT_MARKER + '=' + str(result.returncode), flush=True)
     identity = retain_copy_command_failure(result, stage, spec)
-    print(COPY_FAILURE_EVIDENCE_MARKER + '=' + identity, flush=True)
-    return identity
+    error.copy_failure_markers = {COPY_FAILURE_STAGE_MARKER: stage,
+        COPY_FAILURE_KIND_MARKER: 'command_failed', COPY_FAILURE_EXIT_MARKER: str(result.returncode),
+        COPY_FAILURE_EVIDENCE_MARKER: identity}
+    setattr(error, COPY_FAILURE_EVIDENCE_MARKER, identity)
+    return error
 """
     )
 

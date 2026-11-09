@@ -66,14 +66,22 @@ provider materializer bound with the archive's actual bytes.
 
 ## Private copy failure evidence
 
-When a preview-snapshot or fresh-testing copy runner fails, the host retains its
+When any preview-snapshot or fresh-testing host command fails, the host retains its
 captured stdout and stderr before discarding the in-memory result. The schedule
-and service expose only the existing stage/status and an opaque
+and service expose only an allowlisted `copy_failure_stage`, `copy_failure_kind`,
+exit status and an opaque
 `copy_failure_evidence_id`. The private JSON file is on that same execution host:
 `$HOME/.local/state/launchplane-host/copy-failures/<id>.json`. The directory is
 private (0700), each new file is 0600, and aliases or unsafe permissions
 refuse retention. Storage failure reports `unavailable` without replacing the
 original copy failure or its recovery classification.
+
+Diagnostics are emitted when the failure escapes the host program, so a recovered
+optional command does not become the restore's cause. On the scheduled path,
+non-command failures report their current stage and `unavailable` or `refused`
+without publishing exception text. A terminal candidate restore carries the
+validated markers into its preparation failure receipt and the operation's
+`result.error_message`, returned by the target-replacement operation read.
 
 Failed canonical-address `docker exec` reads and writers use this same private
 archive, including read-only native inspections. Their failure frame and the trace's

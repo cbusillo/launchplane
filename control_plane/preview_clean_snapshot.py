@@ -66,18 +66,16 @@ import time
 import uuid
 
 
-def command(arguments, *, stdin=None, diagnose_failure=False):
+def command(arguments, *, stdin=None):
     result = subprocess.run(arguments, input=stdin, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, check=False, pass_fds=inherited_lock_descriptors)
     if result.returncode:
-        if diagnose_failure:
-            emit_copy_command_failure(result, spec)
-        raise RuntimeError('Clean snapshot preview operation failed')
+        raise retain_copy_failure(RuntimeError('Clean snapshot preview operation failed'), result, spec)
     return result.stdout
 
 
-def docker(*arguments, stdin=None, diagnose_failure=False):
-    return command(['docker', *arguments], stdin=stdin, diagnose_failure=diagnose_failure)
+def docker(*arguments, stdin=None):
+    return command(['docker', *arguments], stdin=stdin)
 
 
 def one_inspection(identifier):
@@ -167,7 +165,7 @@ def restore_preview_snapshot(containers, source_lock):
             arguments.extend(['-e', key + '=' + value])
         output = docker(*arguments, runner, 'python3', '-I', '-', dump, database, spec['readback_spec'],
             base64.b64encode(spec['readback_program'].encode()).decode(), 'resume' if present == '1' else 'fresh', witness,
-            'clean-snapshot', stdin=spec['runner'].encode(), diagnose_failure=True).decode()
+            'clean-snapshot', stdin=spec['runner'].encode()).decode()
         markers = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
         if any(markers.get(key) != 'true' for key in ('testing_copy_sanitized',
             'testing_copy_pre_registry_sanitized', 'odoo_module_update_completed',
@@ -210,6 +208,9 @@ try:
     with (root / 'snapshot.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_SH)
         restore_preview_snapshot(containers, lock)
+except Exception as error:
+    emit_copy_failure(error)
+    raise
 finally:
     os.close(descriptor)
 """
