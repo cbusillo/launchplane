@@ -227,6 +227,27 @@ def write_merge_train_pr_feedback_record(
     with store.merge_train_feedback_delivery_lock(
         repository=request.repository, pull_request_number=request.pull_request_number
     ):
+        if not request.controller_action and request.event == "waiting":
+            previous = store.list_merge_train_pr_feedback_records(
+                repository=request.repository,
+                base_branch=request.base_branch,
+                pr_number=request.pull_request_number,
+                limit=1,
+            )
+            marker = merge_train_pr_feedback_marker(
+                repository=request.repository,
+                base_branch=request.base_branch,
+                pull_request_number=request.pull_request_number,
+            )
+            if (
+                previous
+                and previous[0].delivery_status == "delivered"
+                and (
+                    previous[0].comment_markdown
+                    == render_merge_train_pr_feedback_markdown(marker=marker, request=request)
+                )
+            ):
+                return previous[0]
         record = build_merge_train_pr_feedback_record(
             request=request,
             policy_key=policy_key,

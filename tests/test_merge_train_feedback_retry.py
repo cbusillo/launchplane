@@ -68,6 +68,58 @@ def _record(
 
 
 class MergeTrainFeedbackRetryTests(TestCase):
+    def test_queue_feedback_retries_failed_delivery_and_reuses_unchanged_delivered_record(
+        self,
+    ) -> None:
+        request = MergeTrainPrFeedbackEnvelope(
+            repository="cbusillo/alpha",
+            pull_request_number=7,
+            event="waiting",
+            message="The current source head needs engineering review.",
+        )
+        comment = {
+            "action": "created",
+            "comment_id": 123,
+            "comment_url": "https://github.com/cbusillo/alpha/pull/7#issuecomment-123",
+        }
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                side_effect=[click.ClickException("provider unavailable"), comment, comment],
+            ) as deliver,
+        ):
+            store = FilesystemRecordStore(Path(directory))
+            results = [
+                write_merge_train_pr_feedback_record(
+                    store=store,
+                    request=current,
+                    policy_key="test",
+                    policy_sha256="digest",
+                    token="fixture",
+                    recorded_at=f"2026-10-01T06:0{index}:00Z",
+                    response_trace_id=f"trace-{index}",
+                )
+                for index, current in enumerate(
+                    (
+                        request,
+                        request,
+                        request,
+                        request.model_copy(
+                            update={"message": "The changed source head needs engineering review."}
+                        ),
+                    )
+                )
+            ]
+            self.assertEqual(results[0].delivery_status, "failed")
+            self.assertEqual(results[1].delivery_status, "delivered")
+            self.assertEqual(results[2].feedback_id, results[1].feedback_id)
+            self.assertNotEqual(results[3].feedback_id, results[1].feedback_id)
+            self.assertEqual(deliver.call_count, 3)
+            self.assertEqual(
+                len(store.list_merge_train_pr_feedback_records(repository=request.repository)), 3
+            )
+
     def setUp(self) -> None:
         planning = patch(
             "control_plane.merge_train_pr_feedback.reconcile_completed_change",

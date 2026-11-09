@@ -6,7 +6,7 @@ from unittest import TestCase
 from control_plane import merge_train_controller_feedback as feedback
 from control_plane.merge_train import build_merge_train_dry_run_result
 from control_plane.merge_train import MergeTrainDryRunSnapshot
-from control_plane.merge_train_handoff import MergeTrainReadyHandoff
+from control_plane.merge_train_handoff import MergeTrainReadyHandoff, ready_handoff_refusal
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import dependency_bot_policy
 from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
@@ -29,7 +29,17 @@ class MergeTrainControllerFeedbackTests(TestCase):
             update={"actor_id": 20, "head_sha": "b" * 40, "dependency_update_class": "needs_review"}
         )
         unrequested = refused.model_copy(update={"number": 2, "ready_handoff": None})
-        for change in (refused, stale):
+        blocked = refused.model_copy(update={"labels": (policy.policies[0].blocked_label,)})
+        client_wait = refused.model_copy(
+            update={
+                "actor_id": 20,
+                "ready_handoff": handoff.model_copy(
+                    update={"status": "waiting", "client_wait": True}
+                ),
+            }
+        )
+        pending = refused.model_copy(update={"actor_id": 20, "required_checks_status": "pending"})
+        for change in (refused, stale, blocked, client_wait, pending):
             for another_candidate in (False, True):
                 with self.subTest(change=change, another_candidate=another_candidate):
                     dry_run = build_merge_train_dry_run_result(
@@ -42,6 +52,11 @@ class MergeTrainControllerFeedbackTests(TestCase):
                         batch_landing=True,
                     )
                     self.assertFalse(dry_run.queue_order)
+                    if change is stale:
+                        self.assertIn(
+                            ready_handoff_refusal(policy.policies[0], handoff, change.head_sha),
+                            dry_run.queue[0].ineligible_reasons,
+                        )
                     payloads = feedback.build_feedback_payloads(
                         response={
                             "result": {
@@ -61,7 +76,13 @@ class MergeTrainControllerFeedbackTests(TestCase):
                         }
                     )
                     excluded = [p for p in payloads if p["pull_request_number"] == change.number]
+                    if change is blocked:
+                        self.assertFalse(excluded)
+                        continue
                     self.assertEqual(len(excluded), 1)
+                    self.assertEqual(excluded[0]["event"], "waiting")
+                    self.assertFalse(excluded[0]["controller_action"])
+                    self.assertFalse(excluded[0]["controller_record_id"])
                     for reason in dry_run.queue[0].ineligible_reasons:
                         self.assertIn(reason, cast(str, excluded[0]["message"]))
                     self.assertNotIn(

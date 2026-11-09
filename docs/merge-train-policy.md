@@ -500,8 +500,11 @@ guessing a previous handoff is still current.
 An excluded trusted handoff receives the queue's refusal reasons in the existing
 managed PR comment, even when no candidate can start or other PRs are proceeding.
 This includes a disallowed PR author and a dependency update whose head changed
-after Ready. The comment reports the hold; it changes no label or admission rule.
-PRs without a trusted handoff receive no extra queue feedback.
+after Ready. Queue feedback reports a wait without a controller action or record
+from unrelated work. An unchanged, successfully delivered queue message reuses
+its feedback record. Blocked-label PRs retain their existing failure diagnosis
+and recovery evidence. PRs without a trusted handoff receive no extra queue
+feedback. This changes no label or admission rule.
 
 Edited comments from trusted authors remain unproven even when the handoff
 text has been erased. Unrelated managed-comment updates are ignored only when
