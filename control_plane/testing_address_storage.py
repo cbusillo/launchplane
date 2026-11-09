@@ -519,6 +519,46 @@ def effective_testing_route(
         or binding.source.source_versions.get("testing_route") != route.digest
     ):
         raise ValueError("The testing binding does not belong to its published route.")
+    inventory = store.read_environment_inventory(
+        context_name=binding.context, instance_name="testing"
+    )
+    if inventory.runtime_identity is not None:
+        try:
+            deployment = store.read_deployment_record(
+                inventory.runtime_identity.deployment_record_id
+            )
+        except FileNotFoundError:
+            return route
+        key = deployment.runtime_source.get("testing_route_receipt")
+        if key:
+            from control_plane.contracts.deployment_record import deployment_record_passed
+            from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
+            from control_plane.dokploy.testing_route import maintain_testing_route
+            from control_plane.testing_copy_route import COPY_ROUTE_EFFECT
+
+            receipt = store.read_idempotency_record(
+                scope=REBUILD_SCOPE, route_path=COPY_ROUTE_EFFECT, idempotency_key=key
+            )
+            if (
+                receipt is None
+                or receipt.state != "completed"
+                or not deployment_record_passed(deployment)
+                or (deployment.context, deployment.instance) != (binding.context, "testing")
+                or deployment.runtime_identity is None
+                or deployment.runtime_identity.model_dump(exclude={"deployed_at"})
+                != inventory.runtime_identity.model_dump(exclude={"deployed_at"})
+                or deployment.runtime_identity.product != binding.product
+            ):
+                raise ValueError("The current testing route has no completed deployment evidence.")
+            maintained = TestingLaneRoute.model_validate(receipt.response_payload.get("route"))
+            if maintained != maintain_testing_route(
+                route,
+                workers=int(
+                    maintained.route_id + "-websocket" in maintained.template["http"]["services"]
+                ),
+            ):
+                raise ValueError("The deployment route changed its original testing authority.")
+            route = maintained
     return route
 
 

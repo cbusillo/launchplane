@@ -3279,6 +3279,19 @@ def execute_odoo_stable_target_replacement_apply(
                 + (bootstrap_result.error_message or "no detail"),
             )
 
+    route_maintenance = None
+    if published_copy is not None:
+        from control_plane.testing_copy_route import TestingCopyRoute
+
+        assert isinstance(record_store, PostgresRecordStore)
+        assert provider_effect_checkpoint is not None
+        route_maintenance = TestingCopyRoute(
+            root=control_plane_root,
+            store=record_store,
+            identity=runtime_identity,
+            checkpoint=provider_effect_checkpoint,
+        )
+        runtime_source["testing_route_receipt"] = route_maintenance.run()
     runtime_source["post_deploy_finished_at"] = utc_now_timestamp()
     runtime_source["readiness_started_at"] = utc_now_timestamp()
     verification = verify_odoo_stable_readiness(
@@ -3300,6 +3313,8 @@ def execute_odoo_stable_target_replacement_apply(
     canonical_status = verification.canonical_status
     logo_status = verification.logo_status
     if verification.error_message:
+        if route_maintenance is not None:
+            route_maintenance.run(inverse=True)
         destination_health = HealthcheckEvidence(
             verified=health_status == "pass",
             urls=(health_url,) if health_url else (),
@@ -3342,6 +3357,8 @@ def execute_odoo_stable_target_replacement_apply(
         )
         runtime_source["runtime_identity_finished_at"] = utc_now_timestamp()
         if destination_health.runtime_identity_status != "match":
+            if route_maintenance is not None:
+                route_maintenance.run(inverse=True)
             error_message = "Odoo runtime identity verification failed: " + (
                 destination_health.runtime_identity_detail
                 or destination_health.runtime_identity_status

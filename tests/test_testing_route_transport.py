@@ -99,9 +99,9 @@ class TestingRouteTransportTests(unittest.TestCase):
             }
         }
         with self.assertRaises(NativeSourceUnavailable):
-            self.publish(self.plan.new_backend, self.plan.old_backend, address_preimage=before)
+            self.publish(self.plan.new_backend, self.plan.old_backend, route_preimage=before)
         self.raw.pop("tcpRouters")
-        self.publish(self.plan.new_backend, self.plan.old_backend, address_preimage=before)
+        self.publish(self.plan.new_backend, self.plan.old_backend, route_preimage=before)
         self.assertEqual(
             observe_testing_route(self.plan, self.raw, json.loads(self.route_file.read_text())),
             before.new_backend,
@@ -529,7 +529,7 @@ class TestingRouteTransportTests(unittest.TestCase):
         backend: str | None,
         expected: str | None,
         *,
-        address_preimage: TestingLaneRoute | None = None,
+        route_preimage: TestingLaneRoute | None = None,
     ) -> None:
         execution = self.client.execution_intent(
             self.plan, backend, operation_id="fixture:" + str(expected)
@@ -556,7 +556,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             execution_key=execution.key(attempt=1),
             writer_attempt=writer,
             desired_compose_project=self.candidate_project,
-            address_preimage=address_preimage,
+            route_preimage=route_preimage,
         )
         frame = self.client.read()
         observe_testing_route(

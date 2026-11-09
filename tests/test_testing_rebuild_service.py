@@ -6,6 +6,7 @@ import unittest
 import yaml
 from unittest.mock import Mock, patch
 from control_plane import secrets
+from control_plane import testing_copy_route
 from control_plane.contracts.secret_record import SecretVersion
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_serving_copy import resolve_testing_maintenance_environment
@@ -104,6 +105,9 @@ def exercise_published_copy_maintenance(
     base_url = app.compiled.plan.base_url
     profile = fixture.store.read_product_profile_record(candidate.product)
     with (
+        patch.object(
+            testing_copy_route, "TestingCopyRoute", return_value=Mock(run=Mock(return_value=""))
+        ),
         patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": fixture.store.database_url}),
         patch.object(api, "fetch_dokploy_target_payload", side_effect=fetch),
         patch.object(compose, "sync_dokploy_compose_raw_source", side_effect=sync),
@@ -236,6 +240,48 @@ class PublishedTestingCopyTests(unittest.TestCase):
             product=self.fixture.candidate.product,
             context=self.fixture.candidate.context,
         )
+
+    def test_completed_deployment_route_preserves_publication_and_refuses_other_copies(
+        self,
+    ) -> None:
+        from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
+        from control_plane.dokploy.testing_route import maintain_testing_route
+        from control_plane.testing_address_storage import effective_testing_route
+        from control_plane.testing_copy_route import COPY_ROUTE_EFFECT
+
+        route = maintain_testing_route(self.publication.plan.route, workers=6)
+        deployment = self.store.read_deployment_record(self.publication.plan.deployment.record_id)
+        key = "route-proof"
+        receipt = LaunchplaneIdempotencyRecord(
+            record_id=key,
+            scope=REBUILD_SCOPE,
+            route_path=COPY_ROUTE_EFFECT,
+            idempotency_key=key,
+            request_fingerprint=route.digest,
+            response_trace_id=key,
+            recorded_at=self.fixture.now.isoformat(),
+            response_status_code=200,
+            response_payload={"route": route.model_dump(mode="json")},
+        )
+        self.store.write_idempotency_record(receipt)
+        self.store.write_deployment_record(
+            deployment.model_copy(
+                update={
+                    "runtime_source": {**deployment.runtime_source, "testing_route_receipt": key}
+                }
+            )
+        )
+        self.assertEqual(effective_testing_route(self.store, self.publication), route)
+        self.assertEqual(self.select(), self.publication)
+        changed = route.model_copy(update={"new_backend": "http://other-copy:8069"})
+        self.store.write_idempotency_record(
+            receipt.model_copy(
+                update={"response_payload": {"route": changed.model_dump(mode="json")}}
+            )
+        )
+        with self.assertRaises(ValueError):
+            effective_testing_route(self.store, self.publication)
 
     def test_maintenance_reads_only_local_or_explicit_nonproduction_credentials(self) -> None:
         versions: dict[str, str] = {}

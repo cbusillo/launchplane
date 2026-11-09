@@ -98,7 +98,6 @@ def published_testing_copy(
         or snapshot.target.public_hosts
         or snapshot.target.pending_public_host_effects
         or binding is None
-        or binding.source.source_versions.get("testing_route") != route.digest
         or candidate_custody != candidate
         or not testing_binding_matches_route(
             binding, address.plan.binding_after if address else plan.after.binding, route

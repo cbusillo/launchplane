@@ -14,6 +14,7 @@ from control_plane.dokploy.testing_route import (
     route_document,
     select_testing_route_raw,
     testing_route_rule,
+    maintain_testing_route,
 )
 
 
@@ -69,6 +70,24 @@ class RoutingRuleTests(unittest.TestCase):
 
 
 class TestingRouteTests(unittest.TestCase):
+    def test_same_copy_worker_route_checks_both_backends_and_preserves_http(self) -> None:
+        original = self.plan()
+        maintained = maintain_testing_route(original, workers=6)
+        raw = self.apply(maintained, self.new, retire_old=True)
+        document = route_document(maintained, self.new)
+        self.assertEqual(observe_testing_route(maintained, raw, document), self.new)
+        self.assertEqual(maintained.host, original.host)
+        self.assertEqual(maintained.new_backend, original.new_backend)
+        websocket = raw["services"][maintained.route_id + "-websocket@file"]
+        websocket["loadBalancer"]["servers"] = [{"url": self.old}]
+        with self.assertRaises(ValueError):
+            observe_testing_route(maintained, raw, document)
+        threaded = maintain_testing_route(maintained, workers=0)
+        raw = self.apply(threaded, self.new, retire_old=True)
+        self.assertEqual(
+            observe_testing_route(threaded, raw, route_document(threaded, self.new)), self.new
+        )
+
     def test_recorded_alias_survives_rebuild_and_keeps_foreign_router_checks(self) -> None:
         original = self.plan()
         alias = "retained-testing.example.invalid"

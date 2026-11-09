@@ -364,7 +364,7 @@ class TestingAddressAdapter(DurableProviderMutationAdapter):
                 execution=attempt.execution,
                 execution_key=attempt.key,
                 writer_attempt=attempt,
-                address_preimage=self.plan.route_before,
+                route_preimage=self.plan.route_before,
             )
 
         effects = TestingRouteEffects(

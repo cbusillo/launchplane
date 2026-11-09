@@ -1,0 +1,104 @@
+from types import SimpleNamespace
+import json
+import unittest
+from unittest.mock import Mock, patch
+
+from control_plane import testing_copy_route as maintenance
+from control_plane.dokploy import api, source
+from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+from control_plane.dokploy.testing_route import observe_testing_route, route_document_content
+from tests import test_testing_route_effects as effects_tests
+
+
+class TestingCopyRouteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = effects_tests.TestingRouteFenceControllerTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.native = self.fixture.fixture
+        self.before = self.native.plan
+        self.native.raw = self.native.fixture.apply(
+            self.before, self.before.new_backend, retire_old=True
+        )
+        original_content = route_document_content(self.before, self.before.new_backend)
+        assert original_content is not None
+        self.native.route_file.write_text(original_content)
+        self.native.client.payload["old_project"] = self.native.candidate_project
+        self.native.client.old_runtime_identity = self.native.new_identity
+        self.native.containers["new"]["Config"]["Env"].append("ODOO_WORKERS=6")
+        candidate = SimpleNamespace(
+            compose_id="target", namespace="namespace", server_id="testing-server"
+        )
+        publication = SimpleNamespace(plan=SimpleNamespace(candidate=candidate))
+        for target, name, value in (
+            (maintenance, "published_testing_copy", publication),
+            (maintenance, "effective_testing_route", self.before),
+            (source, "read_dokploy_config", ("https://provider.invalid", "fixture")),
+            (
+                api,
+                "fetch_dokploy_target_payload",
+                {
+                    "composeId": candidate.compose_id,
+                    "name": candidate.namespace,
+                    "serverId": candidate.server_id,
+                    "appName": self.native.candidate_project,
+                },
+            ),
+            (maintenance, "DokployTestingRouteTransport", self.native.client),
+        ):
+            self.enterContext(patch.object(target, name, return_value=value))
+        self.route = maintenance.TestingCopyRoute(
+            root=self.native.root,
+            store=self.fixture.store,
+            identity=self.native.new_identity,
+            checkpoint=Mock(),
+        )
+
+    def test_same_copy_publication_replay_and_inverse_preserve_the_original(self) -> None:
+        original = self.native.route_file.read_text()
+        key = self.route.run()
+        self.assertEqual(
+            observe_testing_route(
+                self.route.after, self.native.raw, json.loads(self.native.route_file.read_text())
+            ),
+            self.before.new_backend,
+        )
+        effects = self.native.remote_modes.count("publish_v2")
+        self.assertEqual(self.route.run(), key)
+        self.assertEqual(self.native.remote_modes.count("publish_v2"), effects)
+        self.route.run(inverse=True)
+        self.assertEqual(self.native.route_file.read_text(), original)
+        self.assertEqual(
+            observe_testing_route(self.before, self.native.raw, json.loads(original)),
+            self.before.new_backend,
+        )
+
+    def test_worker_mode_drift_refuses_before_the_writer(self) -> None:
+        environment = self.native.containers["new"]["Config"]["Env"]
+        environment[-1] = "ODOO_WORKERS=0"
+        with self.assertRaises(ValueError):
+            self.route.run()
+        self.assertEqual(self.native.effect_count, 0)
+
+    def test_lost_reply_is_observed_without_another_writer(self) -> None:
+        self.native.before_publish = lambda: setattr(self.native, "lose_writer_reply", True)
+        with self.assertRaises(NativeSourceUnavailable):
+            self.route.run()
+        effects = self.native.remote_modes.count("publish_v2")
+        self.native.before_publish = None
+        self.native.lose_writer_reply = False
+        self.route.run()
+        self.assertEqual(self.native.remote_modes.count("publish_v2"), effects)
+
+    def test_threaded_copy_keeps_its_http_route_without_a_provider_write(self) -> None:
+        self.native.containers["new"]["Config"]["Env"][-1] = "ODOO_WORKERS=0"
+        original = self.native.route_file.read_text()
+        route = maintenance.TestingCopyRoute(
+            root=self.native.root,
+            store=self.fixture.store,
+            identity=self.native.new_identity,
+            checkpoint=Mock(),
+        )
+        route.run()
+        self.assertEqual(self.native.route_file.read_text(), original)
+        self.assertEqual(self.native.effect_count, 0)

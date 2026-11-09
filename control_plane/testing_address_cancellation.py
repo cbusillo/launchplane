@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 INVERSE_ROUTE = "service:testing-address:inverse"
 
 
-def address_preimage_present(adapter: TestingAddressAdapter) -> bool:
+def route_preimage_present(adapter: TestingAddressAdapter) -> bool:
     frame = adapter.transport.read()
     owned = json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None
     before = adapter.plan.route_before
@@ -59,7 +59,7 @@ def read_cancelled_address(adapter: TestingAddressAdapter) -> dict[str, object]:
     read_testing_address_recovery_copy(adapter.store, adapter.plan)
     if settled_testing_address(
         adapter.store, adapter.plan
-    ) is not None or not address_preimage_present(adapter):
+    ) is not None or not route_preimage_present(adapter):
         raise ValueError("The original testing address preimage has not been restored.")
     return cancelled_address_result(adapter)
 
@@ -147,11 +147,11 @@ def cancel_testing_address(
         observation = effects.observe_for_abort(original.provider_effect_phase, original.attempt)
         if observation.outcome != "present":
             raise NativeSourceUnavailable("The original forward writer is not excluded.")
-    elif not address_preimage_present(adapter):
+    elif not route_preimage_present(adapter):
         raise NativeSourceUnavailable("The address operation has no original forward custody.")
 
-    performed = not address_preimage_present(adapter)
-    restore_address_preimage(adapter, lease, guard)
+    performed = not route_preimage_present(adapter)
+    restore_route_preimage(adapter, lease, guard)
     guard()
     result = read_cancelled_address(adapter)
     return ProviderMutationOutcome(
@@ -165,7 +165,7 @@ def cancel_testing_address(
     )
 
 
-def restore_address_preimage(
+def restore_route_preimage(
     adapter: TestingAddressAdapter, lease: ProviderOperationLease, guard: Callable[[], None]
 ) -> None:
     assert isinstance(lease, ProviderEvidenceLease)
@@ -181,8 +181,8 @@ def restore_address_preimage(
             adapter.plan.route_after,
             adapter.plan.route_after.new_backend,
             operation_id="testing-address-cancel:" + adapter.plan.digest,
-            address_preimage=adapter.plan.route_before,
-            address_inverse=True,
+            route_preimage=adapter.plan.route_before,
+            inverse=True,
         )
     )
     controller = TestingRouteFenceController(
@@ -206,14 +206,14 @@ def restore_address_preimage(
             execution=attempt.execution,
             execution_key=attempt.key,
             writer_attempt=attempt,
-            address_preimage=adapter.plan.route_before,
-            address_inverse=True,
+            route_preimage=adapter.plan.route_before,
+            inverse=True,
         )
 
     effects = TestingRouteEffects(
         controller=controller,
         phase="testing-address-inverse",
-        present=lambda: address_preimage_present(adapter),
+        present=lambda: route_preimage_present(adapter),
         publish=publish,
         recovery_guard=guard,
         inverse=True,
