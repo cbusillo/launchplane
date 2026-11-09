@@ -2,6 +2,7 @@ import json
 import hmac
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -644,6 +645,7 @@ def read_fishbowl_preview_settings(
     product: str,
     repository: str,
     manifest: ArtifactIdentityManifest | None,
+    proven_manifest: Callable[[ArtifactIdentityManifest], ArtifactIdentityManifest],
     binding: SecretBinding,
     version_id: str,
 ) -> tuple[dict[str, str], str]:
@@ -653,7 +655,7 @@ def read_fishbowl_preview_settings(
             manifest is None
             or manifest.source_build is None
             or manifest.source_build.repository != repository
-            or store.read_artifact_manifest(manifest.artifact_id) != manifest
+            or proven_manifest(manifest) != manifest
         ):
             raise ValueError("Unverified preview artifact")
         stage = "producer_inventory"
