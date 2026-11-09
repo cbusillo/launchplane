@@ -263,7 +263,6 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_unavailable_stable_testing_consumer_does_not_stop_the_preview(self) -> None:
-        """Reproduces the addon_state refusal: stable testing is not a prerequisite."""
         planned = self.plan()
         refused = AssertionError("Stable testing must not be read for an independent preview")
         with (
@@ -786,13 +785,10 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_authority_change_during_environment_resolution_refuses_before_provider(self) -> None:
         _write_odoo_preview_template_runtime_environment(store=self.store)
-        self.store.write_runtime_environment_record(
-            self.runtime.model_copy(
-                update={
-                    "env": {**self.runtime.env, "ODOO_DB_USER": "odoo"},
-                }
-            )
+        self.runtime = self.runtime.model_copy(
+            update={"env": {**self.runtime.env, "ODOO_DB_USER": "odoo"}}
         )
+        self.store.write_runtime_environment_record(self.runtime)
         request = self.envelope()
         issued = _issued_plan(request)
         issued = issued.model_copy(

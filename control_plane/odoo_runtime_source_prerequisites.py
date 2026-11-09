@@ -647,7 +647,6 @@ def read_fishbowl_preview_settings(
     binding: SecretBinding,
     version_id: str,
 ) -> tuple[dict[str, str], str]:
-    """Prove one preview's source settings from its recorded artifact and managed records."""
     stage: FailureStage = "artifact"
     try:
         if (
