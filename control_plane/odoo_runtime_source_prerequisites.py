@@ -262,6 +262,8 @@ def _authority(store: PrerequisiteStore, product: str) -> _Authority:
                 and runtime_key not in values
                 and (parameter is None or literal_parameter is not None),
                 "present": parameter is not None,
+                "secret_backed": parameter is not None
+                and parameter.value.source == "secret_binding",
                 "value": literal_parameter.value.value if literal_parameter is not None else None,
             }
         selected = authority.sources.get(name)
@@ -623,12 +625,12 @@ def read_source_consumers(
 
 
 def _preview_setting(field: str, managed: str, fact: dict[str, object]) -> str:
-    typed = "" if fact["value"] is None else str(fact["value"])
-    if (fact["present"] and fact["value"] is None) or (not managed and not fact["known"]):
+    literal = None if fact["value"] is None else str(fact["value"])
+    if fact["secret_backed"] or (not managed and not fact["known"]):
         raise ValueError("Secret-backed or retired setting")
-    if managed and typed and parameter_agreement(field, managed, typed) != "match":
+    if managed and literal is not None and parameter_agreement(field, managed, literal) != "match":
         raise ValueError("Conflicting managed setting")
-    value = managed or typed
+    value = managed or literal
     if not value:
         raise ValueError("Unknown managed setting")
     if field == "ssl_verify":
