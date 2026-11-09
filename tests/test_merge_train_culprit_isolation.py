@@ -763,7 +763,7 @@ class CandidateFailureClassificationTests(unittest.TestCase):
                     _check_run(3, "test", "skipped", suite_id=7),
                     _check_run(4, "ci-gate", "failure", suite_id=7),
                 ],
-                {4: "  RUNNER_POOL_RESULT: abandoned\nrunner_pool concluded with: abandoned\n"},
+                {4: "2026-11-09T18:19:12Z   RUNNER_POOL_RESULT: abandoned\n"},
             ),
             "needed security job absent": (
                 [
@@ -771,7 +771,7 @@ class CandidateFailureClassificationTests(unittest.TestCase):
                     _check_run(2, "secret-scan", "success", suite_id=8),
                     _check_run(4, "security-gate", "failure", suite_id=8),
                 ],
-                {4: "security job results: success abandoned success\n"},
+                {4: "2026-11-09T18:23:13Z   RESULTS: success abandoned success\n"},
             ),
         }
         for shape, (check_runs, logs) in never_ran_shapes.items():
@@ -780,7 +780,7 @@ class CandidateFailureClassificationTests(unittest.TestCase):
                 self.assertTrue(failures.infrastructure_only)
 
     def test_gate_failing_beside_a_real_failure_is_not_infrastructure(self) -> None:
-        abandoned_gate_log = {4: "runner_pool concluded with: abandoned\n"}
+        abandoned_gate_log = {4: "2026-11-09T18:19:12Z   RUNNER_POOL_RESULT: abandoned\n"}
         real_failure_shapes = {
             "failed job in the same run": [
                 _check_run(3, "static_checks", "failure", suite_id=7),
@@ -794,12 +794,18 @@ class CandidateFailureClassificationTests(unittest.TestCase):
                     check_runs, {3: [_exit_code()], 4: [_exit_code()]}, logs=abandoned_gate_log
                 )
                 self.assertFalse(failures.infrastructure_only)
-        failed_need = self._classify(
-            [_check_run(4, "ci-gate", "failure", suite_id=7)],
-            {4: [_exit_code()]},
-            logs={4: "test concluded with: failure\n"},
-        )
-        self.assertFalse(failed_need.infrastructure_only)
+        sole_failure_logs = {
+            "needed job failed": "2026-11-09T18:19:12Z   TEST_RESULT: failure\n",
+            "word in ordinary output": "2026-11-09T18:19:12Z Package acme/widgets is abandoned.\n",
+        }
+        for shape, log in sole_failure_logs.items():
+            with self.subTest(shape):
+                failures = self._classify(
+                    [_check_run(4, "dependency-audit", "failure", suite_id=7)],
+                    {4: [_exit_code()]},
+                    logs={4: log},
+                )
+                self.assertFalse(failures.infrastructure_only)
 
     def test_unacquired_hosted_runner_is_infrastructure(self) -> None:
         # Shape of the October 5 train run whose hosted jobs never got a runner.
@@ -949,7 +955,7 @@ class CandidateFailureClassificationTests(unittest.TestCase):
 
     def test_client_reads_the_sole_failed_gate_log_and_fails_closed_without_it(self) -> None:
         gate_log_outcomes = {
-            "abandoned need": ("runner_pool concluded with: abandoned\n", True),
+            "abandoned need": ("2026-11-09T18:19:12Z   RUNNER_POOL_RESULT: abandoned\n", True),
             "log unavailable": (MergeTrainGitHubError("gone", status_code=410), False),
         }
         for outcome, (log_response, infrastructure_only) in gate_log_outcomes.items():

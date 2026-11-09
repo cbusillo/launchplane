@@ -26,8 +26,13 @@ RUNNER_LOSS_MESSAGES = (
     "received a shutdown signal",
     "was not acquired by runner",
 )
-# GitHub's `needs.<job>.result` for a needed job that never got a job record.
-ABANDONED_NEEDS_RESULT = re.compile(r"\babandoned\b")
+# A step environment line, as GitHub echoes it, holding only `needs.<job>.result`
+# values; `abandoned` is the result of a needed job GitHub never created.
+ABANDONED_NEEDS_RESULT = re.compile(
+    r"^\S*\s+[A-Z][A-Z0-9_]*: (?:(?:success|failure|cancelled|skipped|abandoned) )*"
+    r"abandoned(?: (?:success|failure|cancelled|skipped|abandoned))*\r?$",
+    re.MULTILINE,
+)
 # A CI job names each failed test with an annotation titled this way.
 FAILED_TEST_ANNOTATION_TITLE = "failed test"
 MAX_ANNOTATED_CHECK_RUNS = 20
