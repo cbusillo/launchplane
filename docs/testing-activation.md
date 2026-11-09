@@ -77,9 +77,9 @@ missing or ambiguous witness still refuses a tag-only task.
 Storage programs retain exact comparison. Disabled-program, terminal-history,
 binding and all physical capability checks remain required; this compatibility
 does not authorize retry, allocation, settlement or hold lifting.
-An older image cannot recognize upgraded program bytes. Qualify the exact
-rollback artifact and its program behavior before activation; image identity
-alone does not prove that retained operations can resume after rollback.
+An older image cannot recognize upgraded program bytes. After a rollback to such
+an image, capability operations on an upgraded program refuse before dispatch;
+recover by deploying forward to a build that understands both key sets.
 
 `resources-read` uses the original key and reads only the saved service record.
 A completed operation returns its existing preparation receipt. A missing,
