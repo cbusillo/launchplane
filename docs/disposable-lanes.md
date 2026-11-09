@@ -2786,7 +2786,10 @@ major matching and production release eligibility are unchanged.
 Automatic release reconciliation still holds behind a serving PR candidate until
 source history proves forward movement. An explicit rebuild can select the newest
 verified release independently; selection retains the recorded release baseline
-for complete run/history checks and refuses an older requested release.
+for complete run/history checks. A migrated pair can instead name the main build
+it was produced with, even after main moves on; that build must still be a
+verified release of the default branch's first-parent history, and the pair must
+match its image. Reconciliation then moves testing forward on the restored data.
 
 Once the normal worker has recorded its private candidate application, the
 original authenticated testing caller uploads one part at a time to

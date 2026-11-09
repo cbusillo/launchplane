@@ -3946,11 +3946,10 @@ def verified_testing_rebuild_artifact(
     if profile.driver_id != "odoo" or lane.instance != "testing":
         raise ValueError("Requested build selection requires an Odoo testing lane.")
     identity = product_repository_identity(record_store, profile)
+    transport = _TestingRebuildBuildReads(resolve_build_provenance_transport(record_store, profile))
     try:
         return verify_requested_build_artifact(
-            transport=_TestingRebuildBuildReads(
-                resolve_build_provenance_transport(record_store, profile)
-            ),
+            transport=transport,
             repository=profile.repository,
             repository_id=identity.repository_id,
             commit=source_git_ref,
@@ -3961,13 +3960,21 @@ def verified_testing_rebuild_artifact(
     except BuildProvenanceError as error:
         if error.code != "build_purpose_mismatch":
             raise
-    verified = latest_verified_testing_build(record_store, profile, lane)
-    if (verified.manifest.artifact_id, verified.manifest.source_commit) != (
-        artifact_id,
-        source_git_ref,
-    ):
+    # A migrated pair is bound to the image it was produced with, so any verified main
+    # build qualifies, not only the newest. Reconciliation then moves testing forward on
+    # the restored data like any other release.
+    verified = verify_build_artifact(
+        transport=transport,
+        repository=profile.repository,
+        repository_id=identity.repository_id,
+        commit=source_git_ref,
+        purpose="release",
+        context=lane.context,
+        image_repository=profile.image.repository,
+    )
+    if verified.manifest.artifact_id != artifact_id:
         raise BuildProvenanceError(
-            "The selected build is not the current testing release.", code="build_purpose_mismatch"
+            "The selected build run or attempt changed.", code="manifest_commit_mismatch"
         )
     return verified
 

@@ -928,20 +928,33 @@ class ProductReconcileStoreTests(ProductReconcileTestCase):
 
 
 class ProductReconcileTestingTests(ProductReconcileTestCase):
-    def test_requested_migrated_release_cannot_select_an_ancestor_build(self) -> None:
+    def test_requested_migrated_release_selects_the_main_build_its_pair_was_made_for(
+        self,
+    ) -> None:
         from control_plane.product_reconcile import verified_testing_rebuild_artifact
 
+        # Main moved on after the pair was produced; the pair's own build still qualifies.
         self._running_release(20, DEPLOYABLE)
         self.github.add_run(10, OLDER)
         profile = self.store.read_product_profile_record("site")
         lane = next(item for item in profile.lanes if item.instance == "testing")
-        current = verified_testing_rebuild_artifact(
-            self.store, profile, lane, artifact_id="artifact-cm-run-20-1", source_git_ref=DEPLOYABLE
+        older = verified_testing_rebuild_artifact(
+            self.store, profile, lane, artifact_id="artifact-cm-run-10-1", source_git_ref=OLDER
         )
-        self.assertEqual(current.manifest.source_commit, DEPLOYABLE)
+        assert older.manifest.source_build is not None
+        self.assertEqual(
+            (older.manifest.source_commit, older.manifest.source_build.purpose),
+            (OLDER, "release"),
+        )
+        # A push build of a commit that never was main's tip is still refused.
+        self.github.add_run(50, PR_HEAD)
         with self.assertRaises(BuildProvenanceError):
             verified_testing_rebuild_artifact(
-                self.store, profile, lane, artifact_id="artifact-cm-run-10-1", source_git_ref=OLDER
+                self.store,
+                profile,
+                lane,
+                artifact_id="artifact-cm-run-50-1",
+                source_git_ref=PR_HEAD,
             )
 
     def serving_candidate(
@@ -1166,10 +1179,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.assertEqual(verified.manifest.source_commit, NEWEST)
 
     def test_explicit_release_selection_keeps_release_baseline_while_candidate_serves(self) -> None:
-        from control_plane.product_reconcile import (
-            latest_verified_testing_release,
-            verified_testing_rebuild_artifact,
-        )
+        from control_plane.product_reconcile import latest_verified_testing_release
 
         statuses: tuple[Literal["pass", "reconciliation_required", "fail"], ...] = (
             "pass",
@@ -1198,10 +1208,6 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                     )
                     self.assertEqual((held["current_pull_request_number"], held["held"]), (5, True))
         self.github.add_run(10, OLDER)
-        with self.assertRaises(BuildProvenanceError):
-            verified_testing_rebuild_artifact(
-                self.store, profile, lane, artifact_id="artifact-cm-run-10-1", source_git_ref=OLDER
-            )
         self.github.add_run(40, NEWEST)
         self.assertEqual(
             latest_verified_testing_release(self.store, profile, lane).manifest.source_commit,
