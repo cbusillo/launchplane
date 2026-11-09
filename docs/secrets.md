@@ -142,7 +142,9 @@ registration or retirement.
 
 The Director enters the independently held existing NPMplus identity and secret
 in the existing masked, write-only form at
-`/ui/owner-secrets?product=launchplane&environment=launchplane_service`.
+`/ui/owner-secrets?product=launchplane&environment=launchplane_service`, or
+authorizes the agent to fill the absent slots through the
+[fixed service input](#preview-wildcard-dns-credential).
 This fixed request exposes only `LAUNCHPLANE_NPMPLUS_IDENTITY` and
 `LAUNCHPLANE_NPMPLUS_SECRET`. Each writes its same-named context-scoped binding
 in `launchplane_service`, context `launchplane`, no instance. Current database
@@ -182,6 +184,8 @@ For an explicitly authorized initial transfer, the Director's authenticated
 agent can fill this same absent slot through `POST /v1/product-config/apply`:
 product and context `launchplane`, no instance, exactly one supplied context
 secret with integration `preview_dns_cloudflare`, name and binding `api_token`.
+Each NPMplus API credential slot uses the same input, one request per slot, with
+integration `launchplane_service` and its own name as the binding.
 Existing `product_config.plan` and `product_config.apply` authorization, matching
 dry-run, idempotency and atomic encryption apply. This fixed service input needs
 no product profile. Mixed runtime bundles, other purposes and Client agents do

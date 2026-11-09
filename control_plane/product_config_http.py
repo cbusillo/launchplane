@@ -398,8 +398,8 @@ class ProductConfigApplyEnvelope(BaseModel):
     odoo_business_hours: OdooBusinessHoursConfigRequest | None = None
     reviewed_plan_sha256: str = ""
 
-    def is_preview_dns_service_input(self) -> bool:
-        from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION
+    def fixed_service_secret_slot(self) -> tuple[str, str] | None:
+        from control_plane.secrets import FIXED_SERVICE_SECRET_SLOTS
 
         if (
             self.product != "launchplane"
@@ -420,9 +420,10 @@ class ProductConfigApplyEnvelope(BaseModel):
                 "reviewed_plan_sha256",
             }
         ):
-            return False
+            return None
         secret = self.secrets[0]
-        return (
+        slot = (secret.integration, secret.name)
+        is_fixed_slot = (
             not secret.model_fields_set
             - {
                 "scope",
@@ -437,10 +438,11 @@ class ProductConfigApplyEnvelope(BaseModel):
             and secret.scope == "context"
             and secret.context in {None, "launchplane"}
             and not secret.instance
-            and secret.integration == PREVIEW_DNS_INTEGRATION
-            and secret.name == secret.binding_key == PREVIEW_DNS_BINDING
+            and slot in FIXED_SERVICE_SECRET_SLOTS
+            and secret.name == secret.binding_key
             and secret.value is not None
         )
+        return cast(tuple[str, str], slot) if is_fixed_slot else None
 
     @field_validator("public_hosts", mode="before")
     @classmethod

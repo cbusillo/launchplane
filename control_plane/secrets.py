@@ -29,6 +29,12 @@ from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+from control_plane.npmplus import (
+    NPMPLUS_IDENTITY_ENV_KEY,
+    NPMPLUS_SECRET_ENV_KEY,
+    PREVIEW_DNS_BINDING,
+    PREVIEW_DNS_INTEGRATION,
+)
 
 LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR = "LAUNCHPLANE_SECRET_KEYS_JSON"
 LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR = "LAUNCHPLANE_MASTER_ENCRYPTION_KEY"
@@ -41,6 +47,13 @@ LAUNCHPLANE_WORKER_SECRET_INTEGRATION = "launchplane_worker"
 # Credentials Launchplane itself uses as a service, such as its GitHub token for PR
 # comments and release review. They are never part of any app's runtime environment.
 LAUNCHPLANE_SERVICE_SECRET_INTEGRATION = "launchplane_service"
+FIXED_SERVICE_SECRET_SLOTS = frozenset(
+    {
+        (PREVIEW_DNS_INTEGRATION, PREVIEW_DNS_BINDING),
+        (LAUNCHPLANE_SERVICE_SECRET_INTEGRATION, NPMPLUS_IDENTITY_ENV_KEY),
+        (LAUNCHPLANE_SERVICE_SECRET_INTEGRATION, NPMPLUS_SECRET_ENV_KEY),
+    }
+)
 SECRET_STATUS_CONFIGURED = "configured"
 LEGACY_SECRET_KEY_ID = "launchplane-master-key"
 _KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")

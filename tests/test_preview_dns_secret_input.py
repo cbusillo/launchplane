@@ -10,7 +10,13 @@ from httpx2 import Response
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION
+from control_plane.npmplus import (
+    NPMPLUS_IDENTITY_ENV_KEY,
+    NPMPLUS_SECRET_ENV_KEY,
+    PREVIEW_DNS_BINDING,
+    PREVIEW_DNS_INTEGRATION,
+)
+from control_plane.secrets import LAUNCHPLANE_SERVICE_SECRET_INTEGRATION
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneIdentity,
@@ -128,7 +134,7 @@ class PreviewDnsSecretInputTests(unittest.IsolatedAsyncioTestCase):
     async def test_policy_is_rechecked_inside_the_atomic_write(self) -> None:
         await self.request(self.payload)
         self.payload["mode"] = "apply"
-        writer = self.store.write_preview_dns_secret_bundle
+        writer = self.store.write_fixed_service_secret_bundle
 
         def revoke_before_commit(
             bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity
@@ -147,7 +153,7 @@ class PreviewDnsSecretInputTests(unittest.IsolatedAsyncioTestCase):
             writer(bundle, identity=identity)
 
         with patch.object(
-            self.store, "write_preview_dns_secret_bundle", side_effect=revoke_before_commit
+            self.store, "write_fixed_service_secret_bundle", side_effect=revoke_before_commit
         ):
             response = await self.request(self.payload, "revoked")
         self.assertEqual(response.status_code, 403, response.text)
@@ -173,7 +179,7 @@ class PreviewDnsSecretInputTests(unittest.IsolatedAsyncioTestCase):
                 source_label="test",
             )
             with self.assertRaises(ServiceIdentityAuthorityError):
-                store.write_preview_dns_secret_bundle(
+                store.write_fixed_service_secret_bundle(
                     bundle,
                     identity=LocalOperatorIdentity(
                         subject="director",
@@ -210,7 +216,7 @@ class PreviewDnsSecretInputTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         with self.assertRaises(ServiceIdentityAuthorityError):
-            self.store.write_preview_dns_secret_bundle(
+            self.store.write_fixed_service_secret_bundle(
                 bundle,
                 identity=LocalOperatorIdentity(
                     subject="director",
@@ -221,12 +227,40 @@ class PreviewDnsSecretInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_secret_records(), ())
         self.assertEqual(self.store.list_runtime_environment_records(), ())
 
+    def test_store_refuses_a_service_credential_outside_the_fixed_slots(self) -> None:
+        from control_plane.product_config import plan_product_config_authority_bundle
+        from control_plane.service_auth import LocalOperatorIdentity
+        from control_plane.storage.product_authority_bundle import ServiceIdentityAuthorityError
+
+        self.secret.update(
+            integration=LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+            name="OTHER_SERVICE_SECRET",
+            binding_key="OTHER_SERVICE_SECRET",
+        )
+        _, bundle = plan_product_config_authority_bundle(
+            record_store=self.store,
+            payload=self.payload,
+            mode="apply",
+            actor="test",
+            source_label="test",
+        )
+        with self.assertRaises(ServiceIdentityAuthorityError):
+            self.store.write_fixed_service_secret_bundle(
+                bundle,
+                identity=LocalOperatorIdentity(
+                    subject="director",
+                    token_label="test",
+                    director_agent=True,
+                ),
+            )
+        self.assertEqual(self.store.list_secret_records(), ())
+
     async def test_racing_entry_cannot_replace_a_committed_secret(self) -> None:
         from control_plane.product_config import plan_product_config_authority_bundle
 
         await self.request(self.payload)
         self.payload["mode"] = "apply"
-        writer = self.store.write_preview_dns_secret_bundle
+        writer = self.store.write_fixed_service_secret_bundle
 
         def fill_before_commit(
             bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity
@@ -242,7 +276,7 @@ class PreviewDnsSecretInputTests(unittest.IsolatedAsyncioTestCase):
             writer(bundle, identity=identity)
 
         with patch.object(
-            self.store, "write_preview_dns_secret_bundle", side_effect=fill_before_commit
+            self.store, "write_fixed_service_secret_bundle", side_effect=fill_before_commit
         ):
             response = await self.request(self.payload, "racing-entry")
         self.assertEqual(response.status_code, 409, response.text)
@@ -252,10 +286,56 @@ class PreviewDnsSecretInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(records[0].updated_by, "test")
         self.assertEqual(len(self.store.list_secret_versions(secret_id=records[0].secret_id)), 1)
 
+    async def test_each_npmplus_slot_fills_once_through_the_same_input(self) -> None:
+        for name in (NPMPLUS_IDENTITY_ENV_KEY, NPMPLUS_SECRET_ENV_KEY):
+            with self.subTest(name=name):
+                self.secret.update(
+                    integration=LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                    name=name,
+                    binding_key=name,
+                    value=f"fictional-{name}",
+                )
+                self.payload["mode"] = "dry-run"
+                plan = await self.request(self.payload)
+                self.assertEqual(plan.status_code, 202, plan.text)
+                self.payload["mode"] = "apply"
+                applied = await self.request(self.payload, f"original-{name}")
+                self.assertEqual(applied.status_code, 202, applied.text)
+                self.assertNotIn(f"fictional-{name}", plan.text + applied.text)
+                record = next(
+                    item for item in self.store.list_secret_records() if item.name == name
+                )
+                self.assertEqual(
+                    (record.scope, record.context, record.instance, record.integration),
+                    ("context", "launchplane", "", LAUNCHPLANE_SERVICE_SECRET_INTEGRATION),
+                )
+                refused = await self.request(self.payload, f"another-{name}")
+                self.assertEqual(refused.status_code, 409, refused.text)
+                self.assertEqual(
+                    refused.json()["error"]["code"], "service_secret_already_configured"
+                )
+                self.assertEqual(
+                    len(self.store.list_secret_versions(secret_id=record.secret_id)), 1
+                )
+        self.assertEqual(self.store.list_runtime_environment_records(), ())
+
     async def test_foreign_purpose_or_mixed_runtime_bundle_cannot_claim_service_context(
         self,
     ) -> None:
-        for change in ({"integration": "onboarding_github_app"}, {"binding_key": "other"}):
+        for change in (
+            {"integration": "onboarding_github_app"},
+            {"binding_key": "other"},
+            {
+                "integration": LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                "name": "OTHER_SERVICE_SECRET",
+                "binding_key": "OTHER_SERVICE_SECRET",
+            },
+            {
+                "integration": LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                "name": NPMPLUS_IDENTITY_ENV_KEY,
+                "binding_key": NPMPLUS_SECRET_ENV_KEY,
+            },
+        ):
             with self.subTest(change=change), patch.dict(self.secret, change):
                 response = await self.request(self.payload)
                 self.assertEqual(response.status_code, 403, response.text)
