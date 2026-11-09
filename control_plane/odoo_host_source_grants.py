@@ -285,7 +285,6 @@ def diagnose_host_source_grants(
     except _HostRefused as refusal:
         return _unknown(refusal.stage, cleanup)
     except Exception:
-        # Provider, driver and decryption messages may hold private values.
         return _unknown(stage, cleanup)
     finally:
         if reserved is not None:

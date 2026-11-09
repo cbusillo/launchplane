@@ -123,7 +123,7 @@ def main() -> None:
                     result = probe(settings)
     except Exception as error:
         # Source DNS/auth/TLS/driver messages may carry credentials, hosts or
-        # authentication hashes. Only a fixed word leaves this process.
+        # authentication hashes. No exception chain or stderr leaves this process.
         failure = failure_kind(error)
     sys.stdout.write(
         json.dumps(
