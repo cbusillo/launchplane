@@ -20,6 +20,10 @@ from control_plane.odoo_runtime_source_prerequisites import (
     diagnose_source_prerequisites,
 )
 from control_plane import odoo_shopify_identity as shopify
+from control_plane.odoo_host_source_grants import (
+    HostSourceGrantResult,
+    diagnose_host_source_grants,
+)
 from control_plane.odoo_import_diagnostics import (
     DiagnosticStore,
     ImportDiagnosticResult,
@@ -94,6 +98,14 @@ class OdooImportDiagnosticResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     result: ImportDiagnosticResult
+
+
+class OdooHostSourceGrantResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    result: HostSourceGrantResult
 
 
 class OdooParameterPresenceResponse(BaseModel):
@@ -466,6 +478,35 @@ def register_odoo_runtime_read_routes(
             product, environment, request, identity, record_store, response, runtime_only=True
         )
 
+    def read_host_source_grants(
+        product: str,
+        environment: str,
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        response: Response,
+    ) -> OdooHostSourceGrantResponse:
+        trace_id = common.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if environment != "testing" or request.query_params:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Host source grants require testing and accept no overrides.",
+            )
+        with errors(trace_id):
+            profile = testing_profile(product, identity, record_store, trace_id, "source grants")
+            return OdooHostSourceGrantResponse(
+                trace_id=trace_id,
+                result=diagnose_host_source_grants(
+                    store=cast(DiagnosticStore, record_store),
+                    product=profile.product,
+                    control_plane_root=dependencies.control_plane_root,
+                    database_url=dependencies.database_url,
+                ),
+            )
+
     def read_source_prerequisites(
         product: str,
         environment: str,
@@ -620,6 +661,13 @@ def register_odoo_runtime_read_routes(
             OdooImportDiagnosticResponse,
             "read_odoo_runtime_source_grants",
             "Read value-free source grants from the verified Odoo testing runtime without an Odoo login",
+        ),
+        (
+            "/v1/products/{product}/environments/{environment}/odoo-source-grants/host",
+            read_host_source_grants,
+            OdooHostSourceGrantResponse,
+            "read_odoo_host_source_grants",
+            "Probe the managed Fishbowl account's grants from the testing lane's host without an Odoo runtime",
         ),
         (
             "/v1/products/{product}/environments/{environment}/odoo-import-diagnostics",
