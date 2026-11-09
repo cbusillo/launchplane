@@ -62,8 +62,6 @@ class WalkthroughStep(BaseModel):
         elif self.action not in {"screenshot", "sign_out", "sign_in"} and not self.selector.strip():
             raise ValueError("A browser interaction requires a selector.")
         if self.action == "upload":
-            # CSV text only: the browser fixes the file's name and type, and a
-            # native import's header owns its first line, so no TEST prefix.
             if not self.value.strip():
                 raise ValueError("A file step requires CSV text.")
             return self

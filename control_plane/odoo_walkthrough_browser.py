@@ -81,8 +81,7 @@ def readonly_browser_request(method: str, path: str, payload: object) -> bool:
     return True
 
 
-def native_import_commit_request(payload: object) -> bool:
-    """A walkthrough can run native import's Test; only ``dryrun: true`` rolls back."""
+def commits_native_import(payload: object) -> bool:
     params = payload.get("params") if isinstance(payload, dict) else None
     if not isinstance(params, dict) or params.get("method") != "execute_import":
         return False
@@ -170,7 +169,7 @@ def run_walkthrough_browser(
                             except (ValueError, PlaywrightError):
                                 route.abort()
                                 return
-                        if native_import_commit_request(payload) or (
+                        if commits_native_import(payload) or (
                             read_only
                             and not readonly_browser_request(
                                 route.request.method, request_url.path, payload

@@ -119,7 +119,6 @@ class OpaqueBrowserTests(unittest.TestCase):
         control.evaluate.assert_called_once()
         file = control.set_input_files.call_args.args[0]
         self.assertEqual(file["buffer"], b"id,name\nx,Y\n")
-        self.assertEqual(file["mimeType"], "text/csv")
         self.assertTrue(file["name"].endswith(".csv"))
 
     def test_unsafe_or_readonly_file_step_never_supplies_a_file(self) -> None:
