@@ -16426,11 +16426,12 @@ def create_launchplane_fastapi_app(
         operator_identity = isinstance(
             identity, GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity
         )
-        service_dns_input = (
-            isinstance(identity, LocalOperatorIdentity)
-            and director_agent_identity(identity)
-            and product_config_request.is_preview_dns_service_input()
+        fixed_service_slot = (
+            product_config_request.fixed_service_secret_slot()
+            if isinstance(identity, LocalOperatorIdentity) and director_agent_identity(identity)
+            else None
         )
+        fixed_service_input = fixed_service_slot is not None
         action = (
             "product_config.apply"
             if product_config_request.mode == "apply"
@@ -16501,7 +16502,7 @@ def create_launchplane_fastapi_app(
                         message=f"Caller cannot perform {required_action} for calendar configuration.",
                     )
         if (
-            not service_dns_input
+            not fixed_service_input
             and isinstance(identity, LocalOperatorIdentity)
             and (product_config_request.mode == "apply" or not director_agent_identity(identity))
         ):
@@ -16613,7 +16614,7 @@ def create_launchplane_fastapi_app(
         try:
             config_profile = (
                 None
-                if service_dns_input
+                if fixed_service_input
                 else control_plane_product_config_service.resolve_product_config_profile(
                     database_store,
                     product=product_config_request.product,
@@ -16709,14 +16710,13 @@ def create_launchplane_fastapi_app(
                 code="matching_dry_run_required",
                 message="Product-config apply requires a prior matching dry-run.",
             )
-        if service_dns_input:
-            from control_plane.npmplus import PREVIEW_DNS_BINDING, PREVIEW_DNS_INTEGRATION
-
+        if fixed_service_slot is not None:
+            fixed_integration, fixed_name = fixed_service_slot
             if (
                 database_store.find_secret_record(
                     scope="context",
-                    integration=PREVIEW_DNS_INTEGRATION,
-                    name=PREVIEW_DNS_BINDING,
+                    integration=fixed_integration,
+                    name=fixed_name,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                     instance="",
                 )
@@ -16726,7 +16726,7 @@ def create_launchplane_fastapi_app(
                     status_code=409,
                     trace_id=trace_id,
                     code="service_secret_already_configured",
-                    message="The DNS credential is already configured. Use the signed-in form to rotate it.",
+                    message="This service credential is already configured. Use the signed-in form to rotate it.",
                 )
 
         def secret_copy_source_readable(*, context: str, instance: str) -> bool:
@@ -16936,7 +16936,7 @@ def create_launchplane_fastapi_app(
             authority_bundle = authority_bundle.model_copy(
                 update={"expected_product_profiles": (expected_product_profile,)}
             )
-        if not service_dns_input:
+        if not fixed_service_input:
             authority_bundle = authority_bundle.model_copy(
                 update={
                     "required_product_config_target": (
@@ -17016,7 +17016,7 @@ def create_launchplane_fastapi_app(
             )
         else:
             if (
-                not service_dns_input
+                not fixed_service_input
                 and isinstance(identity, LocalOperatorIdentity)
                 and product_config_request.context
             ):
@@ -17039,8 +17039,8 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     response=product_config_response,
                 )
-                if service_dns_input:
-                    database_store.write_preview_dns_secret_bundle(
+                if fixed_service_input:
+                    database_store.write_fixed_service_secret_bundle(
                         completed_bundle, identity=identity
                     )
                 elif public_hosts_plan is None:
@@ -17157,16 +17157,16 @@ def create_launchplane_fastapi_app(
                 message="The secret copy source changed. Read metadata and review a fresh dry-run.",
             ) from error
         except SecretRecordConflictError as error:
-            dns_input = product_config_request.is_preview_dns_service_input()
+            service_input = product_config_request.fixed_service_secret_slot() is not None
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="service_secret_already_configured"
-                if dns_input
+                if service_input
                 else "provider_secret_already_recorded",
                 message=(
-                    "The DNS credential was configured before commit. Use the signed-in form to rotate it."
-                    if dns_input
+                    "This service credential was configured before commit. Use the signed-in form to rotate it."
+                    if service_input
                     else "A secret named for provider adoption was recorded before commit. "
                     "Review a fresh dry-run."
                 ),
