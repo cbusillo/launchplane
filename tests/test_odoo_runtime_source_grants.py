@@ -1,7 +1,7 @@
 import base64
 import json
 import subprocess
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from unittest.mock import patch
 
 from control_plane import odoo_runtime_source_prerequisites as reader
@@ -215,6 +215,20 @@ class RuntimeSourceTests(PrerequisiteFixture):
         source = next(item for item in self.consume("preview").sources if item.source == "fishbowl")
         self.assertEqual(source.parameters["ssl_verify"], "False")
         self.assertIsNone(source.failure_stage)
+
+    def test_misspelled_fishbowl_setting_is_not_an_opt_out(self) -> None:
+        self.values["fishbowl.ssl_verify"] = "flase"
+        for mode in ("preview", "grants"):
+            with self.subTest(mode=mode):
+                source = next(
+                    item
+                    for item in self.consume(cast(Literal["grants", "preview"], mode)).sources
+                    if item.source == "fishbowl"
+                )
+                self.assertFalse(source.parameters)
+                self.assertEqual(source.grants, "unknown")
+                self.assertEqual(source.failure_stage, "source_resolution")
+        self.assertNotIn("fishbowl.invalid", {probe["host"] for probe in self.probes})
 
     def test_runtime_probe_honors_fishbowl_verification_off_and_no_other_source(self) -> None:
         self.values["fishbowl.ssl_verify"] = "false"

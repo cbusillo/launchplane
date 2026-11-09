@@ -34,8 +34,9 @@ CONSUMER_LIBRARY = r"""
 import subprocess
 consumer_mode=__CONSUMER_MODE__
 
-def source_tls_accepted(name,options):
-    return tls(options)=='enabled_with_verification' or (name=='fishbowl' and tls(options)=='verification_disabled')
+def source_tls_accepted(name,options,raw_verify):
+    return (tls(options)=='enabled_with_verification'
+        or (name=='fishbowl' and tls(options)=='verification_disabled' and raw_verify.lower() in ('false','0')))
 
 def effective_settings(name,module,payload_producer,payload,applied):
     prefix=spec['prefixes'][name]+'.'
@@ -68,7 +69,7 @@ def effective_settings(name,module,payload_producer,payload,applied):
         raise ValueError()
     options=options_projection(module,current)
     delivered_options=options_projection(module,effective)
-    if projection(resolved)!=options or projection(selected)!=delivered_options or not source_tls_accepted(name,options):
+    if projection(resolved)!=options or projection(selected)!=delivered_options or not source_tls_accepted(name,options,current.get(prefix+'ssl_verify','')):
         raise ValueError()
     fields=(*__GRANT_FIELDS__,'use_ssl','password')
     if consumer_mode=='preview':
