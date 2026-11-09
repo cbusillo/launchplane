@@ -297,6 +297,17 @@ def managed_grants(
         settings.get("user", ""),
         settings.get("port", ""),
     )
+    if not reserve_probe(key):
+        return "unknown"
+    result: Literal["read_only", "unsafe", "unknown"] = "unknown"
+    try:
+        result = _run_managed_grants(settings)
+        return result
+    finally:
+        finish_probe(key, failed=result == "unknown")
+
+
+def reserve_probe(key: ProbeKey) -> bool:
     now = time.monotonic()
     with _PROBE_LOCK:
         for expired in [item for item, until in _FAILED_PROBES.items() if until <= now]:
@@ -307,29 +318,34 @@ def managed_grants(
             or len(_ACTIVE_PROBES) >= 4
             or len(_FAILED_PROBES) >= 128
         ):
-            return "unknown"
+            return False
         _ACTIVE_PROBES.add(key)
-    result: Literal["read_only", "unsafe", "unknown"] = "unknown"
-    try:
-        result = _run_managed_grants(settings)
-        return result
-    finally:
-        with _PROBE_LOCK:
-            _ACTIVE_PROBES.discard(key)
-            if result == "unknown":
-                _FAILED_PROBES[key] = time.monotonic() + 60
+        return True
 
 
-def _run_managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsafe", "unknown"]:
+def finish_probe(key: ProbeKey, *, failed: bool) -> None:
+    with _PROBE_LOCK:
+        _ACTIVE_PROBES.discard(key)
+        if failed:
+            _FAILED_PROBES[key] = time.monotonic() + 60
+
+
+def managed_probe_input(settings: dict[str, str]) -> dict[str, str] | None:
     if not all(settings.get(key) for key in ("host", "user", "password")):
-        return "unknown"
+        return None
     if settings.get("ssl_verify", "").lower() not in {"", "true", "1"}:
-        return "unknown"
-    private_input = {
+        return None
+    return {
         key: value
         for key, value in settings.items()
         if key in {"host", "user", "password", "port"} and value
     }
+
+
+def _run_managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsafe", "unknown"]:
+    private_input = managed_probe_input(settings)
+    if private_input is None:
+        return "unknown"
     try:
         completed = subprocess.run(
             [sys.executable, "-I", str(Path(__file__).with_name("odoo_source_probe.py"))],
