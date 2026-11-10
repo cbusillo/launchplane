@@ -958,8 +958,18 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             status, output = self.run_program()
         self.assertNotEqual(status, 0, output)
         frame = json.loads(output.strip().removeprefix("fixture:"))
-        self.assertEqual(frame["predicate"], ReadbackPredicate.BACKING_STORAGE)
+        self.assertEqual(frame["predicate"], ReadbackPredicate.STORAGE_CAPACITY)
+        self.assertEqual(frame["kind"], "refused")
         self.assertNotIn(["docker", "stop", "web"], self.calls)
+        data = Path(self.volumes[self.gen.namespace + "-data"]["Mountpoint"])
+        (data / (".lp-native-" + source.binding_sha256[:32])).mkdir()
+        with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=0, f_frsize=1)):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0, output)
+        frame = json.loads(output.strip().removeprefix("fixture:"))
+        # A started delivery may still be writing; keep observing instead of ending.
+        self.assertEqual(frame["predicate"], ReadbackPredicate.BACKING_STORAGE)
+        self.assertNotEqual(frame.get("kind"), "refused")
 
     def test_native_file_inspection_failure_does_not_report_database_read(self) -> None:
         self.spec.update(inspection_only=True, native_capture={})

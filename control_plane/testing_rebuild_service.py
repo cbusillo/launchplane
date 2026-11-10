@@ -1968,7 +1968,7 @@ class NativeTestingRebuildExecution(TestingRebuildProvider):
                 current is not None
                 and current.application is not None
                 and current.application.phase == "restoring"
-                and not current.application.restore_workflow_started
+                and current.application.restore_workflow_started is False
                 and not current.application.restore_schedule_id
             ):
                 # No restore was dispatched, so there is no restore job to observe.

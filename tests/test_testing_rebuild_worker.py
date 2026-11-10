@@ -4783,7 +4783,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 poll_url="fixture",
             )
             self.assertIn(
-                "backing_storage_valid (unavailable)", str(waiting["error_description"])
+                "backing_storage_valid (unavailable)", cast(str, waiting["error_description"])
             )
             self.assertNotIn("private", json.dumps(waiting))
             retained = self.store.read_testing_candidate(candidate.namespace)
@@ -4806,7 +4806,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         )
         self.assertIn(
             "readback_failed_predicate=storage_capacity_available",
-            str(ended["error_description"]),
+            cast(str, ended["error_description"]),
         )
         self.assertEqual(self.execute(), result)
         self.assertEqual(self.effects, [])

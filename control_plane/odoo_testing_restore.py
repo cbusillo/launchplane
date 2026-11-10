@@ -1114,11 +1114,16 @@ def restore_main():
         if migrated is not None and present=='0':
             inspection_predicate = ReadbackPredicate.BACKING_STORAGE
             data_backing=Path(json.loads(docker('volume','inspect',namespace+'-data'))[0]['Mountpoint']).resolve(strict=True)
+            identity=gen['source_binding_sha256'][:32]
+            existing=populated_filestore_bytes(data_backing/'filestore'/database)
             if not storage_capacity(spec,containers,gen['drill_storage_budget'],
                     runner_staging_bytes=migrated['database']['size'],
-                    filestore_existing_bytes=populated_filestore_bytes(data_backing/'filestore'/database),
-                    data_staging_bytes=remaining_migrated_staging(data_backing,gen['source_binding_sha256'][:32],migrated),
+                    filestore_existing_bytes=existing,
+                    data_staging_bytes=remaining_migrated_staging(data_backing,identity,migrated),
                     probe_clones=False):
+                # Only an untouched receiver proves no delivery write can be in flight.
+                if existing or os.path.lexists(data_backing/('.lp-native-'+identity)):
+                    raise RuntimeError('Testing storage capacity is insufficient during migrated delivery')
                 raise CopyReadbackRefused(ReadbackPredicate.STORAGE_CAPACITY)
         capture=spec.get('native_capture')
         artifacts={}
