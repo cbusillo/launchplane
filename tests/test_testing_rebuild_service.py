@@ -29,6 +29,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 from control_plane.workflows import odoo_stable_target_replacement as maintenance
 from control_plane.dokploy import api, compose, post_deploy, source as dokploy_source
 from control_plane.testing_activation_compose import interpolate
+from control_plane.testing_route_effects import TestingRouteFenceController
 from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
 from control_plane.dokploy.testing_route import route_document
 from tests import test_testing_route_transport as transport_tests
@@ -40,7 +41,11 @@ from control_plane.workflows.odoo_verification import (
 )
 
 
-_NATIVE_ROUTE_READ = DokployTestingRouteTransport.read
+_NATIVE_ROUTE_IO = {
+    name: getattr(DokployTestingRouteTransport, name)
+    for name in ("read", "publish", "settle_attempt")
+}
+_NATIVE_FENCE_ENSURE = TestingRouteFenceController.ensure
 
 
 def exercise_published_copy_maintenance(
@@ -136,7 +141,8 @@ def exercise_published_copy_maintenance(
     base_url = app.compiled.plan.base_url
     profile = fixture.store.read_product_profile_record(candidate.product)
     with (
-        patch.object(DokployTestingRouteTransport, "read", _NATIVE_ROUTE_READ),
+        patch.multiple(DokployTestingRouteTransport, **_NATIVE_ROUTE_IO),
+        patch.object(TestingRouteFenceController, "ensure", _NATIVE_FENCE_ENSURE),
         patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": fixture.store.database_url}),
         patch.object(api, "fetch_dokploy_target_payload", side_effect=fetch),
         patch.object(
