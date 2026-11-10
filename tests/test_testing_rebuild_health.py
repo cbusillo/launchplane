@@ -158,14 +158,17 @@ class TestingPublicHealthTests(unittest.TestCase):
         self.assertNotEqual(self.private_health_exit_code(), 0)
         self.assertEqual(self.requests, ["/health"])
 
-    def test_http_failure_keeps_status_without_response_text(self) -> None:
-        self.status = 503
+    def test_http_failure_keeps_status_without_changing_nonstandard_failure(self) -> None:
         self.body = b"private-response-token"
-        health = read_public_testing_health(self.base_url, "/health?token=private")
-        self.assertEqual(health.status, "fail")
-        self.assertTrue(health.verified)
-        self.assertEqual(getattr(health, "http_status", None), self.status)
-        self.assertNotIn(self.body.decode(), health.model_dump_json())
+        for status in (503, 600):
+            with self.subTest(status=status):
+                self.status = status
+                health = read_public_testing_health(self.base_url, "/health?token=private")
+                self.assertEqual(health.status, "fail")
+                self.assertTrue(health.verified)
+                assert isinstance(health, TestingPublicHealthEvidence)
+                self.assertEqual(health.http_status, status if status < 600 else None)
+                self.assertNotIn(self.body.decode(), health.model_dump_json())
 
     def test_transport_category_never_retains_uncontrolled_exception_text(self) -> None:
         for reason, expected in (

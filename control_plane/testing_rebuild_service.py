@@ -2804,8 +2804,12 @@ def read_public_testing_health(
             urls=(url,),
             timeout_seconds=5,
             status="pending" if 300 <= error.code < 400 else "fail",
-            http_status=error.code,
-            failure_kind="redirect" if 300 <= error.code < 400 else None,
+            http_status=error.code if 100 <= error.code <= 599 else None,
+            failure_kind="redirect"
+            if 300 <= error.code < 400
+            else "invalid_response"
+            if not 100 <= error.code <= 599
+            else None,
         )
     except (URLError, TimeoutError, OSError, ValueError) as error:
         from control_plane.contracts.promotion_record import HealthFailureKind
