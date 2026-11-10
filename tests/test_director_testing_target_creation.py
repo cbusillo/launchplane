@@ -162,6 +162,10 @@ class _DirectorTestingSetupFixture(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    def assert_same_refusal(self, dry: Any, applied: Any) -> None:
+        self.assertEqual(dry.status_code, applied.status_code, dry.text)
+        self.assertEqual(dry.json()["error"], applied.json()["error"])
+
     def assert_production_unchanged(self) -> None:
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
         self.assertEqual(
@@ -322,14 +326,15 @@ class DirectorTestingTargetCreationTests(_DirectorTestingSetupFixture):
         self.assertEqual(result.status_code, 403, result.text)
         self.provider.assert_not_called()
 
-    async def test_read_role_can_still_plan_a_target_with_routes_without_apply_authority(
+    async def test_dry_run_reports_the_same_first_testing_shape_refusal_as_apply(
         self,
     ) -> None:
         result = await self.post(
             mode="dry-run", runtime_port=8787, domains=["testing.example.invalid"]
         )
-        self.assertEqual(result.status_code, 202, result.text)
-        self.assertFalse(result.json()["result"]["applied"])
+        applied = await self.post(runtime_port=8787, domains=["testing.example.invalid"])
+        self.assertEqual(applied.status_code, 400, applied.text)
+        self.assert_same_refusal(result, applied)
         self.provider.assert_not_called()
         self.assert_production_unchanged()
 
@@ -358,7 +363,9 @@ class DirectorTestingTargetCreationTests(_DirectorTestingSetupFixture):
             ),
         )
         denied = await self.post(instance="prod")
+        dry = await self.post(mode="dry-run", instance="prod")
         self.assertEqual(denied.status_code, 403, denied.text)
+        self.assert_same_refusal(dry, denied)
         self.provider.assert_not_called()
         source = await self.post(custom_git_branch="main", compose_path="docker-compose.yml")
         self.assertEqual(source.status_code, 400, source.text)
@@ -537,12 +544,34 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         self.provider.assert_not_called()
         self.assert_production_unchanged()
 
+    async def test_recovery_creation_dry_run_uses_readback_instead_of_fresh_placement(self) -> None:
+        evidence = self.retained_partial()
+        provider_reads = self.provider_read.call_count
+        dry = await self.post(mode="dry-run", retained_compose_setup=evidence)
+        self.assertEqual(dry.status_code, 400, dry.text)
+        self.assertEqual(self.provider_read.call_count, provider_reads)
+        self.provider.assert_not_called()
+        readback = await self.post(mode="readback", retained_compose_setup=evidence)
+        self.assertEqual(readback.status_code, 202, readback.text)
+        self.assertTrue(readback.json()["result"]["recoverable"])
+
     async def test_prelaunch_product_and_new_placement_also_stage(self) -> None:
         self.mark_production_use("prelaunch")
+        placement = {
+            "environment_id": "",
+            "project_name": "staged-project",
+            "environment_name": "production",
+        }
+        dry_refusal = await self.post(mode="dry-run", **placement)
+        apply_refusal = await self.post(**placement)
+        self.assertEqual(apply_refusal.status_code, 400, apply_refusal.text)
+        self.assert_same_refusal(dry_refusal, apply_refusal)
+        self.assert_nothing_staged()
         self.inventory = []
-        result = await self.post(
-            environment_id="", project_name="staged-project", environment_name="production"
-        )
+        dry = await self.post(mode="dry-run", **placement)
+        self.assertEqual(dry.status_code, 202, dry.text)
+        self.assert_nothing_staged()
+        result = await self.post(**placement)
         self.assertEqual(result.status_code, 202, result.text)
         self.assertEqual(
             [call.args[2] for call in self.provider.call_args_list],
@@ -983,7 +1012,9 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
     async def test_terminal_director_stages_and_a_scoped_agent_cannot(self) -> None:
         with scoped_agent_transport():
             denied = await self.post()
+            dry = await self.post(mode="dry-run")
         self.assertEqual(denied.status_code, 403, denied.text)
+        self.assert_same_refusal(dry, denied)
         self.assert_nothing_staged()
         self.app = self.make_app(
             _local_operator_bearer_config().model_copy(
@@ -1134,8 +1165,10 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         for name, inventory in cases.items():
             with self.subTest(name):
                 self.inventory = inventory
+                dry = await self.post(mode="dry-run")
                 result = await self.post()
                 self.assertEqual(result.status_code, 400, result.text)
+                self.assert_same_refusal(dry, result)
                 self.assert_nothing_staged()
 
     async def test_unreadable_provider_or_wrong_project_is_refused(self) -> None:
@@ -1167,7 +1200,9 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
             first_production_target_lock_name("staged-site")
         ) as held:
             self.assertIsNotNone(held)
+            dry = await self.post(mode="dry-run")
             result = await self.post()
+        self.assertEqual(dry.status_code, 202, dry.text)
         self.assertIn(result.status_code, (400, 409), result.text)
         self.assert_nothing_staged()
 
