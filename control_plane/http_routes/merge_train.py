@@ -130,7 +130,9 @@ class MergeTrainControllerStatusResponse(BaseModel):
     trace_id: str
     controller_status: MergeTrainControllerStatusReadModel
     candidate_evidence: MergeTrainCandidateEvidence | None = Field(
-        default=None, exclude_if=lambda value: value is None
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
 
 
