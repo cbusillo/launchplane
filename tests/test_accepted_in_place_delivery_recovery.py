@@ -143,7 +143,9 @@ class AcceptedInPlaceDeliveryRecoveryTests(unittest.TestCase):
         final = self.store.read_idempotency_record_by_id(run.steps[-1].operation_id)
         assert final is not None
         self.final = final
-        self.now = datetime.fromisoformat(self.final.updated_at) + timedelta(seconds=1)
+        self.now = max(
+            datetime.fromisoformat(self.final.updated_at), datetime.now(UTC)
+        ) + timedelta(seconds=1)
         self.health()
 
     def health(self) -> None:
