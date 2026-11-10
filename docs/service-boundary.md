@@ -2274,9 +2274,10 @@ than substitute a new key. The optional `odoo_first_empty` result is absent for
 ordinary config callers.
 
 This preparation does not sync runtime, configure a provider, create a workload,
-create a person account, capture/restore data or release a product. Both installed service and compatible supported caller must be qualified before
-operational use. A dry-run performs remote reads, so a worker assigned no provider/host operation supplies
-an operator packet instead of running it against a real target.
+create a person account, capture/restore data or release a product. Both installed
+service and compatible supported caller must be qualified before operational use.
+A dry-run performs remote reads, so a worker assigned no provider/host operation
+supplies a request packet instead of running it against a real target.
 
 ### Odoo business-hours policy
 
