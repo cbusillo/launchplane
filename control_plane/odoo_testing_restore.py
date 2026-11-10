@@ -1119,7 +1119,7 @@ def restore_main():
                     filestore_existing_bytes=populated_filestore_bytes(data_backing/'filestore'/database),
                     data_staging_bytes=remaining_migrated_staging(data_backing,gen['source_binding_sha256'][:32],migrated),
                     probe_clones=False):
-                raise RuntimeError('Testing storage capacity is insufficient before migrated delivery')
+                raise CopyReadbackRefused(ReadbackPredicate.STORAGE_CAPACITY)
         capture=spec.get('native_capture')
         artifacts={}
         if capture is not None and present=='0':

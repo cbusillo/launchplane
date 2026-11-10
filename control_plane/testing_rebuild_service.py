@@ -17,7 +17,14 @@ from urllib.parse import urlsplit
 import click
 from pydantic import Field, model_validator
 
-from control_plane.copy_readback_diagnostics import copy_failure_summary
+from control_plane.copy_readback_diagnostics import (
+    COPY_FAILURE_KIND_MARKER,
+    COPY_FAILURE_STAGE_MARKER,
+    CopyFailureStage,
+    ReadbackPredicate,
+    copy_failure_receipt,
+    copy_failure_summary,
+)
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.durable_operation_authorization import (
@@ -76,6 +83,7 @@ from control_plane.dokploy import api, compose, post_deploy, source
 from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.native_copy_stream import (
     require_registered_remote_server,
+    NativeProgramFailed,
     NativeSourceUnavailable,
     native_failure_diagnostic,
     NativeSourceAuthorizationDenied,
@@ -1913,7 +1921,11 @@ class NativeTestingRebuildExecution(TestingRebuildProvider):
             )
         except CandidatePrivateReadinessFailed as error:
             self.failed_private_readiness(plan, error.code)
-        except (ValueError, api.DokployDeploymentFailed, api.DokployScheduleExecutionFailed):
+        except (
+            ValueError,
+            api.DokployDeploymentFailed,
+            api.DokployScheduleExecutionFailed,
+        ) as error:
             current = self.store.read_testing_candidate(self.allocation.namespace)
             if current is not None and current.application is not None:
                 if current.application.phase in {"configuring", "configured"}:
@@ -1952,6 +1964,40 @@ class NativeTestingRebuildExecution(TestingRebuildProvider):
                         copy_id=plan.new.copy_id,
                         evidence_id=self.allocation.application.abandonment_evidence,
                     ) from None
+            if (
+                current is not None
+                and current.application is not None
+                and current.application.phase == "restoring"
+                and not current.application.restore_workflow_started
+                and not current.application.restore_schedule_id
+            ):
+                # No restore was dispatched, so there is no restore job to observe.
+                # Only a host capacity refusal is determinate; anything else retries.
+                if not (
+                    isinstance(error, NativeProgramFailed)
+                    and error.predicate == ReadbackPredicate.STORAGE_CAPACITY
+                    and not error.unavailable
+                ):
+                    raise
+                self.allocation = abandon_candidate_application(
+                    root=self.root,
+                    store=self.store,
+                    namespace=current.namespace,
+                    lease=self.lease,
+                    guard=self.guard,
+                    cause=copy_failure_receipt(
+                        {
+                            COPY_FAILURE_STAGE_MARKER: CopyFailureStage.HOST_PREPARATION,
+                            COPY_FAILURE_KIND_MARKER: "refused",
+                        }
+                    )
+                    + f":readback_failed_predicate={error.predicate}",
+                )
+                assert self.allocation.application is not None
+                raise TestingRebuildPreparationFailure(
+                    copy_id=plan.new.copy_id,
+                    evidence_id=self.allocation.application.abandonment_evidence,
+                ) from None
             if (
                 current is not None
                 and current.application is not None

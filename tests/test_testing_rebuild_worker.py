@@ -4725,6 +4725,93 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.current(), self.fixture.before)
         self.assertFalse(self.retained["stopped"])
 
+    def test_undispatched_restore_ends_on_capacity_refusal_and_waits_on_other_native_failures(
+        self,
+    ) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+        from control_plane.operation_status_read import operation_status_read_view
+        from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
+
+        candidate = self.fixture.candidate
+        assert candidate.application is not None
+        undispatched = candidate.model_copy(
+            update={
+                "application": candidate.application.model_copy(
+                    update={
+                        "phase": "restoring",
+                        "prepared": None,
+                        "restore_schedule_id": "",
+                        "restore_previous_deployments": (),
+                        "restore_workflow_started": False,
+                        "workflow_evidence": {},
+                    }
+                )
+            }
+        )
+        with self.store._session_factory.begin() as session:
+            row = session.get(LaunchplaneTestingCandidateRow, candidate.namespace)
+            assert row is not None
+            row.payload = undispatched.model_dump(mode="json", exclude_none=True)
+
+        def refusal(predicate: str, kind: str) -> NativeProgramFailed:
+            return NativeProgramFailed(
+                "The registered source read did not pass.", predicate=predicate, kind=kind
+            )
+
+        with (
+            patch.object(api, "dokploy_request", side_effect=self.fixture.fixture.configure),
+            patch.object(
+                api, "list_deployments_for_target", return_value=self.fixture.fixture.deployments
+            ),
+        ):
+            with patch.object(
+                service,
+                "prepare_candidate_application",
+                side_effect=refusal(ReadbackPredicate.BACKING_STORAGE, "unavailable"),
+            ):
+                with self.assertRaises(service.NativeTestingRebuildPending) as pending:
+                    self.execute()
+            waiting = operation_status_read_view(
+                self.operation.model_copy(
+                    update={
+                        "status": "pending",
+                        "error_code": "testing_rebuild_observation_pending",
+                        "error_message": str(pending.exception) + " private host detail",
+                    }
+                ),
+                poll_url="fixture",
+            )
+            self.assertIn(
+                "backing_storage_valid (unavailable)", str(waiting["error_description"])
+            )
+            self.assertNotIn("private", json.dumps(waiting))
+            retained = self.store.read_testing_candidate(candidate.namespace)
+            assert retained is not None and retained.application is not None
+            self.assertEqual(retained.application.phase, "restoring")
+
+            with patch.object(
+                service,
+                "prepare_candidate_application",
+                side_effect=refusal(ReadbackPredicate.STORAGE_CAPACITY, "refused"),
+            ):
+                result = self.execute()
+        self.assertEqual(result.error_code, "candidate_preparation_failed")
+        retained = self.store.read_testing_candidate(candidate.namespace)
+        assert retained is not None and retained.application is not None
+        self.assertEqual(retained.application.phase, "abandoned")
+        ended = operation_status_read_view(
+            self.operation.model_copy(update={"result": result, "error_code": result.error_code}),
+            poll_url="fixture",
+        )
+        self.assertIn(
+            "readback_failed_predicate=storage_capacity_available",
+            str(ended["error_description"]),
+        )
+        self.assertEqual(self.execute(), result)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
     def test_terminal_private_probe_failure_is_bounded_and_keeps_old_copy_serving(self) -> None:
         from control_plane.dokploy import DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
         from control_plane.dokploy.native_copy_stream import (

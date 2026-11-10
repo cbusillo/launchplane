@@ -79,7 +79,9 @@ def copy_failure_summary(receipt: str) -> str:
     markers: dict[str, str] = {}
     for part in receipt.split(":"):
         key, _, value = part.partition("=")
-        if copy_failure_marker_is_safe(key, value):
+        if copy_failure_marker_is_safe(key, value) or (
+            key == "readback_failed_predicate" and readback_marker_is_safe(key, value)
+        ):
             markers.setdefault(key, value)
     return " ".join(f"{key}={value}" for key, value in markers.items())
 
@@ -248,6 +250,7 @@ class ReadbackPredicate(StrEnum):
     GATE_REMOVED = "web_gate_removed_for_repair"
     BACKING_STORAGE = "backing_storage_valid"
     BACKING_DISTINCT = "backing_storage_distinct"
+    STORAGE_CAPACITY = "storage_capacity_available"
     STORAGE_CONSUMERS = "storage_consumers_exclusive"
     INSTANCE = "copy_instance_valid"
     NAMESPACE = "copy_namespace_valid"
