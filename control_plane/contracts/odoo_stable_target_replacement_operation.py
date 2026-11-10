@@ -201,7 +201,6 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
                 or build is None
                 or build.purpose != "preview"
                 or build.event != "pull_request"
-                or build.pull_request_number is None
                 or candidate.artifact_id
                 != f"artifact-{self.context}-run-{build.run_id}-{build.run_attempt}"
                 or candidate.artifact_id != self.request.artifact_id

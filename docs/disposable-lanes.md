@@ -2771,8 +2771,10 @@ This is the declared offline output, never a claimed observation of
 production. The compiler binds it to the selected artifact and generation.
 
 This native path can select the exact canonical PR Build before Client acceptance
-or main. The service verifies its current open PR head and normal build provenance,
-then binds the offline pair to that image. Admission retains the preview-purpose
+or main, or after its PR closes or moves on. The service verifies the selected
+original run and attempt through normal build provenance and binds the offline
+pair to that image. Current PR associations and head are not used for this
+explicit frozen selection. Admission retains the preview-purpose
 manifest on the original operation; it never registers it as a release artifact.
 The worker carries it into ordinary independent-copy preparation and rechecks
 provenance before first application preparation. Retained preparation and recovery
