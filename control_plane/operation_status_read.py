@@ -18,7 +18,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.contracts.odoo_target_replacement_failures import (
     deploy_failure_description,
 )
-from control_plane.copy_readback_diagnostics import copy_failure_summary
+from control_plane.copy_readback_diagnostics import ReadbackPredicate, copy_failure_summary
 
 OPERATION_STATUS_READ_ACTION = "operations.read"
 OPERATION_STATUS_READ_PRODUCT = "launchplane"
@@ -31,6 +31,7 @@ _SAFE_CODE_MAX_LENGTH = 96
 _SAFE_RECORD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}$")
 _RESULT_STEP_STATUSES = frozenset({"pending", "pass", "fail", "skipped"})
 _UNRECOGNIZED_CODE = "unrecognized_code"
+TESTING_REBUILD_OBSERVATION_PENDING = "testing_rebuild_observation_pending"
 
 _OPERATION_TEXT_FIELDS = (
     "operation_id",
@@ -81,6 +82,10 @@ def operation_status_read_view(operation: BaseModel, *, poll_url: str) -> dict[s
             view["error_description"] = (
                 "The candidate preparation failed; native failure details are unavailable."
             )
+    if view["error_code"] == TESTING_REBUILD_OBSERVATION_PENDING:
+        view["error_description"] = pending_rebuild_description(
+            str(error_source.get("error_message") or "")
+        )
     view["error_detail_keys"] = list(
         safe_error_detail_keys(error_source.get("error_detail_keys") or ())
     )
@@ -106,6 +111,23 @@ def operation_status_read_view(operation: BaseModel, *, poll_url: str) -> dict[s
     view["poll_url"] = poll_url
     view["free_text_omitted"] = True
     return view
+
+
+def pending_rebuild_description(message: str) -> str:
+    """Fixed text for a pending testing rebuild, naming its native check when one is recorded.
+
+    Only a ``<predicate>_<kind>`` token from Launchplane's own vocabulary is
+    taken from the stored message; the message itself never appears.
+    """
+    description = (
+        "Launchplane retries this testing rebuild automatically and keeps the lane held "
+        "until it can observe the original effects."
+    )
+    for token in re.split(r"[\s:]+", message):
+        predicate, _, kind = token.rpartition("_")
+        if kind in {"refused", "unavailable"} and predicate in ReadbackPredicate:
+            return f"{description} Waiting on native check: {predicate} ({kind})."
+    return description
 
 
 def operation_result_read_view(result: BaseModel | None) -> dict[str, object] | None:
