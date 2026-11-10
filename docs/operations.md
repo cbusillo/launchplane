@@ -2758,9 +2758,27 @@ resource discrepancy through supported read-only inventory, never a replay
 under another actor. Keep original requests and keys; legacy receipts are
 history, not proof of a current target's identity or health.
 
-Use `Product Onboarding Manifest (Advanced)` (`POST /v1/product-onboarding/apply`)
-only when the typed generic-web contract does not fit, and `Dokploy Target Setup`
-for adoption, production, compose or repair operations. To remove legacy
+For an advanced existing-product manifest, review through
+`POST /v1/product-onboarding/apply` with outer `product: launchplane`,
+`mode: dry_run`, and the validated desired `manifest`. Use fresh current inputs
+and retain the exact request and returned current/desired digests privately.
+The service returns proposed field changes and `applied: false` without saving
+configuration, scheduling work, reading credential values or calling a provider.
+The authenticated Director agent or an existing product-scoped reader can plan
+without an apply grant. Review the changed fields against the intended delta;
+unrelated changes need corrected inputs and a new plan.
+
+Planning grants no permission to apply the policy it describes. A separately
+authorized advanced apply on the same service route can bind the reviewed
+`plan_sha256` as `reviewed_plan_sha256`; stale inputs or records refuse. Preserve
+the original apply key for replay. The protected `Product Onboarding Manifest
+(Advanced)` workflow remains an apply-only manifest caller; its dry-run option
+belongs to stable-lane repair. Use the native service for manifest planning,
+not that workflow or the new-product Odoo intent. See the
+[service contract](service-boundary.md) for scope, digests and response privacy.
+
+Use `Dokploy Target Setup` for adoption, production, compose or repair operations.
+To remove legacy
 `operator.generic-web-preview` caller rules, run `Generic Web Preview Authorization`
 with `operation=retire` (`POST /v1/authz-policies/managed-rule-sets/generic-web-preview/plan`
 and the protected managed reconcile apply; see [service-boundary.md](service-boundary.md)).

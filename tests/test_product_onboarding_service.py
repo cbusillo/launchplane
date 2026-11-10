@@ -182,7 +182,9 @@ class ProductOnboardingServiceTests(unittest.TestCase):
         self.assertTrue(bundle.runtime_environment_writes[0].expected_absent)
         store.write_product_authority_bundle(bundle)
 
-        result, driver_result = build_product_onboarding_service_result(onboarding_result)
+        result, driver_result = build_product_onboarding_service_result(
+            onboarding_result, manifest=manifest, authority_bundle=bundle
+        )
 
         self.assertEqual(result["product_profile"], "discord-blue")
         self.assertEqual(result["provider_target_count"], 1)

@@ -2025,12 +2025,15 @@ class ProductOnboardingApplyEnvelope(BaseModel):
                 "Product onboarding requires exactly one of manifest, generic_web or odoo."
             )
         if self.manifest is not None:
-            if self.mode != "apply":
-                raise ValueError("Legacy product onboarding manifests support apply mode only.")
-            if self.reviewed_plan_sha256 or self.resolved_target_id or self.allocation_id:
+            if self.resolved_target_id or self.allocation_id:
                 raise ValueError(
-                    "Legacy product onboarding manifests reject generic-web plan fields."
+                    "Advanced product onboarding manifests reject native target allocation fields."
                 )
+            if self.reviewed_plan_sha256 and (
+                self.mode == "dry_run"
+                or re.fullmatch(r"[0-9a-f]{64}", self.reviewed_plan_sha256) is None
+            ):
+                raise ValueError("Advanced onboarding review digests are SHA-256 apply fields.")
             return self
         if self.odoo is not None and (self.resolved_target_id or self.allocation_id):
             raise ValueError("Odoo onboarding records precede their testing target.")
@@ -17956,7 +17959,7 @@ def create_launchplane_fastapi_app(
 
     async def apply_product_onboarding(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -17986,6 +17989,11 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
+        manifest_plan = (
+            onboarding_request.manifest is not None and onboarding_request.mode == "dry_run"
+        )
+        if not manifest_plan:
+            read_operator_mutation_identity(identity)
         native_intent = onboarding_request.generic_web or onboarding_request.odoo
         onboarding_action = (
             "generic_web_onboarding.plan"
@@ -17993,12 +18001,24 @@ def create_launchplane_fastapi_app(
             else "product_onboarding.apply"
         )
         director_onboarding = native_intent is not None and director_agent_identity(identity)
-        if not director_onboarding and not resolved_authz_policy_runtime.allows(
-            identity=identity,
-            action=onboarding_action,
-            product=onboarding_request.product,
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
+        if manifest_plan:
+            assert onboarding_request.manifest is not None
+            onboarding_allowed = director_agent_identity(
+                identity
+            ) or resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="product_profile.read",
+                product=onboarding_request.manifest.product,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
+        else:
+            onboarding_allowed = director_onboarding or resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action=onboarding_action,
+                product=onboarding_request.product,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
+        if not onboarding_allowed:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -18019,6 +18039,27 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
+        if manifest_plan and not director_agent_identity(identity):
+            from control_plane.contracts.product_profile_record import product_context_owner_map
+
+            assert onboarding_request.manifest is not None
+            manifest = onboarding_request.manifest
+            owners = product_context_owner_map(
+                database_store.list_product_profile_records(), config_scopes=True
+            )
+            contexts = {lane.context for lane in manifest.lanes}
+            if manifest.preview.context:
+                contexts.add(manifest.preview.context)
+            if any(
+                owners.get(context.strip().lower(), frozenset()) - {manifest.product}
+                for context in contexts
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Manifest planning cannot read another product's contexts.",
+                )
         (
             normalized_idempotency_key,
             payload_fingerprint,
@@ -18030,7 +18071,7 @@ def create_launchplane_fastapi_app(
             route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
             idempotency_key=idempotency_key,
             trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
+            check_replay=not manifest_plan and bool(idempotency_key.strip()),
         )
         if replay_response is not None:
             return replay_response
@@ -18278,9 +18319,28 @@ def create_launchplane_fastapi_app(
             )
         result, driver_result = (
             control_plane_product_onboarding_service.build_product_onboarding_service_result(
-                onboarding_result
+                onboarding_result,
+                manifest=onboarding_request.manifest,
+                authority_bundle=authority_bundle
+                if onboarding_request.manifest is not None
+                else None,
             )
         )
+        if onboarding_request.manifest is not None:
+            if onboarding_request.reviewed_plan_sha256 and (
+                onboarding_request.reviewed_plan_sha256 != driver_result["plan_sha256"]
+            ):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_onboarding_plan_mismatch",
+                    message="Advanced onboarding inputs or current records changed since review.",
+                )
+            driver_result = {
+                **driver_result,
+                "mode": onboarding_request.mode,
+                "applied": onboarding_request.mode == "apply",
+            }
         if native_plan_sha256:
             driver_result = {
                 **driver_result,
@@ -18300,6 +18360,8 @@ def create_launchplane_fastapi_app(
             },
             result=driver_result,
         )
+        if manifest_plan:
+            return onboarding_response
         try:
             committed_bundle = authority_bundle_with_apply_idempotency(
                 bundle=authority_bundle,
