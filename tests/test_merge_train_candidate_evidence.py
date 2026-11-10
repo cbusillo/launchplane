@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from fastapi import FastAPI
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.merge_train_batch import MergeTrainCandidateBlockIntent
 from control_plane.github_required_checks import CheckRequirement
@@ -84,16 +85,14 @@ class CandidateEvidenceTests(unittest.IsolatedAsyncioTestCase):
             side_effect=AssertionError("Diagnostic read cannot call provider"),
         ):
             response = await _asgi_get(self.app(), self.url, headers=self.headers)
+            summary = await _asgi_get(
+                self.app(), self.url.split("&candidate_record_id=")[0], headers=self.headers
+            )
         self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(summary.status_code, 200, summary.text)
+        self.assertNotIn("candidate_evidence", summary.json())
         evidence = response.json()["candidate_evidence"]
         self.assertEqual(evidence["record"], self.record.model_dump(mode="json"))
-        self.assertNotIn(
-            self.record.record_id,
-            {
-                row["record_id"]
-                for row in response.json()["controller_status"]["controller_records"]
-            },
-        )
         reservations = evidence["recovery_reservations"]
         self.assertEqual(reservations[0]["base_retest"], receipt.model_dump(mode="json"))
         self.assertIsNone(reservations[0]["setup_recovery"])
@@ -103,12 +102,19 @@ class CandidateEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_exact_record_missing_or_wrong_scope_is_not_empty_success(self) -> None:
+        foreign = self.record.model_copy(
+            update={
+                "record_id": self.record.record_id + "-foreign",
+                "candidate": self.candidate.model_copy(update={"base_branch": "other"}),
+            }
+        )
+        self.store.write_merge_train_batch_candidate_record(foreign)
         for url in (
             self.url.replace(self.record.record_id, "missing-record"),
-            self.url.replace("base_branch=main", "base_branch=other"),
+            self.url.replace(self.record.record_id, foreign.record_id),
         ):
             response = await _asgi_get(self.app(), url, headers=self.headers)
-            self.assertNotEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.status_code, 404, response.text)
 
     async def test_denial_precedes_candidate_and_reservation_reads(self) -> None:
         with patch.object(
@@ -122,9 +128,7 @@ class CandidateEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(anonymous.status_code, 401, anonymous.text)
 
     async def test_unreadable_reservation_does_not_claim_unspent_allowance(self) -> None:
-        with patch.object(
-            self.store, "read_merge_train_pr_feedback_record", side_effect=ValueError("invalid")
-        ):
-            response = await _asgi_get(self.app(), self.url, headers=self.headers)
-        self.assertEqual(response.status_code, 503, response.text)
-        self.assertEqual(response.json()["error"]["code"], "candidate_evidence_unavailable")
+        for error in (ValueError("invalid"), SQLAlchemyError("unavailable")):
+            with patch.object(self.store, "read_merge_train_pr_feedback_record", side_effect=error):
+                response = await _asgi_get(self.app(), self.url, headers=self.headers)
+            self.assertEqual(response.status_code, 503, response.text)

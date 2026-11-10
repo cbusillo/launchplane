@@ -2400,7 +2400,8 @@ Add `&candidate_record_id=<original-record-id>` to inspect an original native
 candidate beyond the bounded status summary. The optional `candidate_evidence`
 contains that exact stored record, including its block intent and retry lineage,
 plus validated base-retest and setup-recovery reservations for each member's
-repository/PR/head. Records remain readable after supersession and policy changes.
+repository/PR/head. Records remain readable after supersession and policy
+revisions while their repository/base-branch target remains enrolled.
 Reservations can name a different failed record; that occupied allowance must
 not be treated as available. Null means the corresponding reservation was absent
 when read, not that recovery is authorized. Missing scoped candidates return 404;

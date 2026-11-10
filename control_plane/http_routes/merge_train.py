@@ -3,6 +3,7 @@ from typing import Annotated, Literal, cast
 
 from fastapi import Depends, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.merge_train_batch_candidate import (
@@ -434,7 +435,7 @@ def register_merge_train_read_routes(
                     code="candidate_record_not_found",
                     message="The candidate record does not exist in the requested scope.",
                 ) from error
-            except (OSError, ValueError, TypeError, KeyError) as error:
+            except (OSError, ValueError, TypeError, KeyError, SQLAlchemyError) as error:
                 raise dependencies.http_error(
                     status_code=503,
                     trace_id=trace_id,
@@ -589,7 +590,7 @@ def register_merge_train_read_routes(
         response_model=MergeTrainControllerStatusResponse,
         operation_id="read_merge_train_controller_status",
         summary="Read merge train controller status",
-        responses=responses,
+        responses={**responses, 404: {"model": dependencies.error_response_model}},
     )
     app.add_api_route(
         "/v1/work-graph/merge-train/policy-targets",
