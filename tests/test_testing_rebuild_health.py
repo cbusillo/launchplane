@@ -5,6 +5,9 @@ import json
 from threading import Thread
 from typing import Any
 import unittest
+from unittest.mock import patch
+from urllib.error import URLError
+from ssl import SSLError
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.testing_rebuild_service import read_public_testing_health
@@ -130,3 +133,27 @@ class TestingPublicHealthTests(unittest.TestCase):
         self.status = 302
         self.assertNotEqual(self.private_health_exit_code(), 0)
         self.assertEqual(self.requests, ["/health"])
+
+    def test_http_failure_keeps_status_without_response_text(self) -> None:
+        self.status = 503
+        self.body = b"private-response-token"
+        health = read_public_testing_health(self.base_url, "/health?token=private")
+        self.assertEqual(health.status, "fail")
+        self.assertTrue(health.verified)
+        self.assertEqual(getattr(health, "http_status", None), self.status)
+        self.assertNotIn(self.body.decode(), health.model_dump_json())
+
+    def test_transport_category_never_retains_uncontrolled_exception_text(self) -> None:
+        for reason, expected in (
+            (ConnectionRefusedError("private-host-and-password"), "connection"),
+            (SSLError("private-host-and-password"), "tls"),
+            (TimeoutError("private-host-and-password"), "timeout"),
+        ):
+            with self.subTest(expected=expected), patch("urllib.request.build_opener") as opener:
+                opener.return_value.open.side_effect = URLError(reason)
+                health = read_public_testing_health(self.base_url, "/health")
+                self.assertFalse(health.verified)
+                self.assertEqual(health.status, "pending")
+                self.assertEqual(getattr(health, "failure_kind", None), expected)
+                self.assertNotIn("private-host-and-password", health.model_dump_json())
+                opener.return_value.open.assert_called_once()

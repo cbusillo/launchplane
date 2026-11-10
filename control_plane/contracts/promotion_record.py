@@ -24,6 +24,9 @@ class ArtifactIdentityReference(BaseModel):
     manifest_version: int = Field(default=1, ge=1)
 
 
+HealthFailureKind = Literal["connection", "tls", "timeout", "invalid_response", "redirect"]
+
+
 class HealthcheckEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -34,6 +37,12 @@ class HealthcheckEvidence(BaseModel):
     runtime_identity_status: RuntimeIdentityStatus = "unchecked"
     runtime_identity_detail: str = ""
     observed_runtime_identity: RuntimeIdentity | None = None
+    http_status: int | None = Field(
+        default=None, ge=100, le=599, exclude_if=lambda value: value is None
+    )
+    failure_kind: HealthFailureKind | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     structured_health: StructuredHealthEvidence = Field(default_factory=StructuredHealthEvidence)
 
     @model_validator(mode="after")

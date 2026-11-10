@@ -137,7 +137,36 @@ def _checkpoint_matches(
     )
 
 
-def _terminal_probe(checkpoint: TestingRebuildRecord) -> NativeTestingEvidenceItem:
+def _terminal_probe(
+    checkpoint: TestingRebuildRecord,
+    operation: OdooStableTargetReplacementOperationRecord,
+    reservation: LaunchplaneIdempotencyRecord,
+) -> NativeTestingEvidenceItem:
+    probe = checkpoint.candidate_probe
+    if probe is not None and (
+        probe.plan_digest != checkpoint.plan.digest
+        or probe.observed_at.utcoffset() is None
+        or not checkpoint.began_at <= probe.observed_at <= checkpoint.updated_at
+        or probe.reservation_id != reservation.record_id
+        or probe.operation_attempt != operation.attempt
+        or probe.reservation_attempt is None
+        or probe.reservation_attempt > reservation.attempt
+    ):
+        return _unbound("checkpoint_probe")
+    if probe is not None:
+        return NativeTestingEvidenceItem(
+            source="checkpoint_probe",
+            availability="present" if probe.state is not None else "null",
+            binding="matched",
+            coverage="checkpoint_probe_only",
+            state=probe.state,
+            observed_at=probe.observed_at,
+            attempt=probe.reservation_attempt,
+            http_status=probe.http_status,
+            failure_kind=probe.failure_kind,
+            verified=probe.verified,
+            runtime_identity_matches=probe.runtime_identity_matches,
+        )
     route = checkpoint.route
     if route is None:
         return NativeTestingEvidenceItem(
@@ -183,6 +212,8 @@ def _terminal_probe(checkpoint: TestingRebuildRecord) -> NativeTestingEvidenceIt
         coverage="checkpoint_probe_only",
         state=health.status,
         observed_at=route.observed_at,
+        http_status=health.http_status,
+        failure_kind=health.failure_kind,
         verified=health.verified,
         runtime_identity_matches=health.observed_runtime_identity
         == checkpoint.plan.new.runtime_identity
@@ -426,7 +457,7 @@ def read_native_testing_rebuild_evidence(
         if isinstance(checkpoint.plan.old, UnavailableTestingPredecessor)
         else "identity_recorded"
     )
-    fields["terminal_probe"] = _terminal_probe(checkpoint)
+    fields["terminal_probe"] = _terminal_probe(checkpoint, operation, reservation)
     for name in ("publication_started", "retirement_started", "rollback_started"):
         fields[name] = getattr(checkpoint, name)
     fields["forward_route"] = _route_receipt(

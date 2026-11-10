@@ -1120,7 +1120,14 @@ class NativeTestingRebuildExecution:
                 }
             )
             self.adapter.checkpoints.save(checkpoint)
-        return execute_testing_rebuild(checkpoint.plan, self.adapter.checkpoints, self)
+        assert isinstance(self.lease, ProviderEvidenceLease)
+        return execute_testing_rebuild(
+            checkpoint.plan,
+            self.adapter.checkpoints,
+            self,
+            reservation=self.lease.evidence_reservation(),
+            operation_attempt=self.operation.attempt,
+        )
 
     def guard(self, plan: TestingRebuildPlan | None = None, *, recovery: bool = False) -> None:
         self.check_lock()
@@ -1797,7 +1804,14 @@ class NativeTestingRebuildExecution:
                 recorded_template=self.intent.recorded_template,
                 aliases=self.intent.route_aliases,
             )
-        return execute_testing_rebuild(self.plan, self.adapter.checkpoints, self)
+        assert isinstance(self.lease, ProviderEvidenceLease)
+        return execute_testing_rebuild(
+            self.plan,
+            self.adapter.checkpoints,
+            self,
+            reservation=self.lease.evidence_reservation(),
+            operation_attempt=self.operation.attempt,
+        )
 
     @contextmanager
     def exclusive(self, plan: TestingRebuildPlan) -> Iterator[None]:
@@ -2738,6 +2752,7 @@ def read_public_testing_health(
     """A redirect, timeout or missing identity never proves a healthy origin."""
     from urllib.error import HTTPError, URLError
     from urllib.request import HTTPRedirectHandler, Request, build_opener
+    from ssl import SSLError
     from control_plane.contracts.runtime_identity import (
         runtime_identity_from_health_payload,
         health_payload_runtime_identity_status,
@@ -2750,10 +2765,14 @@ def read_public_testing_health(
             return None
 
     url = base_url if path is None else base_url.rstrip("/") + "/" + path.lstrip("/")
+    http_status = None
     try:
         with build_opener(NoRedirect()).open(Request(url, method="GET"), timeout=5) as response:
+            http_status = response.status
             if response.geturl() != url:
-                return HealthcheckEvidence(status="pending", urls=(url,))
+                return HealthcheckEvidence(
+                    status="pending", urls=(url,), http_status=http_status, failure_kind="redirect"
+                )
             payload = json.loads(response.read(262144).decode())
             if not isinstance(payload, dict):
                 raise ValueError("Health document is unavailable.")
@@ -2773,6 +2792,7 @@ def read_public_testing_health(
                 timeout_seconds=5,
                 status="pass",
                 observed_runtime_identity=identity,
+                http_status=http_status,
                 **classification,
             )
     except HTTPError as error:
@@ -2782,9 +2802,25 @@ def read_public_testing_health(
             urls=(url,),
             timeout_seconds=5,
             status="pending" if 300 <= error.code < 400 else "fail",
+            http_status=error.code,
+            failure_kind="redirect" if 300 <= error.code < 400 else None,
         )
-    except (URLError, TimeoutError, OSError, ValueError):
-        return HealthcheckEvidence(status="pending", urls=(url,))
+    except (URLError, TimeoutError, OSError, ValueError) as error:
+        from control_plane.contracts.promotion_record import HealthFailureKind
+
+        reason = error.reason if isinstance(error, URLError) else error
+        kind: HealthFailureKind
+        if isinstance(reason, TimeoutError):
+            kind = "timeout"
+        elif isinstance(reason, SSLError):
+            kind = "tls"
+        elif isinstance(error, ValueError):
+            kind = "invalid_response"
+        else:
+            kind = "connection"
+        return HealthcheckEvidence(
+            status="pending", urls=(url,), http_status=http_status, failure_kind=kind
+        )
 
 
 def execute_native_testing_rebuild(

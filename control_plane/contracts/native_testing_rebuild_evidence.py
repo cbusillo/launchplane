@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.idempotency_record import LaunchplaneMutationReservationState
-from control_plane.contracts.promotion_record import ReleaseStatus
+from control_plane.contracts.promotion_record import ReleaseStatus, HealthFailureKind
 from control_plane.contracts.testing_rebuild import TestingRebuildStep
 
 
@@ -46,6 +46,12 @@ class NativeTestingEvidenceItem(BaseModel):
     state: NativeEvidenceState | None = None
     observed_at: datetime | None = None
     attempt: int | None = Field(default=None, ge=1)
+    http_status: int | None = Field(
+        default=None, ge=100, le=599, exclude_if=lambda value: value is None
+    )
+    failure_kind: HealthFailureKind | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     verified: bool | None = None
     runtime_identity_matches: bool | None = None
     effect_checkpoint_recorded: bool | None = None

@@ -4,9 +4,13 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from typing import Protocol
+
+from sqlalchemy.exc import SQLAlchemyError
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from urllib.parse import urlsplit
 
 from control_plane.contracts.testing_rebuild import (
+    TestingCandidateProbe,
     TestingCopyReadiness,
     TestingCopyReceipt,
     TestingRebuildPlan,
@@ -211,6 +215,8 @@ def execute_testing_rebuild(
     provider: TestingRebuildProvider,
     *,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    reservation: LaunchplaneIdempotencyRecord | None = None,
+    operation_attempt: int | None = None,
 ) -> TestingRebuildRecord:
     """The service caller binds admitted records; this function grants no authority.
 
@@ -247,10 +253,49 @@ def execute_testing_rebuild(
 
         def save(**changes: object) -> None:
             nonlocal record
-            record = TestingRebuildRecord.model_validate(
+            route = changes.get("route")
+            if (
+                isinstance(route, TestingRouteObservation)
+                and route.slot_id == plan.new.copy_id
+                and not record.error
+            ):
+                health = route.public_health
+                if (
+                    health is None
+                    or not health.verified
+                    or health.status != "pass"
+                    or health.observed_runtime_identity != plan.new.runtime_identity
+                ):
+                    changes["candidate_probe"] = TestingCandidateProbe(
+                        observed_at=route.observed_at,
+                        state=health.status if health else None,
+                        verified=health.verified if health else None,
+                        runtime_identity_matches=health.observed_runtime_identity
+                        == plan.new.runtime_identity
+                        if health and health.observed_runtime_identity is not None
+                        else None,
+                        http_status=health.http_status if health else None,
+                        failure_kind=health.failure_kind if health else None,
+                        plan_digest=plan.digest,
+                        reservation_id=reservation.record_id if reservation else None,
+                        reservation_attempt=reservation.attempt if reservation else None,
+                        operation_attempt=operation_attempt,
+                    )
+            replacement = TestingRebuildRecord.model_validate(
                 {**record.model_dump(), **changes, "updated_at": clock()}
             )
-            store.save(record)
+            store.save(replacement)
+            record = replacement
+
+        def serving_candidate(observation: TestingRouteReadback) -> None:
+            try:
+                _serving(observation, plan, plan.new, clock())
+            except TestingRebuildObservationUnavailable as error:
+                try:
+                    save(route=observation)
+                except (OSError, SQLAlchemyError):
+                    raise error from None
+                raise
 
         if record.step in {"complete", "failed"}:
             return record
@@ -353,7 +398,7 @@ def execute_testing_rebuild(
                 raise ValueError("Traffic moved before the persisted switch intent.")
             _route(observation, plan, plan.new)
             try:
-                _serving(observation, plan, plan.new, clock())
+                serving_candidate(observation)
             except TestingRebuildHealthFailure:
                 save(step="rolling_back", error="candidate_public_health_failed", route=observation)
             else:
@@ -364,7 +409,7 @@ def execute_testing_rebuild(
             observation = provider.current_route(plan)
             _route(observation, plan, plan.new)
             try:
-                _serving(observation, plan, plan.new, clock())
+                serving_candidate(observation)
             except TestingRebuildHealthFailure:
                 save(step="rolling_back", error="candidate_public_health_failed", route=observation)
             else:
@@ -398,7 +443,7 @@ def execute_testing_rebuild(
                 rollback = True
             if not rollback:
                 try:
-                    _serving(observation, plan, plan.new, clock())
+                    serving_candidate(observation)
                 except TestingRebuildHealthFailure:
                     if not committed:
                         rollback = True
@@ -445,7 +490,7 @@ def execute_testing_rebuild(
             observation = provider.current_route(plan)
             _route(observation, plan, plan.new)
             try:
-                _serving(observation, plan, plan.new, clock())
+                serving_candidate(observation)
             except TestingRebuildHealthFailure:
                 if provider.retirement_committed(plan):
                     save(

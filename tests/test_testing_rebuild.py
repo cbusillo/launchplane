@@ -24,6 +24,7 @@ from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
 from control_plane.workflows.testing_rebuild import (
     execute_testing_rebuild,
     TestingRebuildPreparationFailure,
+    TestingRebuildObservationUnavailable,
 )
 
 
@@ -268,6 +269,67 @@ class TestingRebuildTests(unittest.TestCase):
         return execute_testing_rebuild(
             self.plan, self.store, self.provider, clock=lambda: self.provider.now
         )
+
+    def test_terminal_persistence_failure_keeps_health_cause_and_completed_inverse(self) -> None:
+        self.provider.bad_public = True
+        original_save = self.store.save
+
+        def save(record: TestingRebuildRecord) -> None:
+            if record.step == "failed":
+                raise OSError("fixture terminal checkpoint unavailable")
+            original_save(record)
+
+        with patch.object(self.store, "save", side_effect=save), self.assertRaises(OSError):
+            self.run_rebuild()
+        retained = self.store.load(self.plan)
+        self.assertEqual(retained.error, "candidate_public_health_failed")
+        self.assertTrue(retained.rollback_started)
+        assert retained.candidate_probe is not None
+        self.assertEqual(retained.candidate_probe.state, "fail")
+        self.assertEqual(self.provider.serving, self.plan.old)
+        probes = self.provider.new_public_probes
+        completed = self.run_rebuild()
+        self.assertEqual(completed.step, "failed")
+        self.assertEqual(completed.candidate_probe, retained.candidate_probe)
+        self.assertEqual(self.provider.new_public_probes, probes)
+        with self.assertRaises(ValueError):
+            self.store.save(completed.model_copy(update={"candidate_probe": None}))
+
+    def test_optional_pending_probe_persistence_does_not_mask_unavailable_health(self) -> None:
+        original_route = self.provider.current_route
+        original_save = self.store.save
+
+        def current_route(plan: TestingRebuildPlan) -> TestingRouteObservation:
+            route = original_route(plan)
+            if route.slot_id == plan.new.copy_id:
+                return route.model_copy(
+                    update={
+                        "public_health": HealthcheckEvidence(
+                            status="pending", failure_kind="timeout", urls=(plan.base_url,)
+                        )
+                    }
+                )
+            return route
+
+        def save(record: TestingRebuildRecord) -> None:
+            if record.candidate_probe is not None:
+                raise OSError("fixture optional checkpoint unavailable")
+            original_save(record)
+
+        with (
+            patch.object(self.provider, "current_route", side_effect=current_route),
+            patch.object(self.store, "save", side_effect=save),
+            self.assertRaisesRegex(
+                TestingRebuildObservationUnavailable, "Public health evidence is unavailable"
+            ),
+        ):
+            self.run_rebuild()
+        retained = self.store.load(self.plan)
+        self.assertEqual(retained.step, "switching")
+        self.assertIsNone(retained.candidate_probe)
+        self.assertFalse(retained.rollback_started)
+        self.assertEqual(self.provider.new_public_probes, 1)
+        self.assertEqual(self.provider.published, self.plan.old)
 
     def test_managed_legacy_predecessor_keeps_its_observed_identity(self) -> None:
         assert self.plan.old.runtime_identity is not None

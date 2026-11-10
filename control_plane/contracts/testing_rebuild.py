@@ -8,7 +8,11 @@ from pydantic import Field, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.prepared_public_site import FrozenRecord
-from control_plane.contracts.promotion_record import HealthcheckEvidence
+from control_plane.contracts.promotion_record import (
+    HealthcheckEvidence,
+    HealthFailureKind,
+    ReleaseStatus,
+)
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 
 REBUILD_SCOPE = "launchplane:testing-native-rebuild:v1"
@@ -152,6 +156,19 @@ class TestingRouteObservation(FrozenRecord):
     public_health: HealthcheckEvidence | None = None
 
 
+class TestingCandidateProbe(FrozenRecord):
+    observed_at: datetime
+    state: ReleaseStatus | None
+    verified: bool | None
+    runtime_identity_matches: bool | None
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    failure_kind: HealthFailureKind | None = None
+    plan_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reservation_id: str | None = None
+    reservation_attempt: int | None = Field(default=None, ge=1)
+    operation_attempt: int | None = Field(default=None, ge=0)
+
+
 TestingRouteReadback = TestingRouteObservation | TestingOriginalIngressReadback
 
 
@@ -176,6 +193,9 @@ class TestingRebuildRecord(FrozenRecord):
     preparation: TestingCopyReceipt | None = None
     readiness: TestingCopyReadiness | None = None
     route: TestingRouteReadback | None = None
+    candidate_probe: TestingCandidateProbe | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     retirement_started: bool = False
     publication_started: bool = False
     rollback_started: bool = False
