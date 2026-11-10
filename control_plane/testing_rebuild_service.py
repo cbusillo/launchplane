@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 import click
 from pydantic import Field, model_validator
 
+from control_plane.copy_readback_diagnostics import copy_failure_summary
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.durable_operation_authorization import (
@@ -2676,6 +2677,7 @@ def rebuild_result(
 ) -> OdooStableTargetReplacementApplyResult:
     app = allocation.application
     complete = record.step == "complete"
+    cause = copy_failure_summary(record.preparation_failure_evidence)
     return OdooStableTargetReplacementApplyResult(
         product=record.plan.product,
         context=record.plan.context,
@@ -2705,6 +2707,7 @@ def rebuild_result(
             "testing_rebuild": record.plan.operation_id,
             "testing_candidate": allocation.namespace,
             "copy_source": app.plan.source if app else record.plan.source,
+            **({"copy_failure": cause} if cause else {}),
         },
         error_code=record.error,
         error_message=record.admission_refusal
