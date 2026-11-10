@@ -18,10 +18,7 @@ from httpx2 import Response
 from pydantic import BaseModel
 
 from control_plane import testing_candidate_release as release
-from control_plane.contracts.testing_candidate_release import (
-    TestingCandidateReleasePlan,
-    TestingCandidateReleaseStatus,
-)
+from control_plane.contracts.testing_candidate_release import TestingCandidateReleasePlan
 from control_plane.http_routes import testing_candidate_release as routes
 from control_plane.http_routes.support import ApiRouteRegistrar
 from control_plane.provider_operations import (
@@ -411,7 +408,7 @@ class CandidateReleaseRouteTests(unittest.TestCase):
         )
         self.store.ensure_schema()
         self.addCleanup(self.store.close)
-        self.host_status: TestingCandidateReleaseStatus = "eligible"
+        self.released = False
         self.refusal: TestingCandidateReleaseRefused | None = None
         self.applied: list[str] = []
         self.interrupt = False
@@ -430,7 +427,7 @@ class CandidateReleaseRouteTests(unittest.TestCase):
         )
 
         def plan(*_: object) -> release.CandidateRelease:
-            return replace(candidate, status=self.host_status)
+            return replace(candidate, status="absent") if self.released else candidate
 
         def replan(*_: object) -> release.CandidateRelease:
             if self.refusal is not None:
@@ -450,9 +447,9 @@ class CandidateReleaseRouteTests(unittest.TestCase):
                 self.applied.append(mode)
                 if self.interrupt:
                     raise ProviderMutationUnknownError("Fixture transport dropped part way.")
-                self.host_status = "absent"
+                self.released = True
                 return release.HostRelease("released", 3500, "")
-            return release.HostRelease(self.host_status, 0, "")
+            return release.HostRelease("absent" if self.released else "eligible", 0, "")
 
         self.enterContext(patch.object(routes, "build_candidate_release", side_effect=plan))
         self.enterContext(patch.object(release, "build_candidate_release", side_effect=replan))
