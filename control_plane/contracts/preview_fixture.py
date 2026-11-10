@@ -8,27 +8,36 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity
 PREVIEW_FIXTURE_CANCEL_PHASE = "fixture_container_stop"
 
 
-class PreviewFixtureRequest(BaseModel):
+class PreviewMaintenanceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["preview-fixture"]
-    intent: Literal["preview-fixture"]
     context: str = Field(min_length=1, max_length=128)
     instance: str = Field(min_length=1, max_length=128)
     preview_id: str = Field(min_length=1, max_length=200)
     generation_id: str = Field(min_length=1, max_length=200)
-    fixture: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
     mode: Literal["dry-run", "apply", "readback"] = "dry-run"
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
     reason: str = Field(min_length=1, max_length=500)
 
     @model_validator(mode="after")
-    def validate_preview(self) -> "PreviewFixtureRequest":
+    def validate_preview(self) -> "PreviewMaintenanceRequest":
         if self.instance.strip().lower() in {"testing", "prod", "production"}:
             raise ValueError("Fixtures require a named preview.")
         if (self.mode == "apply") != bool(self.reviewed_plan_sha256):
             raise ValueError("Only apply requires the reviewed plan digest.")
         return self
+
+
+class PreviewFixtureRequest(PreviewMaintenanceRequest):
+    action: Literal["preview-fixture"]
+    intent: Literal["preview-fixture"]
+    fixture: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+
+
+class PreviewPartsImportRequest(PreviewMaintenanceRequest):
+    action: Literal["preview-parts-import"]
+    intent: Literal["preview-parts-import"]
+    mode: Literal["dry-run", "apply"] = "dry-run"
 
 
 class FixtureRecord(BaseModel):
@@ -88,11 +97,18 @@ class PreviewFixtureIntent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product: str = Field(min_length=1)
-    maintenance: PreviewFixtureRequest
+    maintenance: PreviewFixtureRequest | PreviewPartsImportRequest
     fixture_binding: PreviewFixtureBinding
+    source_authority_sha256: str = Field(
+        default="", pattern=r"^(|[a-f0-9]{64})$", exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def validate_binding(self) -> "PreviewFixtureIntent":
+        if isinstance(self.maintenance, PreviewPartsImportRequest) != bool(
+            self.source_authority_sha256
+        ):
+            raise ValueError("Only import originals require managed source authority.")
         identity = self.fixture_binding.identity
         request = self.maintenance
         if (

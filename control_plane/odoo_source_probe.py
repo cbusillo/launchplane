@@ -1,6 +1,7 @@
 """Isolated, bounded MySQL metadata probe. Never returns server-controlled text."""
 
 import json
+import inspect
 import re
 import socket
 import ssl
@@ -58,6 +59,19 @@ def grant_names(rows: object) -> tuple[str, ...]:
         if match is not None:
             names.update(part.strip() for part in match[1].split(",") if part.strip())
     return tuple(sorted(names))[:MAX_GRANT_NAMES]
+
+
+def grant_classifier_program() -> str:
+    return (
+        "from __future__ import annotations\nimport re\n"
+        + "_READ_PRIVILEGES = "
+        + repr(_READ_PRIVILEGES)
+        + "\n"
+        + "_GRANT = re.compile("
+        + repr(_GRANT.pattern)
+        + ")\n"
+        + inspect.getsource(classify_grants)
+    )
 
 
 def failure_kind(error: BaseException) -> ProbeFailure:
