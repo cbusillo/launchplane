@@ -29,35 +29,6 @@ COPY control_plane /app/control_plane
 COPY frontend /app/frontend
 RUN pnpm build
 
-FROM mirror.gcr.io/library/golang:1.27.3-bookworm AS github-cli-build
-
-ARG GITHUB_CLI_VERSION=v2.98.0
-ARG GITHUB_CLI_GRPC_VERSION=v1.83.2
-ARG GITHUB_CLI_X_CRYPTO_VERSION=v0.58.0
-ARG GITHUB_CLI_X_TEXT_VERSION=v0.43.0
-ARG GITHUB_CLI_X_NET_VERSION=v0.62.0
-
-ENV CGO_ENABLED=0 \
-    GOTOOLCHAIN=local
-
-RUN github_cli_x_mod_version=v0.41.0 \
-    && mkdir -p /tmp/github-cli-build \
-    && cd /tmp/github-cli-build \
-    && go mod init launchplane.local/github-cli-build \
-    && go get "github.com/cli/cli/v2/cmd/gh@${GITHUB_CLI_VERSION}" \
-    && go get "google.golang.org/grpc@${GITHUB_CLI_GRPC_VERSION}" \
-    && go get "golang.org/x/crypto@${GITHUB_CLI_X_CRYPTO_VERSION}" \
-    && go get "golang.org/x/mod@${github_cli_x_mod_version}" \
-    && go get "golang.org/x/text@${GITHUB_CLI_X_TEXT_VERSION}" \
-    && go get "golang.org/x/net@${GITHUB_CLI_X_NET_VERSION}" \
-    && go build -trimpath -o /go/bin/gh github.com/cli/cli/v2/cmd/gh \
-    && go version -m /go/bin/gh | grep -F "github.com/cli/cli/v2" | grep -F "${GITHUB_CLI_VERSION}" \
-    && go version -m /go/bin/gh | grep -F "google.golang.org/grpc" | grep -F "${GITHUB_CLI_GRPC_VERSION}" \
-    && go version -m /go/bin/gh | grep -F "golang.org/x/crypto" | grep -F "${GITHUB_CLI_X_CRYPTO_VERSION}" \
-    && go version -m /go/bin/gh | grep -F "golang.org/x/mod" | grep -F "${github_cli_x_mod_version}" \
-    && go version -m /go/bin/gh | grep -F "golang.org/x/text" | grep -F "${GITHUB_CLI_X_TEXT_VERSION}" \
-    && go version -m /go/bin/gh | grep -F "golang.org/x/net" | grep -F "${GITHUB_CLI_X_NET_VERSION}"
-
 FROM mirror.gcr.io/library/golang:1.27.3-bookworm AS artifact-scanner
 
 ARG TRIVY_VERSION=v0.76.0
@@ -86,7 +57,6 @@ FROM python-base AS runtime
 LABEL org.opencontainers.image.source="https://github.com/cbusillo/launchplane"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    GH_PROMPT_DISABLED=1 \
     PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy
 
@@ -112,7 +82,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=github-cli-build /go/bin/gh /usr/local/bin/gh
 COPY --from=artifact-scanner /go/bin/trivy /usr/bin/trivy
 
 RUN pip install --no-cache-dir uv \
