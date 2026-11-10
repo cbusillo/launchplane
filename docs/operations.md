@@ -4998,8 +4998,8 @@ port and TLS-verification settings are reset to the connector defaults.
 
 Once deployed, verify the serving generation's artifact, source commit and image
 digest against the PR head. Activate the artifact's importer through Apps if
-needed, check `SHOW GRANTS` using its configured connection without printing
-connection values, and invoke its normal parts-only entrypoint. Report parts,
+needed. Use the [exact-preview parts-import action](preview-parts-import.md) for
+configured-account `SHOW GRANTS` preflight and the fixed parts-only entrypoint. Report parts,
 supplier-cost rows, copied-field/conflict/unmapped counts and familiar-part QA
 on the product issue and PR before asking the Client to accept. Source reads
 stay read-only; writes belong only to the disposable Odoo database. Do not
