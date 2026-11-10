@@ -141,7 +141,69 @@ remaining domain and storage removal is tracked in #2437.
     the context's recent deployments, reads its structured status: ids,
     statuses, phases, times, attempt, the error code and the env-key names the
     failure is about, marked `free_text_omitted`. It never carries the error
-    message, request, plan, checkpoint evidence or provider output.
+    message, request, plan, raw checkpoint evidence or provider output. The
+    separate opt-in below adds only fixed typed observations derived from
+    retained native records.
+  - The target-replacement GET accepts `include_native_evidence=true` to add
+    `native_evidence`, defined by the closed
+    [NativeTestingRebuildEvidence](../control_plane/contracts/native_testing_rebuild_evidence.py)
+    schema. This uses the same stored product/context/instance authorization
+    as the normal GET. Without that query, the field is omitted and the
+    native evidence stores are not read. Existing status, result, recovery
+    and drain consumers keep their contracts. A caller that rejects unknown
+    top-level fields must adopt this schema before opting in; the existing
+    catalog reader's no-query request remains compatible.
+
+    The view reads existing original native reservation, original-intent,
+    rebuild-checkpoint, route-effect, publication and deployment records only.
+    It performs no provider IO, lock acquisition, write, probe or recovery.
+    Each item reports `source`, `availability`, `binding` and `coverage`;
+    retained states, observation times and reservation attempts are optional.
+    `present` means the named record or checkpoint snapshot was read and
+    bound, not that a provider effect happened or a copy is currently serving.
+    `missing` means the named retained row was not found; `null` means an
+    optional observation is null; `unavailable` means storage could not be
+    read; `unsupported` means the source was not read or its accessor/scope
+    is unsupported; `unbound` means retained evidence failed its original
+    binding checks. Decode failures are `unavailable`, not binding mismatches.
+    No availability category establishes false or absent effects. Optional
+    fields whose value is null are omitted on the wire by the route's existing
+    exclude-none serialization; consumers normalize omitted optional fields
+    to null (unknown).
+
+    The operation attempt and provider reservation attempts are separate
+    counters. The checkpoint does not retain its worker attempt; its attempt
+    field remains unknown. Candidate preparation/private-readiness items
+    describe receipt availability in that checkpoint. `predecessor_snapshot`
+    reports the original plan's recorded identity, stopped or absent state,
+    never current provider absence. Route receipts report their retained
+    reservation state, not the actual route. Their optional `not_dispatched`
+    and `route_write_not_started` fields preserve explicit stored true/false
+    markers; omission means unknown. `effect_checkpoint_recorded=false` only
+    means no effect-start checkpoint was retained, never no provider dispatch.
+    Selection reports the retained publication state, not
+    today's selection. A `reversed` publication can include an inverse of a
+    merely planned publication and does not prove a forward adoption happened.
+    Rollback/publication/retirement flags cover persisted intent only. A
+    generic-web intent leaves native checkpoint/receipt sources unsupported.
+
+    `terminal_probe` covers only a candidate observation still retained in
+    the checkpoint, with its own time, verification and identity agreement.
+    It never borrows the operation finish time or a predecessor's health.
+    When the checkpoint contains a predecessor observation instead, it
+    reports `not_retained` with `candidate_probe_not_retained` coverage.
+    The checkpoint has one route observation: a completed inverse can replace
+    the failed candidate observation. The public-health reader also does not
+    retain HTTP status, response bodies or transport exception details.
+    This view cannot reconstruct those historical details. It returns no
+    synthetic evidence locator and does not repurpose the preview-specific
+    private evidence reader for native stable operations.
+
+    No private identifiers, paths, hosts, URLs, keys, caller material, raw
+    payloads or stored prose are copied into this view. Needed copies stay
+    `retain_all`. Provider effects and release safety remain in the existing
+    recovery projection: `unknown` and `safe_to_release=false`; this view adds
+    no eligibility.
 - native FastAPI protected artifact inventory route:
   - `GET /v1/artifacts/protected`, requiring `artifact_protection.read` for
     the requested product and either the requested context or whole-product
