@@ -57,6 +57,34 @@ def _profile(*, shared_prod_domain: bool = False) -> LaunchplaneProductProfileRe
 
 
 class IngressRouteInstanceScopeTests(unittest.TestCase):
+    def test_monitoring_host_is_protective_custody_but_never_proxy_authority(self) -> None:
+        profile = _profile()
+        testing, prod = profile.lanes
+        check = ProductLaneHealthCheck(name="business", url=prod.base_url)
+        testing = testing.model_copy(
+            update={
+                "health_monitoring": testing.health_monitoring.model_copy(
+                    update={"checks": (check,)}
+                )
+            }
+        )
+        profile = profile.model_copy(update={"lanes": (testing, prod)})
+        for instance, code in (
+            ("testing", "ingress_route_domain_scope_mismatch"),
+            ("prod", "ingress_route_domain_scope_ambiguous"),
+        ):
+            with (
+                self.subTest(instance=instance),
+                self.assertRaises(IngressRouteInstanceScopeError) as raised,
+            ):
+                validate_ingress_route_instance_scope(
+                    profile=profile,
+                    context="example",
+                    instance=instance,
+                    requested_domains=("app.example.test",),
+                )
+            self.assertEqual(raised.exception.code, code)
+
     def test_noop_target_host_scope_is_lane_bound_and_rejects_shared_hosts(self) -> None:
         profile = _profile()
         alias = "recovery.example.test"
