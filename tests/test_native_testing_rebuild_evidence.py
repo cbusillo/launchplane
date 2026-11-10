@@ -19,7 +19,23 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
-from control_plane.contracts.testing_candidate import testing_candidate_namespace
+from control_plane.contracts.testing_candidate import (
+    testing_candidate_namespace,
+    TestingCandidateAllocation,
+)
+from control_plane.contracts.testing_candidate_application import (
+    TestingCandidateApplication,
+    TestingCandidateApplicationPlan,
+)
+from control_plane.contracts.artifact_identity import (
+    ArtifactIdentityManifest,
+    ArtifactImageReference,
+)
+from control_plane.dokploy.testing_route import testing_route_id
+from control_plane.dokploy.testing_route_execution import (
+    TestingRouteExecutionIntent,
+    TestingRouteExecutionCustody,
+)
 from control_plane.contracts.testing_rebuild import (
     REBUILD_SCOPE,
     REBUILD_ROUTE,
@@ -31,8 +47,13 @@ from control_plane.contracts.testing_rebuild import (
 from control_plane.native_testing_rebuild_evidence import (
     NativeTestingEvidenceStore,
     read_native_testing_rebuild_evidence,
+    read_native_testing_execution_binding,
+    _route_read,
 )
-from control_plane.contracts.native_testing_rebuild_evidence import NativeTestingRebuildEvidence
+from control_plane.contracts.native_testing_rebuild_evidence import (
+    NativeTestingRebuildEvidence,
+    NativeTestingExecutionBinding,
+)
 from control_plane.http_routes.drivers import (
     ODOO_STABLE_TARGET_REPLACEMENT_OPERATION_STATUS_ROUTE,
     register_operation_status_read_routes,
@@ -56,12 +77,27 @@ class NativeTestingEvidenceTests(unittest.TestCase):
             self.plan.product, self.plan.context, self.plan.operation_id
         )
         self.plan = self.plan.model_copy(
-            update={"new": self.plan.new.model_copy(update={"copy_id": namespace})}
+            update={
+                "route_id": testing_route_id(self.plan.product, self.plan.context),
+                "new": self.plan.new.model_copy(
+                    update={
+                        "copy_id": namespace,
+                        "resource_binding": "d" * 64,
+                        "runtime_identity": self.plan.new.runtime_identity.model_copy(
+                            update={
+                                "source_git_ref": "e" * 40,
+                                "image_reference": "ghcr.io/example/app@sha256:" + "a" * 64,
+                            }
+                        ),
+                    }
+                ),
+            }
         )
-        self.intent = {
+        self.intent: dict[str, Any] = {
             "operation_id": self.plan.operation_id,
             "old": self.plan.old.model_dump(mode="json"),
             "private": "fixture-private-topology-and-credential-material",
+            "server_id": "fixture-execution-server",
         }
         self.intent_digest = canonical_json_sha256(self.intent)
         self.plan = self.plan.model_copy(update={"authority_digest": self.intent_digest})
@@ -93,6 +129,7 @@ class NativeTestingEvidenceTests(unittest.TestCase):
                 "read_original_mutation_intent",
                 "compare_and_write_testing_rebuild_checkpoint",
                 "read_deployment_record",
+                "read_testing_candidate",
                 "read_odoo_stable_target_replacement_operation_record",
             ]
         )
@@ -109,6 +146,7 @@ class NativeTestingEvidenceTests(unittest.TestCase):
             )
         )
         self.store.read_deployment_record.side_effect = FileNotFoundError("fixture")
+        self.store.read_testing_candidate.return_value = None
         self.store.read_odoo_stable_target_replacement_operation_record.return_value = (
             self.operation
         )
@@ -171,6 +209,254 @@ class NativeTestingEvidenceTests(unittest.TestCase):
 
     def read(self) -> NativeTestingRebuildEvidence:
         return read_native_testing_rebuild_evidence(self.store, self.operation)
+
+    def allocation(self) -> TestingCandidateAllocation:
+        plan = self.plan
+        identity = plan.new.runtime_identity
+        return TestingCandidateAllocation(
+            namespace=plan.new.copy_id,
+            product=plan.product,
+            context=plan.context,
+            operation_id=plan.operation_id,
+            intent_sha256=plan.authority_digest,
+            serving_target_id=plan.old.target_id,
+            server_id=self.intent["server_id"],
+            project_id="private-project",
+            environment_id="private-environment",
+            compose_id=plan.new.target_id,
+            resources_binding_sha256=plan.new.resource_binding,
+            created_at=self.checkpoint.began_at,
+            application=TestingCandidateApplication(
+                plan=TestingCandidateApplicationPlan(
+                    product=plan.product,
+                    context=plan.context,
+                    operation_id=plan.operation_id,
+                    namespace=plan.new.copy_id,
+                    target_id=plan.new.target_id,
+                    base_url=plan.base_url,
+                    artifact=ArtifactIdentityManifest(
+                        artifact_id=identity.artifact_id,
+                        source_commit=identity.source_git_ref,
+                        enterprise_base_digest="sha256:" + "b" * 64,
+                        image=ArtifactImageReference(
+                            repository="ghcr.io/example/app", digest=identity.image_digest
+                        ),
+                    ),
+                    runtime_identity=identity,
+                    source="empty",
+                    authority_sha256="c" * 64,
+                    credential_bindings_sha256="f" * 64,
+                )
+            ),
+        )
+
+    def private_read(self) -> NativeTestingExecutionBinding:
+        return read_native_testing_execution_binding(self.store, self.operation)
+
+    def test_private_allocation_requires_original_resources_and_application_identity(self) -> None:
+        allocation = self.allocation()
+        assert allocation.application is not None
+        self.store.read_testing_candidate.return_value = allocation
+        binding = self.private_read()
+        self.assertEqual(binding.candidate.binding, "matched")
+        assert binding.candidate.selector is not None
+        self.assertEqual(binding.candidate.selector.compose_id, self.plan.new.target_id)
+        self.assertEqual(binding.candidate.selector.server_id, self.intent["server_id"])
+        self.assertEqual(binding.intent_sha256, self.reservation.reconciliation_key)
+        self.assertEqual(binding.checkpoint_plan_sha256, self.plan.digest)
+        for changes in (
+            {"operation_id": "foreign"},
+            {"server_id": "foreign"},
+            {"intent_sha256": "a" * 64},
+            {"compose_id": "foreign"},
+            {"resources_binding_sha256": "a" * 64},
+            {
+                "application": allocation.application.model_copy(
+                    update={
+                        "plan": allocation.application.plan.model_copy(
+                            update={"runtime_identity": self.plan.old.runtime_identity}
+                        )
+                    }
+                )
+            },
+        ):
+            with self.subTest(changes=changes):
+                self.store.read_testing_candidate.return_value = allocation.model_copy(
+                    update=changes
+                )
+                result = self.private_read().candidate
+                self.assertEqual(result.availability, "unbound")
+                self.assertIsNone(result.selector)
+
+    def test_missing_and_unavailable_allocation_are_distinct_from_unbound(self) -> None:
+        self.assertEqual(self.private_read().candidate.availability, "missing")
+        self.store.read_testing_candidate.side_effect = OSError("private failure")
+        result = self.private_read().candidate
+        self.assertEqual(result.availability, "unavailable")
+        self.assertIsNone(result.selector)
+
+    def test_foreign_original_does_not_read_candidate_or_route_intents(self) -> None:
+        self.store.read_original_mutation_intent.return_value = {
+            **self.intent,
+            "operation_id": "foreign",
+        }
+        result = self.private_read()
+        self.assertEqual(result.native_evidence.original_intent.binding, "mismatched")
+        self.store.read_testing_candidate.assert_not_called()
+        self.assertEqual(self.store.read_original_mutation_intent.call_count, 1)
+
+    def route_execution(
+        self, *, inverse: bool = False
+    ) -> tuple[LaunchplaneIdempotencyRecord, TestingRouteExecutionIntent]:
+        desired = self.plan.old if inverse else self.plan.new
+        phase = "route:" + desired.copy_id
+        key = self.operation.operation_id + ":" + phase
+        fingerprint = canonical_json_sha256({"intent": self.intent_digest, "phase": phase})
+        receipt = self.row(REBUILD_SCOPE, REBUILD_ROUTE + ":effect", key, fingerprint).model_copy(
+            update={
+                "reconciliation_key": fingerprint,
+                "provider_target_key": self.reservation.provider_target_key + ":" + phase,
+            }
+        )
+        self.rows[(receipt.scope, receipt.route_path, key)] = receipt
+        execution = TestingRouteExecutionIntent(
+            operation_id=self.plan.operation_id,
+            server_id=self.intent["server_id"],
+            route_id=self.plan.route_id,
+            route_digest="a" * 64,
+            document_sha256="b" * 64,
+            backend=desired.private_url,
+            custody=TestingRouteExecutionCustody(mount_source="/private/route", filesystem="1:2"),
+        )
+        self.store.read_original_mutation_intent.side_effect = lambda row: (
+            {"route_execution": execution.model_dump(mode="json")}
+            if row.record_id == receipt.record_id
+            else self.intent
+        )
+        return receipt, execution
+
+    def test_route_intent_returns_bound_desired_backend_without_claiming_current_backend(
+        self,
+    ) -> None:
+        receipt, execution = self.route_execution()
+        result = self.private_read().forward_route
+        self.assertEqual(result.availability, "present")
+        assert result.selector is not None
+        self.assertEqual(result.selector.backend, execution.backend)
+        self.assertEqual(result.attempt, receipt.attempt)
+        self.assertIsNone(result.route_digest_matches)
+        self.assertEqual(result.binding, "unverified")
+        self.assertIsNone(result.observed_backend_matches)
+        self.assertIsNone(result.backend_observed_at)
+
+    def test_foreign_route_intent_cannot_select_a_private_read_target(self) -> None:
+        receipt, execution = self.route_execution()
+        for changes in (
+            {"operation_id": "foreign"},
+            {"server_id": "foreign"},
+            {"backend": "http://foreign:8069"},
+        ):
+            with self.subTest(changes=changes):
+                self.store.read_original_mutation_intent.side_effect = lambda row: (
+                    {
+                        "route_execution": execution.model_copy(update=changes).model_dump(
+                            mode="json"
+                        )
+                    }
+                    if row.record_id == receipt.record_id
+                    else self.intent
+                )
+                result = self.private_read().forward_route
+                self.assertEqual(result.availability, "unbound")
+                self.assertIsNone(result.selector)
+
+    def test_legacy_route_without_execution_intent_is_not_a_missing_receipt(self) -> None:
+        receipt, _ = self.route_execution()
+        self.store.read_original_mutation_intent.side_effect = lambda row: (
+            {} if row.record_id == receipt.record_id else self.intent
+        )
+        result = self.private_read()
+        self.assertEqual(result.native_evidence.forward_route.availability, "present")
+        self.assertEqual(result.forward_route.availability, "not_retained")
+
+    def test_route_digest_requires_the_retained_original_route_plan(self) -> None:
+        from tests.test_testing_publication import TestingPublicationTests
+
+        fixture = TestingPublicationTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        publication = fixture.prepare()
+        receipt, execution = self.route_execution()
+        evidence = self.read().forward_route
+        route = publication.plan.route
+        plan = self.plan.model_copy(
+            update={
+                "product": route.product,
+                "context": route.context,
+                "base_url": "https://" + route.host,
+                "route_id": route.route_id,
+                "old": self.plan.old.model_copy(update={"private_url": route.old_backend}),
+                "new": self.plan.new.model_copy(update={"private_url": route.new_backend}),
+            }
+        )
+        checkpoint = self.checkpoint.model_copy(update={"plan": plan, "route": None})
+        for digest, expected in ((route.digest, "matched"), ("0" * 64, "mismatched")):
+            with self.subTest(digest=digest):
+                self.store.read_original_mutation_intent.side_effect = None
+                self.store.read_original_mutation_intent.return_value = {
+                    "route_execution": execution.model_copy(
+                        update={
+                            "route_digest": digest,
+                            "route_id": route.route_id,
+                            "backend": route.new_backend,
+                        }
+                    ).model_dump(mode="json")
+                }
+                result = _route_read(
+                    cast(NativeTestingEvidenceStore, cast(object, self.store)),
+                    receipt,
+                    evidence,
+                    checkpoint,
+                    self.intent,
+                    inverse=False,
+                    publication=publication,
+                )
+                self.assertEqual(result.binding, expected)
+                self.assertEqual(result.route_digest_matches, expected == "matched")
+                self.assertEqual(result.selector is not None, expected == "matched")
+
+    def test_readiness_returns_retained_success_without_borrowing_public_probe_attempt(
+        self,
+    ) -> None:
+        readiness = self.checkpoint.readiness
+        assert readiness is not None
+        evidence = self.read().candidate_readiness
+        self.assertEqual(evidence.state, "pass")
+        self.assertTrue(evidence.runtime_identity_matches)
+        self.assertEqual(evidence.observed_at, readiness.observed_at)
+        self.assertIsNone(evidence.attempt)
+        self.assertIsNone(evidence.verified)
+
+    def test_private_binding_is_explicit_and_uses_existing_read_authority(self) -> None:
+        path = ODOO_STABLE_TARGET_REPLACEMENT_OPERATION_STATUS_ROUTE.format(
+            operation_id=self.operation.operation_id
+        )
+        for read_only in (False, True):
+            with self.subTest(read_only=read_only):
+                response = asyncio.run(
+                    request(
+                        self.app(read_only=read_only),
+                        "GET",
+                        path + "?include_native_execution_binding=true",
+                    )
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                binding = response.json()["native_execution_binding"]
+                self.assertEqual(binding["operation_id"], self.operation.operation_id)
+                self.assertEqual(binding["native_evidence"]["candidate_readiness"]["state"], "pass")
+                self.assertEqual(binding["failure_reference"]["availability"], "not_retained")
+                self.assertEqual(binding["terminal_account"], "not_retained")
+                self.assertNotIn("native_evidence", response.json())
 
     def test_failed_candidate_probe_survives_inverse_and_terminal_checkpoint(self) -> None:
         evidence = self.read().terminal_probe
@@ -398,10 +684,12 @@ class NativeTestingEvidenceTests(unittest.TestCase):
                 response = asyncio.run(request(self.app(read_only=read_only), "GET", path))
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertNotIn("native_evidence", response.json())
+                self.assertNotIn("native_execution_binding", response.json())
                 self.assertEqual(response.json()["operation"]["attempt"], self.operation.attempt)
                 self.assertFalse(response.json()["recovery"]["safe_to_release"])
         self.store.read_idempotency_record.assert_not_called()
         self.store.read_original_mutation_intent.assert_not_called()
+        self.store.read_testing_candidate.assert_not_called()
 
     def test_opt_in_uses_same_scoped_read_authority_and_does_not_change_status_or_recovery(
         self,
@@ -427,12 +715,73 @@ class NativeTestingEvidenceTests(unittest.TestCase):
         path = ODOO_STABLE_TARGET_REPLACEMENT_OPERATION_STATUS_ROUTE.format(
             operation_id=self.operation.operation_id
         )
-        response = asyncio.run(
-            request(self.app(authorized=False), "GET", path + "?include_native_evidence=true")
-        )
-        self.assertEqual(response.status_code, 403)
+        for query in ("include_native_evidence", "include_native_execution_binding"):
+            response = asyncio.run(
+                request(self.app(authorized=False), "GET", path + "?" + query + "=true")
+            )
+            self.assertEqual(response.status_code, 403)
         self.store.read_idempotency_record.assert_not_called()
         self.store.read_original_mutation_intent.assert_not_called()
+        self.store.read_testing_candidate.assert_not_called()
+
+    def test_private_read_omits_raw_material_and_never_calls_transports_or_writers(self) -> None:
+        self.store.read_testing_candidate.return_value = self.allocation()
+        self.route_execution(inverse=True)
+        with patch.object(socket.socket, "connect", side_effect=AssertionError("provider IO")):
+            result = self.private_read()
+        self.assertEqual(result.execution_server_id, self.intent["server_id"])
+        self.assertTrue(result.inverse_route.observed_backend_matches)
+        assert self.checkpoint.route is not None
+        self.assertEqual(
+            result.inverse_route.backend_observed_at, self.checkpoint.route.observed_at
+        )
+        payload = result.model_dump_json()
+        for private in (
+            self.intent["private"],
+            "/private/route",
+            self.reservation.response_trace_id,
+            self.operation.idempotency_key,
+        ):
+            self.assertNotIn(private, payload)
+        self.store.compare_and_write_testing_rebuild_checkpoint.assert_not_called()
+        self.store.reset_mock()
+        public = self.read().model_dump_json()
+        self.assertNotIn(self.intent["server_id"], public)
+        self.assertNotIn(self.plan.new.target_id, public)
+        self.store.read_testing_candidate.assert_not_called()
+
+    def test_failure_reference_uses_only_bound_checkpoint_markers_without_attribution(self) -> None:
+        key = next(key for key in self.rows if key[0] == REBUILD_CHECKPOINT_SCOPE)
+        checkpoint = self.checkpoint.model_copy(
+            update={
+                "error": "candidate_private_readiness_failed",
+                "readiness": None,
+                "rollback_started": False,
+                "route": None,
+                "candidate_probe": None,
+                "private_readiness_failed_at": self.checkpoint.updated_at,
+                "preparation_failure_evidence": "private-text:copy_failure_stage=host_preparation:copy_failure_kind=command_failed:copy_failure_exit_status=1:copy_failure_evidence_id="
+                + "d" * 32,
+            }
+        )
+        self.rows[key] = self.rows[key].model_copy(
+            update={"response_payload": checkpoint.model_dump(mode="json")}
+        )
+        result = self.private_read()
+        self.assertEqual(result.failure_reference.evidence_id, "d" * 32)
+        self.assertEqual(result.failure_reference.stage, "host_preparation")
+        self.assertIsNone(result.failure_reference.attempt)
+        self.assertEqual(
+            result.failure_reference.observed_at, checkpoint.private_readiness_failed_at
+        )
+        readiness = result.native_evidence.candidate_readiness
+        self.assertEqual(readiness.state, "fail")
+        self.assertEqual(readiness.observed_at, checkpoint.private_readiness_failed_at)
+        self.assertIsNone(readiness.runtime_identity_matches)
+        self.assertIsNone(readiness.attempt)
+        self.assertEqual(result.execution_trace, "not_retained")
+        self.assertEqual(result.submitted_program, "not_retained")
+        self.assertNotIn("private-text", result.model_dump_json())
 
     def test_foreign_effect_receipt_is_unbound_and_missing_is_not_no_effect(self) -> None:
         phase = "route:" + self.plan.old.copy_id

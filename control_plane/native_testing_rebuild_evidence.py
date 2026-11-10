@@ -14,13 +14,25 @@ from control_plane.contracts.idempotency_record import (
 )
 from control_plane.contracts.native_testing_rebuild_evidence import (
     NativeEvidenceSource,
+    NativeCandidateRead,
+    NativeCandidateSelector,
+    NativeRouteRead,
+    NativeRouteSelector,
+    NativeTestingExecutionBinding,
+    NativeFailureRead,
     NativeTestingEvidenceItem,
     NativeTestingRebuildEvidence,
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
-from control_plane.contracts.testing_candidate import testing_candidate_namespace
+from control_plane.contracts.testing_candidate import (
+    TestingCandidateAllocation,
+    testing_candidate_namespace,
+)
+from control_plane.dokploy.testing_route_execution import TestingRouteExecutionIntent
+from control_plane.dokploy.testing_route import TestingLaneRoute
+from control_plane.dokploy.native_copy_stream import require_registered_remote_server
 from control_plane.contracts.testing_publication import TestingPublicationRecord
 from control_plane.contracts.testing_rebuild import (
     REBUILD_SCOPE,
@@ -33,6 +45,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_publication_storage import read_publication
 from control_plane.testing_rebuild_storage import RecordTestingRebuildStore, RebuildRecordStore
 from control_plane.traffic_switch import require_route_authority
+from control_plane.copy_readback_diagnostics import copy_failure_summary
 
 T = TypeVar("T")
 
@@ -44,6 +57,7 @@ class NativeTestingEvidenceStore(Protocol):
     def read_original_mutation_intent(
         self, reservation: LaunchplaneIdempotencyRecord
     ) -> dict[str, Any]: ...
+    def read_testing_candidate(self, namespace: str) -> TestingCandidateAllocation | None: ...
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
 
@@ -225,7 +239,7 @@ def _route_receipt(
     reservation: LaunchplaneIdempotencyRecord,
     copy_id: str,
     source: NativeEvidenceSource,
-) -> NativeTestingEvidenceItem:
+) -> tuple[LaunchplaneIdempotencyRecord | None, NativeTestingEvidenceItem]:
     phase = "route:" + copy_id
     key = operation.operation_id + ":" + phase
     fingerprint = canonical_json_sha256({"intent": reservation.reconciliation_key, "phase": phase})
@@ -236,7 +250,7 @@ def _route_receipt(
         ),
     )
     if record is None:
-        return evidence
+        return None, evidence
     if not _bound_reservation(
         record,
         scope=REBUILD_SCOPE,
@@ -247,19 +261,19 @@ def _route_receipt(
         record.reconciliation_key != fingerprint
         or record.provider_target_key != reservation.provider_target_key + ":" + phase
     ):
-        return _unbound(source)
+        return None, _unbound(source)
     markers = {
         name: record.response_payload.get(name)
         for name in ("not_dispatched", "route_write_not_started")
     }
     if any(value is not None and type(value) is not bool for value in markers.values()):
-        return NativeTestingEvidenceItem(
+        return None, NativeTestingEvidenceItem(
             source=source,
             availability="unavailable",
             binding="matched",
             coverage="retained_record_only",
         )
-    return _reservation_item(record, source).model_copy(
+    return record, _reservation_item(record, source).model_copy(
         update={
             "effect_checkpoint_recorded": bool(record.provider_effect_started_at),
             **markers,
@@ -272,7 +286,7 @@ def _selection(
     operation: OdooStableTargetReplacementOperationRecord,
     reservation: LaunchplaneIdempotencyRecord,
     checkpoint: TestingRebuildRecord,
-) -> NativeTestingEvidenceItem:
+) -> tuple[TestingPublicationRecord | None, NativeTestingEvidenceItem]:
     key = canonical_json_sha256(
         {
             "product": operation.product,
@@ -284,7 +298,7 @@ def _selection(
         "publication_receipt", lambda: read_publication(cast(PostgresRecordStore, store), key)
     )
     if record is None:
-        return evidence
+        return None, evidence
     assert isinstance(record, TestingPublicationRecord)
     plan = record.plan
     candidate = plan.candidate
@@ -307,8 +321,8 @@ def _selection(
         reservation.record_id,
         reservation.provider_target_key,
     ) or plan.deployment.record_id != checkpoint.plan.new.runtime_identity.deployment_record_id:
-        return _unbound("publication_receipt")
-    return NativeTestingEvidenceItem(
+        return None, _unbound("publication_receipt")
+    return record, NativeTestingEvidenceItem(
         source="publication_receipt",
         availability="present",
         binding="matched",
@@ -339,9 +353,248 @@ def _deployment(
     )
 
 
-def read_native_testing_rebuild_evidence(
-    record_store: object, operation: OdooStableTargetReplacementOperationRecord
-) -> NativeTestingRebuildEvidence:
+def _private_status(evidence: NativeTestingEvidenceItem) -> dict[str, Any]:
+    return evidence.model_dump(
+        include={"availability", "binding", "coverage", "observed_at", "attempt"}
+    )
+
+
+def _failure_read(checkpoint: TestingRebuildRecord) -> NativeFailureRead:
+    markers = dict(
+        part.split("=", 1)
+        for part in copy_failure_summary(checkpoint.preparation_failure_evidence).split()
+    )
+    if not markers:
+        return NativeFailureRead(availability="not_retained", coverage="retained_record_only")
+    return NativeFailureRead.model_validate(
+        {
+            "availability": "present",
+            "binding": "matched",
+            "coverage": "retained_record_only",
+            "evidence_id": markers.get("copy_failure_evidence_id"),
+            "stage": markers.get("copy_failure_stage"),
+            "kind": markers.get("copy_failure_kind"),
+            "exit_status": markers.get("copy_failure_exit_status"),
+            "observed_at": checkpoint.private_readiness_failed_at,
+        }
+    )
+
+
+def _readiness(checkpoint: TestingRebuildRecord) -> NativeTestingEvidenceItem:
+    source: NativeEvidenceSource = "checkpoint_private_readiness"
+    if checkpoint.error == "candidate_private_readiness_failed":
+        return NativeTestingEvidenceItem(
+            source=source,
+            availability="present",
+            binding="matched",
+            coverage="retained_record_only",
+            state="fail",
+            observed_at=checkpoint.private_readiness_failed_at,
+        )
+    readiness = checkpoint.readiness
+    if readiness is not None and (readiness.copy_id, readiness.host) != (
+        checkpoint.plan.new.copy_id,
+        checkpoint.plan.host,
+    ):
+        return _unbound(source)
+    return NativeTestingEvidenceItem(
+        source=source,
+        availability="present" if readiness else "null",
+        binding="matched",
+        coverage="retained_record_only",
+        state="pass" if readiness and readiness.healthy else None,
+        observed_at=readiness.observed_at if readiness else None,
+        runtime_identity_matches=readiness.runtime_identity == checkpoint.plan.new.runtime_identity
+        if readiness
+        else None,
+    )
+
+
+def _candidate_read(
+    store: NativeTestingEvidenceStore,
+    operation: OdooStableTargetReplacementOperationRecord,
+    checkpoint: TestingRebuildRecord,
+    intent: dict[str, Any],
+) -> NativeCandidateRead:
+    if not callable(getattr(store, "read_testing_candidate", None)):
+        return NativeCandidateRead()
+    candidate, evidence = _read(
+        "checkpoint_preparation", lambda: store.read_testing_candidate(checkpoint.plan.new.copy_id)
+    )
+    if candidate is None:
+        return NativeCandidateRead(**_private_status(evidence))
+    plan = checkpoint.plan
+    if (
+        candidate.product,
+        candidate.context,
+        candidate.operation_id,
+        candidate.namespace,
+        candidate.intent_sha256,
+        candidate.compose_id,
+        candidate.resources_binding_sha256,
+        candidate.server_id,
+        candidate.serving_target_id,
+    ) != (
+        operation.product,
+        operation.context,
+        operation.operation_id,
+        plan.new.copy_id,
+        plan.authority_digest,
+        plan.new.target_id,
+        plan.new.resource_binding,
+        intent.get("server_id"),
+        plan.old.target_id,
+    ):
+        return NativeCandidateRead(
+            availability="unbound", binding="mismatched", coverage="retained_record_only"
+        )
+    application = candidate.application
+    if application is None:
+        return NativeCandidateRead(
+            availability="present",
+            coverage="retained_record_only",
+            observed_at=candidate.created_at,
+        )
+    if (
+        application.plan.runtime_identity != plan.new.runtime_identity
+        or application.plan.base_url != plan.base_url
+        or application.plan.source != plan.source
+        or (
+            application.prepared is not None
+            and application.prepared.private_endpoint != plan.new.private_url
+        )
+    ):
+        return NativeCandidateRead(
+            availability="unbound", binding="mismatched", coverage="retained_record_only"
+        )
+    try:
+        selector = NativeCandidateSelector(
+            namespace=candidate.namespace,
+            server_id=require_registered_remote_server(candidate.server_id),
+            project_id=candidate.project_id,
+            environment_id=candidate.environment_id,
+            compose_id=candidate.compose_id,
+            resources_binding_sha256=candidate.resources_binding_sha256,
+            runtime_identity=application.plan.runtime_identity,
+        )
+    except ValueError:
+        return NativeCandidateRead(availability="unavailable", coverage="retained_record_only")
+    return NativeCandidateRead(
+        availability="present",
+        binding="matched",
+        coverage="retained_record_only",
+        observed_at=candidate.created_at,
+        selector=selector,
+    )
+
+
+def _route_read(
+    store: NativeTestingEvidenceStore,
+    receipt: LaunchplaneIdempotencyRecord | None,
+    evidence: NativeTestingEvidenceItem,
+    checkpoint: TestingRebuildRecord,
+    intent: dict[str, Any],
+    *,
+    inverse: bool,
+    publication: TestingPublicationRecord | None,
+) -> NativeRouteRead:
+    if receipt is None:
+        return NativeRouteRead(**_private_status(evidence))
+    original, retained = _read(
+        evidence.source, partial(store.read_original_mutation_intent, receipt)
+    )
+    if original is None:
+        return NativeRouteRead(**_private_status(retained))
+    if "route_execution" not in original:
+        return NativeRouteRead(availability="not_retained", coverage="retained_record_only")
+    try:
+        execution = TestingRouteExecutionIntent.model_validate(original["route_execution"])
+        require_registered_remote_server(execution.server_id)
+    except ValueError:
+        return NativeRouteRead(availability="unavailable", coverage="retained_record_only")
+    plan = checkpoint.plan
+    desired = plan.old if inverse else plan.new
+    if (execution.operation_id, execution.server_id, execution.route_id, execution.backend) != (
+        plan.operation_id,
+        intent.get("server_id"),
+        plan.route_id,
+        desired.private_url,
+    ):
+        return NativeRouteRead(
+            availability="unbound", binding="mismatched", coverage="retained_record_only"
+        )
+    route = checkpoint.route
+    observed = (
+        route
+        if isinstance(route, TestingRouteObservation) and route.slot_id == desired.copy_id
+        else None
+    )
+    if observed is not None and desired.private_url is not None:
+        try:
+            require_route_authority(
+                observed,
+                route_id=plan.route_id,
+                host=plan.host,
+                target_url=desired.private_url,
+                slot_id=desired.copy_id,
+            )
+        except ValueError:
+            observed = None
+    else:
+        observed = None
+    try:
+        selector = NativeRouteSelector(
+            server_id=execution.server_id,
+            copy_id=desired.copy_id,
+            route_id=execution.route_id,
+            route_digest=execution.route_digest,
+            document_sha256=execution.document_sha256,
+            backend=execution.backend,
+        )
+    except ValueError:
+        return NativeRouteRead(availability="unavailable", coverage="retained_record_only")
+    expected_route = publication.plan.route if publication else intent.get("unavailable_route")
+    digest_matches = None
+    if expected_route is not None:
+        try:
+            expected = TestingLaneRoute.model_validate(expected_route)
+        except ValueError:
+            return NativeRouteRead(availability="unavailable", coverage="retained_record_only")
+        digest_matches = (
+            execution.route_digest == expected.digest
+            and (
+                expected.product,
+                expected.context,
+                expected.host,
+                expected.route_id,
+                expected.new_backend,
+            )
+            == (plan.product, plan.context, plan.host, plan.route_id, plan.new.private_url)
+            and expected.old_backend == plan.old.private_url
+        )
+        if not digest_matches:
+            return NativeRouteRead(
+                availability="unbound",
+                binding="mismatched",
+                coverage="retained_record_only",
+                route_digest_matches=False,
+            )
+    return NativeRouteRead(
+        availability="present",
+        binding="matched" if digest_matches else "unverified",
+        coverage="retained_record_only",
+        observed_at=evidence.observed_at,
+        attempt=receipt.attempt,
+        selector=selector,
+        route_digest_matches=digest_matches,
+        observed_backend_matches=observed.target_url == execution.backend if observed else None,
+        backend_observed_at=observed.observed_at if observed else None,
+    )
+
+
+def _read_native_testing_rebuild_evidence(
+    record_store: object, operation: OdooStableTargetReplacementOperationRecord, *, private: bool
+) -> NativeTestingExecutionBinding:
     fields: dict[str, Any] = {
         name: NativeTestingEvidenceItem(source=cast(NativeEvidenceSource, source))
         for name, source in (
@@ -358,8 +611,19 @@ def read_native_testing_rebuild_evidence(
         )
     }
 
-    def result() -> NativeTestingRebuildEvidence:
-        return NativeTestingRebuildEvidence(operation_attempt=operation.attempt, **fields)
+    private_fields: dict[str, Any] = {}
+
+    def result() -> NativeTestingExecutionBinding:
+        return NativeTestingExecutionBinding(
+            operation_id=operation.operation_id,
+            product=operation.product,
+            context=operation.context,
+            instance=operation.instance,
+            native_evidence=NativeTestingRebuildEvidence(
+                operation_attempt=operation.attempt, **fields
+            ),
+            **private_fields,
+        )
 
     if not operation.is_native_testing_rebuild or not callable(
         getattr(record_store, "read_idempotency_record", None)
@@ -442,13 +706,7 @@ def read_native_testing_rebuild_evidence(
         binding="matched",
         coverage="retained_record_only",
     )
-    fields["candidate_readiness"] = NativeTestingEvidenceItem(
-        source="checkpoint_private_readiness",
-        availability="present" if checkpoint.readiness is not None else "null",
-        binding="matched",
-        coverage="retained_record_only",
-        observed_at=checkpoint.readiness.observed_at if checkpoint.readiness else None,
-    )
+    fields["candidate_readiness"] = _readiness(checkpoint)
     fields["predecessor_snapshot"] = (
         checkpoint.plan.old.availability
         if isinstance(checkpoint.plan.old, UnavailableTestingPredecessor)
@@ -457,12 +715,58 @@ def read_native_testing_rebuild_evidence(
     fields["terminal_probe"] = _terminal_probe(checkpoint, operation, reservation)
     for name in ("publication_started", "retirement_started", "rollback_started"):
         fields[name] = getattr(checkpoint, name)
-    fields["forward_route"] = _route_receipt(
+    forward, fields["forward_route"] = _route_receipt(
         store, operation, reservation, checkpoint.plan.new.copy_id, "forward_route_receipt"
     )
-    fields["inverse_route"] = _route_receipt(
+    inverse, fields["inverse_route"] = _route_receipt(
         store, operation, reservation, checkpoint.plan.old.copy_id, "inverse_route_receipt"
     )
-    fields["selection"] = _selection(store, operation, reservation, checkpoint)
+    publication, fields["selection"] = _selection(store, operation, reservation, checkpoint)
     fields["deployment"] = _deployment(store, checkpoint)
+    if private:
+        try:
+            private_fields["execution_server_id"] = require_registered_remote_server(
+                intent.get("server_id")
+            )
+        except ValueError:
+            private_fields["execution_server_id"] = None
+        private_fields.update(
+            reservation_id=reservation.record_id,
+            intent_sha256=reservation.reconciliation_key,
+            checkpoint_plan_sha256=checkpoint.plan.digest,
+            failure_reference=_failure_read(checkpoint),
+            candidate=_candidate_read(store, operation, checkpoint, intent),
+            forward_route=_route_read(
+                store,
+                forward,
+                fields["forward_route"],
+                checkpoint,
+                intent,
+                inverse=False,
+                publication=publication,
+            ),
+            inverse_route=_route_read(
+                store,
+                inverse,
+                fields["inverse_route"],
+                checkpoint,
+                intent,
+                inverse=True,
+                publication=publication,
+            ),
+        )
     return result()
+
+
+def read_native_testing_rebuild_evidence(
+    record_store: object, operation: OdooStableTargetReplacementOperationRecord
+) -> NativeTestingRebuildEvidence:
+    return _read_native_testing_rebuild_evidence(
+        record_store, operation, private=False
+    ).native_evidence
+
+
+def read_native_testing_execution_binding(
+    record_store: object, operation: OdooStableTargetReplacementOperationRecord
+) -> NativeTestingExecutionBinding:
+    return _read_native_testing_rebuild_evidence(record_store, operation, private=True)

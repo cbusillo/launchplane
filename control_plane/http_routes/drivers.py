@@ -9,7 +9,10 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from control_plane import service_status as control_plane_service_status
 from control_plane import tracked_target_logs as control_plane_tracked_target_logs
 from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
-from control_plane.contracts.native_testing_rebuild_evidence import NativeTestingRebuildEvidence
+from control_plane.contracts.native_testing_rebuild_evidence import (
+    NativeTestingRebuildEvidence,
+    NativeTestingExecutionBinding,
+)
 from control_plane.contracts.odoo_prod_backup_restore_operation import (
     OdooProdBackupRestoreOperationRecord,
 )
@@ -63,7 +66,10 @@ from control_plane.operation_status_read import (
     operation_result_read_view,
     operation_status_read_view,
 )
-from control_plane.native_testing_rebuild_evidence import read_native_testing_rebuild_evidence
+from control_plane.native_testing_rebuild_evidence import (
+    read_native_testing_rebuild_evidence,
+    read_native_testing_execution_binding,
+)
 from control_plane.service_auth import (
     AuthorizationTarget,
     LaunchplaneIdentity,
@@ -115,6 +121,7 @@ class OdooStableTargetReplacementOperationStatusResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     native_evidence: NativeTestingRebuildEvidence | None = None
+    native_execution_binding: NativeTestingExecutionBinding | None = None
     recovery: TestingReplacementRecoveryRead | None = None
     operation: dict[str, object]
     result: dict[str, object] | None = None
@@ -522,6 +529,7 @@ def register_operation_status_read_routes(
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
         include_native_evidence: Annotated[bool, Query()] = False,
+        include_native_execution_binding: Annotated[bool, Query()] = False,
     ) -> OdooStableTargetReplacementOperationStatusResponse:
         trace_id = dependencies.next_trace_id()
         try:
@@ -596,11 +604,24 @@ def register_operation_status_read_routes(
             if recovery_diagnostics:
                 description += " " + " ".join(recovery_diagnostics)
             status_view["error_description"] = description
+        binding = (
+            read_native_testing_execution_binding(record_store, operation)
+            if include_native_execution_binding
+            else None
+        )
+        evidence = (
+            binding.native_evidence
+            if binding
+            else (
+                read_native_testing_rebuild_evidence(record_store, operation)
+                if include_native_evidence
+                else None
+            )
+        )
         return OdooStableTargetReplacementOperationStatusResponse(
             trace_id=trace_id,
-            native_evidence=read_native_testing_rebuild_evidence(record_store, operation)
-            if include_native_evidence
-            else None,
+            native_evidence=evidence if include_native_evidence else None,
+            native_execution_binding=binding,
             recovery=TestingReplacementRecoveryRead.model_validate(recovery),
             operation=status_view,
             result=result,

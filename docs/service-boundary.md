@@ -176,8 +176,13 @@ remaining domain and storage removal is tracked in #2437.
     and operation attempts within the original bound checkpoint. A later worker
     re-claim does not invalidate an earlier observed attempt. The probe item's
     `attempt` is that captured native reservation attempt. Older checkpoint
-    worker attempts remain unknown. Candidate preparation/private-readiness items
-    describe receipt availability in that checkpoint. `predecessor_snapshot`
+    worker attempts remain unknown. Candidate preparation describes receipt
+    availability. Private readiness also returns its retained successful verdict
+    as `state=pass`, identity agreement and its own observation time. A retained
+    private-readiness failure returns `state=fail` with its recorded failure time
+    and unknown identity agreement. Its attempt
+    and `verified` stay unknown; neither is borrowed from the public probe.
+    These are historical receipt facts, not current health. `predecessor_snapshot`
     reports the original plan's recorded identity, stopped or absent state,
     never current provider absence. Route receipts report their retained
     reservation state, not the actual route. Their optional `not_dispatched`
@@ -189,6 +194,50 @@ remaining domain and storage removal is tracked in #2437.
     merely planned publication and does not prove a forward adoption happened.
     Rollback/publication/retirement flags cover persisted intent only. A
     generic-web intent leaves native checkpoint/receipt sources unsupported.
+
+    `include_native_execution_binding=true` separately selects the closed
+    `NativeTestingExecutionBinding` private representation in
+    `native_execution_binding`. It uses the same operation lookup and stored
+    scope authorization as both existing views, with no new identity or grant.
+    It includes the public-safe `native_evidence` internally. The normal
+    `native_evidence` and default responses gain no private fields. Selecting
+    both views reuses one read of the original records.
+
+    This private package is for an owner-only local evidence file through the
+    maintained caller, never shared output. It contains the original operation
+    scope, reservation ID, intent and checkpoint digests, retained registered
+    execution-server ID and typed candidate/route selectors. Candidate reads
+    require original/intent/checkpoint binding, then allocation namespace,
+    original serving target, server, resources and application identity agreement.
+    Route-intent reads require the bound original effect receipt; the operation,
+    server, desired copy/backend and route ID must agree. Route digest agreement
+    uses the original bound publication or retained unavailable-route plan.
+    Without that route plan, digest agreement remains unknown and the route item
+    is unverified; the retained original selector facts are still available.
+    A missing execution intent on an existing legacy receipt is `not_retained`.
+    Missing rows, storage/decode failures and mismatched bindings remain distinct.
+
+    Route selectors describe intended backends. `observed_backend_matches` and
+    `backend_observed_at` describe only a matching retained checkpoint route
+    observation, never present physical state. An inverse observation does not
+    establish an earlier forward observation. Candidate creation and effect
+    receipt update times are labeled separately from backend observation times.
+    The package omits raw intents, provider dictionaries, custody paths and secrets.
+
+    `failure_reference` projects only validated markers from the bound
+    checkpoint's existing preparation/private-readiness failure evidence, with
+    the private failure time when retained. It never imports adjacent log text.
+    The native records do not retain the provider-terminal account, submitted
+    program or executing trace; these are explicitly `not_retained`. A result-read
+    trace or current package version is no substitute. These gaps limit causal
+    attribution and the documented exact private failure-file read, not every
+    effect-free read of an otherwise qualified target. A separately scoped next
+    reader must resolve its actual execution account/host safely using existing
+    authority. No file accessor is provided or invoked here: the native failure
+    JSON stays on its execution host under the
+    [private failure evidence contract](host-program-package.md#private-copy-failure-evidence).
+    This retained-only GET performs no host, provider, guest or executor IO,
+    acquires no effect authority and changes no custody or recovery eligibility.
 
     `terminal_probe` uses the separately retained candidate probe in the
     existing checkpoint, so an inverse and terminal predecessor observation
