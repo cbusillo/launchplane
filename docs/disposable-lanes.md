@@ -1460,16 +1460,6 @@ No production mutation or new authorization grant is part of this stage.
 
 ### Continuing native route authority
 
-An ordinary in-place Odoo testing deploy also publishes the running copy's
-worker-aware route through the existing fenced route writer. Multiprocess copies
-send `/websocket` to the same private alias on the native evented port; threaded
-copies keep HTTP. Hostnames, TLS, middleware, storage and original publication or
-address receipts do not change. The deployment retains its completed route-effect
-receipt, and current route readers resolve it from the inventory's successful
-deployment. A failed readiness check restores the original route through the
-same fence. Missing worker evidence, changed custody or an uncertain writer stays
-refused or pending; there is no separate amendment action or worker-mode fallback.
-
 The existing Odoo testing route-binding refresh controller renews a published
 native copy from its original publication and route custody. It does not require
 or create provider-owned domains or a legacy ingress audit. Each run reads the

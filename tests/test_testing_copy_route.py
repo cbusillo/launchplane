@@ -6,7 +6,11 @@ from unittest.mock import Mock, patch
 from control_plane import testing_copy_route as maintenance
 from control_plane.dokploy import api, source
 from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
-from control_plane.dokploy.testing_route import observe_testing_route, route_document_content
+from control_plane.dokploy.testing_route import (
+    observe_testing_route,
+    route_document,
+    route_document_content,
+)
 from tests import test_testing_route_effects as effects_tests
 
 
@@ -47,58 +51,59 @@ class TestingCopyRouteTests(unittest.TestCase):
             (maintenance, "DokployTestingRouteTransport", self.native.client),
         ):
             self.enterContext(patch.object(target, name, return_value=value))
-        self.route = maintenance.TestingCopyRoute(
+        self.checkpoint = Mock()
+
+    def run_route(self) -> None:
+        maintenance.publish_testing_copy_route(
             root=self.native.root,
             store=self.fixture.store,
             identity=self.native.new_identity,
-            checkpoint=Mock(),
+            checkpoint=self.checkpoint,
+            operation_id="stable-operation",
+            lease_owner="stable-worker",
         )
 
-    def test_same_copy_publication_replay_and_inverse_preserve_the_original(self) -> None:
-        original = self.native.route_file.read_text()
-        key = self.route.run()
+    def test_same_copy_publication_and_replay_preserve_the_http_authority(self) -> None:
+        self.run_route()
         self.assertEqual(
             observe_testing_route(
-                self.route.after, self.native.raw, json.loads(self.native.route_file.read_text())
+                self.before, self.native.raw, json.loads(self.native.route_file.read_text())
             ),
             self.before.new_backend,
         )
-        effects = self.native.remote_modes.count("publish_v2")
-        self.assertEqual(self.route.run(), key)
-        self.assertEqual(self.native.remote_modes.count("publish_v2"), effects)
-        self.route.run(inverse=True)
-        self.assertEqual(self.native.route_file.read_text(), original)
+        document = json.loads(self.native.route_file.read_text())
         self.assertEqual(
-            observe_testing_route(self.before, self.native.raw, json.loads(original)),
-            self.before.new_backend,
+            document["http"]["services"][self.before.route_id],
+            route_document(self.before, self.before.new_backend)["http"]["services"][
+                self.before.route_id
+            ],
         )
+        effects = self.native.remote_modes.count("publish_v2")
+        self.run_route()
+        self.assertEqual(self.native.remote_modes.count("publish_v2"), effects)
+        self.assertTrue(document["http"]["services"].get(self.before.route_id + "-websocket"))
 
     def test_worker_mode_drift_refuses_before_the_writer(self) -> None:
-        environment = self.native.containers["new"]["Config"]["Env"]
-        environment[-1] = "ODOO_WORKERS=0"
-        with self.assertRaises(ValueError):
-            self.route.run()
-        self.assertEqual(self.native.effect_count, 0)
+        self.native.before_publish = lambda: self.native.containers["new"]["Config"][
+            "Env"
+        ].__setitem__(-1, "ODOO_WORKERS=0")
+        with self.assertRaisesRegex(ValueError, "worker mode changed"):
+            self.run_route()
+        self.assertFalse(self.native.route_file.read_text().find("-websocket") >= 0)
 
-    def test_lost_reply_is_observed_without_another_writer(self) -> None:
+    def test_lost_reply_is_observed_by_a_fresh_invocation_without_another_writer(self) -> None:
         self.native.before_publish = lambda: setattr(self.native, "lose_writer_reply", True)
         with self.assertRaises(NativeSourceUnavailable):
-            self.route.run()
+            self.run_route()
         effects = self.native.remote_modes.count("publish_v2")
         self.native.before_publish = None
         self.native.lose_writer_reply = False
-        self.route.run()
+        self.run_route()
         self.assertEqual(self.native.remote_modes.count("publish_v2"), effects)
 
     def test_threaded_copy_keeps_its_http_route_without_a_provider_write(self) -> None:
         self.native.containers["new"]["Config"]["Env"][-1] = "ODOO_WORKERS=0"
         original = self.native.route_file.read_text()
-        route = maintenance.TestingCopyRoute(
-            root=self.native.root,
-            store=self.fixture.store,
-            identity=self.native.new_identity,
-            checkpoint=Mock(),
-        )
-        route.run()
+        self.run_route()
         self.assertEqual(self.native.route_file.read_text(), original)
         self.assertEqual(self.native.effect_count, 0)

@@ -1,12 +1,12 @@
 """The ordinary replacement action admits a native rebuild only on testing."""
 
+import json
 import os
 from typing import Any
 import unittest
 import yaml
 from unittest.mock import Mock, patch
 from control_plane import secrets
-from control_plane import testing_copy_route
 from control_plane.contracts.secret_record import SecretVersion
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_serving_copy import resolve_testing_maintenance_environment
@@ -27,7 +27,9 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     build_odoo_stable_target_replacement_plan,
 )
 from control_plane.workflows import odoo_stable_target_replacement as maintenance
-from control_plane.dokploy import api, compose, post_deploy
+from control_plane.dokploy import api, compose, post_deploy, source
+from control_plane.dokploy.testing_route import route_document
+from tests import test_testing_route_transport as transport_tests
 from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.workflows.runtime_identity_health import HealthcheckPass
 from control_plane.workflows.odoo_verification import (
@@ -57,6 +59,21 @@ def exercise_published_copy_maintenance(
     before = fixture.current()
     credentials = fixture.store.list_secret_records()
     provider = app.provider_state
+    native = transport_tests.TestingRouteTransportTests()
+    native.setUp(initialize_fence=False)
+    case.addCleanup(native.doCleanups)
+    from control_plane.testing_address_storage import effective_testing_route
+
+    native.plan = effective_testing_route(fixture.store, publication)
+    native.route_file = native.root / (native.plan.route_id + ".yml")
+    native.route_file.write_text(json.dumps(route_document(native.plan, native.plan.new_backend)))
+    native.raw = {"routers": {}, "services": {}, "middlewares": {}}
+    native.apply_document()
+    native.containers["new"]["Config"]["Labels"]["com.docker.compose.project"] = provider["appName"]
+    native.containers["new"]["Name"] = "/" + str(provider["appName"]) + "-web-1"
+    native.containers["new"]["NetworkSettings"]["Networks"]["dokploy-network"]["Aliases"] = [
+        candidate.namespace
+    ]
     checkpoint = Mock()
 
     def fetch(**kwargs: Any) -> Any:
@@ -97,6 +114,11 @@ def exercise_published_copy_maintenance(
         case.assertFalse(kwargs["run_destructive_restore"])
         case.assertIsNone(kwargs["fresh_testing_generation"])
         kwargs["before_provider_mutation"](post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
+        environment = api.parse_dokploy_env_text(str(provider["env"]))
+        for key, value in yaml.safe_load(provider["composeFile"])["services"]["web"]["environment"].items():
+            if "${" not in str(value):
+                environment[key] = str(value)
+        native.containers["new"]["Config"]["Env"] = [key + "=" + value for key, value in environment.items()]
         return {
             "log_available": "true",
             **dict.fromkeys(post_deploy.ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS, "true"),
@@ -105,11 +127,11 @@ def exercise_published_copy_maintenance(
     base_url = app.compiled.plan.base_url
     profile = fixture.store.read_product_profile_record(candidate.product)
     with (
-        patch.object(
-            testing_copy_route, "TestingCopyRoute", return_value=Mock(run=Mock(return_value=""))
-        ),
         patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": fixture.store.database_url}),
         patch.object(api, "fetch_dokploy_target_payload", side_effect=fetch),
+        patch.object(
+            source, "read_dokploy_config", return_value=("https://provider.invalid", "fixture")
+        ),
         patch.object(compose, "sync_dokploy_compose_raw_source", side_effect=sync),
         patch.object(
             compose,
@@ -157,8 +179,14 @@ def exercise_published_copy_maintenance(
             ),
             dokploy_request=request,
             provider_effect_checkpoint=checkpoint,
+            operation_id="fixture-stable-deploy",
+            operation_lease_owner="fixture-stable-worker",
         )
     case.assertEqual(result.deploy_status, "pass", result.error_code)
+    case.assertEqual(
+        json.loads(native.route_file.read_text()),
+        route_document(native.plan, native.plan.new_backend, evented=True),
+    )
     checkpoint.assert_called()
     current = fixture.current()
     case.assertEqual(current.target_id, before.target_id)
@@ -240,48 +268,6 @@ class PublishedTestingCopyTests(unittest.TestCase):
             product=self.fixture.candidate.product,
             context=self.fixture.candidate.context,
         )
-
-    def test_completed_deployment_route_preserves_publication_and_refuses_other_copies(
-        self,
-    ) -> None:
-        from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
-        from control_plane.dokploy.testing_route import maintain_testing_route
-        from control_plane.testing_address_storage import effective_testing_route
-        from control_plane.testing_copy_route import COPY_ROUTE_EFFECT
-
-        route = maintain_testing_route(self.publication.plan.route, workers=6)
-        deployment = self.store.read_deployment_record(self.publication.plan.deployment.record_id)
-        key = "route-proof"
-        receipt = LaunchplaneIdempotencyRecord(
-            record_id=key,
-            scope=REBUILD_SCOPE,
-            route_path=COPY_ROUTE_EFFECT,
-            idempotency_key=key,
-            request_fingerprint=route.digest,
-            response_trace_id=key,
-            recorded_at=self.fixture.now.isoformat(),
-            response_status_code=200,
-            response_payload={"route": route.model_dump(mode="json")},
-        )
-        self.store.write_idempotency_record(receipt)
-        self.store.write_deployment_record(
-            deployment.model_copy(
-                update={
-                    "runtime_source": {**deployment.runtime_source, "testing_route_receipt": key}
-                }
-            )
-        )
-        self.assertEqual(effective_testing_route(self.store, self.publication), route)
-        self.assertEqual(self.select(), self.publication)
-        changed = route.model_copy(update={"new_backend": "http://other-copy:8069"})
-        self.store.write_idempotency_record(
-            receipt.model_copy(
-                update={"response_payload": {"route": changed.model_dump(mode="json")}}
-            )
-        )
-        with self.assertRaises(ValueError):
-            effective_testing_route(self.store, self.publication)
 
     def test_maintenance_reads_only_local_or_explicit_nonproduction_credentials(self) -> None:
         versions: dict[str, str] = {}

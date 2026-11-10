@@ -56,11 +56,18 @@ class TestingRouteTransportTests(unittest.TestCase):
     new_identity: RuntimeIdentity
 
     def test_address_amendment_uses_fenced_writer_without_changing_runtime(self) -> None:
+        self.exercise_address_amendment(evented=False)
+
+    def test_address_amendment_keeps_the_observed_evented_route(self) -> None:
+        self.exercise_address_amendment(evented=True)
+
+    def exercise_address_amendment(self, *, evented: bool) -> None:
         payload = self.plan.model_dump()
         list(payload["template"]["http"]["routers"].values())[-1]["priority"] += 5
         before = TestingLaneRoute.model_validate(payload)
-        self.raw = self.fixture.apply(before, before.new_backend)
-        self.route_file.write_text(json.dumps(route_document(before, before.new_backend)))
+        self.raw = self.fixture.apply(before, before.new_backend, evented=evented)
+        self.route_file.write_text(json.dumps(route_document(before, before.new_backend, evented=evented)))
+        self.containers["new"]["Config"]["Env"].append("ODOO_WORKERS=" + ("6" if evented else "0"))
         self.plan = routing.amend_testing_route_address(before, "canonical.invalid")
         self.client.payload.update(
             host=self.plan.host, aliases=self.plan.aliases, old_project=self.candidate_project
@@ -99,9 +106,9 @@ class TestingRouteTransportTests(unittest.TestCase):
             }
         }
         with self.assertRaises(NativeSourceUnavailable):
-            self.publish(self.plan.new_backend, self.plan.old_backend, route_preimage=before)
+            self.publish(self.plan.new_backend, self.plan.old_backend, address_preimage=before)
         self.raw.pop("tcpRouters")
-        self.publish(self.plan.new_backend, self.plan.old_backend, route_preimage=before)
+        self.publish(self.plan.new_backend, self.plan.old_backend, address_preimage=before)
         self.assertEqual(
             observe_testing_route(self.plan, self.raw, json.loads(self.route_file.read_text())),
             before.new_backend,
@@ -529,7 +536,7 @@ class TestingRouteTransportTests(unittest.TestCase):
         backend: str | None,
         expected: str | None,
         *,
-        route_preimage: TestingLaneRoute | None = None,
+        address_preimage: TestingLaneRoute | None = None,
     ) -> None:
         execution = self.client.execution_intent(
             self.plan, backend, operation_id="fixture:" + str(expected)
@@ -556,7 +563,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             execution_key=execution.key(attempt=1),
             writer_attempt=writer,
             desired_compose_project=self.candidate_project,
-            route_preimage=route_preimage,
+            address_preimage=address_preimage,
         )
         frame = self.client.read()
         observe_testing_route(

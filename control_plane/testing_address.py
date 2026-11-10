@@ -181,7 +181,12 @@ class TestingAddressAdapter(DurableProviderMutationAdapter):
     def present(self) -> bool:
         frame = self.transport.read()
         owned = json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None
-        if owned == route_document(self.plan.route_before, self.plan.route_before.new_backend):
+        if owned in (
+            route_document(self.plan.route_before, self.plan.route_before.new_backend),
+            route_document(
+                self.plan.route_before, self.plan.route_before.new_backend, evented=True
+            ),
+        ):
             return False
         return (
             observe_testing_route(self.plan.route_after, frame["raw"], owned)
@@ -364,7 +369,7 @@ class TestingAddressAdapter(DurableProviderMutationAdapter):
                 execution=attempt.execution,
                 execution_key=attempt.key,
                 writer_attempt=attempt,
-                route_preimage=self.plan.route_before,
+                address_preimage=self.plan.route_before,
             )
 
         effects = TestingRouteEffects(

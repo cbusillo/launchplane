@@ -161,7 +161,6 @@ class TestingLaneRoute(FrozenRecord):
         default=(), max_length=1, exclude_if=lambda value: not value
     )
     address_only: bool = Field(default=False, exclude_if=lambda value: not value)
-    worker_mode_only: bool = Field(default=False, exclude_if=lambda value: not value)
     route_id: str = Field(pattern=r"^lp-testing-route-[a-f0-9]{32}$")
     old_backend: str | None
     new_backend: str
@@ -196,9 +195,7 @@ class TestingLaneRoute(FrozenRecord):
             raise ValueError("The original application route requires its exact file identity.")
         if self.route_id != testing_route_id(self.product, self.context):
             raise ValueError("Testing traffic identity belongs to another lane.")
-        if self.address_only and self.worker_mode_only:
-            raise ValueError("A worker route amendment cannot change the address.")
-        if (self.old_backend == self.new_backend) != (self.address_only or self.worker_mode_only):
+        if (self.old_backend == self.new_backend) != self.address_only:
             raise ValueError("Only an address amendment can preserve the current backend.")
         if (self.old_backend is None) != (self.unavailable_preimage is not None):
             raise ValueError("Unavailable predecessor routing requires its distinct preimage.")
@@ -228,17 +225,13 @@ class TestingLaneRoute(FrozenRecord):
         routers = http.get("routers")
         if not isinstance(routers, dict) or not routers:
             raise ValueError("Testing traffic requires an owned route template.")
-        evented = self.route_id + "-websocket" in http.get("services", {})
-        base = testing_worker_route_template(self.template, self.route_id, enabled=False)
-        if self.template != testing_worker_route_template(base, self.route_id, enabled=evented):
-            raise ValueError("Testing websocket must preserve its HTTP route and private copy.")
-        if set(base["http"].get("services", {})) != {self.route_id} or any(
+        if set(http.get("services", {})) != {self.route_id} or any(
             not isinstance(router, dict)
             or router.get("rule") != testing_route_rule(self.host, self.aliases)
             or router.get("service") != self.route_id
             or not router.get("entryPoints")
             or not set(router["entryPoints"]) <= set(self.public_entrypoints)
-            for router in base["http"]["routers"].values()
+            for router in routers.values()
         ):
             raise ValueError("Testing route template crosses its admitted host or service.")
         if self.aliases and any(
@@ -262,7 +255,6 @@ def amend_testing_route_address(before: TestingLaneRoute, hostname: str) -> Test
         host=hostname,
         aliases=[before.host],
         address_only=True,
-        worker_mode_only=False,
         old_backend=before.new_backend,
         unavailable_preimage=None,
         application_file_name="",
@@ -272,31 +264,32 @@ def amend_testing_route_address(before: TestingLaneRoute, hostname: str) -> Test
         router["rule"] = testing_route_rule(hostname, (before.host,))
         if "tls" in router:
             router["tls"]["domains"] = [{"main": hostname}, {"main": before.host}]
-    payload["template"] = testing_worker_route_template(
-        payload["template"],
-        before.route_id,
-        enabled=before.route_id + "-websocket" in before.template["http"]["services"],
-    )
     return TestingLaneRoute.model_validate(payload)
 
 
-def maintain_testing_route(before: TestingLaneRoute, *, workers: int) -> TestingLaneRoute:
-    if workers < 0:
-        raise ValueError("Odoo worker count cannot be negative.")
-    return TestingLaneRoute.model_validate(
-        {
-            **before.model_dump(),
-            "old_backend": before.new_backend,
-            "address_only": False,
-            "worker_mode_only": True,
-            "template": testing_worker_route_template(
-                before.template, before.route_id, enabled=bool(workers)
-            ),
-            "unavailable_preimage": None,
-            "application_file_name": "",
-            "application_file_sha256": "",
-        }
+def testing_route_id(product: str, context: str) -> str:
+    return (
+        "lp-testing-route-" + canonical_json_sha256({"product": product, "context": context})[:32]
     )
+
+
+def router_configuration(router: dict[str, Any]) -> dict[str, Any]:
+    """Only applied behavior belongs in a route comparison, never status counters."""
+    configuration: dict[str, Any] = {
+        key: router[key]
+        for key in (
+            "rule",
+            "ruleSyntax",
+            "service",
+            "entryPoints",
+            "priority",
+            "middlewares",
+            "tls",
+        )
+        if key in router
+    }
+    configuration.setdefault("middlewares", [])
+    return configuration
 
 
 def testing_worker_route_template(
@@ -329,32 +322,9 @@ def testing_worker_route_template(
     return document
 
 
-def testing_route_id(product: str, context: str) -> str:
-    return (
-        "lp-testing-route-" + canonical_json_sha256({"product": product, "context": context})[:32]
-    )
-
-
-def router_configuration(router: dict[str, Any]) -> dict[str, Any]:
-    """Only applied behavior belongs in a route comparison, never status counters."""
-    configuration: dict[str, Any] = {
-        key: router[key]
-        for key in (
-            "rule",
-            "ruleSyntax",
-            "service",
-            "entryPoints",
-            "priority",
-            "middlewares",
-            "tls",
-        )
-        if key in router
-    }
-    configuration.setdefault("middlewares", [])
-    return configuration
-
-
-def route_document(plan: TestingLaneRoute, backend: str | None) -> dict[str, Any]:
+def route_document(
+    plan: TestingLaneRoute, backend: str | None, *, evented: bool = False
+) -> dict[str, Any]:
     if backend not in {plan.old_backend, plan.new_backend}:
         raise ValueError("Testing traffic cannot select an unadmitted backend.")
     if backend is None:
@@ -368,22 +338,24 @@ def route_document(plan: TestingLaneRoute, backend: str | None) -> dict[str, Any
         return document
     document = deepcopy(plan.template)
     document["http"]["services"][plan.route_id]["loadBalancer"]["servers"] = [{"url": backend}]
-    return testing_worker_route_template(
-        document,
-        plan.route_id,
-        enabled=plan.route_id + "-websocket" in plan.template["http"]["services"],
-    )
+    return testing_worker_route_template(document, plan.route_id, enabled=evented)
 
 
-def route_document_content(plan: TestingLaneRoute, backend: str | None) -> str | None:
+def route_document_content(
+    plan: TestingLaneRoute, backend: str | None, *, evented: bool = False
+) -> str | None:
     if backend is None:
         assert plan.unavailable_preimage is not None
         return plan.unavailable_preimage.file_content
-    return json.dumps(route_document(plan, backend), sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        route_document(plan, backend, evented=evented), sort_keys=True, separators=(",", ":")
+    )
 
 
-def route_document_digest(plan: TestingLaneRoute, backend: str | None) -> str:
-    content = route_document_content(plan, backend)
+def route_document_digest(
+    plan: TestingLaneRoute, backend: str | None, *, evented: bool = False
+) -> str:
+    content = route_document_content(plan, backend, evented=evented)
     return hashlib.sha256(content.encode()).hexdigest() if content is not None else "absent"
 
 
@@ -818,8 +790,6 @@ def _compile_testing_route(
             application_file_name=application_file_name,
             application_file_sha256=application_file_sha256,
         )
-        if owned_document != route_document(plan, old_backend):
-            raise ValueError("Testing route file differs from the serving copy's authority.")
         observe_testing_route(plan, raw, owned_document)
         return plan
     if recorded_template is not None or not matches or len(legacy) != len(matches):
@@ -1357,7 +1327,11 @@ def observe_testing_route(
         if owned_document == original and scoped == preimage.raw:
             return None
     matches = possible_lane_routers(raw, plan.host, plan.public_entrypoints, plan.aliases)
-    owned = route_document(plan, plan.new_backend)["http"]["routers"]
+    evented = bool(
+        owned_document
+        and plan.route_id + "-websocket" in owned_document.get("http", {}).get("services", {})
+    )
+    owned = route_document(plan, plan.new_backend, evented=evented)["http"]["routers"]
     names = {name + "@file" for name in owned}
     for name, router in matches.items():
         if name in names:
@@ -1415,14 +1389,14 @@ def observe_testing_route(
     backend = applied_service_backend(raw, plan.route_id, "file")
     if backend not in {plan.old_backend, plan.new_backend}:
         raise TestingRouteAuthorityChanged("Testing route selected an unadmitted backend.")
-    if plan.route_id + "-websocket" in plan.template["http"]["services"]:
-        expected_evented = route_document(plan, backend)["http"]["services"][
+    if evented:
+        expected_evented = route_document(plan, backend, evented=True)["http"]["services"][
             plan.route_id + "-websocket"
         ]["loadBalancer"]["servers"][0]["url"]
         if applied_service_backend(raw, plan.route_id + "-websocket", "file") != expected_evented:
             raise TestingRouteAuthorityChanged(
                 "Testing websocket selected another copy or listener."
             )
-    if owned_document != route_document(plan, backend):
+    if owned_document != route_document(plan, backend, evented=evented):
         raise TestingRoutePending("Testing file and applied backend have not converged.")
     return backend

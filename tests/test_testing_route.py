@@ -14,7 +14,6 @@ from control_plane.dokploy.testing_route import (
     route_document,
     select_testing_route_raw,
     testing_route_rule,
-    maintain_testing_route,
 )
 
 
@@ -70,24 +69,6 @@ class RoutingRuleTests(unittest.TestCase):
 
 
 class TestingRouteTests(unittest.TestCase):
-    def test_same_copy_worker_route_checks_both_backends_and_preserves_http(self) -> None:
-        original = self.plan()
-        maintained = maintain_testing_route(original, workers=6)
-        raw = self.apply(maintained, self.new, retire_old=True)
-        document = route_document(maintained, self.new)
-        self.assertEqual(observe_testing_route(maintained, raw, document), self.new)
-        self.assertEqual(maintained.host, original.host)
-        self.assertEqual(maintained.new_backend, original.new_backend)
-        websocket = raw["services"][maintained.route_id + "-websocket@file"]
-        websocket["loadBalancer"]["servers"] = [{"url": self.old}]
-        with self.assertRaises(ValueError):
-            observe_testing_route(maintained, raw, document)
-        threaded = maintain_testing_route(maintained, workers=0)
-        raw = self.apply(threaded, self.new, retire_old=True)
-        self.assertEqual(
-            observe_testing_route(threaded, raw, route_document(threaded, self.new)), self.new
-        )
-
     def test_recorded_alias_survives_rebuild_and_keeps_foreign_router_checks(self) -> None:
         original = self.plan()
         alias = "retained-testing.example.invalid"
@@ -214,10 +195,10 @@ class TestingRouteTests(unittest.TestCase):
         )
 
     def apply(
-        self, plan: TestingLaneRoute, backend: str, *, retire_old: bool = False
+        self, plan: TestingLaneRoute, backend: str, *, retire_old: bool = False, evented: bool = False
     ) -> dict[str, Any]:
         raw = deepcopy(self.raw)
-        document = route_document(plan, backend)["http"]
+        document = route_document(plan, backend, evented=evented)["http"]
         for section in ("routers", "services", "middlewares"):
             for name, value in document.get(section, {}).items():
                 raw[section][name + "@file"] = {**value, "status": "enabled"}
@@ -574,6 +555,34 @@ class TestingRouteTests(unittest.TestCase):
         )
         # The public connection policy survives removal of its Docker producer.
         self.assertTrue(new_document["http"]["middlewares"])
+
+    def test_rebuild_and_address_accept_only_the_same_copy_evented_overlay(self) -> None:
+        from control_plane.dokploy.testing_route import amend_testing_route_address
+
+        plan = self.plan()
+        document = route_document(plan, self.new, evented=True)
+        raw = self.apply(plan, self.new, retire_old=True, evented=True)
+        rebuilt = compile_testing_route(
+            product=plan.product,
+            context=plan.context,
+            host=plan.host,
+            old_backend=self.new,
+            new_backend="http://lp-testing-" + "b" * 32 + ":8069",
+            raw=raw,
+            public_entrypoints=plan.public_entrypoints,
+            owned_document=document,
+            recorded_template=plan.template,
+        )
+        self.assertEqual(observe_testing_route(rebuilt, raw, document), self.new)
+        address = amend_testing_route_address(plan, "later.example.invalid")
+        self.assertEqual(
+            observe_testing_route(address, self.apply(address, self.new, evented=True), route_document(address, self.new, evented=True)),
+            self.new,
+        )
+        service = plan.route_id + "-websocket"
+        raw["services"][service + "@file"]["loadBalancer"]["servers"][0]["url"] = "http://another-copy:8072"
+        with self.assertRaisesRegex(ValueError, "another copy or listener"):
+            observe_testing_route(plan, raw, document)
 
     def test_second_rebuild_uses_recorded_same_host_and_route_without_legacy_container(
         self,
