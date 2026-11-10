@@ -2877,7 +2877,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         assert provider_target is not None
         self.assertEqual(provider_target.target_id, "app-verireel-testing")
 
-    def test_dokploy_target_setup_endpoint_dry_run_does_not_persist(self) -> None:
+    def test_dokploy_target_setup_plan_only_caller_reports_apply_refusal_without_writes(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -2970,13 +2972,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["mode"], "dry-run")
-        self.assertFalse(payload["result"]["applied"])
-        self.assertEqual(
-            payload["result"]["setup"]["target_id_record"]["target_id"],
-            "planned-compose-id",
-        )
+        self.assertEqual(status_code, apply_status, payload)
+        self.assertEqual(payload["error"]["code"], apply_payload["error"]["code"])
+        self.assertEqual(payload["error"]["message"], apply_payload["error"]["message"])
         self.assertEqual(target_records, ())
         self.assertEqual(apply_status, 403)
         self.assertEqual(apply_payload["error"]["code"], "authorization_denied")

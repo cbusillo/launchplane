@@ -321,14 +321,17 @@ class DirectorTestingTargetCreationTests(_DirectorTestingSetupFixture):
         self.assertEqual(result.status_code, 403, result.text)
         self.provider.assert_not_called()
 
-    async def test_read_role_can_still_plan_a_target_with_routes_without_apply_authority(
+    async def test_dry_run_reports_the_same_first_testing_shape_refusal_as_apply(
         self,
     ) -> None:
         result = await self.post(
             mode="dry-run", runtime_port=8787, domains=["testing.example.invalid"]
         )
-        self.assertEqual(result.status_code, 202, result.text)
-        self.assertFalse(result.json()["result"]["applied"])
+        applied = await self.post(runtime_port=8787, domains=["testing.example.invalid"])
+        self.assertEqual(applied.status_code, 400, applied.text)
+        self.assertEqual(result.status_code, applied.status_code, result.text)
+        self.assertEqual(result.json()["error"]["code"], applied.json()["error"]["code"])
+        self.assertEqual(result.json()["error"]["message"], applied.json()["error"]["message"])
         self.provider.assert_not_called()
         self.assert_production_unchanged()
 
@@ -357,7 +360,11 @@ class DirectorTestingTargetCreationTests(_DirectorTestingSetupFixture):
             ),
         )
         denied = await self.post(instance="prod")
+        dry = await self.post(mode="dry-run", instance="prod")
         self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(dry.status_code, denied.status_code, dry.text)
+        self.assertEqual(dry.json()["error"]["code"], denied.json()["error"]["code"])
+        self.assertEqual(dry.json()["error"]["message"], denied.json()["error"]["message"])
         self.provider.assert_not_called()
         source = await self.post(custom_git_branch="main", compose_path="docker-compose.yml")
         self.assertEqual(source.status_code, 400, source.text)
@@ -538,10 +545,25 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
 
     async def test_prelaunch_product_and_new_placement_also_stage(self) -> None:
         self.mark_production_use("prelaunch")
-        self.inventory = []
-        result = await self.post(
-            environment_id="", project_name="staged-project", environment_name="production"
+        placement = {
+            "environment_id": "",
+            "project_name": "staged-project",
+            "environment_name": "production",
+        }
+        dry_refusal = await self.post(mode="dry-run", **placement)
+        apply_refusal = await self.post(**placement)
+        self.assertEqual(apply_refusal.status_code, 400, apply_refusal.text)
+        self.assertEqual(dry_refusal.status_code, apply_refusal.status_code, dry_refusal.text)
+        self.assertEqual(dry_refusal.json()["error"]["code"], apply_refusal.json()["error"]["code"])
+        self.assertEqual(
+            dry_refusal.json()["error"]["message"], apply_refusal.json()["error"]["message"]
         )
+        self.assert_nothing_staged()
+        self.inventory = []
+        dry = await self.post(mode="dry-run", **placement)
+        self.assertEqual(dry.status_code, 202, dry.text)
+        self.assert_nothing_staged()
+        result = await self.post(**placement)
         self.assertEqual(result.status_code, 202, result.text)
         self.assertEqual(
             [call.args[2] for call in self.provider.call_args_list],
@@ -901,7 +923,11 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
     async def test_terminal_director_stages_and_a_scoped_agent_cannot(self) -> None:
         with scoped_agent_transport():
             denied = await self.post()
+            dry = await self.post(mode="dry-run")
         self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(dry.status_code, denied.status_code, dry.text)
+        self.assertEqual(dry.json()["error"]["code"], denied.json()["error"]["code"])
+        self.assertEqual(dry.json()["error"]["message"], denied.json()["error"]["message"])
         self.assert_nothing_staged()
         self.app = self.make_app(
             _local_operator_bearer_config().model_copy(
@@ -1052,8 +1078,12 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         for name, inventory in cases.items():
             with self.subTest(name):
                 self.inventory = inventory
+                dry = await self.post(mode="dry-run")
                 result = await self.post()
                 self.assertEqual(result.status_code, 400, result.text)
+                self.assertEqual(dry.status_code, result.status_code, dry.text)
+                self.assertEqual(dry.json()["error"]["code"], result.json()["error"]["code"])
+                self.assertEqual(dry.json()["error"]["message"], result.json()["error"]["message"])
                 self.assert_nothing_staged()
 
     async def test_unreadable_provider_or_wrong_project_is_refused(self) -> None:

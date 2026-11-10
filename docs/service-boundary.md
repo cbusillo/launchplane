@@ -2547,9 +2547,13 @@ Dokploy target setup uses the native FastAPI
 `POST /v1/dokploy-targets/setup` route. The route is the service-owned path for
 adopting an existing Dokploy target or creating a new application/compose target
 while immediately writing the matching Dokploy target, target-id, and
-provider-target records. Dry-run accepts the narrow `dokploy_target.plan`
-action or the backwards-compatible broader `dokploy_target.setup` action;
-apply always requires `dokploy_target.setup`, all for product/context
+provider-target records. Creation dry-runs evaluate the caller's apply
+authorization, including the bounded Director first-target and lane-setup
+paths. Planning authority alone cannot produce a passing creation dry-run.
+Other setup dry-runs accept the narrow `dokploy_target.plan` action or the
+backwards-compatible broader `dokploy_target.setup` action; domain-authority
+repair has its own plan action. Apply keeps its existing setup, lane-scoped or
+bounded Director authority. Service-scoped actions use product/context
 `launchplane`. Apply requires exact confirmation, an admin reason, and an
 idempotency key. Apply
 requests keep the `Idempotency-Key` replay/conflict contract; dry-runs remain
@@ -2561,6 +2565,14 @@ before any provider mutation. A matching expectation can plan a replacement,
 and an unoccupied lane without an expectation can plan ordinary creation.
 Adoption of the same recorded authority also remains supported. Apply rechecks
 current authority because a successful dry-run does not reserve the lane.
+First-target creation dry-runs also run the existing read-only shape, usage,
+ownership and placement checks. First-production setup in an existing
+environment confirms it is empty and belongs only to the product's context;
+new placement checks for an already present project. Testing creation checks
+retained allocation custody. Refusals use the apply path's error code and
+reason, without creating provider resources or target records. Confirmation,
+reason, idempotency and reviewed recovery evidence remain apply inputs, and
+concurrent changes or provider writes can still cause later refusals.
 The manual `Dokploy Target Setup` workflow is the supported shared and production caller;
 product repos must not store live target IDs or provider fixtures as setup
 authority. Runtime port is accepted for `create-compose` and `reconcile-compose-domain`

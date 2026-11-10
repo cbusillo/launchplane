@@ -26685,6 +26685,12 @@ def create_launchplane_fastapi_app(
         lane_owner = _lane_setup_context_owner(
             record_store=database_store, context=setup_request.context
         )
+        authorization_mode = (
+            "apply"
+            if setup_request.mode == "dry-run"
+            and setup_request.operation in {"create-compose", "create-application"}
+            else setup_request.mode
+        )
         native_onboarding = setup_request.onboarding is not None and (
             isinstance(identity, GitHubHumanIdentity) or director_agent_identity(identity)
         )
@@ -26694,7 +26700,7 @@ def create_launchplane_fastapi_app(
             product=setup_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
-        if isinstance(identity, TerminalAgentIdentity) and setup_request.mode == "apply":
+        if isinstance(identity, TerminalAgentIdentity) and authorization_mode == "apply":
             service_scoped = False
         disposable_rebuild_setup = (
             director_agent_identity(identity)
@@ -26703,7 +26709,7 @@ def create_launchplane_fastapi_app(
         )
         first_testing_setup = (
             director_agent_identity(identity)
-            and setup_request.mode == "apply"
+            and authorization_mode == "apply"
             and setup_request.operation in {"create-compose", "create-application"}
             and setup_request.instance == "testing"
             and not setup_request.replaces_operation_id
@@ -26711,7 +26717,7 @@ def create_launchplane_fastapi_app(
         )
         first_production_setup = (
             director_agent_identity(identity)
-            and setup_request.mode == "apply"
+            and authorization_mode == "apply"
             and setup_request.operation == "create-compose"
             and setup_request.instance == "prod"
             and bool(lane_owner)
@@ -26725,14 +26731,14 @@ def create_launchplane_fastapi_app(
         )
         director_testing_domain = (
             director_agent_identity(identity)
-            and setup_request.mode == "apply"
+            and authorization_mode == "apply"
             and setup_request.operation == "reconcile-compose-domain"
             and setup_request.instance == "testing"
             and bool(lane_owner)
         )
         if (
             isinstance(identity, TerminalAgentIdentity)
-            and setup_request.mode == "apply"
+            and authorization_mode == "apply"
             and not disposable_rebuild_setup
             and not first_testing_setup
             and not first_production_setup
@@ -26797,7 +26803,7 @@ def create_launchplane_fastapi_app(
                 context=_LAUNCHPLANE_SERVICE_CONTEXT,
             )
         )
-        can_plan_target = setup_request.mode != "apply" and (
+        can_plan_target = authorization_mode != "apply" and (
             can_setup_target
             or resolved_authz_policy_runtime.allows(
                 identity=identity,
@@ -26810,7 +26816,7 @@ def create_launchplane_fastapi_app(
         if setup_request.operation == "repair-domain-authority":
             authorized = (
                 can_repair_domain_authority
-                if setup_request.mode == "apply"
+                if authorization_mode == "apply"
                 else (
                     can_repair_domain_authority
                     or resolved_authz_policy_runtime.allows(
@@ -26823,8 +26829,8 @@ def create_launchplane_fastapi_app(
                 )
             )
         else:
-            authorized = can_setup_target if setup_request.mode == "apply" else can_plan_target
-        role_only_setup = not authorized and setup_request.mode != "apply" and bool(lane_owner)
+            authorized = can_setup_target if authorization_mode == "apply" else can_plan_target
+        role_only_setup = not authorized and authorization_mode != "apply" and bool(lane_owner)
         if role_only_setup:
             authorized = resolved_authz_policy_runtime.allows(
                 identity=identity,
@@ -26918,7 +26924,7 @@ def create_launchplane_fastapi_app(
             and setup_request.instance == "prod"
             and setup_request.project_name
             and not setup_request.environment_id
-            and setup_request.mode in {"apply", "readback"}
+            and setup_request.mode in {"dry-run", "apply", "readback"}
             and director_agent_identity(identity)
             and lane_owner
             and (
@@ -26941,55 +26947,61 @@ def create_launchplane_fastapi_app(
                 trace_id,
             )
             try:
-                if not idempotency_key.strip():
-                    raise ValueError("Original target setup key is required.")
-                prior = database_store.read_idempotency_record(
-                    scope=idempotency_scope(identity),
-                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
-                    idempotency_key=idempotency_key.strip(),
-                )
-                if (
-                    prior is not None
-                    and not prior.reconciliation_key
-                    and setup_request.mode == "apply"
-                ):
-                    _, _, legacy_replay = await replay_apply_idempotency(
-                        request=request,
-                        record_store=database_store,
-                        identity=identity,
-                        route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
-                        idempotency_key=idempotency_key,
-                        trace_id=trace_id,
-                        check_replay=True,
-                    )
-                    if legacy_replay is not None:
-                        return legacy_replay
-                if setup_request.mode == "readback":
-                    return accepted_evidence_response(
-                        trace_id=trace_id, records={}, result=compose_adapter.readback()
-                    )
-
-                def compose_operation(store: PostgresRecordStore) -> DurableProviderOperationResult:
-                    return run_durable_provider_operation(
-                        store=store,
+                if setup_request.mode == "dry-run":
+                    compose_adapter.checkpoint()
+                    compose_adapter.placement({})
+                else:
+                    if not idempotency_key.strip():
+                        raise ValueError("Original target setup key is required.")
+                    prior = database_store.read_idempotency_record(
                         scope=idempotency_scope(identity),
                         route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
                         idempotency_key=idempotency_key.strip(),
-                        request_fingerprint=compose_adapter.reconciliation_key(),
-                        lease_owner=trace_id,
-                        response_trace_id=trace_id,
-                        adapter=compose_adapter,
-                        original_intent=compose_adapter.intent(),
                     )
+                    if (
+                        prior is not None
+                        and not prior.reconciliation_key
+                        and setup_request.mode == "apply"
+                    ):
+                        _, _, legacy_replay = await replay_apply_idempotency(
+                            request=request,
+                            record_store=database_store,
+                            identity=identity,
+                            route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                            idempotency_key=idempotency_key,
+                            trace_id=trace_id,
+                            check_replay=True,
+                        )
+                        if legacy_replay is not None:
+                            return legacy_replay
+                    if setup_request.mode == "readback":
+                        return accepted_evidence_response(
+                            trace_id=trace_id, records={}, result=compose_adapter.readback()
+                        )
 
-                return await run_provider_operation_http(
-                    record_store=database_store,
-                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
-                    trace_id=trace_id,
-                    operation=compose_operation,
-                    in_progress_message="Original target setup is running.",
-                    reconcile_message="Target creation may have partial effects. Preserve the original request and key; inspect readback before recovery.",
-                )
+                    def compose_operation(
+                        store: PostgresRecordStore,
+                    ) -> DurableProviderOperationResult:
+                        return run_durable_provider_operation(
+                            store=store,
+                            scope=idempotency_scope(identity),
+                            route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                            idempotency_key=idempotency_key.strip(),
+                            request_fingerprint=compose_adapter.reconciliation_key(),
+                            lease_owner=trace_id,
+                            response_trace_id=trace_id,
+                            adapter=compose_adapter,
+                            original_intent=compose_adapter.intent(),
+                        )
+
+                    return await run_provider_operation_http(
+                        record_store=database_store,
+                        route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                        trace_id=trace_id,
+                        operation=compose_operation,
+                        in_progress_message="Original target setup is running.",
+                        reconcile_message="Target creation may have partial effects. Preserve the original request and key; inspect readback before recovery.",
+                    )
             except BridgeNetworkCapacityRefused as error:
                 raise _launchplane_http_error(
                     status_code=409, trace_id=trace_id, code=error.code, message=str(error)
@@ -27192,6 +27204,12 @@ def create_launchplane_fastapi_app(
             execution_request = named_application_request(setup_request, ordinary_preview)
         try:
             rebuild_checkpoint()
+            if first_production_setup and setup_request.mode == "dry-run":
+                require_empty_owned_environment(
+                    database_store,
+                    setup_request,
+                    control_plane_root_path=resolved_control_plane_root,
+                )
             # Replacing a testing target holds the lock its event deploys run under.
             replacement_lock = (
                 first_testing_replacement_lock_name(database_store, setup_request)

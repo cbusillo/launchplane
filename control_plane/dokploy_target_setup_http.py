@@ -849,7 +849,7 @@ def _execute_dokploy_target_setup(
     if request.state_volume_path and application_mutate is None:
         raise ValueError("State-volume creation requires its reviewed durable service operation.")
     if (
-        request.mode == "apply"
+        request.mode in {"dry-run", "apply"}
         and request.instance == "testing"
         and not request.state_volume_path
         and application_mutate is None
