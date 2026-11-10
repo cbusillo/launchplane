@@ -257,6 +257,13 @@ def _validate_requested_policy(
         raise ProductPrelaunchRebuildPolicyStateError(
             "Enabled product prelaunch rebuild policy requires prelaunch monitoring intent."
         )
+    if (
+        lane.instance == "prod"
+        and policy.data_source_mode == "empty"
+        and lane.odoo_data_policy.data_authority == "unknown"
+        and not lane.odoo_data_policy.upstream_source
+    ):
+        return
     if not lane.odoo_data_policy.allows_rebuild_source(policy.data_source_mode):
         raise ProductPrelaunchRebuildPolicyStateError(
             "Product prelaunch rebuild data source is not allowed by the lane data policy."

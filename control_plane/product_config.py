@@ -47,6 +47,7 @@ from control_plane.storage.product_authority_bundle import SecretCopySourceExpec
 from control_plane.storage.product_authority_bundle import SecretDeliverySetExpectation
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.runtime_environments import site_secret_scopes
+from control_plane.odoo_first_empty_inputs import QualifiedFirstEmptyInputs
 
 
 ProductConfigMode = Literal["dry-run", "apply"]
@@ -250,6 +251,30 @@ def normalize_product_config_payload(payload: dict[str, object]) -> dict[str, ob
             normalized["public_hosts"] = list(normalize_public_hosts(payload["public_hosts"]))
         except ValueError as error:
             raise ProductConfigError(str(error)) from error
+    if "odoo_first_empty" in payload:
+        intent = payload["odoo_first_empty"]
+        if (
+            intent != "runtime_credentials"
+            or instance_name != "prod"
+            or not context_name
+            or runtime_env
+            or runtime_input.get("retired_provider_keys") is not None
+            or runtime_input.get("adopt_provider_keys") is not None
+            or any(
+                key in payload
+                for key in ("public_hosts", "odoo_business_hours", "disable_secret_bindings")
+            )
+            or not secrets
+            or any(secret.get("generate") != "odoo_first_empty" for secret in secrets)
+        ):
+            raise ProductConfigError(
+                "First-empty preparation requires its standalone production intent."
+            )
+        normalized["odoo_first_empty"] = intent
+    elif any(secret.get("generate") == "odoo_first_empty" for secret in secrets):
+        raise ProductConfigError(
+            "First-empty generation requires its production preparation intent."
+        )
     return normalized
 
 
@@ -284,6 +309,7 @@ def plan_product_config_authority_bundle(
     source_label: str,
     lane_provider_env_reader: LaneProviderEnvReader | None = None,
     secret_copy_source_authorizer: Callable[[SecretRecord], bool] | None = None,
+    first_empty_qualification: "QualifiedFirstEmptyInputs | None" = None,
 ) -> tuple[dict[str, object], ProductAuthorityBundle]:
     if "odoo_business_hours" in payload:
         raise ProductConfigError(
@@ -304,6 +330,14 @@ def plan_product_config_authority_bundle(
     runtime_input = cast(_ProductConfigRuntimeInput, normalized_payload["runtime_env"])
     runtime_env = cast(dict[str, ScalarValue], runtime_input["env"])
     secrets = tuple(cast(list[dict[str, object]], normalized_payload["secrets"]))
+    if normalized_payload.get("odoo_first_empty") is not None:
+        if first_empty_qualification is None:
+            raise ProductConfigError(
+                "First-empty preparation requires service-owned current storage qualification."
+            )
+        first_empty_qualification.validate(product, context_name, instance_name)
+        if first_empty_qualification.intent != normalized_payload["odoo_first_empty"]:
+            raise ProductConfigError("First-empty qualification names another intent.")
     _require_product_config_master_key_if_needed(secrets)
     copy_sources: dict[int, SecretVersion] = {}
     copy_contexts: set[tuple[str, str]] = set()
@@ -318,16 +352,29 @@ def plan_product_config_authority_bundle(
         )
 
         try:
-            copy_profile = validate_generation(
-                cast(TestingCredentialStore, record_store),
-                product=product,
-                context=context_name,
-                instance=instance_name,
-                entries=generated_entries,
-            )
+            if first_empty_qualification is not None:
+                from control_plane.odoo_first_empty_inputs import validate_first_empty_generation
+
+                copy_profile = validate_first_empty_generation(
+                    first_empty_qualification,
+                    product=product,
+                    context=context_name,
+                    instance=instance_name,
+                    entries=generated_entries,
+                )
+            else:
+                copy_profile = validate_generation(
+                    cast(TestingCredentialStore, record_store),
+                    product=product,
+                    context=context_name,
+                    instance=instance_name,
+                    entries=generated_entries,
+                )
         except (ValueError, FileNotFoundError) as error:
             raise ProductConfigError(
-                "Generation requires declared local credentials on an owned testing lane."
+                "Generation requires absent eligible credentials on the qualified original production lane."
+                if first_empty_qualification is not None
+                else "Generation requires declared local credentials on an owned testing lane."
             ) from error
         generation_read_sets = (
             SecretDeliverySetExpectation(
@@ -476,13 +523,17 @@ def plan_product_config_authority_bundle(
             record_store=record_store,
             secret=secret,
         )
+        if secret.get("generate") == "odoo_first_empty" and planned_action != "created":
+            raise ProductConfigError(
+                "First-empty generation cannot rotate an existing secret record."
+            )
         if apply_changes:
             try:
                 if index in copy_sources:
                     plaintext_value = product_secret_copy.copy_source_value(copy_sources[index])
                 elif index in adopted_secret_values:
                     plaintext_value = adopted_secret_values[index]
-                elif secret.get("generate") == "testing_local":
+                elif secret.get("generate") in {"testing_local", "odoo_first_empty"}:
                     plaintext_value = random_secrets.token_urlsafe(32)
                 else:
                     plaintext_value = str(secret["value"])
@@ -528,7 +579,7 @@ def plan_product_config_authority_bundle(
                 adopted_secret_ids.append(secret_id)
                 for event in secret_plan["secret_audit_events"]:
                     event.metadata.update({"value_source": "provider_env"})
-            if secret.get("generate") == "testing_local":
+            if secret.get("generate") in {"testing_local", "odoo_first_empty"}:
                 for event in secret_plan["secret_audit_events"]:
                     event.metadata.update({"value_source": "service_generated"})
             secret_versions.extend(secret_plan["secret_versions"])
@@ -618,6 +669,17 @@ def plan_product_config_authority_bundle(
         secret_bindings=(*secret_bindings, *disabled_bundle.secret_bindings),
         secret_audit_events=(*secret_audit_events, *disabled_bundle.secret_audit_events),
     )
+    if first_empty_qualification is not None:
+        proof = first_empty_qualification
+        bundle = proof.authority.bundle.model_copy(
+            update={
+                "secret_records": bundle.secret_records,
+                "secret_versions": bundle.secret_versions,
+                "secret_bindings": bundle.secret_bindings,
+                "secret_audit_events": bundle.secret_audit_events,
+                "absent_secret_ids": tuple(record.secret_id for record in bundle.secret_records),
+            }
+        )
     return result, bundle
 
 
@@ -1046,11 +1108,11 @@ def _product_config_secret_inputs(
         adopt_from_provider = raw_secret.get("adopt_from_provider")
         generate = raw_secret.get("generate")
         if generate is not None:
-            if generate != "testing_local" or any(
+            if generate not in {"testing_local", "odoo_first_empty"} or any(
                 source is not None for source in (plaintext_value, copy_from, adopt_from_provider)
             ):
                 raise ProductConfigError(
-                    "Generated testing credentials cannot accept another value source."
+                    "Generated credentials cannot accept another value source."
                 )
         elif adopt_from_provider is not None:
             if not isinstance(adopt_from_provider, bool) or not adopt_from_provider:
@@ -1133,14 +1195,14 @@ def _product_config_secret_inputs(
             index=index,
         )
         if generate is not None and (
-            instance_name != "testing"
+            instance_name != ("prod" if generate == "odoo_first_empty" else "testing")
             or validated_scope != "context_instance"
             or integration != control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
-            or secret_class != "testing"
+            or secret_class != ("prod_only" if generate == "odoo_first_empty" else "testing")
             or sharing_reason is not None
         ):
             raise ProductConfigError(
-                "Generation requires a lane-exact testing runtime credential with testing class."
+                "Generation requires an exact runtime credential with the intent's lane and secret class."
             )
         if copy_from is not None and (
             validated_scope != "context_instance"
