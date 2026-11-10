@@ -713,7 +713,14 @@ blocks and admin holds retain their existing release path and never acquire
 automatic recovery from an unrelated candidate failure.
 
 The controller persists its source-head-bound block decision before applying
-the label, including the previous label event ID. It then confirms the applied
+the label, including the previous label event ID. The same intent retains the
+complete failed required-check selection used by that decision: required names
+and Apps, provider check/status IDs and conclusions, the candidate repository,
+ref and SHA, and Actions execution, attempt and suite identities authenticated
+against the failed jobs. Non-Actions checks retain their provider suite; commit
+statuses retain their own IDs rather than acquiring an invented execution.
+Incomplete origin evidence never becomes a partial recovery proof.
+It then confirms the applied
 label event ID. A successful POST is also saved as a positive write receipt
 before observing event/detail reads. If both reads lag, that receipt retains
 the causal proof without holding the repository's lease; ordinary queue work
@@ -726,6 +733,12 @@ ID, independently of the enqueue allowlist; reserved Bot-login metadata resolves
 that ID even when GitHub omits `performed_via_github_app` from label events.
 The confirmed numeric writer ID is saved with the event, so later App/key
 rotation needs no read of the old App's metadata.
+Moved-base recovery uses this recorded failure selection, not current candidate
+checks, mutable current requirements, the pre-retry request map or a later pass.
+The current-check reader still reports current executions. Historical blocks
+without decision-bound failure evidence remain unqualified for that path; new
+source does not backfill their missing proof. Policy compatibility, exact label
+ownership, retry lineage and the existing reservation/allowance guards still apply.
 The [Get an app API](https://docs.github.com/en/rest/apps/apps#get-an-app) requires
 no additional token permission. A removal or reapplication is a
 new hold, including within the same timestamp. Feedback delivery is not proof
@@ -2399,6 +2412,7 @@ FastAPI route
 Add `&candidate_record_id=<original-record-id>` to inspect an original native
 candidate beyond the bounded status summary. The optional `candidate_evidence`
 contains that exact stored record, including its block intent and retry lineage,
+and any failure selection retained with the original block decision,
 plus validated base-retest and setup-recovery reservations for each member's
 repository/PR/head. Records remain readable after supersession and policy
 revisions while their repository/base-branch target remains enrolled.

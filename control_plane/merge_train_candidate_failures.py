@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
     from control_plane.github_required_checks import CheckRequirement
+    from control_plane.contracts.merge_train_failure_evidence import MergeTrainBlockFailureEvidence
 
 from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 
@@ -55,6 +56,7 @@ class CandidateCheckFailures:
     attribution_requirements: tuple[CheckRequirement, ...] = ()
     retry_runs: tuple[tuple[int, int], ...] = ()
     checks_disagree: bool = False
+    decision_evidence: MergeTrainBlockFailureEvidence | None = None
 
     @property
     def conclusive(self) -> bool:

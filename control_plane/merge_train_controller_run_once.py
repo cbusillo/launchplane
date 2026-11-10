@@ -1,4 +1,5 @@
 from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+from control_plane.contracts.merge_train_failure_evidence import MergeTrainBlockFailureEvidence
 import hashlib
 from control_plane.merge_train_pr_feedback import queue_landing_planning_feedback
 from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
@@ -6679,6 +6680,7 @@ def _recover_failed_merge_train_candidate(
         github_client=github_client,
         dry_run_result=dry_run_result,
         details=details,
+        failure_evidence=failures.decision_evidence,
         repository=repository,
         base_branch=base_branch,
         mutate=mutate,
@@ -7243,6 +7245,7 @@ def _block_failed_candidate_culprit(
     github_client: GitHubMergeTrainClient,
     dry_run_result: MergeTrainDryRunResult,
     details: dict[str, object],
+    failure_evidence: MergeTrainBlockFailureEvidence | None,
     repository: str,
     base_branch: str,
     mutate: bool,
@@ -7334,6 +7337,7 @@ def _block_failed_candidate_culprit(
                 label=block_dry_run.blocked_label,
                 prior_label_event_id=prior,
                 source_failed_record_id=active_candidate_record.record_id,
+                failure_evidence=failure_evidence,
                 writer_app_id=(
                     repository_policy.github_token.github_app.app_id
                     if repository_policy.github_token.github_app is not None

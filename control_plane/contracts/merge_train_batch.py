@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
+from control_plane.contracts.merge_train_failure_evidence import MergeTrainBlockFailureEvidence
 
 from control_plane.contracts.merge_train_controller_state import build_merge_train_controller_key
 from control_plane.contracts.merge_train_historical_completion import (
@@ -424,6 +425,9 @@ class MergeTrainCandidateBlockIntent(BaseModel):
     applied_label_actor_id: int | None = Field(default=None, ge=1)
     label_write_succeeded: bool = False
     source_failed_record_id: str = Field(min_length=1)
+    failure_evidence: MergeTrainBlockFailureEvidence | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class MergeTrainSetupFailureRecovery(BaseModel):
@@ -459,6 +463,17 @@ class MergeTrainBatchCandidateRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeTrainBatchCandidateRecord":
+        evidence = self.block_intent.failure_evidence if self.block_intent else None
+        if evidence is not None and (
+            evidence.repository,
+            evidence.candidate_ref,
+            evidence.candidate_sha,
+        ) != (
+            self.candidate.repository,
+            self.candidate.candidate_ref,
+            self.candidate.candidate_sha,
+        ):
+            raise ValueError("Block failure evidence does not match its candidate")
         self.record_id = require_text(
             self.record_id, "merge train batch candidate record requires record_id"
         )
