@@ -22,7 +22,6 @@ from control_plane.merge_train_base_retest_receipt import (
     read_base_retest_receipt,
     reserve_base_retest,
 )
-from control_plane.merge_train_candidate_failures import CandidateCheckFailures
 from control_plane.merge_train_pr_feedback import MergeTrainPrFeedbackRecordStore
 from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
 from control_plane.merge_train_policy_source import (
@@ -44,10 +43,6 @@ _LOGGER = logging.getLogger(__name__)
 
 class CandidateBlockRecoveryClient(Protocol):
     def read_base_branch_sha(self, *, repository: str, base_branch: str) -> str: ...
-
-    def read_candidate_check_failures(
-        self, *, candidate: MergeTrainBatchCandidate
-    ) -> CandidateCheckFailures: ...
 
     def read_base_check_observation(
         self,
@@ -300,10 +295,16 @@ def recover_candidate_block(
                 != policy
             ):
                 return None
-            failures = client.read_candidate_check_failures(candidate=failed)
-            requirements = failures.attribution_requirements
-            if not failures.conclusive or not requirements:
+            failure_evidence = (
+                candidate.block_intent.failure_evidence if candidate.block_intent else None
+            )
+            if failure_evidence is None or not failure_evidence.checks:
                 return None
+            requirements = tuple(
+                dict.fromkeys(
+                    CheckRequirement(check.name, check.app_id) for check in failure_evidence.checks
+                )
+            )
             if (
                 client.read_base_branch_sha(
                     repository=policy.repository, base_branch=policy.base_branch
