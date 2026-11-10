@@ -1155,9 +1155,13 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.github.add_run(10, OLDER)
         profile = self.store.read_product_profile_record("site")
         lane = next(item for item in profile.lanes if item.instance == "testing")
-        older = verified_testing_rebuild_artifact(
-            self.store, profile, lane, artifact_id="artifact-cm-run-10-1", source_git_ref=OLDER
-        )
+        read = self.github.get_json
+        with patch.object(
+            self.github, "get_json", side_effect=lambda path: read(path.partition("/attempts/")[0])
+        ):
+            older = verified_testing_rebuild_artifact(
+                self.store, profile, lane, artifact_id="artifact-cm-run-10-1", source_git_ref=OLDER
+            )
         assert older.manifest.source_build is not None
         self.assertEqual(
             (older.manifest.source_commit, older.manifest.source_build.purpose),
@@ -1171,7 +1175,15 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.github.add_run(50, PR_HEAD)
         profile = self.store.read_product_profile_record("site")
         lane = next(item for item in profile.lanes if item.instance == "testing")
-        with self.assertRaises(BuildProvenanceError):
+        read = self.github.get_json
+        with (
+            patch.object(
+                self.github,
+                "get_json",
+                side_effect=lambda path: read(path.partition("/attempts/")[0]),
+            ),
+            self.assertRaises(BuildProvenanceError),
+        ):
             verified_testing_rebuild_artifact(
                 self.store,
                 profile,

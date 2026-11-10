@@ -8,7 +8,7 @@ from dataclasses import replace
 from functools import partial
 from email.message import Message
 from urllib.error import HTTPError
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from httpx2 import Response
 
@@ -122,22 +122,52 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             )
         )
 
-    def test_migrated_candidate_plan_does_not_compare_against_current_release(self) -> None:
+    def test_historical_candidate_preflight_and_worker_revalidate_the_same_manifest(self) -> None:
+        from control_plane import testing_rebuild_service as worker
+        from control_plane.build_provenance import verify_requested_build_artifact
+        from control_plane.contracts.odoo_stable_target_replacement import (
+            LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+        )
+        from tests import test_build_provenance as builds
+        from tests.support.artifact_manifests import artifact_manifest_v2
         from tests.test_migrated_testing_source import MigratedTestingRequestTests
 
-        source = self.manifest.source_build
-        assert source is not None
-        candidate = self.manifest.model_copy(
-            update={
-                "artifact_id": (
-                    f"artifact-{self.fixture.operation.context}-run-{source.run_id}-{source.run_attempt}"
-                ),
-                "source_commit": "d" * 40,
-                "source_build": source.model_copy(
-                    update={"event": "pull_request", "purpose": "preview", "pull_request_number": 8}
-                ),
-            }
+        profile = self.fixture.intent.profile
+
+        class ProductBuildReads(builds.FakeGitHub):
+            def get_json(self, path: str) -> object:
+                return super().get_json(
+                    path.replace(f"/repos/{profile.repository}", f"/repos/{builds.REPOSITORY}", 1)
+                )
+
+        class ReadOnlyLease:
+            def assert_current(self) -> None:
+                raise AssertionError("Build verification must not use a provider lease.")
+
+            def checkpoint_effect(self, phase: str) -> None:
+                raise AssertionError(f"Build verification must not dispatch {phase}.")
+
+        run = builds._run(event="pull_request")
+        run["pull_requests"] = []
+        github = ProductBuildReads(
+            runs=[run],
+            pull_request_head=builds.TIP,
+            manifest=artifact_manifest_v2(
+                image_repository=profile.image.repository,
+                tenant_source_repository=profile.repository,
+                odoo_install_modules=LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+            ).model_dump(mode="json"),
         )
+        github.pull_request_state = "closed"
+        candidate = verify_requested_build_artifact(
+            transport=github,
+            repository=profile.repository,
+            repository_id=builds.REPOSITORY_ID,
+            commit=builds.COMMIT,
+            context=self.fixture.operation.context,
+            image_repository=profile.image.repository,
+            artifact_id=f"artifact-{self.fixture.operation.context}-run-7-1",
+        ).manifest
         migrated = MigratedTestingRequestTests().request().migrated_source
         assert migrated is not None
         replacement = self.fixture.operation.request.model_copy(
@@ -155,27 +185,51 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                 ),
             }
         )
+        operation = self.fixture.operation.model_copy(
+            update={"request": replacement, "testing_candidate_manifest": candidate}
+        )
+        execution = worker.NativeTestingRebuildExecution(
+            worker.NativeTestingRebuildAdapter(
+                self.fixture.root,
+                self.store,
+                operation,
+                self.fixture.intent,
+                self.fixture.authorize,
+            ),
+            ReadOnlyLease(),
+            Mock(),
+        )
         with (
             patch(
-                "control_plane.product_reconcile.verified_testing_rebuild_artifact",
-                return_value=VerifiedBuildArtifact(manifest=candidate),
+                "control_plane.product_reconcile.resolve_build_provenance_transport",
+                return_value=github,
+            ),
+            patch(
+                "control_plane.product_reconcile.product_repository_identity",
+                return_value=Mock(repository_id=builds.REPOSITORY_ID),
             ),
             patch.object(preflight, "_inspect_execution", side_effect=lambda *args: args[4]),
         ):
             plan, verified = preflight.inspect_current_testing_rebuild(
-                root=self.fixture.root,
-                store=self.store,
-                request=replacement,
-                actor="fixture-agent",
+                root=self.fixture.root, store=self.store, request=replacement, actor="fixture-agent"
             )
-        self.assertEqual(
-            (plan.artifact_id, plan.source_git_ref),
-            (candidate.artifact_id, candidate.source_commit),
-        )
-        self.assertEqual(verified.manifest, candidate)
+            self.assertEqual(
+                (plan.artifact_id, verified.manifest), (candidate.artifact_id, candidate)
+            )
+            run["pull_requests"] = [{"number": 99}]
+            execution.require_candidate_build()
+            image = github.manifest["image"]
+            assert isinstance(image, dict)
+            image["digest"] = candidate.image.digest[:-1] + (
+                "0" if candidate.image.digest[-1] != "0" else "1"
+            )
+            with self.assertRaises(worker.NativeTestingRebuildAdmissionChanged):
+                execution.require_candidate_build()
+        self.assertEqual(operation.testing_candidate_manifest, candidate)
+        self.latest.assert_not_called()
+        self.assertEqual(self.fixture.effects, [])
         with self.assertRaises(FileNotFoundError):
             self.store.read_artifact_manifest(candidate.artifact_id)
-        self.assertEqual(self.fixture.effects, [])
 
     def test_invalid_source_and_build_are_refused_before_conditional_planning(self) -> None:
         replacement = self.fixture.operation.request.model_copy(
