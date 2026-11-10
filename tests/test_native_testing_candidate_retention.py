@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any
 import unittest
-from unittest.mock import Mock, PropertyMock
+from unittest.mock import Mock
 
 from control_plane.contracts.testing_candidate import (
     TestingCandidateAllocation,
@@ -74,7 +74,7 @@ class CandidateRetentionGuardTests(unittest.TestCase):
 class CandidateRetentionPlanTests(unittest.TestCase):
     def setUp(self) -> None:
         from control_plane import testing_candidate_retention as retention
-        from control_plane.contracts.retained_volume_sweep import NativeTestingSweepRequest
+        from control_plane.contracts.testing_candidate_retention import NativeTestingSweepRequest
         from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
         from control_plane.contracts.deploy_target import ProviderTargetRecord
         from tests.test_testing_replacement_resources import TestingReplacementResourceFixture
@@ -97,6 +97,7 @@ class CandidateRetentionPlanTests(unittest.TestCase):
                 "phase": "failed",
                 "finished_at": fixture.operation.updated_at,
                 "error_message": "Fabricated restore failed before serving",
+                "error_code": "candidate_preparation_failed",
                 "request": fixture.operation.request.model_copy(
                     update={
                         "strategy": "replace-and-cutover",
@@ -200,62 +201,6 @@ class CandidateRetentionPlanTests(unittest.TestCase):
             self.plan()
         self.inspect.assert_not_called()
 
-    def test_optional_http_mode_keeps_director_boundary_and_refuses_production(self) -> None:
-        import asyncio
-        from typing import cast
-        from fastapi import FastAPI, HTTPException
-        from pydantic import BaseModel
-        from control_plane.http_routes.retained_volume_sweep import (
-            RetainedVolumeSweepDependencies,
-            register_retained_volume_sweep_route,
-        )
-        from control_plane.http_routes.support import ApiRouteRegistrar
-        from control_plane.service_auth import TerminalAgentIdentity
-        from tests.support.http import request
-
-        def app(director: bool) -> FastAPI:
-            application = FastAPI()
-
-            def error(**kwargs: Any) -> HTTPException:
-                return HTTPException(kwargs["status_code"], detail=kwargs)
-
-            register_retained_volume_sweep_route(
-                cast(ApiRouteRegistrar, cast(object, application)),
-                dependencies=RetainedVolumeSweepDependencies(
-                    read_identity=lambda: TerminalAgentIdentity(
-                        "fixture", "test", director_agent=director
-                    ),
-                    get_record_store=lambda: self.store,
-                    next_trace_id=lambda: "http-fixture",
-                    authorization_allows=lambda **_: False,
-                    http_error=error,
-                    control_plane_root=self.root,
-                    error_response_model=BaseModel,
-                ),
-            )
-            return application
-
-        payload = self.request.model_dump(mode="json")
-        for director, instance, status in (
-            (True, "testing", 200),
-            (False, "testing", 403),
-            (True, "prod", 422),
-        ):
-            with self.subTest(director=director, instance=instance):
-                result = asyncio.run(
-                    request(
-                        app(director),
-                        "POST",
-                        "/v1/retained-volume-sweep",
-                        payload={**payload, "instance": instance},
-                    )
-                )
-                self.assertEqual(result.status_code, status, result.text)
-                if status == 200:
-                    self.assertEqual(
-                        result.json()["candidates"][0]["operation_id"], self.candidate.operation_id
-                    )
-
     def test_physical_sources_and_unqualified_nonempty_copy_are_never_removed(self) -> None:
         self.observation["volumes"][0].update(empty=False, reason="source_inputs_preserved")
         self.assertEqual(self.plan().candidates[0].resources[0].reason, "source_inputs_preserved")
@@ -291,53 +236,6 @@ class CandidateRetentionPlanTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "active or unknown"):
                 self.retention.candidate_provider_snapshot(payload)
 
-    def test_changed_selection_refuses_before_the_host_effect(self) -> None:
-        from contextlib import nullcontext
-        from unittest.mock import patch
-        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-
-        self.request = self.request.model_copy(update={"candidates": (self.candidate.namespace,)})
-        plan, private = self.retention.build_native_testing_sweep(
-            self.store, self.root, self.request, "trace"
-        )
-        request = self.request.model_copy(
-            update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
-        )
-        self.store.write_dokploy_target_id_record(
-            DokployTargetIdRecord(
-                context=self.request.context,
-                instance="testing",
-                target_id=self.candidate.compose_id,
-                updated_at=datetime.now(timezone.utc).isoformat(),
-            )
-        )
-        self.host.reset_mock()
-        with (
-            patch.object(
-                self.retention, "build_native_testing_sweep", return_value=(plan, private)
-            ),
-            patch.object(
-                type(self.store),
-                "database_dialect_name",
-                new_callable=PropertyMock,
-                return_value="postgresql",
-            ),
-            patch.object(
-                self.store, "testing_candidate_retention_guard", return_value=nullcontext(Mock())
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "ownership or current references changed"):
-                self.retention.execute_native_testing_sweep_request(
-                    self.store,
-                    self.root,
-                    request,
-                    actor="fixture-director",
-                    key="changed-selection",
-                    trace_id="trace",
-                )
-        self.host.assert_not_called()
-        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
-
     def test_provider_read_error_holds_one_candidate_without_a_mutation_claim(self) -> None:
         from control_plane.dokploy.api import DokployRequestFailed
 
@@ -347,63 +245,3 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         candidate = self.plan().candidates[0]
         self.assertEqual(candidate.status, "held")
         self.host.assert_not_called()
-
-    def test_uncertain_original_reconciles_without_repeating_removal(self) -> None:
-        from contextlib import nullcontext
-        from unittest.mock import patch
-        from control_plane.provider_operations import ProviderMutationUnknownError
-
-        self.request = self.request.model_copy(update={"candidates": (self.candidate.namespace,)})
-        digest = self.plan().plan_sha256
-        request = self.request.model_copy(update={"mode": "apply", "reviewed_plan_sha256": digest})
-        removals = []
-        uncertain = True
-
-        def host(
-            root: Any, binding: Any, mode: str, key: str, lease: Any = None, **kwargs: Any
-        ) -> tuple[str, str]:
-            if mode == "apply":
-                lease.checkpoint_effect("volume_removal")
-                removals.append(key)
-                return "unknown", "effect_unknown"
-            if mode == "readback":
-                return ("unknown", "effect_unknown") if uncertain else ("absent", "removed")
-            return "eligible", "qualified"
-
-        self.host.side_effect = host
-        with (
-            patch.object(
-                type(self.store),
-                "database_dialect_name",
-                new_callable=PropertyMock,
-                return_value="postgresql",
-            ),
-            patch.object(
-                self.store,
-                "testing_candidate_retention_guard",
-                side_effect=lambda _: nullcontext(Mock()),
-            ),
-        ):
-            for _ in range(2):
-                with self.assertRaises(ProviderMutationUnknownError):
-                    self.retention.execute_native_testing_sweep_request(
-                        self.store,
-                        self.root,
-                        request,
-                        actor="fixture-director",
-                        key="cleanup-original",
-                        trace_id="trace",
-                    )
-            self.assertEqual(len(removals), 1)
-            uncertain = False
-            observed = self.retention.execute_native_testing_sweep_request(
-                self.store,
-                self.root,
-                request.model_copy(update={"mode": "readback"}),
-                actor="fixture-director",
-                key="cleanup-original",
-                trace_id="readback",
-            )
-            self.assertEqual(observed.candidates[0].status, "removed")
-            self.assertEqual(len(removals), 1)
-            self.assertIsNotNone(self.store.read_testing_candidate(self.candidate.namespace))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import closing, ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +13,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
 from control_plane.contracts.retained_volume import RetainedVolumeBinding
-from control_plane.contracts.retained_volume_sweep import (
+from control_plane.contracts.testing_candidate_retention import (
     NativeTestingBackingCapacity,
     NativeTestingSweepCandidate,
     NativeTestingSweepRequest,
@@ -36,7 +37,6 @@ from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderOperationLease,
     ProviderObservation,
-    run_durable_provider_operation,
 )
 from control_plane.retained_volume_sweep_execution import (
     SweepStatus,
@@ -125,7 +125,11 @@ def candidate_authority(
             operation,
             product=request.product,
             context=request.context,
-            receiver_operation_id=request.operation_id,
+            receiver_operation_id=(
+                request.operation_id
+                if request.receiver_operation_id is None
+                else request.receiver_operation_id
+            ),
             selected_targets=tuple(row.target_id for row in targets),
         )
     )
@@ -440,7 +444,11 @@ def project_capacity(
 
 
 def build_native_testing_sweep(
-    store: PostgresRecordStore, root: Path, request: NativeTestingSweepRequest, trace_id: str
+    store: PostgresRecordStore,
+    root: Path,
+    request: NativeTestingSweepRequest,
+    trace_id: str,
+    allowed_provider_records: frozenset[str] = frozenset(),
 ) -> tuple[NativeTestingSweepResponse, dict[str, Any]]:
     receiver = store.read_odoo_stable_target_replacement_operation_record(request.operation_id)
     if (receiver.product, receiver.context, receiver.instance) != (
@@ -457,8 +465,23 @@ def build_native_testing_sweep(
     ]
     if set(request.candidates) - {row.namespace for row in owned}:
         raise ValueError("A selected candidate has foreign or unknown original custody.")
-    receiver_namespace = testing_candidate_namespace(
-        request.product, request.context, request.operation_id
+    receiver_id = (
+        request.operation_id
+        if request.receiver_operation_id is None
+        else request.receiver_operation_id
+    )
+    if receiver_id:
+        receiver = store.read_odoo_stable_target_replacement_operation_record(receiver_id)
+        if (receiver.product, receiver.context, receiver.instance) != (
+            request.product,
+            request.context,
+            "testing",
+        ):
+            raise ValueError("The receiver original belongs to another product or instance.")
+    receiver_namespace = (
+        testing_candidate_namespace(request.product, request.context, receiver_id)
+        if receiver_id
+        else ""
     )
     items = []
     private: dict[str, Any] = {}
@@ -468,7 +491,9 @@ def build_native_testing_sweep(
     for candidate in owned:
         selected = candidate.namespace in request.candidates
         try:
-            ownership, reasons = candidate_authority(store, request, candidate)
+            ownership, reasons = candidate_authority(
+                store, request, candidate, allowed_provider_records
+            )
             source_proof: dict[str, Any] = {}
             try:
                 source_preserved = not reasons and _source_preserved(
@@ -624,7 +649,7 @@ def build_native_testing_sweep(
     )
     return NativeTestingSweepResponse(
         trace_id=trace_id,
-        records={"receiver_operation": request.operation_id},
+        records={"receiver_operation": receiver_id} if receiver_id else {},
         plan_sha256=digest,
         candidates=tuple(items),
         capacity=tuple(capacities),
@@ -640,9 +665,11 @@ class NativeTestingSweepAdapter:
         request: NativeTestingSweepRequest,
         plan: NativeTestingSweepResponse,
         private: dict[str, Any],
+        check_current_use: Callable[[TestingCandidateAllocation], None] | None = None,
     ) -> None:
         self.store, self.root, self.request = store, root, request
         self.plan, self.private = plan, private
+        self.check_current_use = check_current_use
 
     def target_key(self) -> str:
         return f"native-testing-retention:{self.request.product}:{self.request.context}"
@@ -662,7 +689,11 @@ class NativeTestingSweepAdapter:
         try:
             receiver = self.store.read_testing_candidate(
                 testing_candidate_namespace(
-                    self.request.product, self.request.context, self.request.operation_id
+                    self.request.product,
+                    self.request.context,
+                    self.request.operation_id
+                    if self.request.receiver_operation_id is None
+                    else self.request.receiver_operation_id,
                 )
             )
             if receiver is not None:
@@ -769,6 +800,11 @@ class NativeTestingSweepAdapter:
             )
         candidates = []
         performed = False
+        parent_record = (
+            lease.evidence_reservation().record_id
+            if isinstance(lease, ProviderEvidenceLease)
+            else ""
+        )
         for candidate in self.plan.candidates:
             if not candidate.selected or candidate.status != "eligible":
                 candidates.append(candidate)
@@ -785,8 +821,8 @@ class NativeTestingSweepAdapter:
                 def original_guard() -> None:
                     check()
                     current = self.store.read_testing_candidate(candidate.namespace)
-                    from control_plane.contracts.retained_volume_sweep import (
-                        RETAINED_VOLUME_SWEEP_ROUTE,
+                    from control_plane.contracts.testing_candidate_release import (
+                        TESTING_CANDIDATE_RELEASE_ROUTE,
                     )
 
                     own_records = frozenset(
@@ -795,7 +831,7 @@ class NativeTestingSweepAdapter:
                         if (
                             record := self.store.read_idempotency_record(
                                 scope="native-testing-retention-lifecycle",
-                                route_path=RETAINED_VOLUME_SWEEP_ROUTE,
+                                route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
                                 idempotency_key=candidate_lifecycle_key(
                                     provider_operation_key, candidate.namespace, phase
                                 ),
@@ -803,6 +839,8 @@ class NativeTestingSweepAdapter:
                         )
                         is not None
                     )
+                    if parent_record:
+                        own_records = own_records | {parent_record}
                     ownership, reasons = candidate_authority(
                         self.store, self.request, original, allowed_provider_records=own_records
                     )
@@ -820,6 +858,8 @@ class NativeTestingSweepAdapter:
                 if lifecycle:
 
                     def lifecycle_guard() -> None:
+                        if self.check_current_use is not None:
+                            self.check_current_use(original)
                         original_guard()
                         if not _source_preserved(
                             self.store, original, self.private[candidate.namespace]["source_proof"]
@@ -906,6 +946,8 @@ class NativeTestingSweepAdapter:
                     effect_permit: dict[str, Any] = {}
 
                     def guard() -> None:
+                        if self.check_current_use is not None:
+                            self.check_current_use(original)
                         original_guard()
                         if not _inventory_clear(
                             self.root, binding, ignored_compose_id=original.compose_id, exact=True
@@ -992,68 +1034,3 @@ class NativeTestingSweepAdapter:
         return ProviderMutationOutcome(
             202, self._result(candidates), provider_effect_performed=performed
         )
-
-
-def execute_native_testing_sweep_request(
-    store: PostgresRecordStore,
-    root: Path,
-    request: NativeTestingSweepRequest,
-    *,
-    actor: str,
-    key: str,
-    trace_id: str,
-) -> NativeTestingSweepResponse:
-    import json
-    from control_plane.contracts.retained_volume_sweep import RETAINED_VOLUME_SWEEP_ROUTE
-
-    if request.mode == "dry-run":
-        plan, _ = build_native_testing_sweep(store, root, request, trace_id)
-        return plan
-    if not key or len(key) > 200:
-        raise ValueError("Apply/readback require the original bounded idempotency key.")
-    if request.mode == "apply" and store.database_dialect_name != "postgresql":
-        raise ValueError("Candidate reclamation requires PostgreSQL executor exclusion.")
-    scope = f"native-testing-retention:{request.product}:{request.context}:{request.operation_id}"
-    fingerprint = canonical_json_sha256(
-        {
-            "actor": actor,
-            "request": request.model_copy(update={"mode": "apply"}).model_dump(mode="json"),
-        }
-    )
-    original = store.read_idempotency_record(
-        scope=scope, route_path=RETAINED_VOLUME_SWEEP_ROUTE, idempotency_key=key
-    )
-    if original is not None:
-        if original.request_fingerprint != fingerprint:
-            raise ValueError("The original cleanup key belongs to another request.")
-        if original.state == "completed":
-            return NativeTestingSweepResponse.model_validate(original.response_payload).model_copy(
-                update={"trace_id": trace_id, "replayed": True}
-            )
-        saved = json.loads(original.reconciliation_key)
-        plan = NativeTestingSweepResponse.model_validate(saved["plan"])
-        private = saved["private"]
-    else:
-        if request.mode == "readback":
-            raise ValueError("The original cleanup receipt is unavailable.")
-        plan, private = build_native_testing_sweep(store, root, request, trace_id)
-        if plan.plan_sha256 != request.reviewed_plan_sha256:
-            raise ValueError("The reviewed native candidate plan changed.")
-    result = run_durable_provider_operation(
-        store=store,
-        scope=scope,
-        route_path=RETAINED_VOLUME_SWEEP_ROUTE,
-        idempotency_key=key,
-        request_fingerprint=fingerprint,
-        lease_owner=trace_id,
-        response_trace_id=trace_id,
-        adapter=NativeTestingSweepAdapter(store, root, request, plan, private),
-        allow_mutation=request.mode == "apply" and original is None,
-    )
-    if result.status not in {"completed", "replayed", "adopted"}:
-        raise ProviderMutationUnknownError(
-            "Preserve the original cleanup request and key for readback."
-        )
-    return NativeTestingSweepResponse.model_validate(result.response_payload).model_copy(
-        update={"trace_id": trace_id, "replayed": result.status == "replayed"}
-    )

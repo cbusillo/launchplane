@@ -1070,7 +1070,7 @@
         ],
         "operation_id": "sweep_retained_volumes",
         "path": "/v1/retained-volume-sweep",
-        "purpose": "Inspect, apply, or read back a reviewed retired-product volume sweep or original-bound failed native testing candidate sweep.",
+        "purpose": "Inspect, apply, or read back one reviewed retained-volume retirement sweep without exposing provider bindings.",
         "response_statuses": [
           "200",
           "400",
@@ -1081,15 +1081,11 @@
           "503"
         ],
         "reviewed_evidence": [
+          "reviewed_plan_sha256",
           "retirement_record_id",
-          "minimum_age_seconds",
-          "product",
-          "context",
-          "operation_id",
-          "candidates",
-          "reviewed_plan_sha256"
+          "minimum_age_seconds"
         ],
-        "schema_fingerprint_sha256": "6b5331e1c7c7ab516659373ae45d55cd60305c6507450cffbbc15255ba728052",
+        "schema_fingerprint_sha256": "97c57a4d12f191da974363dd089db8bc5baeb8826ac3edb59ac28d97c6ac9ca5",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1107,7 +1103,7 @@
         ],
         "operation_id": "release_failed_testing_candidate",
         "path": "/v1/products/{product}/testing-rebuild/{operation_id}/candidate-release",
-        "purpose": "Inspect, release or read back a failed native testing candidate's private containers and volumes, with the bytes a dry run would free; the operation record, failure receipts and evidence stay.",
+        "purpose": "Inspect failed native testing candidates and original-bound physical capacity; release only the reviewed unused resources and read back actual backing space while preserving sources and operation evidence.",
         "response_statuses": [
           "200",
           "400",
@@ -1118,9 +1114,10 @@
           "503"
         ],
         "reviewed_evidence": [
-          "reviewed_plan_sha256"
+          "reviewed_plan_sha256",
+          "receiver_operation_id"
         ],
-        "schema_fingerprint_sha256": "47c85986a25b2cff872b963de902f18704e0c2071c890525db504124d395a962",
+        "schema_fingerprint_sha256": "bcdb8b3288cfd58fd71dfdbb3c96b4a265319ab6d31e541ff94b693514516427",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1541,8 +1538,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "1eff7b9ca63a00203147ef3bd67994903d1682fd"
+    "source_commit_sha": "ad27c5bfb06a5bf5263bcec55c4f5680a74f9f00"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "bed34433748e4ce354fba39aa73912ec2cbe0fd1084a14ee23c29194de262b66"
+  "semantic_digest_sha256": "a582ecb61585f8689a345cc6703b601022a18a49021fec06bd88b907cdb96fdb"
 }

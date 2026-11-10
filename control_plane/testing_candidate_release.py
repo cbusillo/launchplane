@@ -1,11 +1,10 @@
 """Release a failed native testing candidate's private containers and volumes."""
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import inspect
 import json
 from pathlib import Path
-from typing import cast
+from typing import Any
 
 import click
 
@@ -29,6 +28,7 @@ from control_plane.lane_usage import evaluate_lane_usage
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_usage import read_odoo_testing_usage
 from control_plane.provider_operations import (
+    ProviderEvidenceLease,
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
     ProviderMutationUnknownError,
@@ -45,6 +45,14 @@ from control_plane.testing_candidate_allocation import (
     require_candidate_target_custody,
 )
 from control_plane.testing_publication_storage import read_publication
+from control_plane.contracts.testing_candidate_retention import (
+    NativeTestingSweepRequest,
+    NativeTestingSweepResponse,
+)
+from control_plane.testing_candidate_retention import (
+    NativeTestingSweepAdapter,
+    build_native_testing_sweep,
+)
 
 RELEASE_TIMEOUT_SECONDS = 600
 RELEASE_PLAN_ERRORS = (ValueError, OSError, click.ClickException, ProviderMutationUnknownError)
@@ -77,7 +85,7 @@ def json_value(*arguments):
 
 def qualified_request(spec):
     resources=spec.get('resources')
-    if (spec.get('mode') not in {'dry-run','apply'} or not isinstance(resources,dict)
+    if (spec.get('mode') != 'dry-run' or not isinstance(resources,dict)
         or set(resources)!=RESOURCE_FIELDS or not all(isinstance(value,str) and value for value in resources.values())
         or resources['instance']!='testing'
         or re.fullmatch(r'lp-testing-[a-f0-9]{32}',resources['namespace']) is None):
@@ -134,17 +142,6 @@ def candidate_containers(namespace,volumes):
                 raise Held('volume_has_other_consumer')
     return own
 
-def used_bytes(volumes,own):
-    try:
-        total=0
-        for path in volumes.values():
-            total+=int(subprocess.run(['du','-sxB1',str(path)],capture_output=True,check=True,timeout=240).stdout.split()[0])
-        for row in json_value('container','inspect','--size',*own) if own else ():
-            total+=int(row.get('SizeRw') or 0)
-        return total
-    except Exception:
-        return None
-
 def release(spec):
     mode,resources=qualified_request(spec)
     namespace=resources['namespace']
@@ -152,17 +149,7 @@ def release(spec):
     own=candidate_containers(namespace,volumes)
     if not volumes and not own:
         return {'status':'absent','reclaimable_bytes':0}
-    size=used_bytes(volumes,own)
-    if mode=='dry-run':
-        return {'status':'eligible','reclaimable_bytes':size}
-    if own:
-        docker('stop',*own,timeout=120)
-        docker('rm',*own,timeout=120)
-    for name in volumes:
-        docker('volume','rm',name,timeout=120)
-    if owned_volumes(namespace,resources_label(resources)) or candidate_containers(namespace,{}):
-        raise RuntimeError('Release absence is unverified')
-    return {'status':'released','reclaimable_bytes':size}
+    return {'status':'eligible','reclaimable_bytes':None}
 
 try:
     emit(release(json.loads(base64.b64decode(sys.argv[1],validate=True))))
@@ -194,6 +181,9 @@ class CandidateRelease:
     server_id: str
     status: TestingCandidateReleaseStatus
     reclaimable_bytes: int | None
+    retention: NativeTestingSweepResponse | None = None
+    private: dict[str, Any] = field(default_factory=dict)
+    request: NativeTestingSweepRequest | None = None
 
 
 def require_failed_testing_operation(
@@ -203,10 +193,10 @@ def require_failed_testing_operation(
         raise TestingCandidateReleaseRefused(
             "candidate_release_not_testing", "Only a native testing rebuild has a candidate."
         )
-    if operation.status != "fail" or not operation.error_code:
+    if operation.status != "fail":
         raise TestingCandidateReleaseRefused(
             "candidate_release_outcome_unrecorded",
-            "Release waits until the operation has failed with a recorded cause.",
+            "Release waits until the operation has failed.",
         )
 
 
@@ -315,11 +305,8 @@ def host_release(
     host, token = source.read_dokploy_config(control_plane_root=root)
     frames: list[dict[str, object]] = []
 
-    def dispatch(send: Callable[[], None]) -> None:
-        if lease is None:
-            raise ValueError("A candidate release requires its current operation lease.")
-        lease.checkpoint_effect("release-candidate:" + resources.namespace)
-        send()
+    if mode != "dry-run" or lease is not None:
+        raise ValueError("Original release receipts permit observation only.")
 
     native_copy_stream.run_managed_server_program(
         host=host,
@@ -329,7 +316,6 @@ def host_release(
         payload={"mode": mode, "resources": resources.model_dump(mode="json")},
         receive=frames.append,
         timeout_seconds=RELEASE_TIMEOUT_SECONDS,
-        dispatch_guard=dispatch if mode == "apply" else None,
     )
     if len(frames) != 1 or frames[0].get("type") != "complete":
         raise ProviderMutationUnknownError("Candidate release host result is incomplete.")
@@ -347,10 +333,19 @@ def host_release(
 
 
 def build_candidate_release(
-    root: Path, store: PostgresRecordStore, product: str, operation_id: str
+    root: Path,
+    store: PostgresRecordStore,
+    product: str,
+    operation_id: str,
+    receiver_operation_id: str | None = None,
+    allowed_provider_records: frozenset[str] = frozenset(),
 ) -> CandidateRelease:
     operation = store.read_odoo_stable_target_replacement_operation_record(operation_id)
-    require_failed_testing_operation(operation, product)
+    if operation.product != product or not operation.is_native_testing_rebuild:
+        raise TestingCandidateReleaseRefused(
+            "candidate_release_not_testing",
+            "Only a native testing original can inspect candidate storage.",
+        )
     allocation = store.read_testing_candidate(
         testing_candidate_namespace(product, operation.context, operation_id)
     )
@@ -358,29 +353,62 @@ def build_candidate_release(
         raise TestingCandidateReleaseRefused(
             "candidate_release_no_candidate", "This operation never placed a candidate."
         )
-    require_candidate_unselected(root, store, allocation)
-    require_lane_releasable(root, store, operation)
-    resources = candidate_resources(allocation)
-    observed = host_release(root, allocation.server_id, resources, "dry-run")
-    if observed.status not in {"eligible", "absent"}:
-        raise TestingCandidateReleaseRefused(
-            "candidate_release_held",
-            "The candidate's storage is not provably its own: "
-            + (observed.reason_code or "host_evidence_unavailable"),
+    request = NativeTestingSweepRequest(
+        kind="native-testing",
+        product=product,
+        context=operation.context,
+        operation_id=operation_id,
+        receiver_operation_id=receiver_operation_id or "",
+        candidates=(allocation.namespace,),
+    )
+    observed, private = build_native_testing_sweep(
+        store, root, request, "candidate-release-plan", allowed_provider_records
+    )
+    try:
+        require_failed_testing_operation(operation, product)
+        require_candidate_unselected(root, store, allocation)
+        require_lane_releasable(root, store, operation)
+    except TestingCandidateReleaseRefused as error:
+        observed = observed.model_copy(
+            update={
+                "candidates": tuple(
+                    item.model_copy(
+                        update={
+                            "status": "held",
+                            "reasons": (*item.reasons, error.code),
+                            "resources": tuple(
+                                row.model_copy(update={"status": "held", "reason": error.code})
+                                if row.status == "eligible"
+                                else row
+                                for row in item.resources
+                            ),
+                        }
+                    )
+                    if item.selected
+                    else item
+                    for item in observed.candidates
+                )
+            }
         )
+    candidate = next(item for item in observed.candidates if item.selected)
+    status: TestingCandidateReleaseStatus = (
+        "eligible"
+        if candidate.status == "eligible"
+        else "absent"
+        if candidate.resources and all(row.status == "absent" for row in candidate.resources)
+        else "held"
+    )
+    resources = candidate_resources(allocation)
     plan = TestingCandidateReleasePlan(
         product=product,
         operation_id=operation_id,
         error_code=operation.error_code,
         namespace=allocation.namespace,
         resources_binding_sha256=resources.binding_sha256,
+        retention_plan_sha256=observed.plan_sha256,
     )
     return CandidateRelease(
-        plan,
-        resources,
-        allocation.server_id,
-        cast(TestingCandidateReleaseStatus, observed.status),
-        observed.reclaimable_bytes,
+        plan, resources, allocation.server_id, status, None, observed, private, request
     )
 
 
@@ -395,6 +423,9 @@ def release_response(
         plan_sha256=release.plan.digest(),
         status=status,
         reclaimable_bytes=release.reclaimable_bytes,
+        candidates=release.retention.candidates if release.retention else (),
+        capacity=release.retention.capacity if release.retention else (),
+        capacity_refusal=release.retention.capacity_refusal if release.retention else "",
     )
 
 
@@ -414,71 +445,141 @@ class TestingCandidateReleaseAdapter:
         return "testing-candidate-release:" + self.release.plan.namespace
 
     def reconciliation_key(self) -> str:
-        return json.dumps(
-            {
-                "plan": self.release.plan.model_dump(mode="json"),
-                "resources": self.release.resources.model_dump(mode="json"),
-                "server_id": self.release.server_id,
-                "reclaimable_bytes": self.release.reclaimable_bytes,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        payload = {
+            "plan": self.release.plan.model_dump(
+                mode="json",
+                exclude={"retention_plan_sha256"}
+                if not self.release.plan.retention_plan_sha256
+                else set(),
+            ),
+            "resources": self.release.resources.model_dump(mode="json"),
+            "server_id": self.release.server_id,
+            "reclaimable_bytes": self.release.reclaimable_bytes,
+        }
+        if self.release.retention is not None:
+            assert self.release.request is not None
+            payload.update(
+                retention=self.release.retention.model_dump(mode="json"),
+                private=self.release.private,
+                request=self.release.request.model_dump(mode="json"),
+            )
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
     def _payload(self, status: TestingCandidateReleaseStatus) -> dict[str, object]:
         return release_response(self.release, self.trace_id, status).model_dump(
             mode="json", exclude_none=True
         )
 
+    def _use_guard(self, allocation: TestingCandidateAllocation) -> None:
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(
+            allocation.operation_id
+        )
+        require_failed_testing_operation(operation, self.release.plan.product)
+        require_candidate_unselected(self.root, self.store, allocation)
+        require_lane_releasable(self.root, self.store, operation)
+
+    def _adapter(self) -> NativeTestingSweepAdapter:
+        assert self.release.request is not None and self.release.retention is not None
+        request = self.release.request.model_copy(
+            update={"mode": "apply", "reviewed_plan_sha256": self.release.retention.plan_sha256}
+        )
+        return NativeTestingSweepAdapter(
+            self.store,
+            self.root,
+            request,
+            self.release.retention,
+            self.release.private,
+            self._use_guard,
+        )
+
+    def _physical_payload(self, payload: dict[str, object]) -> dict[str, object]:
+        observed = NativeTestingSweepResponse.model_validate(payload)
+        selected = next(item for item in observed.candidates if item.selected)
+        status: TestingCandidateReleaseStatus = (
+            "released"
+            if selected.resources
+            and all(
+                row.status in {"absent", "removed"} or row.reason == "source_inputs_preserved"
+                for row in selected.resources
+            )
+            else "held"
+        )
+        return release_response(
+            replace(self.release, retention=observed), self.trace_id, status
+        ).model_dump(mode="json", exclude_none=True)
+
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        del provider_operation_key, provider_effect_phase
         if reconciliation_key != self.reconciliation_key():
             return ProviderObservation("unknown")
-        try:
-            observed = host_release(
-                self.root, self.release.server_id, self.release.resources, "dry-run"
+        if self.release.retention is None:
+            # Pre-convergence receipts can prove original absence, never dispatch a less-bound effect.
+            try:
+                observed = host_release(
+                    self.root, self.release.server_id, self.release.resources, "dry-run"
+                )
+            except RELEASE_PLAN_ERRORS:
+                return ProviderObservation("unknown")
+            return (
+                ProviderObservation("present", response_payload=self._payload("released"))
+                if observed.status == "absent"
+                else ProviderObservation("unknown")
             )
-        except (ValueError, OSError, click.ClickException, ProviderMutationUnknownError):
-            return ProviderObservation("unknown")
-        if observed.status == "absent":
-            return ProviderObservation("present", response_payload=self._payload("released"))
-        if observed.status == "eligible":
-            return ProviderObservation("absent", retry_safe=True, preserve_effect_checkpoint=True)
-        return ProviderObservation("unknown")
+        adapter = self._adapter()
+        observation = adapter.observe(
+            provider_operation_key, provider_effect_phase, adapter.reconciliation_key()
+        )
+        return (
+            replace(
+                observation, response_payload=self._physical_payload(observation.response_payload)
+            )
+            if observation.outcome == "present"
+            else observation
+        )
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
-        del provider_operation_key
-        plan = self.release.plan
+        if self.release.retention is None:
+            raise ProviderMutationUnknownError(
+                "Preserve the original release receipt; current physical custody is unverified."
+            )
+        if self.store.database_dialect_name != "postgresql":
+            raise ProviderMutationRejectedError(
+                ValueError("Candidate release requires PostgreSQL executor exclusion.")
+            )
         try:
-            fresh = build_candidate_release(self.root, self.store, plan.product, plan.operation_id)
+            fresh = build_candidate_release(
+                self.root,
+                self.store,
+                self.release.plan.product,
+                self.release.plan.operation_id,
+                self.release.request.receiver_operation_id if self.release.request else None,
+                allowed_provider_records=frozenset({lease.evidence_reservation().record_id})
+                if isinstance(lease, ProviderEvidenceLease)
+                else frozenset(),
+            )
         except RELEASE_PLAN_ERRORS as error:
             raise ProviderMutationRejectedError(error) from error
-        if fresh.plan != plan or plan.digest() != self.reviewed_plan_sha256:
+        if fresh.plan.digest() != self.reviewed_plan_sha256:
             raise ProviderMutationRejectedError(
                 TestingCandidateReleaseRefused(
                     "candidate_release_plan_changed", "The reviewed candidate changed."
+                )
+            )
+        if fresh.status == "held":
+            raise ProviderMutationRejectedError(
+                TestingCandidateReleaseRefused(
+                    "candidate_release_held", "Current use or custody protects the candidate."
                 )
             )
         if fresh.status == "absent":
             return ProviderMutationOutcome(
                 202, self._payload("absent"), provider_effect_performed=False
             )
-        lease.assert_current()
-        try:
-            applied = host_release(
-                self.root, self.release.server_id, self.release.resources, "apply", lease
-            )
-        except (ValueError, OSError, click.ClickException) as error:
-            raise ProviderMutationUnknownError(
-                "Candidate release transport is unverified."
-            ) from error
-        if applied.status != "released":
-            raise ProviderMutationUnknownError("Candidate release is unverified.")
-        return ProviderMutationOutcome(202, self._payload("released"))
+        result = self._adapter().apply(provider_operation_key, lease)
+        return replace(result, response_payload=self._physical_payload(result.response_payload))
 
 
 def release_from_receipt(reconciliation_key: str) -> CandidateRelease:
@@ -489,4 +590,11 @@ def release_from_receipt(reconciliation_key: str) -> CandidateRelease:
         str(recorded["server_id"]),
         "eligible",
         recorded["reclaimable_bytes"],
+        NativeTestingSweepResponse.model_validate(recorded["retention"])
+        if "retention" in recorded
+        else None,
+        recorded.get("private", {}),
+        NativeTestingSweepRequest.model_validate(recorded["request"])
+        if "request" in recorded
+        else None,
     )

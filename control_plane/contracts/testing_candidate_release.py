@@ -3,13 +3,17 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+from control_plane.contracts.testing_candidate_retention import (
+    NativeTestingSweepCandidate,
+    NativeTestingBackingCapacity,
+)
 
 
 TESTING_CANDIDATE_RELEASE_ROUTE = (
     "/v1/products/{product}/testing-rebuild/{operation_id}/candidate-release"
 )
 
-TestingCandidateReleaseStatus = Literal["eligible", "absent", "released"]
+TestingCandidateReleaseStatus = Literal["eligible", "absent", "released", "held"]
 
 
 class TestingCandidateReleaseRequest(BaseModel):
@@ -17,6 +21,7 @@ class TestingCandidateReleaseRequest(BaseModel):
 
     mode: Literal["dry-run", "apply", "readback"] = "dry-run"
     reviewed_plan_sha256: str = ""
+    receiver_operation_id: str | None = Field(default=None, min_length=1, max_length=200)
 
     @model_validator(mode="after")
     def validate_review(self) -> "TestingCandidateReleaseRequest":
@@ -36,9 +41,15 @@ class TestingCandidateReleasePlan(BaseModel):
     error_code: str
     namespace: str
     resources_binding_sha256: str
+    retention_plan_sha256: str = ""
 
     def digest(self) -> str:
-        return nonvalidating_compact_sorted_json_sha256(self.model_dump(mode="json"))
+        return nonvalidating_compact_sorted_json_sha256(
+            self.model_dump(
+                mode="json",
+                exclude={"retention_plan_sha256"} if not self.retention_plan_sha256 else set(),
+            )
+        )
 
 
 class TestingCandidateReleaseResponse(BaseModel):
@@ -55,4 +66,14 @@ class TestingCandidateReleaseResponse(BaseModel):
     )
     replayed: bool | None = Field(
         default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
+
+    candidates: tuple[NativeTestingSweepCandidate, ...] = Field(
+        default=(), json_schema_extra={"x-launchplane-optional-response": True}
+    )
+    capacity: tuple[NativeTestingBackingCapacity, ...] = Field(
+        default=(), json_schema_extra={"x-launchplane-optional-response": True}
+    )
+    capacity_refusal: str = Field(
+        default="", json_schema_extra={"x-launchplane-optional-response": True}
     )

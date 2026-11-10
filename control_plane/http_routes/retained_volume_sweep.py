@@ -17,8 +17,6 @@ from control_plane.contracts.retained_volume_sweep import (
     RetainedVolumeSweepPlan,
     RetainedVolumeSweepRequest,
     RetainedVolumeSweepResponse,
-    NativeTestingSweepRequest,
-    NativeTestingSweepResponse,
 )
 from control_plane.http_routes.support import (
     ApiRouteRegistrar,
@@ -55,11 +53,11 @@ def register_retained_volume_sweep_route(
     app: ApiRouteRegistrar, *, dependencies: RetainedVolumeSweepDependencies
 ) -> None:
     async def retained_volume_sweep(
-        payload: RetainedVolumeSweepRequest | NativeTestingSweepRequest,
+        payload: RetainedVolumeSweepRequest,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> RetainedVolumeSweepResponse | NativeTestingSweepResponse:
+    ) -> RetainedVolumeSweepResponse:
         trace_id = dependencies.next_trace_id()
 
         def refuse(code: str, message: str, status: int = 409) -> None:
@@ -81,41 +79,6 @@ def register_retained_volume_sweep_route(
         store: PostgresRecordStore = record_store
         key = idempotency_key.strip()
         actor = launchplane_identity_actor(identity)
-        if isinstance(payload, NativeTestingSweepRequest):
-            from control_plane.testing_candidate_retention import (
-                execute_native_testing_sweep_request,
-            )
-
-            try:
-                native_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        execute_native_testing_sweep_request,
-                        store,
-                        dependencies.control_plane_root,
-                        payload,
-                        actor=actor,
-                        key=key,
-                        trace_id=trace_id,
-                    )
-                )
-                return await asyncio.shield(native_task)
-            except (ValueError, FileNotFoundError):
-                refuse(
-                    "native_testing_sweep_refused",
-                    "Native candidate ownership, reviewed evidence or request is unqualified.",
-                )
-            except Exception:
-                if payload.mode == "dry-run":
-                    refuse(
-                        "native_testing_inspection_unavailable",
-                        "Native candidate inspection is incomplete; no cleanup was dispatched.",
-                        503,
-                    )
-                refuse(
-                    "mutation_reconciliation_required",
-                    "Preserve the original native cleanup request and key; read back its evidence.",
-                )
-            raise AssertionError
         normalized = payload.model_copy(update={"mode": "apply"})
         fingerprint = hashlib.sha256(
             (actor + "\n" + normalized.model_dump_json()).encode()
@@ -228,7 +191,7 @@ def register_retained_volume_sweep_route(
         RETAINED_VOLUME_SWEEP_ROUTE,
         retained_volume_sweep,
         methods=["POST"],
-        response_model=RetainedVolumeSweepResponse | NativeTestingSweepResponse,
+        response_model=RetainedVolumeSweepResponse,
         response_model_exclude_none=True,
         operation_id="sweep_retained_volumes",
         summary="Inspect or sweep retained volumes",

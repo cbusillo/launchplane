@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.retained_volume_sweep import RETAINED_VOLUME_SWEEP_ROUTE
+from control_plane.contracts.testing_candidate_release import TESTING_CANDIDATE_RELEASE_ROUTE
 from control_plane.dokploy import api, source
 from control_plane.dokploy.testing_retained_copy import retained_copy_operation
 from control_plane.provider_operations import (
@@ -140,14 +140,14 @@ class CandidateRetentionLifecycle:
         key = candidate_lifecycle_key(parent_key, self.custody["namespace"], self.phase)
         scope = "native-testing-retention-lifecycle"
         original = self.store.read_idempotency_record(
-            scope=scope, route_path=RETAINED_VOLUME_SWEEP_ROUTE, idempotency_key=key
+            scope=scope, route_path=TESTING_CANDIDATE_RELEASE_ROUTE, idempotency_key=key
         )
         if original is None and not mutate:
             return False
         result = run_durable_provider_operation(
             store=self.store,
             scope=scope,
-            route_path=RETAINED_VOLUME_SWEEP_ROUTE,
+            route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
             idempotency_key=key,
             request_fingerprint=canonical_json_sha256(self.custody),
             lease_owner=trace_id,
