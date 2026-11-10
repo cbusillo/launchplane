@@ -2396,6 +2396,19 @@ request.
 Admin views can read the broader stored controller state from the native
 FastAPI route
 `GET /v1/work-graph/merge-train/controller/status?repository=owner/name&base_branch=main`.
+Add `&candidate_record_id=<original-record-id>` to inspect an original native
+candidate beyond the bounded status summary. The optional `candidate_evidence`
+contains that exact stored record, including its block intent and retry lineage,
+plus validated base-retest and setup-recovery reservations for each member's
+repository/PR/head. Records remain readable after supersession and policy changes.
+Reservations can name a different failed record; that occupied allowance must
+not be treated as available. Null means the corresponding reservation was absent
+when read, not that recovery is authorized. Missing scoped candidates return 404;
+unreadable reservation evidence returns 503 rather than an unspent allowance.
+This uses the same diagnostic authorization, performs no provider read or write,
+and grants no controller or recovery authority. Omit the selector for the existing
+summary-only response.
+
 That route returns the same admission decision plus the latest Level 1 run record,
 identified by `latest_run_source=level1`, with `latest_run_age_seconds` measured
 at the response's `generated_at`. Both fields are null when no Level 1 run
