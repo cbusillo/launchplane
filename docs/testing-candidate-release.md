@@ -11,9 +11,9 @@ and how a failed candidate's storage is released.
 ## Admission refuses a migrated restore that cannot fit
 
 Before a migrated restore is queued, the rebuild preflight reads the testing
-server's free space for Docker volumes, container writable layers and the
-clean-snapshot directory, grouping paths that share a ZFS pool or device. It
-charges the same terms the receiver checks before delivery: the database
+server's free space for Docker volumes, container writable layers and, when
+clean snapshots are on, the clean-snapshot directory, grouping paths that share
+a ZFS pool or device. It charges the same terms the receiver checks before delivery: the database
 budget, the filestore budget plus the whole staged pair, the runner's copy of
 the database, the clean snapshot when enabled, and the reserve once per
 backing. The migrated budget comes from `migrated_storage_budget`, which the
@@ -33,19 +33,23 @@ is for a signed-in admin or the Director's service agent.
 - `mode: apply` with `reviewed_plan_sha256` and an `Idempotency-Key` stops and
   removes the candidate's own containers and volumes, then verifies they are
   gone.
-- `mode: readback` with the same digest and key reads the original receipt.
+- `mode: readback` with the same digest and key reads the original receipt
+  without planning again. If an apply was interrupted part way, readback
+  reports it unsettled; apply with the same key finishes it, after the same
+  checks.
 
 It refuses, naming the reason, unless all of these hold:
 
 - the operation is a native testing rebuild whose status is `fail` with a
   recorded `error_code` (`candidate_release_not_testing`,
   `candidate_release_outcome_unrecorded`);
-- no lane target names the candidate, its publication was never applied or was
-  reversed, and it has no public domain (`candidate_release_selected`);
+- no lane target names the candidate, its publication is not `applied`, and it
+  has no public domain (`candidate_release_selected`);
 - the testing lane holds no recorded only-needed copy and shares no production
   resources (`testing_needed_copy`, `testing_production_resources_shared`);
-- no person is using the lane: a staff testing hold or a recent sign-in refuses
-  (`testing_in_use`);
+- no person is using the lane: a staff testing hold (`testing_staff_hold`) or a
+  recent sign-in (`testing_in_use`) refuses. Unknown use does not refuse; the
+  release never touches the serving copy;
 - on the host, every volume carries this candidate's ownership label and no
   other container mounts it (`candidate_release_held`).
 

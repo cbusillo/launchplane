@@ -18,10 +18,16 @@ from httpx2 import Response
 from pydantic import BaseModel
 
 from control_plane import testing_candidate_release as release
-from control_plane.contracts.testing_candidate_release import TestingCandidateReleasePlan
+from control_plane.contracts.testing_candidate_release import (
+    TestingCandidateReleasePlan,
+    TestingCandidateReleaseStatus,
+)
 from control_plane.http_routes import testing_candidate_release as routes
 from control_plane.http_routes.support import ApiRouteRegistrar
-from control_plane.provider_operations import ProviderOperationLease
+from control_plane.provider_operations import (
+    ProviderMutationUnknownError,
+    ProviderOperationLease,
+)
 from control_plane.service_auth import LocalOperatorIdentity
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.http import request
@@ -49,7 +55,7 @@ if args==['volume','ls','--format','{{.Name}}']:
     print('\n'.join(volumes))
 elif args[:2]==['volume','inspect']:
     item=volumes[args[2]]
-    print(json.dumps([{'Name':args[2],'Driver':'local','Labels':item['labels'],'Mountpoint':item['path']}]))
+    print(json.dumps([{'Name':args[2],'Driver':'local','Labels':item['labels'],'Mountpoint':item['path'],'Options':item.get('options')}]))
 elif args==['ps','-aq','--no-trunc']:
     print('\n'.join(containers))
 elif args[:3]==['inspect','--type','container']:
@@ -193,6 +199,15 @@ class CandidateReleaseProgramTests(unittest.TestCase):
         )
         self.assertEqual(self.removals(), [])
 
+    def test_bind_backed_volume_is_kept(self) -> None:
+        self.state["volumes"][NAMESPACE + "-data"]["options"] = {"o": "bind"}
+        self.save()
+        self.assertEqual(
+            self.run_program("apply"),
+            {"status": "held", "reason_code": "volume_ownership_unverified"},
+        )
+        self.assertEqual(self.removals(), [])
+
     def test_volume_mounted_by_another_container_is_kept(self) -> None:
         self.state["containers"]["borrower"] = {
             "Config": {"Labels": {}},
@@ -264,7 +279,6 @@ class CandidateReleaseGuardTests(unittest.TestCase):
         cases = (
             ({"custody": ValueError("lane target names it")}, "candidate_release_selected"),
             ({"publication": Mock(state="applied")}, "candidate_release_selected"),
-            ({"publication": Mock(state="planned")}, "candidate_release_selected"),
             ({"routed": True}, "candidate_release_selected"),
         )
         for case, code in cases:
@@ -284,15 +298,21 @@ class CandidateReleaseGuardTests(unittest.TestCase):
                     ),
                     code,
                 )
-        with (
-            patch.object(release, "require_candidate_target_custody"),
-            patch.object(release, "read_publication", return_value=Mock(state="reversed")),
-            patch.object(release, "candidate_routed", return_value=False),
-        ):
-            release.require_candidate_unselected(Path("/unused"), Mock(), allocation)
+        for state in ("planned", "reversed"):
+            with (
+                patch.object(release, "require_candidate_target_custody"),
+                patch.object(release, "read_publication", return_value=Mock(state=state)),
+                patch.object(release, "candidate_routed", return_value=False),
+            ):
+                release.require_candidate_unselected(Path("/unused"), Mock(), allocation)
 
     def lane_refusal(
-        self, *, only_copy: bool = False, shared: bool = False, protected: bool = False
+        self,
+        *,
+        only_copy: bool = False,
+        shared: bool = False,
+        protected: bool = False,
+        reason: str = "usage_protected",
     ) -> str | None:
         store = Mock()
         store.read_disposable_lane_safety.return_value = None
@@ -304,7 +324,9 @@ class CandidateReleaseGuardTests(unittest.TestCase):
             ),
             patch.object(release, "read_odoo_testing_usage", return_value=Mock(usage="unknown")),
             patch.object(
-                release, "evaluate_lane_usage", return_value=Mock(protected=protected)
+                release,
+                "evaluate_lane_usage",
+                return_value=Mock(protected=protected, reason=reason),
             ) as usage,
         ):
             try:
@@ -318,6 +340,9 @@ class CandidateReleaseGuardTests(unittest.TestCase):
         self.assertEqual(self.lane_refusal(only_copy=True), "testing_needed_copy")
         self.assertEqual(self.lane_refusal(shared=True), "testing_production_resources_shared")
         self.assertEqual(self.lane_refusal(protected=True), "testing_in_use")
+        self.assertEqual(
+            self.lane_refusal(protected=True, reason="staff_testing_hold"), "testing_staff_hold"
+        )
         self.assertIsNone(self.lane_refusal())
 
     def test_plan_is_stable_after_release_so_readback_matches_its_review(self) -> None:
@@ -386,9 +411,10 @@ class CandidateReleaseRouteTests(unittest.TestCase):
         )
         self.store.ensure_schema()
         self.addCleanup(self.store.close)
-        self.host_status = "eligible"
+        self.host_status: TestingCandidateReleaseStatus = "eligible"
         self.refusal: TestingCandidateReleaseRefused | None = None
         self.applied: list[str] = []
+        self.interrupt = False
         candidate = release.CandidateRelease(
             TestingCandidateReleasePlan(
                 product="fixture",
@@ -422,6 +448,8 @@ class CandidateReleaseRouteTests(unittest.TestCase):
                 assert lease is not None
                 lease.checkpoint_effect("release-candidate")
                 self.applied.append(mode)
+                if self.interrupt:
+                    raise ProviderMutationUnknownError("Fixture transport dropped part way.")
                 self.host_status = "absent"
                 return release.HostRelease("released", 3500, "")
             return release.HostRelease(self.host_status, 0, "")
@@ -490,6 +518,27 @@ class CandidateReleaseRouteTests(unittest.TestCase):
         applied = self.post(key="release", mode="apply", reviewed_plan_sha256=reviewed)
         self.assertEqual(applied.status_code, 200, applied.text)
         self.assertEqual(self.applied, ["apply"])
+
+    def test_interrupted_apply_stays_unsettled_until_the_same_key_finishes_it(self) -> None:
+        reviewed = self.post().json()["plan_sha256"]
+        self.interrupt = True
+        interrupted = self.post(key="release", mode="apply", reviewed_plan_sha256=reviewed)
+        self.assertEqual(interrupted.status_code, 409, interrupted.text)
+        self.interrupt = False
+        self.refusal = TestingCandidateReleaseRefused("testing_in_use", "A person is using it.")
+        unsettled = self.post(key="release", mode="readback", reviewed_plan_sha256=reviewed)
+        self.assertEqual(unsettled.status_code, 409, unsettled.text)
+        self.assertEqual(unsettled.json()["detail"]["code"], "mutation_reconciliation_required")
+        self.assertEqual(self.applied, ["apply"])
+        self.refusal = None
+        finished = self.post(key="release", mode="apply", reviewed_plan_sha256=reviewed)
+        self.assertEqual(finished.status_code, 200, finished.text)
+        self.assertEqual(
+            (finished.json()["status"], finished.json()["reclaimable_bytes"]), ("released", 3500)
+        )
+        self.assertEqual(self.applied, ["apply", "apply"])
+        readback = self.post(key="release", mode="readback", reviewed_plan_sha256=reviewed)
+        self.assertEqual(readback.json()["status"], "released")
 
 
 if __name__ == "__main__":

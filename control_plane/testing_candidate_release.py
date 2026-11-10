@@ -97,6 +97,7 @@ def owned_volumes(namespace,label):
         labels=volume.get('Labels') or {}
         path=Path(str(volume.get('Mountpoint','')))
         if (volume.get('Name')!=name or volume.get('Driver')!='local'
+            or volume.get('Options') not in (None,{})
             or labels.get('io.launchplane.testing-resources')!=label
             or not path.is_absolute()):
             raise Held('volume_ownership_unverified')
@@ -228,7 +229,7 @@ def require_candidate_unselected(
             }
         ),
     )
-    if publication is not None and publication.state != "reversed":
+    if publication is not None and publication.state == "applied":
         raise TestingCandidateReleaseRefused(
             "candidate_release_selected", "This candidate was selected to serve testing."
         )
@@ -294,6 +295,10 @@ def require_lane_releasable(
         usage=reported,
         require_unused=False,
     )
+    if decision.protected and decision.reason == "staff_testing_hold":
+        raise TestingCandidateReleaseRefused(
+            "testing_staff_hold", "Staff are testing on this lane under a recorded hold."
+        )
     if decision.protected:
         raise TestingCandidateReleaseRefused(
             "testing_in_use", "A person is using this testing lane."
@@ -414,6 +419,7 @@ class TestingCandidateReleaseAdapter:
                 "plan": self.release.plan.model_dump(mode="json"),
                 "resources": self.release.resources.model_dump(mode="json"),
                 "server_id": self.release.server_id,
+                "reclaimable_bytes": self.release.reclaimable_bytes,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -436,9 +442,11 @@ class TestingCandidateReleaseAdapter:
             )
         except (ValueError, OSError, click.ClickException, ProviderMutationUnknownError):
             return ProviderObservation("unknown")
-        if observed.status != "absent":
-            return ProviderObservation("unknown")
-        return ProviderObservation("present", response_payload=self._payload("released"))
+        if observed.status == "absent":
+            return ProviderObservation("present", response_payload=self._payload("released"))
+        if observed.status == "eligible":
+            return ProviderObservation("absent", retry_safe=True, preserve_effect_checkpoint=True)
+        return ProviderObservation("unknown")
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -450,7 +458,11 @@ class TestingCandidateReleaseAdapter:
         except RELEASE_PLAN_ERRORS as error:
             raise ProviderMutationRejectedError(error) from error
         if fresh.plan != plan or plan.digest() != self.reviewed_plan_sha256:
-            raise ProviderMutationRejectedError(ValueError("The reviewed candidate changed."))
+            raise ProviderMutationRejectedError(
+                TestingCandidateReleaseRefused(
+                    "candidate_release_plan_changed", "The reviewed candidate changed."
+                )
+            )
         if fresh.status == "absent":
             return ProviderMutationOutcome(
                 202, self._payload("absent"), provider_effect_performed=False
@@ -467,3 +479,14 @@ class TestingCandidateReleaseAdapter:
         if applied.status != "released":
             raise ProviderMutationUnknownError("Candidate release is unverified.")
         return ProviderMutationOutcome(202, self._payload("released"))
+
+
+def release_from_receipt(reconciliation_key: str) -> CandidateRelease:
+    recorded = json.loads(reconciliation_key)
+    return CandidateRelease(
+        TestingCandidateReleasePlan.model_validate(recorded["plan"]),
+        OdooTestingResources.model_validate(recorded["resources"]),
+        str(recorded["server_id"]),
+        "eligible",
+        recorded["reclaimable_bytes"],
+    )

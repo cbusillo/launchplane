@@ -409,7 +409,12 @@ def _require_migrated_restore_capacity(
             "A migrated restore requires reviewed testing storage headroom.",
         )
     try:
-        roles = read_testing_backings(root, store.database_url, intent.server_id)
+        roles = read_testing_backings(
+            root,
+            store.database_url,
+            intent.server_id,
+            clean_snapshot=intent.profile.preview.clean_testing_snapshot,
+        )
     except NativeSourceAuthorizationDenied:
         raise
     except (NativeSourceUnavailable, ValueError, KeyError, click.ClickException) as error:

@@ -514,7 +514,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             patch.object(
                 preflight,
                 "read_testing_backings",
-                side_effect=lambda *_: {
+                side_effect=lambda *_, **__: {
                     role: BackingMeasurement(backing="zfs:testing", available=free["bytes"])
                     for role in ("volumes", "writable", "snapshot")
                 },

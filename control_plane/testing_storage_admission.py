@@ -45,7 +45,7 @@ def existing_ancestor(path):
     return path
 
 try:
-    json.loads(base64.b64decode(sys.argv[1],validate=True))
+    spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
     info=json.loads(subprocess.run(['docker','info','--format','{{json .}}'],
         capture_output=True,check=True,timeout=30).stdout)
     if info.get('Driver')!='overlay2':
@@ -54,8 +54,9 @@ try:
     if not root.is_absolute():
         raise RuntimeError('Docker backing is unavailable')
     pools=zfs_pools()
-    roles={'volumes':measured(root/'volumes',pools),'writable':measured(root/'overlay2',pools),
-        'snapshot':measured(existing_ancestor(Path.home()/CLEAN_SNAPSHOT_STATE_DIRECTORY),pools)}
+    roles={'volumes':measured(root/'volumes',pools),'writable':measured(root/'overlay2',pools)}
+    if spec.get('clean_snapshot') is True:
+        roles['snapshot']=measured(existing_ancestor(Path.home()/CLEAN_SNAPSHOT_STATE_DIRECTORY),pools)
     print(prefix+json.dumps({'type':'complete','roles':roles}),flush=True)
 except Exception:
     print(prefix+json.dumps({'type':'failed'}),flush=True)
@@ -133,7 +134,7 @@ def worst_shortfall(
 
 
 def read_testing_backings(
-    root: Path, database_url: str, server_id: str
+    root: Path, database_url: str, server_id: str, *, clean_snapshot: bool
 ) -> dict[str, BackingMeasurement]:
     host, token = source.read_dokploy_config(control_plane_root=root, database_url=database_url)
     frames: list[dict[str, object]] = []
@@ -142,14 +143,15 @@ def read_testing_backings(
         token=token,
         server_id=server_id,
         program=TESTING_BACKING_READ_PROGRAM,
-        payload={},
+        payload={"clean_snapshot": clean_snapshot},
         receive=frames.append,
         timeout_seconds=60,
     )
     if len(frames) != 1 or frames[0].get("type") != "complete":
         raise ValueError("Testing storage backing read is incomplete.")
     roles = frames[0].get("roles")
-    if not isinstance(roles, dict) or set(roles) != {"volumes", "writable", "snapshot"}:
+    expected = {"volumes", "writable"} | ({"snapshot"} if clean_snapshot else set())
+    if not isinstance(roles, dict) or set(roles) != expected:
         raise ValueError("Testing storage backing read is malformed.")
     return {
         role: BackingMeasurement(backing=str(value["backing"]), available=int(value["available"]))

@@ -30,6 +30,7 @@ from control_plane.testing_candidate_release import (
     TestingCandidateReleaseAdapter,
     TestingCandidateReleaseRefused,
     build_candidate_release,
+    release_from_receipt,
     release_response,
 )
 
@@ -147,14 +148,14 @@ def register_testing_candidate_release_route(
                         trace_id,
                     ),
                     lease_seconds=900,
-                    allow_mutation=payload.mode == "apply" and original is None,
+                    allow_mutation=payload.mode == "apply",
                 )
             except TestingCandidateReleaseRefused as error:
                 raise refusal(error.code, str(error) + " Nothing was released.") from error
             except RELEASE_PLAN_ERRORS as error:
                 raise refusal(
-                    "candidate_release_plan_changed",
-                    "The candidate changed after review. Nothing was released; review it again.",
+                    "candidate_release_unavailable",
+                    "The candidate could not be checked again before release. Nothing was released.",
                 ) from error
             if result.status in {"completed", "replayed", "adopted"}:
                 return TestingCandidateReleaseResponse.model_validate(
@@ -169,8 +170,18 @@ def register_testing_candidate_release_route(
                 "The candidate release has not settled. Preserve the original request and key.",
             )
 
+        def recorded() -> CandidateRelease:
+            assert original is not None
+            try:
+                return release_from_receipt(original.reconciliation_key)
+            except (ValueError, KeyError, TypeError) as error:
+                raise refusal(
+                    "mutation_reconciliation_required",
+                    "The original release receipt is unreadable. Preserve the request and key.",
+                ) from error
+
         def execute() -> TestingCandidateReleaseResponse:
-            release = plan()
+            release = recorded() if original is not None else plan()
             if payload.mode == "dry-run":
                 return release_response(release, trace_id, release.status)
             if payload.mode == "apply" and release.plan.digest() != payload.reviewed_plan_sha256:
