@@ -92,6 +92,53 @@ class Connection:
 
 
 class NativeSourceTransportTests(unittest.TestCase):
+    def test_command_failure_frame_preserves_only_bounded_cause_without_settling_a_write(
+        self,
+    ) -> None:
+        from control_plane import http_error_evidence
+        from control_plane.copy_readback_diagnostics import CopyFailureStage
+
+        markers = {
+            "copy_failure_stage": CopyFailureStage.SOURCE_TRANSFER.value,
+            "copy_failure_kind": "command_failed",
+            "copy_failure_exit_status": "7",
+            COPY_FAILURE_EVIDENCE_MARKER: uuid.uuid4().hex,
+        }
+        private = "password=secret /credential/path dump-content"
+        for supplied, expected in ((markers, markers), ({key: private for key in markers}, {})):
+            with self.subTest(supplied=supplied):
+                connection = Connection(
+                    {
+                        "type": "failed",
+                        "predicate": ReadbackPredicate.NATIVE_READ.value,
+                        "kind": "unavailable",
+                        "stderr": private,
+                        **supplied,
+                    }
+                )
+                with self.assertRaises(transport.NativeProgramFailed) as raised:
+                    transport._read_program(
+                        connection=connection,
+                        program="fixture program",
+                        payload={},
+                        timeout_seconds=5,
+                        receive=lambda _frame: None,
+                    )
+                error = raised.exception
+                self.assertFalse(getattr(error, "provider_effect_terminal", False))
+                self.assertEqual(error.copy_failure_markers, expected)
+                self.assertNotIn(private, str(error))
+                for key, value in expected.items():
+                    self.assertEqual(error.evidence[key], value)
+                    self.assertIn(f"{key}={value}", str(error))
+                with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+                    http_error_evidence.log_handled_error_cause(error, "command-test")
+                public = logs.records[-1].getMessage()
+                self.assertNotIn(private, public)
+                entry = json.loads(public)["native_programs"][0]
+                for key, value in expected.items():
+                    self.assertEqual(entry[key], value)
+
     def test_private_failure_reference_survives_without_changing_failure_authority(self) -> None:
         from control_plane import http_error_evidence
 

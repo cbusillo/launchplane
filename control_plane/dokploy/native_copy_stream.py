@@ -26,6 +26,7 @@ from control_plane.copy_readback_diagnostics import (
     NATIVE_PROGRAM_SOURCE_SITE_LIMIT as NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
     COPY_FAILURE_EVIDENCE_MARKER,
     copy_failure_evidence_id,
+    copy_failure_marker_is_safe,
     ReadbackPredicate,
     readback_failure_evidence,
 )
@@ -95,8 +96,21 @@ class NativeProgramFailed(NativeSourceUnavailable):
         program_sites: object = None,
         container_fields: object = None,
         failure_evidence_id: object = None,
+        failure_markers: object = None,
     ) -> None:
-        super().__init__(message)
+        self.copy_failure_markers = (
+            {
+                key: value
+                for key, value in failure_markers.items()
+                if isinstance(key, str)
+                and isinstance(value, str)
+                and copy_failure_marker_is_safe(key, value)
+            }
+            if isinstance(failure_markers, dict)
+            else {}
+        )
+        if set(self.copy_failure_markers) == {COPY_FAILURE_EVIDENCE_MARKER}:
+            self.copy_failure_markers = {}
         self.copy_failure_evidence_id = copy_failure_evidence_id(failure_evidence_id)
         line_count = len(program.splitlines())
         self.program_sites: tuple[int, ...] = (
@@ -135,11 +149,19 @@ class NativeProgramFailed(NativeSourceUnavailable):
                 if predicate in ReadbackPredicate
                 else ReadbackPredicate.NATIVE_READ,
                 "readback_failure_kind": kind if self.has_diagnostic else "unavailable",
+                **self.copy_failure_markers,
             }
         )
         self.predicate = ReadbackPredicate(self.evidence["readback_failed_predicate"])
         self.unavailable = self.evidence["readback_failure_kind"] == "unavailable"
         self.code = self.predicate.value + "_" + self.evidence["readback_failure_kind"]
+        self.diagnostic_code = self.code + "".join(
+            f":{key}={value}" for key, value in sorted(self.copy_failure_markers.items())
+        )
+        summary = " ".join(
+            f"{key}={value}" for key, value in sorted(self.copy_failure_markers.items())
+        )
+        super().__init__(message + (" " + summary if summary else ""))
 
 
 class NativeSourceExceedsBound(NativeSourceUnavailable):
@@ -148,7 +170,9 @@ class NativeSourceExceedsBound(NativeSourceUnavailable):
 
 def native_failure_diagnostic(error: BaseException) -> str:
     return (
-        " " + error.code if isinstance(error, NativeProgramFailed) and error.has_diagnostic else ""
+        " " + error.diagnostic_code
+        if isinstance(error, NativeProgramFailed) and error.has_diagnostic
+        else ""
     )
 
 
@@ -395,6 +419,7 @@ def _read_program(
                 program_sites=value.get("sites"),
                 container_fields=value.get("container_fields"),
                 failure_evidence_id=value.get(COPY_FAILURE_EVIDENCE_MARKER),
+                failure_markers=value,
             )
         if value.get("type") == "source_exceeds_bound":
             raise NativeSourceExceedsBound("The source exceeds the bounded native copy capacity.")

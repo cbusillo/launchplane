@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
+
 from pathlib import Path
 from typing import Literal
+
+from control_plane.copy_readback_diagnostics import (
+    CopyReadbackRefused,
+    copy_failure_diagnostics_library,
+)
 
 from control_plane.contracts.odoo_testing_source import (
     NATIVE_TESTING_COPY_CHUNK_BYTES,
@@ -87,9 +94,14 @@ def write_native_testing_stream(
         raise NativeSourceUnavailable("The migrated stream has no exact receiver witness.")
 
 
-NATIVE_TESTING_STREAM_WRITE_PROGRAM = r'''
+NATIVE_TESTING_STREAM_WRITE_PROGRAM = (
+    copy_failure_diagnostics_library()
+    + inspect.getsource(CopyReadbackRefused)
+    + r'''
 import base64,hashlib,json,os,re,subprocess,sys
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True));prefix=sys.argv[2]
+copy_failure_stage=CopyFailureStage.SOURCE_TRANSFER
+child=None
 def emit(value):
     print(prefix+json.dumps(value,sort_keys=True),flush=True)
 try:
@@ -158,7 +170,7 @@ else:
         os.close(directory)
 print(json.dumps(expected),flush=True)
 """
-    child=subprocess.Popen(['docker','exec','-i','-u','root',spec['container'],'python3','-u','-c',writer,json.dumps(spec)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    child=subprocess.Popen(['docker','exec','-i','-u','root',spec['container'],'python3','-u','-c',writer,json.dumps(spec)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
     try:
         while True:
             start=json.loads(child.stdout.readline())
@@ -187,6 +199,9 @@ print(json.dumps(expected),flush=True)
     finally:
         if child.poll() is None:
             child.stdin.close();child.wait()
-except Exception:
-    emit({'type':'failed'})
+except Exception as error:
+    if child is not None and child.poll() is not None and child.wait()!=0:
+        error=copy_command_failure(error,subprocess.CompletedProcess([],child.wait(),b'',b''),spec)
+    emit({'type':'failed','predicate':'native_inspection_complete','kind':'unavailable',**copy_failure_frame_markers(error)})
 '''
+)

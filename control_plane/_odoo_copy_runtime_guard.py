@@ -61,6 +61,7 @@ def copy_readback_failure_frame(error: Exception, predicate: str = ReadbackPredi
     identity = copy_failure_evidence_id(getattr(error, COPY_FAILURE_EVIDENCE_MARKER, None))
     if identity:
         frame[COPY_FAILURE_EVIDENCE_MARKER] = identity
+    frame.update(copy_failure_frame_markers(error))
     return frame
 
 

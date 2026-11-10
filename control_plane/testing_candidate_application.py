@@ -48,7 +48,7 @@ class CandidatePrivateReadinessFailed(CandidateObservationUnavailable):
     def __init__(self, message: str, *, native_failure: NativeProgramFailed | None = None) -> None:
         super().__init__(message)
         self.evidence = native_failure.evidence if native_failure is not None else {}
-        self.code = native_failure.code if native_failure is not None else ""
+        self.code = native_failure.diagnostic_code if native_failure is not None else ""
 
 
 def candidate_private_readiness(

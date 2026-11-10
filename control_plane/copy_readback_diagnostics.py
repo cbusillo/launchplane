@@ -175,6 +175,10 @@ def copy_failure_cause(error: Exception) -> Exception:
     return error
 
 
+def copy_failure_frame_markers(error: Exception) -> dict[str, str]:
+    return getattr(copy_failure_cause(error), 'copy_failure_markers', {})
+
+
 def emit_copy_failure(error: Exception) -> None:
     error = copy_failure_cause(error)
     markers = getattr(error, 'copy_failure_markers', None)

@@ -292,7 +292,7 @@ def docker(*arguments):
     if result.returncode:
         if any(token in result.stderr.lower() for token in (b'permission denied',b'unauthorized',b'access denied')):
             raise PermissionError('Managed testing retirement was refused')
-        raise RuntimeError('Managed testing retirement did not complete')
+        raise copy_command_failure(RuntimeError('Managed testing retirement did not complete'), result, spec, containers=globals().get('containers'))
     return result.stdout
 
 def inventory():
@@ -307,6 +307,7 @@ def inventory():
 try:
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
     containers=inventory()
+    copy_failure_stage=CopyFailureStage.CLEANUP if spec['mode']=='remove' else CopyFailureStage.HOST_PREPARATION
     own={item['Id'] for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==spec['project']}
     if spec['mode'] in {'remove','removal-readback'}:
         expected=spec.get('container_ids')
