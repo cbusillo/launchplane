@@ -2673,8 +2673,43 @@ run` is the foreground loop intended for an external process supervisor, and
   provider. Missing records return 404.
 - The supported admin write path is a thin dispatch workflow pinned to an
   immutable reusable worker. The worker persists through the service route,
-  records only redacted request-shape evidence, and treats the write as complete
-  only when the response confirms `result.website_bootstrap=true`.
+  records only redacted request-shape evidence, and checks that the returned
+  `result.website_bootstrap` matches the requested presence. Both the dispatch
+  and reusable worker accept `website_bootstrap_payload: "null"` for withdrawal.
+  The workflow retains apply-only behavior; plan through the service route below
+  with the existing scoped read authority. The actual
+  provider and Odoo database are never changed by this record write.
+- To withdraw stable bootstrap, first read the current intent, then send this
+  envelope to `POST /v1/drivers/odoo/website-bootstrap-override`:
+
+  ```json
+  {
+    "product": "example-product",
+    "override": {
+      "product": "example-product",
+      "context": "example",
+      "instance": "testing",
+      "website_bootstrap": null,
+      "mode": "dry-run"
+    }
+  }
+  ```
+
+  Review the response's `planned_website_bootstrap: null`, `applied: false`
+  and `website_bootstrap: false`. Apply the same intent with `mode: apply`
+  and an `Idempotency-Key`; reuse that exact key and body for uncertain-response
+  reconciliation. The stable request does not use preview reservation,
+  inheritance or reviewed-plan fields. Apply re-reads the current override and
+  uses the existing compare-and-swap write; its dry-run is not a stored preview
+  plan. A write conflict returns 409 `stale`, and different intent with the same
+  idempotency key returns 409 `idempotency_key_reused`.
+  An independent GET must then return `website_bootstrap: null` and unchanged
+  `apply_on` values. Only bootstrap intent and ordinary edit metadata change:
+  config parameters, addon settings and unrelated website settings remain.
+  Positive writes retain deploy/promotion phase additions. Null on a preview
+  still requires its original-bound preparation and preserves its template.
+  Withdrawing an absent stable override succeeds without creating one; its
+  independent GET remains 404. Omission of the required field is not withdrawal.
 - Stable bootstrap normalizes the persisted `website_bootstrap.canonical_url`
   to the Launchplane-resolved origin base URL before post-deploy renders
   the payload, so local tenant bootstrap defaults do not become stable lane URL
