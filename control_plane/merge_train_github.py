@@ -1497,7 +1497,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             return unavailable("candidate_ref_not_canonical")
         selected: list[MergeTrainFailedRequiredCheck] = []
         latest_statuses = {
-            str(status.get("context") or "").casefold(): status for status in reversed(statuses)
+            _required_text(
+                status.get("context"), "GitHub commit status requires context."
+            ).casefold(): status
+            for status in reversed(statuses)
         }
         try:
             for source, payloads in (
@@ -1510,15 +1513,16 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                         if source == "check_run"
                         else commit_status_state(str(payload.get("state") or ""))
                     )
-                    name = str(payload.get("name" if source == "check_run" else "context") or "")
+                    name = _required_text(
+                        payload.get("name" if source == "check_run" else "context"),
+                        "GitHub failed check requires a name.",
+                    )
                     if state != "fail" or is_launchplane_projected_check(name):
                         continue
                     for requirement in requirements:
                         if not matches_required_check(
                             requirement=requirement,
-                            name=str(
-                                payload.get("name" if source == "check_run" else "context") or ""
-                            ),
+                            name=name,
                             app_id=_check_payload_app_id(payload),
                         ):
                             continue
@@ -1526,11 +1530,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                         if source == "check_run":
                             if payload.get("head_sha") != candidate.candidate_sha:
                                 return unavailable("check_head_mismatch")
-                            suite = _json_object(
-                                payload.get("check_suite"), "GitHub failed check suite"
-                            )
+                            suite, app = payload.get("check_suite"), payload.get("app")
+                            if not isinstance(suite, dict) or not isinstance(app, dict):
+                                return unavailable("failed_check_origin_invalid")
                             origin["check_suite_id"] = suite.get("id")
-                            app = _json_object(payload.get("app"), "GitHub failed check App")
                             origin["provider_app_slug"] = app.get("slug")
                             if app.get("slug") == "github-actions":
                                 identity = _actions_check_identity(
@@ -1558,30 +1561,34 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                                     or run.get("status") != "completed"
                                 ):
                                     return unavailable("actions_execution_suite_or_state_mismatch")
-                                job = _json_object(
-                                    self.transport.request(
-                                        method="GET",
-                                        path=f"/repos/{_repository_path(candidate.repository)}/actions/jobs/{payload['id']}",
-                                    ),
-                                    "GitHub failed check job",
+                                job = self.transport.request(
+                                    method="GET",
+                                    path=f"/repos/{_repository_path(candidate.repository)}/actions/jobs/{payload['id']}",
                                 )
+                                if not isinstance(job, dict):
+                                    return unavailable("failed_check_origin_invalid")
+                                job_attempt = job.get("run_attempt")
                                 if (
-                                    job.get("id"),
-                                    job.get("run_id"),
-                                    job.get("run_attempt"),
-                                    job.get("head_sha"),
-                                    job.get("status"),
-                                    job.get("conclusion"),
-                                ) != (
-                                    payload["id"],
-                                    run_id,
-                                    run["run_attempt"],
-                                    candidate.candidate_sha,
-                                    "completed",
-                                    payload.get("conclusion"),
+                                    not isinstance(job_attempt, int)
+                                    or isinstance(job_attempt, bool)
+                                    or not 1 <= job_attempt <= cast(int, run["run_attempt"])
+                                    or (
+                                        job.get("id"),
+                                        job.get("run_id"),
+                                        job.get("head_sha"),
+                                        job.get("status"),
+                                        job.get("conclusion"),
+                                    )
+                                    != (
+                                        payload["id"],
+                                        run_id,
+                                        candidate.candidate_sha,
+                                        "completed",
+                                        payload.get("conclusion"),
+                                    )
                                 ):
                                     return unavailable("actions_job_attempt_or_origin_mismatch")
-                                origin.update(run_id=run_id, run_attempt=run["run_attempt"])
+                                origin.update(run_id=run_id, run_attempt=job_attempt)
                         selected.append(
                             MergeTrainFailedRequiredCheck.model_validate(
                                 {

@@ -8,7 +8,7 @@ retries the second kind and isolates the change behind the first.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, Callable, Literal
 
@@ -57,7 +57,9 @@ class CandidateCheckFailures:
     attribution_requirements: tuple[CheckRequirement, ...] = ()
     retry_runs: tuple[tuple[int, int], ...] = ()
     checks_disagree: bool = False
-    capture_decision_evidence: Callable[[], MergeTrainBlockFailureEvidence] | None = None
+    capture_decision_evidence: Callable[[], MergeTrainBlockFailureEvidence] | None = field(
+        default=None, compare=False, repr=False
+    )
 
     @cached_property
     def decision_evidence(self) -> MergeTrainBlockFailureEvidence | None:

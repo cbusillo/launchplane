@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.merge_train_candidate_failures import CandidateCheckFailures
-from control_plane.merge_train_github import GitHubMergeTrainClient
+from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
 from tests.test_merge_train_github import _batch_candidate
 
 
@@ -54,6 +54,7 @@ class FailureHistory:
         self.runs = runs
         self.checks = checks
         self.job_changes: dict[str, object] = {}
+        self.job_attempts: dict[int, int] = {}
         self.status_changes: dict[str, object] = {}
         self.inventory_missing = False
         self.external_changes: dict[str, object] = {}
@@ -96,7 +97,7 @@ class FailureHistory:
                 return {
                     **check,
                     "run_id": run["id"],
-                    "run_attempt": run["run_attempt"],
+                    "run_attempt": self.job_attempts.get(check["id"], 1),
                     **self.job_changes,
                 }
             if "/status?" in path:
@@ -117,7 +118,8 @@ class FailureHistory:
         class Provider:
             token_permissions = ("actions:read",)
 
-            def request(self, **kwargs: Any) -> object:
+            @staticmethod
+            def request(**kwargs: Any) -> object:
                 return request(**kwargs)
 
         self.client = GitHubMergeTrainClient(transport=Provider())
@@ -136,56 +138,28 @@ class FailureHistory:
 
 
 class BlockFailureEvidenceTests(unittest.TestCase):
-    def test_decision_keeps_repeat_failures_after_a_later_pass(self) -> None:
-        candidate = _batch_candidate().model_copy(
-            update={"candidate_sha": "c" * 40, "check_rerun_attempts": {41: 1}}
-        )
-        history = FailureHistory(candidate)
-        initial = history.observe()
-        history.phase = 2
-        repeat = history.observe()
-        history.phase = 3
-        current = history.observe()
-        self.assertEqual([item.name for item in initial.attribution_requirements], ["ci-gate"])
-        self.assertFalse(current.conclusive)
-        self.assertEqual(history.job_reads, 0)
-        evidence = repeat.decision_evidence
-        self.assertIs(repeat.decision_evidence, evidence)
-        self.assertEqual(history.job_reads, 1)
-        self.assertIsNotNone(evidence)
-        assert evidence is not None
-        self.assertEqual(
-            {check.name for check in evidence.checks},
-            {"security-gate", "status-gate", "external-gate"},
-        )
-        security = next(check for check in evidence.checks if check.run_id is not None)
-        self.assertEqual(
-            (security.run_id, security.run_attempt, security.check_suite_id), (42, 1, 20)
-        )
-        status = next(check for check in evidence.checks if check.source == "commit_status")
-        self.assertEqual(status.provider_id, 802)
-        self.assertEqual(evidence.candidate_ref, candidate.candidate_ref)
-        self.assertEqual(evidence.candidate_sha, candidate.candidate_sha)
-        self.assertEqual(evidence.repository, candidate.repository)
-
     def test_partial_or_wrong_execution_evidence_cannot_qualify_a_decision(self) -> None:
         candidate = _batch_candidate().model_copy(update={"candidate_sha": "c" * 40})
         history = FailureHistory(candidate)
         history.phase = 2
-        for changes in (
+        invalid_jobs: tuple[dict[str, object], ...] = (
             {"run_id": 41},
             {"run_attempt": 2},
+            {"run_attempt": 0},
+            {"run_attempt": True},
             {"id": 999},
             {"head_sha": "d" * 40},
             {"conclusion": "success"},
-        ):
+        )
+        for changes in invalid_jobs:
             with self.subTest(job=changes):
-                history.job_changes = dict(changes)
+                history.job_changes = changes
                 result = history.observe()
                 self.assertTrue(result.conclusive)
-                assert result.decision_evidence is not None
-                self.assertFalse(result.decision_evidence.checks)
-                self.assertTrue(result.decision_evidence.unavailable_reason)
+                evidence = result.decision_evidence
+                assert evidence is not None
+                self.assertFalse(evidence.checks)
+                self.assertTrue(evidence.unavailable_reason)
         history.job_changes = {}
         history.inventory_missing = True
         evidence = history.observe().decision_evidence
@@ -205,38 +179,62 @@ class BlockFailureEvidenceTests(unittest.TestCase):
         self.assertFalse(evidence.checks)
         self.assertTrue(evidence.unavailable_reason)
 
-    def test_same_execution_new_attempt_keeps_only_its_failed_job_origin(self) -> None:
-        history = FailureHistory(
-            _batch_candidate().model_copy(
-                update={"candidate_sha": "c" * 40, "check_rerun_attempts": {41: 1}}
-            )
-        )
+    def test_malformed_origins_leave_no_partial_decision_evidence(self) -> None:
+        history = FailureHistory(_batch_candidate().model_copy(update={"candidate_sha": "c" * 40}))
+        history.phase = 2
+        history.external_changes = {"check_suite": None}
+        evidence = history.observe().decision_evidence
+        assert evidence is not None
+        self.assertFalse(evidence.checks)
+        self.assertTrue(evidence.unavailable_reason)
+        history.external_changes = {}
+        malformed_jobs: tuple[object, ...] = (None, [], {"id": 422})
+        for job in malformed_jobs:
+            failures = history.observe()
+            with (
+                self.subTest(job=job),
+                patch.object(history.client.transport, "request", return_value=job),
+            ):
+                evidence = failures.decision_evidence
+            assert evidence is not None
+            self.assertFalse(evidence.checks)
+            self.assertTrue(evidence.unavailable_reason)
+
+    def test_job_origin_keeps_its_own_attempt_within_the_observed_execution(self) -> None:
+        history = FailureHistory(_batch_candidate().model_copy(update={"candidate_sha": "c" * 40}))
         history.runs[0]["run_attempt"] = 2
-        history.checks[0]["conclusion"] = "success"
+        history.checks[1]["id"] = 512
+        history.checks[1]["details_url"] = (
+            f"https://github.com/{history.candidate.repository}/actions/runs/41/job/512"
+        )
         history.checks[1]["conclusion"] = "failure"
+        history.job_attempts[512] = 2
         evidence = history.observe().decision_evidence
         assert evidence is not None
         self.assertEqual(
-            {(check.name, check.run_id, check.run_attempt) for check in evidence.checks},
-            {("security-gate", 41, 2)},
+            {(check.provider_id, check.run_id, check.run_attempt) for check in evidence.checks},
+            {(411, 41, 1), (512, 41, 2)},
         )
-        history.job_changes = {"run_attempt": 1}
-        unavailable = history.observe().decision_evidence
-        assert unavailable is not None
-        self.assertFalse(unavailable.checks)
-        self.assertTrue(unavailable.unavailable_reason)
+        history.job_changes = {"run_attempt": 3}
+        evidence = history.observe().decision_evidence
+        assert evidence is not None
+        self.assertFalse(evidence.checks)
+        self.assertTrue(evidence.unavailable_reason)
 
     def test_manual_candidate_failure_is_evidence_without_becoming_a_retry_grant(self) -> None:
         history = FailureHistory(_batch_candidate().model_copy(update={"candidate_sha": "c" * 40}))
-        history.phase = 2
-        history.runs[1]["event"] = "workflow_dispatch"
+        history.runs[0]["event"] = "workflow_dispatch"
         failures = history.observe()
         self.assertFalse(failures.retry_runs)
+        with self.assertRaises(MergeTrainGitHubError):
+            history.client.prepare_candidate_check_retry(
+                candidate=history.candidate.model_copy(update={"check_rerun_attempts": {41: 1}})
+            )
         evidence = failures.decision_evidence
         assert evidence is not None
         self.assertEqual(
             {check.name for check in evidence.checks},
-            {"ci-gate", "security-gate", "status-gate", "external-gate"},
+            {"ci-gate"},
         )
 
     def test_external_suite_and_current_selection_must_be_proved(self) -> None:

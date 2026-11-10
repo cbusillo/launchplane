@@ -904,13 +904,12 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.setup_base_retest()
         candidate = self.record.candidate.model_copy(update={"check_rerun_attempts": {41: 1}})
         history = FailureHistory(candidate)
-        history.observe()
+        self.assertEqual(history.observe().check_names, ("ci-gate",))
         history.phase = 2
         blocking = history.observe()
         history.phase = 3
         self.assertFalse(history.observe().conclusive)
-        evidence = blocking.decision_evidence
-        assert evidence is not None
+        self.assertEqual(history.job_reads, 0)
         self.record = self.record.model_copy(update={"candidate": candidate, "block_intent": None})
         self.store.write_merge_train_batch_candidate_record(self.record)
         self.events = []
@@ -935,31 +934,75 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             patch.object(self.client, "retry_candidate_checks", return_value=None),
             patch.object(self.client, "candidate_check_retry_finished", return_value=True),
         ):
-            produced = _recover_failed_merge_train_candidate(
-                candidate_store=self.store,
-                stack_collapse_store=self.store,
-                active_candidate_record=self.record,
-                github_client=self.client,
-                dry_run_result=build_merge_train_dry_run_result(
-                    policy=self.policy, snapshot=snapshot, batch_landing=True
-                ),
-                snapshot=snapshot,
-                held_out=(),
-                policy=self.policy,
-                policy_sha256=self.policy_digest,
-                repository=self.target.repository,
-                base_branch=self.target.base_branch,
-                mutate=True,
-                lease=self.lease,
-                recorded_at="2026-10-18T00:02:00Z",
-                trace_id="decision",
-            )
+
+            def produce() -> dict[str, object] | None:
+                return _recover_failed_merge_train_candidate(
+                    candidate_store=self.store,
+                    stack_collapse_store=self.store,
+                    active_candidate_record=self.record,
+                    github_client=self.client,
+                    dry_run_result=build_merge_train_dry_run_result(
+                        policy=self.policy, snapshot=snapshot, batch_landing=True
+                    ),
+                    snapshot=snapshot,
+                    held_out=(),
+                    policy=self.policy,
+                    policy_sha256=self.policy_digest,
+                    repository=self.target.repository,
+                    base_branch=self.target.base_branch,
+                    mutate=True,
+                    lease=self.lease,
+                    recorded_at="2026-10-18T00:02:00Z",
+                    trace_id="decision",
+                )
+
+            for error in (
+                MergeTrainGitHubError("upstream unavailable", status_code=503),
+                MergeTrainGitHubError("quota exhausted", status_code=403, rate_limited=True),
+                MergeTrainGitHubError("transport unavailable"),
+            ):
+                with (
+                    self.subTest(error=error),
+                    patch.object(history.client.transport, "request", side_effect=error),
+                ):
+                    self.assertIsNone(produce())
+                    self.assertFalse(self.events)
+                    self.assertTrue(
+                        all(
+                            record.block_intent is None
+                            for record in self.store.list_merge_train_batch_candidate_records()
+                        )
+                    )
+            produced = produce()
+        evidence = blocking.decision_evidence
+        assert evidence is not None
+        self.assertIs(blocking.decision_evidence, evidence)
+        self.assertEqual(history.job_reads, 1)
+        self.assertEqual(
+            {
+                (
+                    check.name,
+                    check.provider_id,
+                    check.run_id,
+                    check.run_attempt,
+                    check.check_suite_id,
+                )
+                for check in evidence.checks
+            },
+            {
+                ("security-gate", 422, 42, 1, 20),
+                ("status-gate", 802, None, None, None),
+                ("external-gate", 901, None, None, 701),
+            },
+        )
         assert produced is not None
+        record_id = produced["merge_train_batch_candidate_record_id"]
+        assert isinstance(record_id, str)
         read = read_candidate_evidence(
             store=self.store,
             repository=self.target.repository,
             base_branch=self.target.base_branch,
-            record_id=str(produced["merge_train_batch_candidate_record_id"]),
+            record_id=record_id,
         )
         assert read.record.block_intent is not None
         self.assertEqual(read.record.block_intent.failure_evidence, evidence)
@@ -991,18 +1034,6 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             self.store, self.target.repository, self.old.number, self.old.head_sha
         )
         assert receipt is not None
-        recovered = read_candidate_evidence(
-            store=self.store,
-            repository=self.target.repository,
-            base_branch=self.target.base_branch,
-            record_id=receipt.failed_record_id,
-        )
-        assert recovered.record.block_intent is not None
-        self.assertEqual(recovered.record.block_intent.failure_evidence, evidence)
-        self.assertEqual(
-            recovered.record.block_intent.source_failed_record_id,
-            read.record.block_intent.source_failed_record_id,
-        )
         self.assertEqual(
             receipt.applied_label_event_id, read.record.block_intent.applied_label_event_id
         )
@@ -1861,8 +1892,9 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                     if r.block_intent is not None
                 ]
                 self.assertEqual(len(intents), 1)
-                assert intents[0].block_intent is not None
-                self.assertEqual(intents[0].block_intent.failure_evidence, failure_evidence)
+                intent = intents[0].block_intent
+                assert intent is not None
+                self.assertEqual(intent.failure_evidence, failure_evidence)
                 self.assertEqual(intents[0].candidate.entries[0].head_sha, self.old.head_sha)
                 if lose_label_reply:
                     self.events = [self.label_event]

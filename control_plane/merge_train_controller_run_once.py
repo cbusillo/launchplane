@@ -6674,13 +6674,18 @@ def _recover_failed_merge_train_candidate(
             mutate=mutate,
             lease=lease,
         )
+    try:
+        failure_evidence = failures.decision_evidence
+    except MergeTrainGitHubError:
+        lease.observe(reason_code="candidate_failure_read_unavailable")
+        return None
     return _block_failed_candidate_culprit(
         candidate_store=candidate_store,
         active_candidate_record=active_candidate_record,
         github_client=github_client,
         dry_run_result=dry_run_result,
         details=details,
-        failure_evidence=failures.decision_evidence,
+        failure_evidence=failure_evidence,
         repository=repository,
         base_branch=base_branch,
         mutate=mutate,
