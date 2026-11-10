@@ -1103,7 +1103,7 @@
         ],
         "operation_id": "release_failed_testing_candidate",
         "path": "/v1/products/{product}/testing-rebuild/{operation_id}/candidate-release",
-        "purpose": "Inspect, release or read back a failed native testing candidate's private containers and volumes, with the bytes a dry run would free; the operation record, failure receipts and evidence stay.",
+        "purpose": "Inspect failed native testing candidates and original-bound physical capacity; release only the reviewed unused resources and read back actual backing space while preserving sources and operation evidence.",
         "response_statuses": [
           "200",
           "400",
@@ -1114,9 +1114,10 @@
           "503"
         ],
         "reviewed_evidence": [
-          "reviewed_plan_sha256"
+          "reviewed_plan_sha256",
+          "receiver_operation_id"
         ],
-        "schema_fingerprint_sha256": "47c85986a25b2cff872b963de902f18704e0c2071c890525db504124d395a962",
+        "schema_fingerprint_sha256": "bcdb8b3288cfd58fd71dfdbb3c96b4a265319ab6d31e541ff94b693514516427",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1537,8 +1538,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "d1a1204caad1f6eedd52181cf28da819230af58b"
+    "source_commit_sha": "ad27c5bfb06a5bf5263bcec55c4f5680a74f9f00"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "4abb7ff7ea0ad585a09633913a2b716cba1d08eeedff4b2421ab24c2f55bda23"
+  "semantic_digest_sha256": "a582ecb61585f8689a345cc6703b601022a18a49021fec06bd88b907cdb96fdb"
 }

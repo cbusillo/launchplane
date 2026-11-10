@@ -14,7 +14,10 @@ from control_plane.contracts.testing_candidate_release import (
     TestingCandidateReleaseResponse,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, HttpErrorFactory
-from control_plane.provider_operations import run_durable_provider_operation
+from control_plane.provider_operations import (
+    run_durable_provider_operation,
+    ProviderMutationUnknownError,
+)
 from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneIdentity,
@@ -90,7 +93,7 @@ def register_testing_candidate_release_route(
                     launchplane_identity_actor(identity),
                     product,
                     operation_id,
-                    normalized.model_dump_json(),
+                    normalized.model_dump_json(exclude_none=True),
                 )
             ).encode()
         ).hexdigest()
@@ -116,7 +119,11 @@ def register_testing_candidate_release_route(
         def plan() -> CandidateRelease:
             try:
                 return build_candidate_release(
-                    dependencies.control_plane_root, store, product, operation_id
+                    dependencies.control_plane_root,
+                    store,
+                    product,
+                    operation_id,
+                    receiver_operation_id=payload.receiver_operation_id,
                 )
             except TestingCandidateReleaseRefused as error:
                 raise refusal(error.code, str(error)) from error
@@ -152,6 +159,11 @@ def register_testing_candidate_release_route(
                 )
             except TestingCandidateReleaseRefused as error:
                 raise refusal(error.code, str(error) + " Nothing was released.") from error
+            except ProviderMutationUnknownError as error:
+                raise refusal(
+                    "mutation_reconciliation_required",
+                    "Preserve the original request and key; its effects need readback.",
+                ) from error
             except RELEASE_PLAN_ERRORS as error:
                 raise refusal(
                     "candidate_release_unavailable",

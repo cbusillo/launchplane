@@ -1,6 +1,5 @@
 import asyncio
 import base64
-from dataclasses import replace
 from collections.abc import Callable
 import hashlib
 import json
@@ -22,13 +21,10 @@ from control_plane.contracts.testing_candidate_release import TestingCandidateRe
 from control_plane.http_routes import testing_candidate_release as routes
 from control_plane.http_routes.support import ApiRouteRegistrar
 from control_plane.provider_operations import (
-    ProviderMutationUnknownError,
     ProviderOperationLease,
 )
 from control_plane.service_auth import LocalOperatorIdentity
-from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.http import request
-from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.testing_candidate_release import (
     TESTING_CANDIDATE_RELEASE_PROGRAM,
     TestingCandidateReleaseRefused,
@@ -73,8 +69,6 @@ else:
 save()
 """
 
-DU_FIXTURE = '#!/bin/sh\necho 1000 "$3"\n'
-
 
 def resources(**changes: str) -> dict[str, str]:
     return {
@@ -101,7 +95,7 @@ class CandidateReleaseProgramTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         bin_directory = self.root / "bin"
         bin_directory.mkdir()
-        for name, content in (("docker", DOCKER_FIXTURE), ("du", DU_FIXTURE)):
+        for name, content in (("docker", DOCKER_FIXTURE),):
             (bin_directory / name).write_text(content)
             (bin_directory / name).chmod(0o755)
         self.path = str(bin_directory) + os.pathsep + os.environ["PATH"]
@@ -153,23 +147,15 @@ class CandidateReleaseProgramTests(unittest.TestCase):
             if call[0] == "rm" or call[:2] == ["volume", "rm"]
         ]
 
-    def test_dry_run_reports_reclaimable_bytes_and_removes_nothing(self) -> None:
+    def test_legacy_observation_reports_remaining_resources_and_removes_nothing(self) -> None:
         self.assertEqual(
-            self.run_program("dry-run"), {"status": "eligible", "reclaimable_bytes": 3500}
+            self.run_program("dry-run"), {"status": "eligible", "reclaimable_bytes": None}
         )
         self.assertEqual(self.removals(), [])
 
-    def test_apply_releases_only_the_candidates_containers_and_volumes(self) -> None:
-        self.state["containers"]["other-service"] = {
-            "Config": {"Labels": {"com.docker.compose.project": "fixture-testing"}},
-            "Mounts": [{"Type": "volume", "Name": "fixture-testing-data", "Source": "/srv/other"}],
-        }
-        self.state["volumes"]["fixture-testing-data"] = {"labels": {}, "path": "/srv/other"}
-        self.save()
-        self.assertEqual(self.run_program("apply")["status"], "released")
-        self.assertEqual(set(self.state["containers"]), {"other-service"})
-        self.assertEqual(set(self.state["volumes"]), {"fixture-testing-data"})
-        self.assertEqual(self.run_program("dry-run"), {"status": "absent", "reclaimable_bytes": 0})
+    def test_legacy_receipt_observation_cannot_dispatch_an_effect(self) -> None:
+        self.assertEqual(self.run_program("apply")["reason_code"], "invalid_request")
+        self.assertEqual(self.removals(), [])
 
     def test_production_or_foreign_scope_is_refused_before_any_removal(self) -> None:
         for spec in (
@@ -191,7 +177,7 @@ class CandidateReleaseProgramTests(unittest.TestCase):
         }
         self.save()
         self.assertEqual(
-            self.run_program("apply"),
+            self.run_program("dry-run"),
             {"status": "held", "reason_code": "volume_ownership_unverified"},
         )
         self.assertEqual(self.removals(), [])
@@ -200,7 +186,7 @@ class CandidateReleaseProgramTests(unittest.TestCase):
         self.state["volumes"][NAMESPACE + "-data"]["options"] = {"o": "bind"}
         self.save()
         self.assertEqual(
-            self.run_program("apply"),
+            self.run_program("dry-run"),
             {"status": "held", "reason_code": "volume_ownership_unverified"},
         )
         self.assertEqual(self.removals(), [])
@@ -212,7 +198,7 @@ class CandidateReleaseProgramTests(unittest.TestCase):
         }
         self.save()
         self.assertEqual(
-            self.run_program("apply"),
+            self.run_program("dry-run"),
             {"status": "held", "reason_code": "volume_has_other_consumer"},
         )
         self.assertEqual(self.removals(), [])
@@ -237,13 +223,12 @@ class CandidateReleaseGuardTests(unittest.TestCase):
             call()
         return raised.exception.code
 
-    def test_only_a_failed_testing_rebuild_with_a_recorded_cause_is_releasable(self) -> None:
+    def test_only_a_failed_testing_rebuild_is_releasable(self) -> None:
         for operation, code in (
             (failed_operation(is_native_testing_rebuild=False), "candidate_release_not_testing"),
             (failed_operation(product="other"), "candidate_release_not_testing"),
             (failed_operation(status="running"), "candidate_release_outcome_unrecorded"),
             (failed_operation(status="cancelled"), "candidate_release_outcome_unrecorded"),
-            (failed_operation(error_code=""), "candidate_release_outcome_unrecorded"),
         ):
             with self.subTest(operation=operation):
                 self.assertEqual(
@@ -342,120 +327,64 @@ class CandidateReleaseGuardTests(unittest.TestCase):
         )
         self.assertIsNone(self.lane_refusal())
 
-    def test_plan_is_stable_after_release_so_readback_matches_its_review(self) -> None:
-        store = Mock()
-        store.read_odoo_stable_target_replacement_operation_record.return_value = failed_operation()
-        allocation = Mock(
-            product="fixture",
-            context="fixture-testing",
-            operation_id="operation-1",
-            namespace=NAMESPACE,
-            compose_id="compose-1",
-            server_id="server-1",
-        )
-        store.read_testing_candidate.return_value = allocation
-        candidate = OdooTestingResources.model_validate(resources())
-        plans = []
-        for status, size in (("eligible", 3500), ("absent", 0)):
-            with (
-                patch.object(release, "require_candidate_unselected"),
-                patch.object(release, "require_lane_releasable"),
-                patch.object(release, "candidate_resources", return_value=candidate),
-                patch.object(
-                    release,
-                    "host_release",
-                    return_value=release.HostRelease(status, size, ""),
-                ),
-            ):
-                built = release.build_candidate_release(
-                    Path("/unused"), store, "fixture", "operation-1"
-                )
-            self.assertEqual((built.status, built.reclaimable_bytes), (status, size))
-            plans.append(built.plan.digest())
-        self.assertEqual(plans[0], plans[1])
-
-    def test_held_host_evidence_refuses_the_plan(self) -> None:
-        store = Mock()
-        store.read_odoo_stable_target_replacement_operation_record.return_value = failed_operation()
-        store.read_testing_candidate.return_value = Mock(compose_id="compose-1")
-        with (
-            patch.object(release, "require_candidate_unselected"),
-            patch.object(release, "require_lane_releasable"),
-            patch.object(release, "candidate_resources"),
-            patch.object(
-                release,
-                "host_release",
-                return_value=release.HostRelease("held", None, "volume_has_other_consumer"),
-            ),
-        ):
-            self.assertEqual(
-                self.refusal(
-                    lambda: release.build_candidate_release(
-                        Path("/unused"), store, "fixture", "operation-1"
-                    )
-                ),
-                "candidate_release_held",
-            )
-
 
 class CandidateReleaseRouteTests(unittest.TestCase):
     def setUp(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-        self.store = PostgresRecordStore(
-            database_url=f"sqlite+pysqlite:///{self.root / 'records.db'}"
+        from contextlib import nullcontext
+        from unittest.mock import PropertyMock
+        from tests import test_native_testing_candidate_retention as fixtures
+
+        self.fixture = fixtures.CandidateRetentionPlanTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.root, self.store = self.fixture.root, self.fixture.store
+        self.enterContext(
+            patch.object(
+                type(self.store),
+                "database_dialect_name",
+                new_callable=PropertyMock,
+                return_value="postgresql",
+            )
         )
-        self.store.ensure_schema()
-        self.addCleanup(self.store.close)
-        self.released = False
-        self.refusal: TestingCandidateReleaseRefused | None = None
+        self.executor = self.enterContext(
+            patch.object(
+                self.store,
+                "testing_candidate_retention_guard",
+                side_effect=lambda _: nullcontext(Mock()),
+            )
+        )
+        self.enterContext(patch.object(release, "candidate_routed", return_value=False))
+        self.usage = self.enterContext(patch.object(release, "require_lane_releasable"))
         self.applied: list[str] = []
         self.interrupt = False
-        candidate = release.CandidateRelease(
-            TestingCandidateReleasePlan(
-                product="fixture",
-                operation_id="operation-1",
-                error_code="candidate_preparation_failed",
-                namespace=NAMESPACE,
-                resources_binding_sha256="b" * 64,
-            ),
-            OdooTestingResources.model_validate(resources()),
-            "server-1",
-            "eligible",
-            3500,
-        )
-
-        def plan(*_: object) -> release.CandidateRelease:
-            return replace(candidate, status="absent") if self.released else candidate
-
-        def replan(*_: object) -> release.CandidateRelease:
-            if self.refusal is not None:
-                raise self.refusal
-            return plan()
+        self.uncertain = True
 
         def host(
             _root: Path,
-            _server: str,
-            _resources: OdooTestingResources,
+            _binding: Any,
             mode: str,
+            key: str,
             lease: ProviderOperationLease | None = None,
-        ) -> release.HostRelease:
+            **kwargs: Any,
+        ) -> tuple[str, str]:
             if mode == "apply":
                 assert lease is not None
-                lease.checkpoint_effect("release-candidate")
-                self.applied.append(mode)
-                if self.interrupt:
-                    raise ProviderMutationUnknownError("Fixture transport dropped part way.")
-                self.released = True
-                return release.HostRelease("released", 3500, "")
-            return release.HostRelease("absent" if self.released else "eligible", 0, "")
+                lease.checkpoint_effect("release-fixture-volume")
+                self.applied.append(key)
+                return ("unknown", "effect_unknown") if self.interrupt else ("removed", "removed")
+            if mode == "readback":
+                return (
+                    ("unknown", "effect_unknown")
+                    if self.interrupt and self.uncertain
+                    else ("absent", "removed")
+                )
+            return "eligible", "qualified"
 
-        self.enterContext(patch.object(routes, "build_candidate_release", side_effect=plan))
-        self.enterContext(patch.object(release, "build_candidate_release", side_effect=replan))
-        self.enterContext(patch.object(release, "host_release", side_effect=host))
+        self.fixture.host.side_effect = host
 
-    def post(self, director: bool = True, key: str = "", **body: object) -> Response:
+    def post(
+        self, director: bool = True, key: str = "", operation: str | None = None, **body: object
+    ) -> Response:
         app = FastAPI()
 
         def error(**kwargs: object) -> HTTPException:
@@ -474,23 +403,23 @@ class CandidateReleaseRouteTests(unittest.TestCase):
                 error_response_model=BaseModel,
             ),
         )
+        operation = operation or self.fixture.candidate.operation_id
         return asyncio.run(
             request(
                 app,
                 "POST",
-                "/v1/products/fixture/testing-rebuild/operation-1/candidate-release",
+                f"/v1/products/{self.fixture.candidate.product}/testing-rebuild/{operation}/candidate-release",
                 payload=body,
                 headers={"Idempotency-Key": key},
             )
         )
 
-    def test_dry_run_apply_and_readback_release_once(self) -> None:
+    def test_dry_run_apply_readback_and_wrong_identity_release_once(self) -> None:
         self.assertEqual(self.post(director=False).status_code, 403)
         dry = self.post()
         self.assertEqual(dry.status_code, 200, dry.text)
-        self.assertEqual(
-            (dry.json()["status"], dry.json()["reclaimable_bytes"]), ("eligible", 3500)
-        )
+        self.assertEqual(dry.json()["status"], "eligible")
+        self.assertEqual(dry.json()["candidates"][0]["namespace"], self.fixture.candidate.namespace)
         reviewed = dry.json()["plan_sha256"]
         stale = self.post(key="release", mode="apply", reviewed_plan_sha256="c" * 64)
         self.assertEqual(stale.status_code, 409, stale.text)
@@ -500,42 +429,142 @@ class CandidateReleaseRouteTests(unittest.TestCase):
         readback = self.post(key="release", mode="readback", reviewed_plan_sha256=reviewed)
         self.assertEqual(readback.status_code, 200, readback.text)
         self.assertEqual(
-            (readback.json()["status"], readback.json()["replayed"]), ("released", True)
+            (
+                readback.json()["status"],
+                readback.json()["replayed"],
+                readback.json()["plan_sha256"],
+            ),
+            ("released", True, reviewed),
         )
-        self.assertEqual(self.applied, ["apply"])
+        self.assertEqual(len(self.applied), 1)
 
-    def test_guard_refusing_at_apply_releases_nothing_and_leaves_the_key_usable(self) -> None:
+    def test_current_use_refuses_before_effect_and_releases_reservation(self) -> None:
         reviewed = self.post().json()["plan_sha256"]
-        self.refusal = TestingCandidateReleaseRefused("testing_in_use", "A person is using it.")
+        self.usage.side_effect = TestingCandidateReleaseRefused(
+            "testing_in_use", "A person is using it."
+        )
         refused = self.post(key="release", mode="apply", reviewed_plan_sha256=reviewed)
         self.assertEqual(refused.status_code, 409, refused.text)
-        self.assertEqual(refused.json()["detail"]["code"], "testing_in_use")
         self.assertEqual(self.applied, [])
-        self.refusal = None
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        self.usage.side_effect = None
         applied = self.post(key="release", mode="apply", reviewed_plan_sha256=reviewed)
-        self.assertEqual(applied.status_code, 200, applied.text)
-        self.assertEqual(self.applied, ["apply"])
+        self.assertEqual(applied.json()["status"], "released", applied.text)
 
-    def test_interrupted_apply_stays_unsettled_until_the_same_key_finishes_it(self) -> None:
+    def test_unknown_original_only_reconciles_without_repeating_removal(self) -> None:
         reviewed = self.post().json()["plan_sha256"]
         self.interrupt = True
-        interrupted = self.post(key="release", mode="apply", reviewed_plan_sha256=reviewed)
-        self.assertEqual(interrupted.status_code, 409, interrupted.text)
-        self.interrupt = False
-        self.refusal = TestingCandidateReleaseRefused("testing_in_use", "A person is using it.")
-        unsettled = self.post(key="release", mode="readback", reviewed_plan_sha256=reviewed)
-        self.assertEqual(unsettled.status_code, 409, unsettled.text)
-        self.assertEqual(unsettled.json()["detail"]["code"], "mutation_reconciliation_required")
-        self.assertEqual(self.applied, ["apply"])
-        self.refusal = None
-        finished = self.post(key="release", mode="apply", reviewed_plan_sha256=reviewed)
-        self.assertEqual(finished.status_code, 200, finished.text)
-        self.assertEqual(
-            (finished.json()["status"], finished.json()["reclaimable_bytes"]), ("released", 3500)
+        for mode in ("apply", "readback", "apply"):
+            response = self.post(key="release", mode=mode, reviewed_plan_sha256=reviewed)
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["detail"]["code"], "mutation_reconciliation_required")
+        self.assertEqual(len(self.applied), 1)
+        self.usage.side_effect = TestingCandidateReleaseRefused(
+            "testing_in_use", "A person is using it."
         )
-        self.assertEqual(self.applied, ["apply", "apply"])
-        readback = self.post(key="release", mode="readback", reviewed_plan_sha256=reviewed)
-        self.assertEqual(readback.json()["status"], "released")
+        self.uncertain = False
+        observed = self.post(key="release", mode="readback", reviewed_plan_sha256=reviewed)
+        self.assertEqual(observed.json()["status"], "released", observed.text)
+        self.assertEqual(observed.json()["plan_sha256"], reviewed)
+        self.assertEqual(len(self.applied), 1)
+
+    def test_missing_receipt_and_foreign_receiver_do_not_dispatch(self) -> None:
+        missing = self.post(key="missing", mode="readback", reviewed_plan_sha256="a" * 64)
+        self.assertEqual(missing.status_code, 404, missing.text)
+        self.assertEqual(missing.json()["detail"]["code"], "release_receipt_unavailable")
+        missing_receiver = self.post(receiver_operation_id="missing-original")
+        self.assertEqual(missing_receiver.status_code, 409, missing_receiver.text)
+        self.assertEqual(self.applied, [])
+
+    def test_legacy_completed_receipt_replays_with_original_fingerprint(self) -> None:
+        from control_plane.provider_operations import (
+            ProviderMutationOutcome,
+            ProviderObservation,
+            run_durable_provider_operation,
+        )
+        from control_plane.service_auth import launchplane_identity_actor
+        from control_plane.testing_candidate_allocation import candidate_resources
+        from control_plane.contracts.testing_candidate_release import (
+            TESTING_CANDIDATE_RELEASE_ROUTE,
+        )
+
+        actor = launchplane_identity_actor(
+            LocalOperatorIdentity("test-agent", "test", director_agent=True)
+        )
+        candidate = self.fixture.candidate
+        plan = TestingCandidateReleasePlan(
+            product=candidate.product,
+            operation_id=candidate.operation_id,
+            error_code="candidate_preparation_failed",
+            namespace=candidate.namespace,
+            resources_binding_sha256="b" * 64,
+        )
+        old_request = json.dumps(
+            {"mode": "apply", "reviewed_plan_sha256": plan.digest()}, separators=(",", ":")
+        )
+        fingerprint = hashlib.sha256(
+            "\n".join((actor, candidate.product, candidate.operation_id, old_request)).encode()
+        ).hexdigest()
+        receipt = json.dumps(
+            {
+                "plan": plan.model_dump(mode="json", exclude={"retention_plan_sha256"}),
+                "resources": candidate_resources(candidate).model_dump(mode="json"),
+                "server_id": "host",
+                "reclaimable_bytes": 123,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        reconstructed = release.release_from_receipt(receipt)
+
+        class LegacyAdapter:
+            def target_key(self) -> str:
+                return "testing-candidate-release:" + candidate.namespace
+
+            def reconciliation_key(self) -> str:
+                return receipt
+
+            def observe(
+                self,
+                provider_operation_key: str,
+                provider_effect_phase: str,
+                reconciliation_key: str,
+            ) -> ProviderObservation:
+                return ProviderObservation("unknown")
+
+            def apply(
+                self, provider_operation_key: str, lease: ProviderOperationLease
+            ) -> ProviderMutationOutcome:
+                lease.checkpoint_effect("legacy-fabricated-completion")
+                return ProviderMutationOutcome(
+                    202,
+                    release.release_response(reconstructed, "old-trace", "released").model_dump(
+                        mode="json"
+                    ),
+                )
+
+        adapter = LegacyAdapter()
+        run_durable_provider_operation(
+            store=self.store,
+            scope=f"testing-candidate-release:{candidate.product}:{candidate.operation_id}",
+            route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
+            idempotency_key="legacy",
+            request_fingerprint=fingerprint,
+            lease_owner="legacy",
+            response_trace_id="legacy",
+            adapter=adapter,
+        )
+        response = self.post(key="legacy", mode="readback", reviewed_plan_sha256=plan.digest())
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            (
+                response.json()["status"],
+                response.json()["replayed"],
+                response.json()["plan_sha256"],
+            ),
+            ("released", True, plan.digest()),
+        )
+        self.assertEqual(self.applied, [])
 
 
 if __name__ == "__main__":

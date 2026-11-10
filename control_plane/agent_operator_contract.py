@@ -436,11 +436,11 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         TESTING_CANDIDATE_RELEASE_ROUTE,
-        "Inspect, release or read back a failed native testing candidate's private containers and volumes, with the bytes a dry run would free; the operation record, failure receipts and evidence stay.",
+        "Inspect failed native testing candidates and original-bound physical capacity; release only the reviewed unused resources and read back actual backing space while preserving sources and operation evidence.",
         ("service_api",),
         ("dry-run", "apply", "readback"),
         "apply",
-        ("reviewed_plan_sha256",),
+        ("reviewed_plan_sha256", "receiver_operation_id"),
     ),
     OperationSpec(
         "GET",

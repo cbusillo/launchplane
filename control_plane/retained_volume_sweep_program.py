@@ -1,4 +1,5 @@
 import inspect
+from control_plane.dokploy.testing_retained_copy import retained_container_snapshot
 
 from control_plane.retained_volume_capture import (
     _batched_docker_inspect,
@@ -10,20 +11,34 @@ from control_plane.retained_volume_capture import (
 
 
 RETAINED_VOLUME_SWEEP_HOST_PROGRAM = (
-    "from collections.abc import Callable,Mapping,Sequence\nimport hashlib,json\n"
+    "from collections.abc import Callable,Mapping,Sequence\nfrom typing import Any\nimport hashlib,json\n"
     + inspect.getsource(retained_volume_identity)
     + inspect.getsource(retained_volume_identity_matches)
     + inspect.getsource(retained_volume_engine_identity)
     + inspect.getsource(_batched_docker_inspect)
     + inspect.getsource(retained_volume_docker_command)
+    + inspect.getsource(retained_container_snapshot)
     + r"""
 import base64,fcntl,hashlib,json,math,os,re,stat,subprocess,sys,time
 from pathlib import Path
 
 prefix=sys.argv[2]
+physical={}
 
 def emit(status,reason):
-    print(prefix+json.dumps({'type':'complete','result':{'status':status,'reason_code':reason}},sort_keys=True,separators=(',',':')),flush=True)
+    result={'status':status,'reason_code':reason}
+    if physical:
+        try:
+            point=Path(physical['path'])
+            space=os.statvfs(point)
+            if point.resolve(strict=True)!=point or point.stat().st_dev!=physical['device'] or space.f_fsid!=physical['filesystem']:
+                raise ValueError('backing changed')
+            after=space.f_bavail*space.f_frsize
+            result['physical']={'before_bytes':physical['before_bytes'],'after_bytes':after,
+                'observed_change_bytes':after-physical['before_bytes']}
+        except (OSError,ValueError,KeyError):
+            result['physical']={'reason':'backing_readback_unknown'}
+    print(prefix+json.dumps({'type':'complete','result':result},sort_keys=True,separators=(',',':')),flush=True)
 
 try:
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
@@ -183,7 +198,18 @@ def groups(values):
 
 def inventory(backing,root):
     containers=identifiers('ps','-aq','--no-trunc')
-    for container in inspect_many('container',containers).values():
+    inspected=inspect_many('container',containers)
+    planned=spec.get('planned_container_removals',{})
+    ignored=set()
+    if planned:
+        if mode!='dry-run' or set(planned)!={'ids','snapshot'} or not isinstance(planned['ids'],list):
+            raise Held()
+        ignored=set(planned['ids'])
+        if len(ignored)!=len(planned['ids']) or not ignored<=set(inspected) or retained_container_snapshot([inspected[key] for key in sorted(ignored)])!=planned['snapshot']:
+            raise Held()
+    for identifier,container in inspected.items():
+        if identifier in ignored:
+            continue
         mounts=container.get('Mounts')
         if not isinstance(mounts,list):
             raise Unknown()
@@ -291,10 +317,13 @@ def read_receipt(path):
         value=json.loads(path.read_text())
     except (OSError,ValueError):
         raise Unknown() from None
-    if (not isinstance(value,dict) or not {'operation','identity','volume','started','engine_id'}<=set(value)<= {'operation','identity','volume','started','engine_id','outcome','retirement'}
+    if (not isinstance(value,dict) or not {'operation','identity','volume','started','engine_id'}<=set(value)<= {'operation','identity','volume','started','engine_id','outcome','retirement','physical'}
         or value['operation']!=operation or value['identity']!=captured or value['volume']!=name
         or value['started'] is not True or not isinstance(value['engine_id'],str) or not value['engine_id']
-        or value.get('retirement',{})!=retirement):
+        or (value.get('retirement',{})!=retirement and not (
+            mode=='readback' and spec.get('original_retirement_binding') is True
+            and retirement and isinstance(value.get('retirement'),dict)
+            and value['retirement'].get('binding')==retirement['binding']))):
         raise Unknown()
     return value
 
@@ -326,6 +355,7 @@ try:
     with os.fdopen(lock_descriptor,'r+') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         receipt=read_receipt(receipt_path)
+        physical=receipt.get('physical',{}) if receipt else {}
         engine_id,root=engine()
         if receipt is not None:
             if receipt.get('outcome')=='never_started':
@@ -386,7 +416,14 @@ try:
         if remaining<10:
             raise Held()
         rm_timeout=10
-        persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id,'retirement':retirement})
+        if spec.get('physical_readback'):
+            parent=root/'volumes'
+            space=os.statvfs(parent)
+            backing_space=os.statvfs(backing)
+            if parent.resolve(strict=True)!=parent or parent.stat().st_dev!=metadata.st_dev or space.f_fsid!=backing_space.f_fsid:
+                raise Held()
+            physical={'path':str(parent),'device':metadata.st_dev,'filesystem':space.f_fsid,'before_bytes':space.f_bavail*space.f_frsize}
+        persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id,'retirement':retirement,**({'physical':physical} if physical else {})})
         try:
             result=subprocess.run(retained_volume_docker_command('volume','rm',name),capture_output=True,timeout=rm_timeout,check=False)
         except (OSError,subprocess.SubprocessError):
@@ -401,7 +438,7 @@ try:
             _,current_metadata=binding(current,root)
             if not retained_volume_identity_matches(current,engine_id,current_metadata.st_dev,current_metadata.st_ino,os.statvfs(current['Mountpoint']).f_fsid,captured):
                 raise Unknown()
-            persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id,'outcome':'no_effect','retirement':retirement})
+            persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id,'outcome':'no_effect','retirement':retirement,**({'physical':physical} if physical else {})})
             emit('held','no_effect')
         else:
             emit('unknown','effect_unknown')

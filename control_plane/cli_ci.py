@@ -51,6 +51,7 @@ POSTGRES_INTEGRATION_MODULES = (
     "tests.test_generic_web_testing_abandonment_postgres",
     "tests.test_disposable_observation_clear_postgres",
     "tests.test_postgres_integration",
+    "tests.test_native_testing_retention_postgres",
     "tests.test_testing_private_ingress_postgres",
     "tests.test_testing_override_sanitization_postgres",
     "tests.test_solo_administration_confirmation_postgres",

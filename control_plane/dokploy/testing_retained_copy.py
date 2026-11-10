@@ -1,4 +1,5 @@
 import inspect
+from collections.abc import Callable
 from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
 from typing import Any
 from control_plane.copy_readback_diagnostics import CopyReadbackRefused, ReadbackPredicate
@@ -50,6 +51,130 @@ def retained_inventory_sha256(containers: list[dict[str, Any]], spec: dict[str, 
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
+
+
+def retained_container_snapshot(containers: list[dict[str, Any]]) -> str:
+    import hashlib
+    import json
+
+    rows = []
+    for container in containers:
+        row = {key: container[key] for key in ("Id", "Image", "Config", "HostConfig", "Mounts")}
+        row["started_at"] = container["State"]["StartedAt"]
+        rows.append(row)
+    return hashlib.sha256(
+        json.dumps(
+            sorted(rows, key=lambda row: row["Id"]), sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+
+
+def failed_testing_web_wait(
+    container: dict[str, Any], spec: dict[str, Any], read_processes: Callable[[str], list[str]]
+) -> bool:
+    from pathlib import Path
+    import json
+
+    original = spec.get("failed_candidate", {})
+    command = original.get("web_command")
+    if not command or container["Config"].get("Cmd") != command:
+        return False
+    environment = dict(
+        value.split("=", 1) for value in container["Config"].get("Env", []) if "=" in value
+    )
+    if json.loads(environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", "null")) != spec.get(
+        "identity"
+    ):
+        return False
+    mounts = [
+        row
+        for row in container["Mounts"]
+        if row.get("Destination") == "/volumes/data"
+        and row.get("Type") == "volume"
+        and row.get("Name") == original["resources"]["namespace"] + "-data"
+    ]
+    if len(mounts) != 1:
+        return False
+    backing = Path(mounts[0]["Source"])
+    gate = backing / Path(original["web_gate_path"]).relative_to("/volumes/data")
+    if backing.resolve(strict=True) != backing or gate.exists() or gate.is_symlink():
+        return False
+    processes = read_processes(container["Id"])
+    return "sh" in processes and bool(processes) and set(processes) <= {"sh", "sleep", "tini"}
+
+
+def qualify_failed_testing_containers(
+    containers: list[dict[str, Any]],
+    spec: dict[str, Any],
+    read_processes: Callable[[str], list[str]] | None = None,
+) -> dict[str, Any]:
+    import re
+    import json
+
+    resources = spec["failed_candidate"]["resources"]
+    namespace = resources["namespace"]
+    if (
+        resources["instance"] != "testing"
+        or resources["context"] != spec["context"]
+        or re.fullmatch(r"lp-testing-[a-f0-9]{32}", namespace) is None
+        or re.fullmatch(re.escape(namespace) + r"(?:-[a-z0-9]{6})?", spec["project"]) is None
+    ):
+        raise ValueError("Failed candidate testing custody is unavailable.")
+    require_complete_container_inventory(containers)
+    members = [
+        row
+        for row in containers
+        if (row["Config"]["Labels"] or {}).get("com.docker.compose.project") == spec["project"]
+    ]
+    roles = []
+    for row in members:
+        config, state = row["Config"], row["State"]
+        labels = config["Labels"]
+        role = labels.get("com.docker.compose.service")
+        roles.append(role)
+        if (
+            re.fullmatch(r"[a-f0-9]{64}", row["Id"]) is None
+            or not row.get("Image")
+            or state["Status"] not in {"running", "exited", "created", "dead"}
+            or not isinstance(state.get("StartedAt"), str)
+            or "ExecIDs" not in row
+            or row["ExecIDs"] not in (None, [])
+            or role not in {"web", "database", "script-runner"}
+            or role == "web"
+            and state["Status"] == "running"
+            and (read_processes is None or not failed_testing_web_wait(row, spec, read_processes))
+            or role in {"web", "script-runner"}
+            and config.get("Image") != spec["failed_candidate"]["image"]
+            or labels.get("dokploy.application.id") not in (None, resources["target_id"])
+            or not isinstance(row.get("HostConfig"), dict)
+            or "PortBindings" not in row["HostConfig"]
+            or row["HostConfig"]["PortBindings"]
+        ):
+            raise ValueError("Failed candidate has active, foreign or unknown container use.")
+        if role != "database":
+            environment = dict(
+                value.split("=", 1) for value in config.get("Env", []) if "=" in value
+            )
+            if (
+                environment.get("PLATFORM_INSTANCE") != "testing"
+                or environment.get("ODOO_DB_HOST") != "database"
+                or json.loads(environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", "null"))
+                != spec["identity"]
+            ):
+                raise ValueError("Failed candidate runtime identity changed.")
+        for mount in row["Mounts"]:
+            if mount["RW"] and (
+                mount["Type"] != "volume"
+                or mount.get("Name")
+                not in {namespace + suffix for suffix in ("-db", "-data", "-logs")}
+            ):
+                raise ValueError("Failed candidate has unbound writable storage.")
+    if len(roles) != len(set(roles)):
+        raise ValueError("Failed candidate service identity is ambiguous.")
+    snapshot = retained_container_snapshot(members)
+    if spec.get("container_snapshot") and spec["container_snapshot"] != snapshot:
+        raise ValueError("Reviewed failed candidate containers changed.")
+    return {"container_snapshot": snapshot, "container_ids": sorted(row["Id"] for row in members)}
 
 
 def retained_web_process(containers: list[dict[str, Any]], spec: dict[str, Any]) -> dict[str, str]:
@@ -274,7 +399,7 @@ assert isinstance(payload,dict) and payload.get('runtime_identity')==spec['ident
 
 def retained_copy_host_program() -> str:
     return (
-        "import base64,hashlib,json,subprocess,sys\nfrom typing import Any\nfrom pathlib import Path\n"
+        "import base64,hashlib,json,os,subprocess,sys\nfrom typing import Any\nfrom collections.abc import Callable\nfrom pathlib import Path\n"
         + VOLUME_BACKING_INSPECTION_LIBRARY
         + inspect.getsource(qualify_retained_copy)
         + inspect.getsource(retained_inventory_sha256)
@@ -282,14 +407,23 @@ def retained_copy_host_program() -> str:
         + inspect.getsource(retained_web_process)
         + inspect.getsource(matches_unavailable_web_process)
         + inspect.getsource(require_complete_container_inventory)
+        + inspect.getsource(retained_container_snapshot)
+        + inspect.getsource(failed_testing_web_wait)
+        + inspect.getsource(qualify_failed_testing_containers)
         + "\nHEALTH_PROGRAM="
         + repr(RETAINED_PRIVATE_HEALTH_PROGRAM)
         + "\n"
         + r"""
 
+class FailedCandidateRemovalRefused(Exception):
+    pass
+
 def docker(*arguments):
-    result=subprocess.run(['docker',*arguments],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90,check=False)
+    command=['docker',*(['--host','unix:///var/run/docker.sock'] if spec.get('failed_candidate') else []),*arguments]
+    result=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90,check=False)
     if result.returncode:
+        if spec.get('failed_candidate') and arguments[:1]==('rm',):
+            raise FailedCandidateRemovalRefused()
         if any(token in result.stderr.lower() for token in (b'permission denied',b'unauthorized',b'access denied')):
             raise PermissionError('Managed testing retirement was refused')
         raise copy_command_failure(RuntimeError('Managed testing retirement did not complete'), result, spec, containers=globals().get('containers'))
@@ -306,9 +440,23 @@ def inventory():
 
 try:
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
+    if spec.get('failed_candidate'):
+        os.environ.pop('DOCKER_CONTEXT',None)
+        os.environ['DOCKER_HOST']='unix:///var/run/docker.sock'
     copy_failure_stage=CopyFailureStage.CLEANUP if spec['mode']=='remove' else CopyFailureStage.HOST_PREPARATION
     containers=inventory()
     own={item['Id'] for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==spec['project']}
+    failed_custody={}
+    qualification_spec=spec
+    if spec.get('failed_candidate'):
+        if spec['mode']=='removal-readback':
+            expected=set(spec.get('container_ids',[]))
+            if any(item['Id'] in expected and item['Id'] not in own for item in containers) or own-set(expected):
+                raise ValueError('Original candidate container ownership changed')
+        else:
+            failed_custody=qualify_failed_testing_containers(containers,spec,lambda identifier: docker('top',identifier,'-eo','comm').decode().splitlines()[1:])
+        if not any(item['Id'] in own and item['Config']['Labels'].get('com.docker.compose.service')=='web' for item in containers):
+            qualification_spec={**spec,'identity':None}
     if spec['mode'] in {'remove','removal-readback'}:
         expected=spec.get('container_ids')
         if spec.get('allow_unavailable') is not True or not isinstance(expected,list) or not expected or not all(isinstance(value,str) and value for value in expected):
@@ -322,6 +470,15 @@ try:
         elif not states.issubset({'exited','created','dead'}):
             raise ValueError('Old testing container state is unverified')
         elif spec['mode']=='remove':
+            if spec.get('failed_candidate'):
+                if own!=set(expected):
+                    raise ValueError('Reviewed failed candidate members changed')
+                qualified=qualify_retained_copy(containers,qualification_spec)
+                expected_binding=hashlib.sha256(json.dumps(spec['failed_candidate']['resources'],sort_keys=True,separators=(',',':')).encode()).hexdigest()
+                backings=inspect_volume_backings(qualified['volumes'],containers,own,expected_binding=expected_binding)
+                physical=hashlib.sha256(json.dumps({'logical':qualified['resource_binding'],'backings':backings},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+                if physical!=spec.get('physical_binding'):
+                    raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
             if spec.get('retiring') is True and own:
                 qualified=qualify_retained_copy(containers,{**spec,'resource_binding':spec.get('resource_binding') if project_own==set(expected) else None})
                 backings=inspect_volume_backings(qualified['volumes'],containers,project_own)
@@ -337,9 +494,10 @@ try:
         else:
             result={'type':'complete','availability':'stopped' if own else 'absent'}
     else:
-        result=qualify_retained_copy(containers,spec)
+        result=qualify_retained_copy(containers,qualification_spec)
         if result.get('availability')!='absent':
-            backings=inspect_volume_backings(result['volumes'],containers,own)
+            expected_binding=hashlib.sha256(json.dumps(spec['failed_candidate']['resources'],sort_keys=True,separators=(',',':')).encode()).hexdigest() if spec.get('failed_candidate') else None
+            backings=inspect_volume_backings(result['volumes'],containers,own,expected_binding=expected_binding)
             result['physical_binding']=hashlib.sha256(json.dumps({'logical':result['resource_binding'],'backings':backings},sort_keys=True,separators=(',',':')).encode()).hexdigest()
         if spec.get('physical_binding') and result['physical_binding']!=spec['physical_binding']:
             raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
@@ -367,7 +525,9 @@ try:
             result['healthy']=True
         elif spec['mode'] not in {'read'}:
             raise ValueError('Unsupported retained testing operation')
-    print(sys.argv[2]+json.dumps(result),flush=True)
+    print(sys.argv[2]+json.dumps({**result,**failed_custody}),flush=True)
+except FailedCandidateRemovalRefused:
+    print(sys.argv[2]+json.dumps({'type':'complete','availability':'incomplete','reason':'container_removal_refused'}),flush=True)
 except PermissionError:
     print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
     sys.exit(1)
@@ -383,6 +543,7 @@ def retained_copy_operation(
     token: str,
     server_id: str,
     payload: dict[str, Any],
+    dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
 ) -> dict[str, Any]:
     frames: list[dict[str, Any]] = []
     _read_remote(
@@ -393,6 +554,7 @@ def retained_copy_operation(
         payload=payload,
         receive=frames.append,
         timeout_seconds=180,
+        dispatch_guard=dispatch_guard,
     )
     if len(frames) != 1 or frames[0].get("type") != "complete":
         raise ValueError("Retained testing custody is unverified.")

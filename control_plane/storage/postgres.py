@@ -13148,6 +13148,37 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.get(LaunchplaneTestingCandidateRow, namespace)
             return TestingCandidateAllocation.model_validate(row.payload) if row else None
 
+    def list_testing_candidates(self) -> tuple[TestingCandidateAllocation, ...]:
+        with self._session_factory() as session:
+            return tuple(
+                TestingCandidateAllocation.model_validate(payload)
+                for payload in session.scalars(
+                    select(LaunchplaneTestingCandidateRow.payload).order_by(
+                        LaunchplaneTestingCandidateRow.namespace
+                    )
+                )
+            )
+
+    @contextmanager
+    def testing_candidate_retention_guard(self, operation_id: str) -> Iterator[Callable[[], None]]:
+        with self.testing_replacement_execution_lock(operation_id) as executor_check:
+            if executor_check is None:
+                raise ValueError("The candidate original still has an executor.")
+            with self._session_factory() as session:
+                row = session.get(
+                    LaunchplaneOdooStableTargetReplacementOperationRow,
+                    operation_id,
+                    with_for_update=True,
+                )
+                if row is None:
+                    raise ValueError("The candidate original is unavailable.")
+
+                def checkpoint() -> None:
+                    executor_check()
+                    session.execute(text("SELECT 1"))
+
+                yield checkpoint
+
     def find_testing_candidate_by_target(self, target_id: str) -> TestingCandidateAllocation | None:
         with self._session_factory() as session:
             rows = tuple(

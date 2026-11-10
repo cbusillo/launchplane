@@ -266,6 +266,9 @@ def _host_result(
     lease: ProviderOperationLease | None = None,
     *,
     retirement: dict[str, object] | None = None,
+    physical: dict[str, object] | None = None,
+    planned_container_removals: dict[str, Any] | None = None,
+    original_retirement_binding: bool = False,
 ) -> tuple[SweepStatus, str]:
     host, token = source.read_dokploy_config(control_plane_root=root)
     frames: list[dict[str, object]] = []
@@ -288,6 +291,13 @@ def _host_result(
             "engine_identity": binding.engine_identity_sha256,
             "operation": operation_key,
             **({"retirement": retirement} if retirement else {}),
+            **({"physical_readback": True} if physical is not None else {}),
+            **({"original_retirement_binding": True} if original_retirement_binding else {}),
+            **(
+                {"planned_container_removals": planned_container_removals}
+                if planned_container_removals
+                else {}
+            ),
         },
         receive=frames.append,
         timeout_seconds=120,
@@ -304,6 +314,8 @@ def _host_result(
         "unknown",
     }:
         raise ProviderMutationUnknownError("Retained volume host result is invalid.")
+    if physical is not None and isinstance(result.get("physical"), dict):
+        physical.update(result["physical"])
     return cast(SweepStatus, result["status"]), str(
         result.get("reason_code", "host_evidence_unavailable")
     )

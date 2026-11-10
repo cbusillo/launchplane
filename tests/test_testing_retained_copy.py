@@ -6,6 +6,7 @@ from copy import deepcopy
 import io
 from itertools import product
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -70,6 +71,158 @@ class RetainedTestingCopyTests(unittest.TestCase):
             "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + json.dumps(self.identity),
             *(key + "=fixture-" + key for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS),
         ]
+
+    def test_failed_candidate_detachment_requires_original_members_and_no_active_exec_or_web(
+        self,
+    ) -> None:
+        from control_plane.dokploy.testing_retained_copy import qualify_failed_testing_containers
+        from control_plane.odoo_testing_resources import OdooTestingResources
+        from control_plane.contracts.testing_candidate import testing_candidate_namespace
+
+        namespace = testing_candidate_namespace("fixture", "example", "failed-original")
+        resources = OdooTestingResources(
+            product="fixture",
+            context="example",
+            operation_id="failed-original",
+            target_id="failed-compose",
+            namespace=namespace,
+        )
+        spec = {
+            **self.spec,
+            "project": namespace,
+            "identity": self.identity,
+            "failed_candidate": {
+                "resources": resources.model_dump(mode="json"),
+                "image": "fixture@sha256:" + "a" * 64,
+            },
+        }
+        for position, row in enumerate(self.containers):
+            role = row["Config"]["Labels"]["com.docker.compose.service"]
+            row["Id"] = str(position + 1) * 64
+            row["Image"] = "sha256:" + "b" * 64
+            row["Config"]["Image"] = spec["failed_candidate"]["image"]
+            row["Config"]["Labels"]["com.docker.compose.project"] = namespace
+            row["Mounts"][0]["Name"] = resources.volumes[
+                "ODOO_DATA_VOLUME" if role == "web" else "ODOO_DB_VOLUME"
+            ]
+            row["HostConfig"] = {"PortBindings": {}}
+            row["State"] = {
+                "Status": "exited" if role == "web" else "running",
+                "StartedAt": "fixture-start",
+            }
+            row["ExecIDs"] = []
+        original = qualify_failed_testing_containers(self.containers, spec)
+        self.assertEqual(original["container_ids"], sorted(row["Id"] for row in self.containers))
+        for field, value in (("ExecIDs", ["active-job"]), ("Image", "sha256:" + "c" * 64)):
+            changed = deepcopy(self.containers)
+            changed[1][field] = value
+            with self.assertRaises(ValueError):
+                qualify_failed_testing_containers(
+                    changed, {**spec, "container_snapshot": original["container_snapshot"]}
+                )
+        self.containers[0]["State"]["Status"] = "running"
+        with self.assertRaises(ValueError):
+            qualify_failed_testing_containers(self.containers, spec)
+        for row in self.containers:
+            row["State"]["Status"] = "exited"
+            mount = row["Mounts"][0]
+            destination = self.root / mount["Name"]
+            Path(mount["Source"]).rename(destination)
+            mount["Source"] = str(destination)
+        self.spec = spec
+        read, _ = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(read["type"], "complete")
+        original = {
+            "allow_unavailable": True,
+            **{
+                key: read[key]
+                for key in (
+                    "container_ids",
+                    "container_snapshot",
+                    "resource_binding",
+                    "physical_binding",
+                )
+            },
+        }
+        refused, _ = self.run_host(mode="remove", extra=original, remove_refused=True)
+        self.assertEqual(refused["availability"], "incomplete")
+        self.assertEqual(sorted(row["Id"] for row in self.containers), original["container_ids"])
+        removed, commands = self.run_host(mode="remove", extra=original)
+        self.assertEqual(removed["availability"], "absent")
+        self.assertTrue(
+            all(command[1:3] == ["--host", "unix:///var/run/docker.sock"] for command in commands)
+        )
+        readback, commands = self.run_host(mode="removal-readback", extra=original)
+        self.assertEqual(readback["availability"], "absent")
+        self.assertFalse(any("rm" in command for command in commands))
+
+    def test_failed_candidate_without_web_keeps_exact_original_runtime_custody(self) -> None:
+        from control_plane.odoo_testing_resources import OdooTestingResources
+        from control_plane.contracts.testing_candidate import testing_candidate_namespace
+
+        namespace = testing_candidate_namespace("fixture", "example", "failed-original")
+        resources = OdooTestingResources(
+            product="fixture",
+            context="example",
+            operation_id="failed-original",
+            target_id="failed-compose",
+            namespace=namespace,
+        )
+        runner = self.containers[0]
+        runner["Config"]["Labels"]["com.docker.compose.service"] = "script-runner"
+        for index, row in enumerate(self.containers):
+            row.update(
+                Id=str(index + 1) * 64,
+                Image="sha256:" + "b" * 64,
+                HostConfig={"PortBindings": {}},
+                ExecIDs=[],
+            )
+            row["State"].update(Status="exited", StartedAt="fixture-start")
+            row["Config"].update(Image="fixture@sha256:" + "a" * 64)
+            row["Config"]["Labels"]["com.docker.compose.project"] = namespace
+            mount = row["Mounts"][0]
+            name = resources.volumes["ODOO_DATA_VOLUME" if index == 0 else "ODOO_DB_VOLUME"]
+            Path(mount["Source"]).rename(self.root / name)
+            mount.update(Name=name, Source=str(self.root / name))
+        self.spec.update(
+            project=namespace,
+            failed_candidate={
+                "resources": resources.model_dump(mode="json"),
+                "image": runner["Config"]["Image"],
+            },
+        )
+        result, _ = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(result["type"], "complete")
+        runner["Config"]["Env"] = []
+        refused, _ = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(refused["type"], "failed")
+
+    def test_waiting_web_requires_original_command_processes_and_absent_gate(self) -> None:
+        from control_plane.dokploy.testing_retained_copy import failed_testing_web_wait
+        from control_plane.dokploy.compose import _odoo_web_command
+        from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
+
+        web = self.containers[0]
+        web["Config"]["Cmd"] = [
+            "/bin/sh",
+            "-lc",
+            _odoo_web_command(hold_until_integration_readback=True).replace("$$", "$"),
+        ]
+        web["Mounts"][0]["Name"] = "fixture-data"
+        web["Mounts"][0]["Source"] = str(Path(web["Mounts"][0]["Source"]).resolve())
+        spec = {
+            "identity": self.identity,
+            "failed_candidate": {
+                "resources": {"namespace": "fixture"},
+                "web_command": web["Config"]["Cmd"],
+                "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
+            },
+        }
+        self.assertTrue(failed_testing_web_wait(web, spec, lambda _: ["sh", "sleep"]))
+        self.assertFalse(failed_testing_web_wait(web, spec, lambda _: ["sh", "odoo"]))
+        gate = Path(web["Mounts"][0]["Source"]) / Path(INTEGRATION_READBACK_PASSED_PATH).name
+        gate.write_text("completed-copy-evidence")
+        self.assertFalse(failed_testing_web_wait(web, spec, lambda _: ["sh", "sleep"]))
 
     def test_all_services_must_be_stopped_and_restarts_keep_the_same_data_custody(self) -> None:
         read = qualify_retained_copy(self.containers, self.spec)
@@ -198,6 +351,7 @@ class RetainedTestingCopyTests(unittest.TestCase):
         *,
         mode: str = "read",
         deny: bool = False,
+        remove_refused: bool = False,
         extra: dict[str, Any] | None = None,
         inspect_result: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], list[list[str]]]:
@@ -206,6 +360,9 @@ class RetainedTestingCopyTests(unittest.TestCase):
 
         def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
             commands.append(command)
+            if payload.get("failed_candidate"):
+                self.assertEqual(command[1:3], ["--host", "unix:///var/run/docker.sock"])
+                command = [command[0], *command[3:]]
             if deny:
                 return subprocess.CompletedProcess(
                     command, 1, stdout=b"", stderr=b"permission denied"
@@ -220,10 +377,29 @@ class RetainedTestingCopyTests(unittest.TestCase):
                 ).encode()
             elif command[1:3] == ["volume", "inspect"]:
                 name = command[-1]
+                from control_plane.contracts.canonical_json import canonical_json_sha256
+
                 output = json.dumps(
-                    [{"Driver": "local", "Options": {}, "Mountpoint": str(self.root / name)}]
+                    [
+                        {
+                            "Driver": "local",
+                            "Options": {},
+                            "Mountpoint": str(self.root / name),
+                            "Labels": {
+                                "io.launchplane.testing-resources": canonical_json_sha256(
+                                    payload["failed_candidate"]["resources"]
+                                )
+                            }
+                            if payload.get("failed_candidate")
+                            else {},
+                        }
+                    ]
                 ).encode()
             elif command[1] == "rm":
+                if remove_refused:
+                    return subprocess.CompletedProcess(
+                        command, 1, stdout=b"", stderr=b"container removal refused"
+                    )
                 self.assertNotIn("-f", command)
                 self.assertNotIn("-v", command)
                 self.assertTrue(set(command[2:]) <= {item["Id"] for item in self.containers})
@@ -250,6 +426,7 @@ class RetainedTestingCopyTests(unittest.TestCase):
         stdout = io.StringIO()
         with (
             redirect_stdout(stdout),
+            patch.dict(os.environ),
             patch.object(
                 sys,
                 "argv",
