@@ -679,7 +679,7 @@ or an existing grant is not that path.
 
 Each product profile records `release_on_acceptance`: `held` (the default for
 every product), `promote`, `promote_with_rollback_drill` (Odoo or generic web), or
-`director_standing` (generic web). An admin with
+`director_standing` (Odoo or generic web). An admin with
 `product_profile.write` changes it in the product's Client settings, through
 `POST /v1/product-profiles/{product}/production-use` with the optional
 `release_on_acceptance` field: dry run, Apply bound to the reviewed plan digest,
@@ -699,7 +699,7 @@ Release panel queues:
    the durable provider-operation runner, with a target fence and heartbeat;
    its promotion record names the deployment and automatic rollback outcome.
 
-For generic web, a signed-in admin can record `director_standing` through the
+For Odoo or generic web, a signed-in admin can record `director_standing` through the
 same reviewed Client setting. This explicitly records that the named Client is
 the Director and that the Director's standing acceptance starts releases.
 Admin permission never implies that a Client is the Director. The attestation
@@ -1354,6 +1354,22 @@ this comparison can run. Missing production records do not prove that no live
 site exists, so the service does not silently interpret missing evidence as a
 first release. Bootstrap a non-live lane explicitly, then request review before
 live activation. The CM baseline must be verified from deployed service records.
+
+For an empty Odoo target, the existing target-replacement planner accepts a first
+workload without inventory once its desired inputs are recorded: instance
+runtime/database and dedicated volume settings through product-config, the
+lane's qualified data authority through the onboarding manifest, and local
+provider domains through target setup. Explicit prelaunch classification and
+the exact-instance [prelaunch rebuild policy](operations.md) remain separate
+reviewed settings. Empty rebuild requires resettable data authority; unknown or
+authoritative data, and every Live production rebuild, retain backup proof.
+Missing history alone establishes none of these facts. Stable bootstrap requires
+an existing inventory artifact and cannot supply this first workload.
+
+Keep release acceptance held while preparing that baseline. Then review the
+complete candidate through the existing release-review surface and the recorded
+Client's supported acceptance setting. Source delivery does not activate the
+setting, qualify actual storage or authorize public ingress changes.
 
 Release decisions are persisted in `launchplane_release_review_decisions`, with
 file storage reserved for tests and rehearsal. Deployments must migrate the

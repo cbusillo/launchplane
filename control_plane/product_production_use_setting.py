@@ -104,9 +104,9 @@ def build_product_production_use_plan(
         evidence["release_on_acceptance"] = request.release_on_acceptance
     release_on_acceptance_after = request.release_on_acceptance or profile.release_on_acceptance
     if release_on_acceptance_after == "director_standing":
-        if profile.driver_id != "generic-web" or not profile.owner.is_set:
+        if profile.driver_id not in {"odoo", "generic-web"} or not profile.owner.is_set:
             raise ValueError(
-                "Director standing acceptance requires a generic-web product with a recorded Client."
+                "Director standing acceptance requires an Odoo or generic-web product with a recorded Client."
             )
     digest = nonvalidating_compact_sorted_json_sha256(evidence)
     if request.mode == "apply" and request.reviewed_plan_sha256 != digest:

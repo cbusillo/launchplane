@@ -317,8 +317,6 @@ def release_start_for_acceptance(
     ):
         return ""
     if mode == "director_standing":
-        if profile.driver_id != "generic-web":
-            return ""
         mode = "promote_with_rollback_drill"
     if mode == "promote_with_rollback_drill" and _product_drill_passed(store, profile):
         return "promote"
@@ -1333,7 +1331,7 @@ def _record_standing_acceptance(
     """
 
     if (
-        profile.driver_id != "generic-web"
+        profile.driver_id not in {"odoo", "generic-web"}
         or profile.release_on_acceptance != "director_standing"
         or not profile.is_active
         or not profile.owner.is_set
