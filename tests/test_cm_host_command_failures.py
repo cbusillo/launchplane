@@ -13,6 +13,7 @@ from unittest.mock import patch
 from control_plane.copy_readback_diagnostics import (
     COPY_FAILURE_EXIT_MARKER,
     COPY_FAILURE_KIND_MARKER,
+    COPY_COMMAND_FAILURE_KIND,
     COPY_FAILURE_STAGE_MARKER,
     COPY_FAILURE_EVIDENCE_MARKER,
     CopyFailureStage,
@@ -141,7 +142,7 @@ class CMHostCommandFailureTests(unittest.TestCase):
                     if framed
                     else dict(line.split("=", 1) for line in public.splitlines())
                 )
-                self.assertEqual(frame.get(COPY_FAILURE_KIND_MARKER), "command_failed")
+                self.assertEqual(frame.get(COPY_FAILURE_KIND_MARKER), COPY_COMMAND_FAILURE_KIND)
                 self.assertEqual(frame.get(COPY_FAILURE_STAGE_MARKER), stage)
                 self.assertEqual(frame.get(COPY_FAILURE_EXIT_MARKER), "7")
                 self.assertEqual(frame.get(COPY_FAILURE_EVIDENCE_MARKER), "unavailable")

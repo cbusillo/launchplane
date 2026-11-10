@@ -96,12 +96,18 @@ class NativeSourceTransportTests(unittest.TestCase):
         self,
     ) -> None:
         from control_plane import http_error_evidence
-        from control_plane.copy_readback_diagnostics import CopyFailureStage
+        from control_plane.copy_readback_diagnostics import (
+            CopyFailureStage,
+            COPY_COMMAND_FAILURE_KIND,
+            COPY_FAILURE_KIND_MARKER,
+            COPY_FAILURE_STAGE_MARKER,
+            COPY_FAILURE_EXIT_MARKER,
+        )
 
         markers = {
-            "copy_failure_stage": CopyFailureStage.SOURCE_TRANSFER.value,
-            "copy_failure_kind": "command_failed",
-            "copy_failure_exit_status": "7",
+            COPY_FAILURE_STAGE_MARKER: CopyFailureStage.SOURCE_TRANSFER.value,
+            COPY_FAILURE_KIND_MARKER: COPY_COMMAND_FAILURE_KIND,
+            COPY_FAILURE_EXIT_MARKER: "7",
             COPY_FAILURE_EVIDENCE_MARKER: uuid.uuid4().hex,
         }
         private = "password=secret /credential/path dump-content"

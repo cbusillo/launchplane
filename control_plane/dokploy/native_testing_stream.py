@@ -101,17 +101,20 @@ NATIVE_TESTING_STREAM_WRITE_PROGRAM = (
     + inspect.getsource(CopyReadbackRefused)
     + r'''
 import base64,hashlib,json,os,re,subprocess,sys
+from contextlib import suppress
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True));prefix=sys.argv[2]
 copy_failure_stage=CopyFailureStage.SOURCE_TRANSFER
 child=None
 def emit(value):
     print(prefix+json.dumps(value,sort_keys=True),flush=True)
+def check_receiver_status() -> None:
+    status=child.wait()
+    if status:
+        raise copy_command_failure(RuntimeError('Migrated receiver command failed'),subprocess.CompletedProcess([],status,b'',b''),spec) from None
 def receiver_frame():
     line=child.stdout.readline()
     if not line:
-        status=child.wait()
-        if status:
-            raise copy_command_failure(RuntimeError('Migrated receiver command failed'),subprocess.CompletedProcess([],status,b'',b''),spec)
+        check_receiver_status()
         raise RuntimeError('Migrated receiver frame is incomplete')
     return json.loads(line)
 try:
@@ -200,19 +203,31 @@ print(json.dumps(expected),flush=True)
                     data=base64.b64decode(line.strip(),validate=True)
                     if len(data)!=min(65536,total-offset):
                         raise RuntimeError('Migrated input window size differs')
-                    child.stdin.write(data);child.stdin.flush();offset+=len(data)
-        child.stdin.close()
+                    try:
+                        child.stdin.write(data);child.stdin.flush()
+                    except BrokenPipeError:
+                        check_receiver_status()
+                        raise
+                    offset+=len(data)
+        try:
+            child.stdin.close()
+        except BrokenPipeError:
+            check_receiver_status()
+            raise
         result=receiver_frame()
-        status=child.wait()
-        if status:
-            raise copy_command_failure(RuntimeError('Migrated receiver command failed'),subprocess.CompletedProcess([],status,b'',b''),spec)
+        check_receiver_status()
         if result!=spec['artifact']:
             raise RuntimeError('Migrated receiver did not complete')
         emit({'type':'complete',**result})
     finally:
-        if child.poll() is None:
-            child.stdin.close();child.wait()
+        with suppress(BrokenPipeError):
+            child.stdin.close()
+        child.wait()
 except Exception as error:
-    emit({'type':'failed','predicate':ReadbackPredicate.NATIVE_READ,'kind':'unavailable',**copy_failure_frame_markers(error)})
+    frame={'type':'failed'}
+    markers=copy_failure_frame_markers(error)
+    if markers:
+        frame.update(predicate=ReadbackPredicate.NATIVE_READ,kind='unavailable',**markers)
+    emit(frame)
 '''
 )

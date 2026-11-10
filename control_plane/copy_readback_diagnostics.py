@@ -26,6 +26,7 @@ class CopyFailureStage(StrEnum):
 
 COPY_FAILURE_STAGE_MARKER = "copy_failure_stage"
 COPY_FAILURE_KIND_MARKER = "copy_failure_kind"
+COPY_COMMAND_FAILURE_KIND = "command_failed"
 COPY_FAILURE_EXIT_MARKER = "copy_failure_exit_status"
 COPY_FAILURE_EVIDENCE_MARKER = "copy_failure_evidence_id"
 COPY_FAILURE_OUTPUT_BYTES = 1024 * 1024
@@ -43,7 +44,7 @@ def copy_failure_evidence_id(value: object) -> str:
 
 def copy_failure_marker_is_safe(key: str, value: str) -> bool:
     if key == COPY_FAILURE_KIND_MARKER:
-        return value in {"command_failed", "refused", "unavailable"}
+        return value in {COPY_COMMAND_FAILURE_KIND, "refused", "unavailable"}
     if key == COPY_FAILURE_STAGE_MARKER:
         return value in CopyFailureStage
     if key == COPY_FAILURE_EVIDENCE_MARKER:
@@ -92,6 +93,7 @@ def copy_failure_diagnostics_library() -> str:
         + f"\nCOPY_FAILURE_STAGES = {tuple(stage.value for stage in CopyFailureStage)!r}\n"
         + f"COPY_FAILURE_STAGE_MARKER = {COPY_FAILURE_STAGE_MARKER!r}\n"
         + f"COPY_FAILURE_KIND_MARKER = {COPY_FAILURE_KIND_MARKER!r}\n"
+        + f"COPY_COMMAND_FAILURE_KIND = {COPY_COMMAND_FAILURE_KIND!r}\n"
         + f"COPY_FAILURE_EXIT_MARKER = {COPY_FAILURE_EXIT_MARKER!r}\n"
         + f"COPY_FAILURE_EVIDENCE_MARKER = {COPY_FAILURE_EVIDENCE_MARKER!r}\n"
         + f"COPY_FAILURE_OUTPUT_BYTES = {COPY_FAILURE_OUTPUT_BYTES!r}\n"
@@ -184,7 +186,7 @@ def copy_failure_cause(error: Exception) -> Exception:
         stage = command.copy_command_stage
         identity = retain_copy_command_failure(result, stage, command.copy_command_spec) if command.copy_command_private else 'unavailable'
         command.copy_failure_markers = {COPY_FAILURE_STAGE_MARKER: stage,
-            COPY_FAILURE_KIND_MARKER: 'command_failed', COPY_FAILURE_EXIT_MARKER: str(result.returncode),
+            COPY_FAILURE_KIND_MARKER: COPY_COMMAND_FAILURE_KIND, COPY_FAILURE_EXIT_MARKER: str(result.returncode),
             COPY_FAILURE_EVIDENCE_MARKER: identity}
         del command.copy_command_result, command.copy_command_spec
     if hasattr(command, 'copy_failure_markers'):
