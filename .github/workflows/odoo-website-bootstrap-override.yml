@@ -20,9 +20,16 @@ name: Odoo Website Bootstrap Override
           - testing
           - prod
       website_bootstrap_payload:
-        description: Website bootstrap JSON object rendered from tenant bootstrap settings; homepage and route URLs must be local Odoo route paths.
+        description: Website bootstrap JSON object with local Odoo route paths, or null to withdraw.
         required: true
         type: string
+      mode:
+        description: Plan without effects, or persist the intent.
+        default: apply
+        type: choice
+        options:
+          - dry-run
+          - apply
 
 permissions:
   contents: read
@@ -30,7 +37,7 @@ permissions:
 
 jobs:
   write:
-    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-website-bootstrap-override.yml@b62941a9219f69a2575c1bce1a8d7fcb8c605f3c # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-website-bootstrap-override.yml@27e580240f0eb693d8dab33a62ede406267c9be4 # main
     permissions:
       contents: read
       id-token: write
@@ -39,3 +46,5 @@ jobs:
       context: ${{ inputs.context }}
       instance: ${{ inputs.instance }}
       website_bootstrap_payload: ${{ inputs.website_bootstrap_payload }}
+      # noinspection UndefinedParamsPresent
+      mode: ${{ inputs.mode }}
