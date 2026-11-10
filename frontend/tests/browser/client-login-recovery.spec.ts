@@ -1,8 +1,9 @@
 import { waitForState, expect, test, type Page, type Route } from "./state";
 
 async function mockProduct(page: Page) {
-  await page.route("**/ui/products/atlas-commerce?fixture=products", route => route.fulfill({ contentType: "text/html", body: "" }), { times: 1 });
-  await page.goto("/ui/products/atlas-commerce?fixture=products");
+  const fixtureUrl = "/ui/products/atlas-commerce?fixture=products";
+  await page.route(`**${fixtureUrl}`, route => route.fulfill({ contentType: "text/html", body: "" }), { times: 1 });
+  await page.goto(fixtureUrl);
   const { products, fixtureIdentity } = await page.evaluate(async () => {
     const fixtures = await import("/ui/src/dev-fixtures.ts");
     return { products: fixtures.productsForFixture("products"), fixtureIdentity: fixtures.fixtureIdentity };
