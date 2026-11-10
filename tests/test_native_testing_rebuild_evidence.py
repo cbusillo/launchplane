@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import asyncio
 import socket
 from typing import Any, cast
@@ -23,7 +23,10 @@ from control_plane.contracts.testing_candidate import testing_candidate_namespac
 from control_plane.contracts.testing_rebuild import (
     REBUILD_SCOPE,
     REBUILD_ROUTE,
+    TestingRebuildPlan,
     TestingRebuildRecord,
+    TestingRouteObservation,
+    TestingPublicHealthEvidence,
 )
 from control_plane.native_testing_rebuild_evidence import (
     NativeTestingEvidenceStore,
@@ -118,11 +121,23 @@ class NativeTestingEvidenceTests(unittest.TestCase):
         self.rows[(REBUILD_SCOPE, REBUILD_ROUTE, self.operation.operation_id)] = self.reservation
         provider = TestingProvider(self.plan)
         provider.bad_public = True
+        original_switch = provider.switch
+
+        def switch(
+            plan: TestingRebuildPlan, previous: Any, desired: Any, *, reconcile_only: bool
+        ) -> None:
+            if desired == plan.old:
+                provider.now += timedelta(seconds=1)
+            original_switch(plan, previous, desired, reconcile_only=reconcile_only)
+
+        self.enterContext(patch.object(provider, "switch", side_effect=switch))
         self.checkpoint = execute_testing_rebuild(
             self.plan,
             RecordTestingRebuildStore(cast(RebuildRecordStore, cast(object, self.store))),
             provider,
             clock=lambda: provider.now,
+            reservation=self.reservation,
+            operation_attempt=self.operation.attempt,
         )
         self.store.reset_mock()
 
@@ -157,7 +172,100 @@ class NativeTestingEvidenceTests(unittest.TestCase):
     def read(self) -> NativeTestingRebuildEvidence:
         return read_native_testing_rebuild_evidence(self.store, self.operation)
 
+    def test_failed_candidate_probe_survives_inverse_and_terminal_checkpoint(self) -> None:
+        evidence = self.read().terminal_probe
+        self.assertEqual(self.checkpoint.step, "failed")
+        assert self.checkpoint.route is not None
+        self.assertEqual(self.checkpoint.route.slot_id, self.plan.old.copy_id)
+        self.assertEqual(evidence.availability, "present")
+        self.assertEqual(evidence.state, "fail")
+        self.assertTrue(evidence.verified)
+        assert self.checkpoint.candidate_probe is not None
+        self.assertEqual(evidence.observed_at, self.checkpoint.candidate_probe.observed_at)
+        assert evidence.observed_at is not None
+        self.assertLess(evidence.observed_at, self.checkpoint.route.observed_at)
+
+    def test_retained_probe_stays_bound_after_worker_reclaim(self) -> None:
+        self.operation = self.operation.model_copy(update={"attempt": self.operation.attempt + 1})
+        self.reservation = self.reservation.model_copy(
+            update={"attempt": self.reservation.attempt + 1}
+        )
+        self.rows[(REBUILD_SCOPE, REBUILD_ROUTE, self.operation.operation_id)] = self.reservation
+        evidence = self.read().terminal_probe
+        self.assertEqual(evidence.availability, "present")
+        self.assertEqual(evidence.binding, "matched")
+        self.assertEqual(evidence.state, "fail")
+        assert self.checkpoint.candidate_probe is not None
+        self.assertEqual(evidence.attempt, self.checkpoint.candidate_probe.reservation_attempt)
+
+    def test_candidate_probe_binding_is_independent_of_the_inverse_route(self) -> None:
+        probe = self.checkpoint.candidate_probe
+        assert probe is not None
+        key = next(key for key in self.rows if key[0] == REBUILD_CHECKPOINT_SCOPE)
+        original = self.rows[key]
+        for changes in (
+            {"reservation_attempt": self.reservation.attempt + 1},
+            {"operation_attempt": self.operation.attempt + 1},
+        ):
+            with self.subTest(changes=changes):
+                checkpoint = self.checkpoint.model_copy(
+                    update={"candidate_probe": probe.model_copy(update=changes)}
+                )
+                self.rows[key] = original.model_copy(
+                    update={"response_payload": checkpoint.model_dump(mode="json")}
+                )
+                evidence = self.read().terminal_probe
+                self.assertEqual(evidence.availability, "unbound")
+                self.assertIsNone(evidence.state)
+                self.assertIsNone(evidence.observed_at)
+
+    def test_candidate_http_cause_is_projected_without_private_probe_material(self) -> None:
+        key = next(key for key in self.rows if key[0] == REBUILD_CHECKPOINT_SCOPE)
+        self.rows.pop(key)
+        provider = TestingProvider(self.plan)
+        provider.bad_public = True
+        original_route = provider.current_route
+
+        def route(plan: TestingRebuildPlan) -> TestingRouteObservation:
+            observation = original_route(plan)
+            if observation.slot_id == plan.new.copy_id:
+                assert observation.public_health is not None
+                health = TestingPublicHealthEvidence.model_validate(
+                    {
+                        **observation.public_health.model_dump(),
+                        "http_status": 503,
+                        "urls": (plan.base_url + "/health?token=private-query",),
+                        "runtime_identity_detail": "private-body-or-error",
+                    }
+                )
+                return observation.model_copy(update={"public_health": health})
+            return observation
+
+        with patch.object(provider, "current_route", side_effect=route):
+            checkpoint = execute_testing_rebuild(
+                self.plan,
+                RecordTestingRebuildStore(cast(RebuildRecordStore, cast(object, self.store))),
+                provider,
+                clock=lambda: provider.now,
+                reservation=self.reservation,
+                operation_attempt=self.operation.attempt,
+            )
+        assert checkpoint.candidate_probe is not None
+        self.assertNotIn("private-", checkpoint.candidate_probe.model_dump_json())
+        key = next(key for key in self.rows if key[0] == REBUILD_CHECKPOINT_SCOPE)
+        self.rows[key] = self.rows[key].model_copy(
+            update={"response_payload": checkpoint.model_dump(mode="json")}
+        )
+        evidence = self.read()
+        self.assertEqual(evidence.terminal_probe.http_status, 503)
+        self.assertEqual(evidence.terminal_probe.attempt, self.reservation.attempt)
+        self.assertNotIn("private-", evidence.model_dump_json())
+
     def test_failed_checkpoint_reports_probe_loss_without_claiming_recovery(self) -> None:
+        key = next(key for key in self.rows if key[0] == REBUILD_CHECKPOINT_SCOPE)
+        payload = self.rows[key].response_payload.copy()
+        payload.pop("candidate_probe", None)
+        self.rows[key] = self.rows[key].model_copy(update={"response_payload": payload})
         evidence = self.read()
         self.assertEqual(evidence.reservation.availability, "present")
         self.assertEqual(evidence.reservation.binding, "matched")
@@ -369,7 +477,9 @@ class NativeTestingEvidenceTests(unittest.TestCase):
             observation.model_copy(update={"host": "foreign.invalid"}),
         ):
             with self.subTest(has_health=probe.public_health is not None):
-                checkpoint = self.checkpoint.model_copy(update={"route": probe})
+                checkpoint = self.checkpoint.model_copy(
+                    update={"route": probe, "candidate_probe": None}
+                )
                 self.rows[key] = original.model_copy(
                     update={"response_payload": checkpoint.model_dump(mode="json")}
                 )

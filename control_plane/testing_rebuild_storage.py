@@ -124,6 +124,12 @@ def require_rebuild_successor(
         )
         if steps.index(record.step) < steps.index(current.step):
             raise ValueError("A rebuild checkpoint cannot regress.")
+        if (
+            current.candidate_probe is not None
+            and current.error
+            and record.candidate_probe != current.candidate_probe
+        ):
+            raise ValueError("A rebuild cannot replace its failed candidate probe.")
         if current.retirement_recovery is not None and (
             record.retirement_recovery != current.retirement_recovery
         ):

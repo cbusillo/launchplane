@@ -5,8 +5,16 @@ import json
 from threading import Thread
 from typing import Any
 import unittest
+from unittest.mock import patch
+from urllib.error import URLError
+from ssl import SSLError
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.testing_rebuild import (
+    TestingPublicHealthEvidence,
+    TestingRouteObservation,
+)
+from datetime import UTC, datetime
 from control_plane.testing_rebuild_service import read_public_testing_health
 
 
@@ -57,6 +65,19 @@ class TestingPublicHealthTests(unittest.TestCase):
         self.assertEqual(health.status, "pass")
         self.assertEqual(health.observed_runtime_identity, self.identity)
         self.assertEqual(health.urls, (self.base_url + "/launchplane/health",))
+        route = TestingRouteObservation(
+            route_id="fixture-route",
+            host="example.invalid",
+            target_url="http://candidate:8069",
+            slot_id="fixture-candidate",
+            applied=True,
+            authoritative_router_count=1,
+            observed_at=datetime.now(UTC),
+            public_health=health,
+        )
+        shared_health = route.model_dump(mode="json")["public_health"]
+        self.assertNotIn("http_status", shared_health)
+        self.assertNotIn("failure_kind", shared_health)
 
     def test_explicit_health_url_keeps_its_path_and_query(self) -> None:
         request_target = "/identity?mode=testing"
@@ -73,12 +94,18 @@ class TestingPublicHealthTests(unittest.TestCase):
         self.assertEqual(health.status, "pending")
         self.assertFalse(health.verified)
         self.assertEqual(self.requests, ["/health"])
+        assert isinstance(health, TestingPublicHealthEvidence)
+        self.assertEqual(health.failure_kind, "redirect")
 
     def test_unparseable_body_does_not_become_a_verified_failure_or_success(self) -> None:
         self.body = b"unparseable"
         health = read_public_testing_health(self.base_url, "/health")
         self.assertFalse(health.verified)
         self.assertEqual(health.status, "pending")
+
+        assert isinstance(health, TestingPublicHealthEvidence)
+        self.assertEqual(health.failure_kind, "invalid_response")
+        self.assertEqual(health.http_status, self.status)
 
     def test_nonmapping_is_unknown_and_malformed_mapping_preserves_classification(self) -> None:
         self.body = b"[]"
@@ -130,3 +157,30 @@ class TestingPublicHealthTests(unittest.TestCase):
         self.status = 302
         self.assertNotEqual(self.private_health_exit_code(), 0)
         self.assertEqual(self.requests, ["/health"])
+
+    def test_http_failure_keeps_status_without_changing_nonstandard_failure(self) -> None:
+        self.body = b"private-response-token"
+        for status in (503, 600):
+            with self.subTest(status=status):
+                self.status = status
+                health = read_public_testing_health(self.base_url, "/health?token=private")
+                self.assertEqual(health.status, "fail")
+                self.assertTrue(health.verified)
+                assert isinstance(health, TestingPublicHealthEvidence)
+                self.assertEqual(health.http_status, status if status < 600 else None)
+                self.assertNotIn(self.body.decode(), health.model_dump_json())
+
+    def test_transport_category_never_retains_uncontrolled_exception_text(self) -> None:
+        for reason, expected in (
+            (ConnectionRefusedError("private-host-and-password"), "connection"),
+            (SSLError("private-host-and-password"), "tls"),
+            (TimeoutError("private-host-and-password"), "timeout"),
+        ):
+            with self.subTest(expected=expected), patch("urllib.request.build_opener") as opener:
+                opener.return_value.open.side_effect = URLError(reason)
+                health = read_public_testing_health(self.base_url, "/health")
+                self.assertFalse(health.verified)
+                self.assertEqual(health.status, "pending")
+                self.assertEqual(getattr(health, "failure_kind", None), expected)
+                self.assertNotIn("private-host-and-password", health.model_dump_json())
+                opener.return_value.open.assert_called_once()
