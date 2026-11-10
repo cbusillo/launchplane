@@ -111,7 +111,7 @@ class MergeTrainFeedbackRetryTests(TestCase):
                     )
                     results.append(
                         write_merge_train_pr_feedback_record(
-                            store=store,
+                            store=require_merge_train_pr_feedback_record_store(store),
                             request=request
                             if index < 5
                             else request.model_copy(
@@ -171,7 +171,7 @@ class MergeTrainFeedbackRetryTests(TestCase):
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(Path(directory))
             held = write_merge_train_pr_feedback_record(
-                store=store,
+                store=require_merge_train_pr_feedback_record_store(store),
                 request=MergeTrainPrFeedbackEnvelope.model_validate(
                     build_feedback_payloads(response=response)[1]
                 ),
