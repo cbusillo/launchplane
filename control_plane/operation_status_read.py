@@ -77,6 +77,10 @@ def operation_status_read_view(operation: BaseModel, *, poll_url: str) -> dict[s
             view["error_description"] = (
                 f"{view['error_description']} Preparation failure: {cause}".strip()
             )
+        else:
+            view["error_description"] = (
+                "The candidate preparation failed; native failure details are unavailable."
+            )
     view["error_detail_keys"] = list(
         safe_error_detail_keys(error_source.get("error_detail_keys") or ())
     )

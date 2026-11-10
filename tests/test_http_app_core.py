@@ -1905,6 +1905,21 @@ class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
                 operation,
             )
 
+        from control_plane.operation_status_read import operation_status_read_view
+
+        unavailable = operation_status_read_view(
+            operation.model_copy(
+                update={
+                    "result": result.model_copy(
+                        update={"runtime_source": {"copy_failure": "private raw error"}}
+                    )
+                }
+            ),
+            poll_url="fixture",
+        )
+        self.assertTrue(unavailable["error_description"])
+        self.assertNotIn("private", str(unavailable["error_description"]))
+
     async def test_read_only_recovery_classifies_legacy_journal_and_preserves_fence(self) -> None:
         from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests
 

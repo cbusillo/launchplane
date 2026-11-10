@@ -79,7 +79,7 @@ def copy_failure_diagnostics_library() -> str:
         + f"COPY_FAILURE_OUTPUT_BYTES = {COPY_FAILURE_OUTPUT_BYTES!r}\n"
         + f"COPY_FAILURE_STATE_DIRECTORY = {COPY_FAILURE_STATE_DIRECTORY!r}\n"
         + """
-def copy_failure_mount_is_private(source):
+def copy_failure_mount_is_private(source: object) -> bool:
     from pathlib import Path
     if not isinstance(source, str) or not Path(source).is_absolute():
         return False
@@ -88,7 +88,7 @@ def copy_failure_mount_is_private(source):
     return not (private.is_relative_to(path) or path.is_relative_to(private))
 
 
-def copy_failure_storage_is_private(containers):
+def copy_failure_storage_is_private(containers: object) -> bool:
     if not isinstance(containers, list):
         return False
     try:
@@ -154,7 +154,7 @@ copy_failure_stage = CopyFailureStage.HOST_PREPARATION
 copy_failure_containers = globals().get('copy_failure_containers')
 
 
-def copy_failure_cause(error):
+def copy_failure_cause(error: Exception) -> Exception:
     chain = [error]
     while not chain[-1].__suppress_context__ and chain[-1].__context__ is not None:
         chain.append(chain[-1].__context__)
@@ -175,7 +175,7 @@ def copy_failure_cause(error):
     return error
 
 
-def emit_copy_failure(error):
+def emit_copy_failure(error: Exception) -> None:
     error = copy_failure_cause(error)
     markers = getattr(error, 'copy_failure_markers', None)
     if markers is None:
@@ -185,7 +185,7 @@ def emit_copy_failure(error):
         print(key + '=' + value, flush=True)
 
 
-def copy_command_failure(error, result, spec, containers=None):
+def copy_command_failure(error: Exception, result: object, spec: dict[str, object], containers: object = None) -> Exception:
     stage = copy_failure_stage
     for line in (result.stdout or b'').decode(errors='replace').splitlines():
         key, separator, value = line.partition('=')
