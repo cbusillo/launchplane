@@ -1259,6 +1259,30 @@ a later live-target runtime sync delivers it from the managed secret. A
 production secret adopted as `shared_safe` with a sharing reason can then be
 copied to testing by reference, as described above.
 
+## First-empty Odoo runtime credentials
+
+For the first-empty production preparation contract in
+[the service boundary](service-boundary.md#first-empty-odoo-production-inputs),
+use `odoo_first_empty: "runtime_credentials"` on the existing config route.
+Each `secrets` entry names an exact runtime purpose (`ODOO_DB_PASSWORD`,
+`ODOO_MASTER_PASSWORD` or `ODOO_ADMIN_PASSWORD`), `generate: "odoo_first_empty"`
+and `secret_class: "prod_only"`. The name equals its binding key, integration
+is `runtime_environment`, scope is `context_instance`, and context/instance
+must equal the original product's prod target. Omitted route fields use those
+existing defaults. Never include `value`, `copy_from`, provider adoption or a
+sharing reason. The `testing_local` request and testing namespace remain
+restricted to testing.
+
+A purpose with an existing binding or secret record cannot be rotated through
+this intent. Other existing purposes and all non-secret settings are preserved.
+Generation happens inside the service only after current qualification and a
+matching reviewed apply; plans and completed replays generate nothing. This
+uses the existing random generation, encryption, binding, audit and atomic
+publication paths. No person account is created and no credential is delivered
+to a runtime. Read names, IDs, version, scope and provenance through the existing
+secret metadata and product-environment read paths; values, ciphertext and value
+hashes are never review or response data.
+
 ## Shared preview settings
 
 See [preview runtime settings](preview-settings.md) for the managed `preview`

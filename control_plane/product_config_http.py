@@ -486,14 +486,8 @@ class ProductConfigApplyEnvelope(BaseModel):
                 or self.public_hosts is not None
                 or self.odoo_business_hours is not None
                 or self.disable_secret_bindings
-                or (self.odoo_first_empty == "data_policy" and self.secrets)
-                or (
-                    self.odoo_first_empty == "runtime_credentials"
-                    and (
-                        not self.secrets
-                        or any(secret.generate != "odoo_first_empty" for secret in self.secrets)
-                    )
-                )
+                or not self.secrets
+                or any(secret.generate != "odoo_first_empty" for secret in self.secrets)
             ):
                 raise ValueError(
                     "First-empty preparation requires a standalone exact production intent."

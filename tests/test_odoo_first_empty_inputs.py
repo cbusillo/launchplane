@@ -1,5 +1,8 @@
 import os
 import json
+import base64
+import subprocess
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,7 +23,11 @@ from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.product_config import apply_product_config_bundle
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.odoo_first_empty_inputs import first_empty_storage_snapshot
+from control_plane.odoo_first_empty_inputs import (
+    first_empty_storage_snapshot,
+    first_empty_storage_program,
+    resolve_first_empty_authority,
+)
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
 from tests.support.http import request
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
@@ -28,7 +35,7 @@ from tests.support.stores import _write_runtime_key_safety_policy
 from tests.support.auth import _local_operator_policy
 
 
-class FirstEmptyInputsHttpTests(unittest.IsolatedAsyncioTestCase):
+class FirstEmptyInputsFixture(unittest.TestCase):
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -139,6 +146,8 @@ class FirstEmptyInputsHttpTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+
+class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsyncioTestCase):
     async def post(self, intent: str, *, key: str = "", **extra: Any) -> Any:
         return await request(
             self.app,
@@ -152,39 +161,55 @@ class FirstEmptyInputsHttpTests(unittest.IsolatedAsyncioTestCase):
                 "mode": "dry-run",
                 "reason": "Prepare empty original",
                 "odoo_first_empty": intent,
+                **(
+                    {
+                        "secrets": [
+                            {
+                                "binding_key": "ODOO_DB_PASSWORD",
+                                "generate": "odoo_first_empty",
+                                "secret_class": "prod_only",
+                            }
+                        ]
+                    }
+                    if intent == "runtime_credentials"
+                    else {}
+                ),
                 **extra,
             },
         )
 
-    async def test_reviewed_data_policy_changes_only_original_lane_and_completed_replay_skips_probe(
+    async def test_missing_profile_or_observation_authority_refuses_before_remote_read(
         self,
     ) -> None:
-        response = await self.post("data_policy")
-        self.assertEqual(response.status_code, 202, response.text)
-        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
-        review = response.json()["result"]["odoo_first_empty"]["plan_sha256"]
-        applied = await self.post(
-            "data_policy", mode="apply", reviewed_plan_sha256=review, key="policy-original"
-        )
-        self.assertEqual(applied.status_code, 202, applied.text)
-        after = self.store.read_product_profile_record(self.profile.product)
-        expected = self.profile.model_dump(mode="json")
-        for lane in expected["lanes"]:
-            if lane["instance"] == "prod":
-                lane["odoo_data_policy"].update(
-                    data_authority="resettable", allowed_rebuild_sources=["empty"]
-                )
-        expected.update(source=after.source, updated_at=after.updated_at)
-        self.assertEqual(after.model_dump(mode="json"), expected)
-        self.assertEqual(self.store.list_runtime_environment_records(), (self.runtime,))
-        self.assertFalse(self.store.list_secret_records())
-        self.probe.reset_mock()
-        replay = await self.post(
-            "data_policy", mode="apply", reviewed_plan_sha256=review, key="policy-original"
-        )
-        self.assertEqual(replay.status_code, 202, replay.text)
-        self.assertTrue(replay.json()["replayed"])
+        from control_plane.http_app import LaunchplaneAuthzPolicyRuntime
+
+        original = LaunchplaneAuthzPolicyRuntime.allows
+        for denied in ("product_profile.read", "operations.read"):
+
+            def permits(policy: Any, **kwargs: Any) -> bool:
+                return kwargs["action"] != denied and original(policy, **kwargs)
+
+            with (
+                self.subTest(action=denied),
+                patch.object(LaunchplaneAuthzPolicyRuntime, "allows", permits),
+            ):
+                response = await self.post("runtime_credentials")
+                self.assertEqual(response.status_code, 403, response.text)
         self.probe.assert_not_called()
+        self.assertFalse(self.store.list_secret_records())
+
+    async def test_data_policy_intent_cannot_leave_a_durable_empty_classification(self) -> None:
+        for mode in ("dry-run", "apply"):
+            response = await self.post(
+                "data_policy",
+                mode=mode,
+                key="obsolete-policy",
+                **({"reviewed_plan_sha256": "a" * 64} if mode == "apply" else {}),
+            )
+            self.assertEqual(response.status_code, 400, response.text)
+        self.probe.assert_not_called()
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+        self.assertFalse(self.store.list_secret_records())
 
     async def test_runtime_generation_is_apply_only_encrypted_and_replay_preserves_versions(
         self,
@@ -246,17 +271,17 @@ class FirstEmptyInputsHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refused.status_code, 400, refused.text)
 
     async def test_storage_or_profile_change_invalidates_review_without_publishing(self) -> None:
-        dry = await self.post("data_policy")
+        dry = await self.post("runtime_credentials")
         self.assertEqual(dry.status_code, 202, dry.text)
         review = dry.json()["result"]["odoo_first_empty"]["plan_sha256"]
         self.storage_identity = "b" * 64
         refused = await self.post(
-            "data_policy", mode="apply", reviewed_plan_sha256=review, key="stale-original"
+            "runtime_credentials", mode="apply", reviewed_plan_sha256=review, key="stale-original"
         )
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
 
-    async def test_existing_sibling_credentials_survive_policy_and_new_absent_purpose(self) -> None:
+    async def test_existing_sibling_credentials_survive_new_absent_purpose(self) -> None:
         apply_product_config_bundle(
             record_store=self.store,
             payload={
@@ -280,7 +305,6 @@ class FirstEmptyInputsHttpTests(unittest.IsolatedAsyncioTestCase):
             self.store.read_secret_version(record.current_version_id) for record in existing
         )
         requests: tuple[tuple[str, dict[str, Any]], ...] = (
-            ("data_policy", {}),
             (
                 "runtime_credentials",
                 {
@@ -371,13 +395,13 @@ class FirstEmptyInputsHttpTests(unittest.IsolatedAsyncioTestCase):
         self.probe.side_effect = lambda **kwargs: kwargs["receive"](
             {"type": "complete", "status": "unknown"}
         )
-        self.assertEqual((await self.post("data_policy")).status_code, 409)
+        self.assertEqual((await self.post("runtime_credentials")).status_code, 409)
         self.probe.side_effect = lambda **kwargs: kwargs["receive"]({"type": "denied"})
-        denied = await self.post("data_policy")
+        denied = await self.post("runtime_credentials")
         self.assertEqual(denied.status_code, 403, denied.text)
         self.probe.side_effect = self.observe
         refused = await self.post(
-            "data_policy", mode="apply", key="unreviewed", reviewed_plan_sha256="a" * 64
+            "runtime_credentials", mode="apply", key="unreviewed", reviewed_plan_sha256="a" * 64
         )
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
@@ -405,18 +429,18 @@ class FirstEmptyInputsHttpTests(unittest.IsolatedAsyncioTestCase):
         self.probe.assert_not_called()
         self.assertFalse(self.store.list_secret_records())
 
-    async def test_live_authoritative_foreign_or_provider_workload_refuses_before_probe(
+    async def test_live_non_odoo_or_provider_workload_refuses_before_probe(
         self,
     ) -> None:
         for change in ({"production_use": "live"}, {"driver_id": "generic-web"}):
             with self.subTest(change=change):
                 self.store.write_product_profile_record(self.profile.model_copy(update=change))
-                refused = await self.post("data_policy")
+                refused = await self.post("runtime_credentials")
                 self.assertEqual(refused.status_code, 409, refused.text)
                 self.probe.assert_not_called()
         self.store.write_product_profile_record(self.profile)
         self.provider_payload["composeFile"] = "services: {existing: {image: existing}}"
-        self.assertEqual((await self.post("data_policy")).status_code, 409)
+        self.assertEqual((await self.post("runtime_credentials")).status_code, 409)
         self.probe.assert_not_called()
 
     async def test_authoritative_data_recorded_use_custody_and_target_alias_refuse(self) -> None:
@@ -437,7 +461,7 @@ class FirstEmptyInputsHttpTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.store.write_product_profile_record(protected)
-        self.assertEqual((await self.post("data_policy")).status_code, 409)
+        self.assertEqual((await self.post("runtime_credentials")).status_code, 409)
         self.store.write_product_profile_record(self.profile)
         now = datetime.now(UTC)
         for fields in (
@@ -460,14 +484,14 @@ class FirstEmptyInputsHttpTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
             )
-            self.assertEqual((await self.post("data_policy")).status_code, 409)
+            self.assertEqual((await self.post("runtime_credentials")).status_code, 409)
         self.probe.assert_not_called()
 
     async def test_same_physical_target_cannot_be_claimed_by_another_lane(self) -> None:
         self.store.write_dokploy_target_id_record(
             self.target_id.model_copy(update={"context": "another", "instance": "testing"})
         )
-        self.assertEqual((await self.post("data_policy")).status_code, 409)
+        self.assertEqual((await self.post("runtime_credentials")).status_code, 409)
         self.probe.assert_not_called()
 
     async def test_plain_runtime_credential_cannot_be_hashed_into_a_review_or_overridden(
@@ -478,10 +502,27 @@ class FirstEmptyInputsHttpTests(unittest.IsolatedAsyncioTestCase):
                 update={"env": {**self.runtime.env, "ODOO_DB_PASSWORD": "borrowed-runtime-value"}}
             )
         )
-        refused = await self.post("data_policy")
+        refused = await self.post("runtime_credentials")
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertNotIn("borrowed-runtime-value", refused.text)
         self.probe.assert_not_called()
+
+    async def test_foreign_context_owner_and_missing_prod_lane_never_observe_storage(self) -> None:
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"product": "foreign-product"})
+        )
+        response = await self.post("runtime_credentials")
+        self.assertIn(response.status_code, {403, 409})
+        self.probe.assert_not_called()
+        self.store.write_product_profile_record(
+            self.profile.model_copy(
+                update={
+                    "lanes": tuple(lane for lane in self.profile.lanes if lane.instance != "prod")
+                }
+            )
+        )
+        with self.assertRaises(ValueError):
+            resolve_first_empty_authority(self.store, self.profile.product, self.context)
 
 
 class FirstEmptyStorageTests(unittest.TestCase):
@@ -509,17 +550,20 @@ class FirstEmptyStorageTests(unittest.TestCase):
         if arguments[0] == "ps":
             return "\n".join(self.containers)
         if arguments[0] == "inspect":
-            return json.dumps([self.containers[arguments[-1]]])
+            return "\n".join(
+                json.dumps(self.containers[identifier]) for identifier in arguments[5:]
+            )
         if arguments[:2] == ("volume", "inspect"):
-            return json.dumps(
-                [
+            return "\n".join(
+                json.dumps(
                     {
-                        "Name": arguments[-1],
+                        "Name": name,
                         "Driver": "local",
-                        "Mountpoint": str(self.volume_root / arguments[-1] / "_data"),
-                        **self.volume_metadata.get(arguments[-1], {}),
+                        "Mountpoint": str(self.volume_root / name / "_data"),
+                        **self.volume_metadata.get(name, {}),
                     }
-                ]
+                )
+                for name in arguments[4:]
             )
         raise AssertionError(arguments)
 
@@ -563,6 +607,7 @@ class FirstEmptyStorageTests(unittest.TestCase):
         (project / "backup").write_text("only copy")
         with self.assertRaises(ValueError):
             self.snapshot()
+
         (project / "backup").unlink()
         self.containers["container-other"] = {
             "Id": "container-other",
@@ -574,3 +619,112 @@ class FirstEmptyStorageTests(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             self.snapshot()
+
+    def test_physical_inode_aliases_protect_storage_even_when_paths_differ(self) -> None:
+        backing = self.volume_root / "db" / "_data"
+        backing.mkdir(parents=True)
+        self.names.append("db")
+        alias = self.root / "different-path"
+        alias.mkdir()
+        self.containers["container-other"] = {
+            "Id": "container-other",
+            "Name": "other",
+            "Labels": {},
+            "Mounts": [{"Type": "bind", "Source": str(alias)}],
+        }
+        self.snapshot()
+
+        def same_backing(path: Path, **kwargs: Any) -> os.stat_result:
+            return os.stat(backing if path == alias else path, **kwargs)
+
+        with patch.object(Path, "stat", same_backing), self.assertRaises(ValueError):
+            self.snapshot()
+
+
+class FirstEmptyProgramTests(unittest.TestCase):
+    def test_generated_program_batches_inventory_and_distinguishes_denied_from_unknown(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            volume_root = root / "engine" / "volumes"
+            volume_root.mkdir(parents=True)
+            state_path = root / "state.json"
+            executable = root / "docker"
+            executable.write_text(
+                f"#!{sys.executable}\n"
+                + r"""
+import json,os,sys
+from pathlib import Path
+p=Path(os.environ['FAKE_DOCKER_STATE'])
+s=json.loads(p.read_text())
+s['calls']=s.get('calls',0)+1
+p.write_text(json.dumps(s))
+if sys.argv[1:3] != ['--host','unix:///var/run/docker.sock']:
+    raise SystemExit(97)
+a=sys.argv[3:]
+if s.get('denied'):
+    print('permission denied while trying to connect to the docker daemon',file=sys.stderr)
+    raise SystemExit(1)
+if a[0]=='info':
+    print('[]' if s.get('unknown') else json.dumps({'DockerRootDir':s['root'],'Swarm':{'LocalNodeState':'active'}}))
+elif a[:2]==['node','ls']:
+    print(json.dumps({'ID':'node-original','Self':True}))
+elif a[:2]==['service','ls']:
+    print('foreign-service')
+elif a[:2]==['service','inspect']:
+    for identifier in a[4:]:
+        print(json.dumps({'ID':identifier,'Name':'unrelated','Labels':{},'Mounts':[]}))
+elif a[:2]==['volume','ls']:
+    print('\n'.join('unrelated-'+str(i) for i in range(s['volumes'])))
+elif a[:2]==['volume','inspect']:
+    for name in a[4:]:
+        print(json.dumps({'Name':name,'Driver':'local','Options':{},'Labels':{},'Mountpoint':s['root']+'/volumes/'+name+'/_data'}))
+elif a[0]=='ps':
+    print('foreign-container')
+elif a[0]=='inspect':
+    for identifier in a[5:]:
+        print(json.dumps({'Id':identifier,'Name':'unrelated','Labels':{},'Mounts':[]}))
+else:
+    raise SystemExit(98)
+"""
+            )
+            executable.chmod(0o755)
+            spec = {"project": "fictional-prod", "volumes": ["db", "data", "logs"]}
+            program = root / "observe.py"
+            program.write_text(first_empty_storage_program(compose_root=root / "compose"))
+            for scenario, expected in (
+                ("empty", "complete"),
+                ("denied", "denied"),
+                ("unknown", "complete"),
+            ):
+                with self.subTest(scenario=scenario):
+                    state_path.write_text(
+                        json.dumps(
+                            {"root": str(volume_root.parent), "volumes": 400, scenario: True}
+                        )
+                    )
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-I",
+                            str(program),
+                            base64.b64encode(json.dumps(spec).encode()).decode(),
+                            "FRAME:",
+                        ],
+                        env={"PATH": str(root), "FAKE_DOCKER_STATE": str(state_path)},
+                        capture_output=True,
+                        text=True,
+                        timeout=20,
+                        check=True,
+                    )
+                    frame = json.loads(result.stdout.removeprefix("FRAME:"))
+                    self.assertEqual(frame["type"], expected, result.stdout)
+                    if scenario == "empty":
+                        self.assertEqual(
+                            frame["binding"], nonvalidating_compact_sorted_json_sha256(spec)
+                        )
+                        self.assertEqual(len(frame["storage"]), 64)
+                        self.assertLess(json.loads(state_path.read_text())["calls"], 40)
+                    elif scenario == "unknown":
+                        self.assertEqual(frame["status"], "unknown")

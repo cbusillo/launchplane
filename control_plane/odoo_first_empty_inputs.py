@@ -12,13 +12,13 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
     LaunchplaneProductProfileRecord,
-    ProductOdooLaneDataPolicy,
     product_target_owner_products,
 )
 from control_plane.dokploy import api, native_copy_stream, source
@@ -34,19 +34,17 @@ from control_plane.storage.product_authority_bundle import (
 if TYPE_CHECKING:
     from control_plane.storage.postgres import PostgresRecordStore
 
-FirstEmptyIntent = Literal["data_policy", "runtime_credentials"]
+FirstEmptyIntent = Literal["runtime_credentials"]
 
 
 class FirstEmptyInputResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    intent: FirstEmptyIntent
+    intent: FirstEmptyIntent = "runtime_credentials"
     plan_sha256: str
     data: Literal["empty"] = "empty"
     provenance: Literal["service:original-target-storage"] = "service:original-target-storage"
     applied: bool = False
-    current_policy: ProductOdooLaneDataPolicy
-    proposed_policy: ProductOdooLaneDataPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -74,9 +72,11 @@ class FirstEmptyAuthority:
 @dataclass(frozen=True)
 class QualifiedFirstEmptyInputs:
     authority: FirstEmptyAuthority
-    intent: FirstEmptyIntent
+    intent: FirstEmptyIntent | Literal["replacement"]
     plan_sha256: str
     observed_at: datetime
+    storage_sha256: str
+    provider_spec: dict[str, object]
 
     def validate(self, product: str, context: str, instance: str) -> None:
         if (product, context, instance) != (
@@ -88,12 +88,18 @@ class QualifiedFirstEmptyInputs:
 
 
 def resolve_first_empty_authority(
-    store: PostgresRecordStore, product: str, context: str
+    store: PostgresRecordStore,
+    product: str,
+    context: str,
+    *,
+    pending_deployment: DeploymentRecord | None = None,
 ) -> FirstEmptyAuthority:
     profile = store.read_product_profile_record(product)
     lane = next(
-        lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "prod")
+        (lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "prod")), None
     )
+    if lane is None:
+        raise ValueError("The product has no original production lane in this context.")
     if (
         profile.driver_id != "odoo"
         or not profile.is_active
@@ -138,6 +144,7 @@ def resolve_first_empty_authority(
         raise ValueError("Recorded data, use or custody protects this target.")
     if (
         store.list_deployment_records(context_name=context, instance_name="prod")
+        != ((pending_deployment,) if pending_deployment is not None else ())
         or store.list_promotion_records(context_name=context, to_instance_name="prod")
         or store.list_backup_gate_records(context_name=context, instance_name="prod")
     ):
@@ -211,7 +218,11 @@ def resolve_first_empty_authority(
 
 
 def _provider_projection(
-    payload: api.JsonObject, authority: FirstEmptyAuthority
+    payload: api.JsonObject,
+    authority: FirstEmptyAuthority,
+    *,
+    staged_environment: str | None = None,
+    staged_compose: str | None = None,
 ) -> dict[str, object]:
     if (
         not {"composeId", "appName", "serverId", "env", "composeFile", "mounts", "autoDeploy"}
@@ -219,8 +230,10 @@ def _provider_projection(
         or payload.get("composeId") != authority.target_id.target_id
         or not isinstance(payload.get("appName"), str)
         or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", str(payload["appName"]))
-        or payload.get("env") not in {None, ""}
-        or payload.get("composeFile") not in {None, ""}
+        or payload.get("env")
+        not in ((None, "") if staged_environment is None else (staged_environment,))
+        or payload.get("composeFile")
+        not in ((None, "") if staged_compose is None else (staged_compose,))
         or payload.get("mounts") not in (None, [])
         or payload.get("autoDeploy") is not False
     ):
@@ -239,9 +252,25 @@ def qualify_first_empty_storage(
     root: Path,
     product: str,
     context: str,
-    intent: FirstEmptyIntent,
+    intent: FirstEmptyIntent | Literal["replacement"],
+    previous: QualifiedFirstEmptyInputs | None = None,
+    pending_deployment: DeploymentRecord | None = None,
+    staged_environment: str | None = None,
+    staged_compose: str | None = None,
 ) -> QualifiedFirstEmptyInputs:
-    authority = resolve_first_empty_authority(store, product, context)
+    if (
+        pending_deployment is not None
+        or staged_environment is not None
+        or staged_compose is not None
+    ) and (previous is None or previous.intent != "replacement" or intent != "replacement"):
+        raise ValueError("Staged inputs require the original executor qualification.")
+    authority = resolve_first_empty_authority(
+        store, product, context, pending_deployment=pending_deployment
+    )
+    if previous is not None and authority != previous.authority:
+        raise ValueError("Original profile, target, runtime or binding authority changed.")
+    if intent == "replacement" and not authority.profile.prelaunch_bootstrap_authorized:
+        raise ValueError("Empty replacement requires explicit prelaunch bootstrap authority.")
     host, token = source.read_dokploy_config(
         control_plane_root=root, database_url=store.database_url
     )
@@ -258,9 +287,13 @@ def qualify_first_empty_storage(
             require_complete=True,
         ):
             raise ValueError("Provider deployment history contradicts first-empty preparation.")
-        return _provider_projection(payload, authority)
+        return _provider_projection(
+            payload, authority, staged_environment=staged_environment, staged_compose=staged_compose
+        )
 
     spec = provider_read()
+    if previous is not None and spec != previous.provider_spec:
+        raise ValueError("Original physical target changed.")
     frames: list[dict[str, object]] = []
     native_copy_stream.run_managed_server_program(
         host=host,
@@ -283,7 +316,11 @@ def qualify_first_empty_storage(
         or not isinstance(storage, str)
         or re.fullmatch(r"[a-f0-9]{64}", storage) is None
         or provider_read() != spec
-        or resolve_first_empty_authority(store, product, context) != authority
+        or resolve_first_empty_authority(
+            store, product, context, pending_deployment=pending_deployment
+        )
+        != authority
+        or (previous is not None and storage != previous.storage_sha256)
     ):
         raise ValueError("Fresh original-target storage qualification is incomplete or changed.")
     digest = nonvalidating_compact_sorted_json_sha256(
@@ -294,36 +331,7 @@ def qualify_first_empty_storage(
             "intent": intent,
         }
     )
-    return QualifiedFirstEmptyInputs(authority, intent, digest, datetime.now(UTC))
-
-
-def build_first_empty_data_policy_plan(
-    qualified: QualifiedFirstEmptyInputs,
-) -> LaunchplaneProductProfileRecord:
-    profile = qualified.authority.profile
-    context = qualified.authority.target.context
-    qualified.validate(profile.product, context, "prod")
-    replacement = profile.model_copy(
-        update={
-            "lanes": tuple(
-                lane.model_copy(
-                    update={
-                        "odoo_data_policy": ProductOdooLaneDataPolicy(
-                            data_authority="resettable",
-                            allowed_rebuild_sources=("empty",),
-                            requires_runtime_identity=lane.odoo_data_policy.requires_runtime_identity,
-                        )
-                    }
-                )
-                if (lane.context, lane.instance) == (context, "prod")
-                else lane
-                for lane in profile.lanes
-            )
-        }
-    )
-    return LaunchplaneProductProfileRecord.model_validate(
-        replacement.model_dump(mode="json")
-    ).validate_write_contract()
+    return QualifiedFirstEmptyInputs(authority, intent, digest, datetime.now(UTC), storage, spec)
 
 
 def validate_first_empty_generation(
@@ -374,11 +382,19 @@ def first_empty_storage_snapshot(
             raise ValueError("Incomplete Docker inventory.")
         return sorted(values)
 
-    def metadata(*arguments: str) -> dict[str, Any]:
-        items = json.loads(docker(*arguments))
-        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
-            raise ValueError("Incomplete Docker metadata.")
-        return items[0]
+    def metadata(identifiers: list[str], *arguments: str, key: str) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for offset in range(0, len(identifiers), 128):
+            batch = identifiers[offset : offset + 128]
+            items = [json.loads(line) for line in docker(*arguments, *batch).splitlines()]
+            if (
+                len(items) != len(batch)
+                or any(not isinstance(item, dict) for item in items)
+                or {item.get(key) for item in items} != set(batch)
+            ):
+                raise ValueError("Incomplete Docker metadata.")
+            result.update({item[key]: item for item in items})
+        return result
 
     project = spec["project"]
     names = spec["volumes"]
@@ -415,10 +431,30 @@ def first_empty_storage_snapshot(
         if not path.is_absolute():
             raise ValueError("Backing path is unknown.")
         path = path.resolve()
-        return any(
+        if any(
             path == original or original in path.parents or path in original.parents
             for original in (*paths, project_root)
-        )
+        ):
+            return True
+
+        def path_identity(candidate: Path) -> tuple[int, int] | None:
+            if not candidate.exists():
+                return None
+            observed = candidate.stat()
+            return observed.st_dev, observed.st_ino
+
+        mounted_identity = path_identity(path)
+        for original in (*paths, *(storage_path / "_data" for storage_path in paths), project_root):
+            original_identity = path_identity(original)
+            if original_identity is not None and any(
+                path_identity(parent) == original_identity for parent in (path, *path.parents)
+            ):
+                return True
+            if mounted_identity is not None and any(
+                path_identity(parent) == mounted_identity for parent in original.parents
+            ):
+                return True
+        return False
 
     info = root_info
     if not isinstance(info, dict) or info.get("Swarm", {}).get("LocalNodeState") not in {
@@ -427,18 +463,18 @@ def first_empty_storage_snapshot(
     }:
         raise ValueError("Original engine inventory is incomplete.")
     swarm = read_swarm(docker) if info["Swarm"]["LocalNodeState"] == "active" else []
-    services = inventory("service", "ls", "--quiet") if swarm else []
-    service_rows = {}
-    for identifier in services:
-        row = metadata(
-            "service",
-            "inspect",
-            "--format",
-            '[{"ID":{{json .ID}},"Name":{{json .Spec.Name}},"Labels":{{json .Spec.Labels}},"Mounts":{{json .Spec.TaskTemplate.ContainerSpec.Mounts}}}]',
-            identifier,
-        )
+    services = inventory("service", "ls", "--quiet", "--no-trunc") if swarm else []
+    service_rows = metadata(
+        services,
+        "service",
+        "inspect",
+        "--format",
+        '{"ID":{{json .ID}},"Name":{{json .Spec.Name}},"Labels":{{json .Spec.Labels}},"Mounts":{{json .Spec.TaskTemplate.ContainerSpec.Mounts}}}',
+        key="ID",
+    )
+    for row in service_rows.values():
         mounts = row.get("Mounts") or []
-        if row.get("ID") != identifier or not isinstance(mounts, list):
+        if not isinstance(mounts, list):
             raise ValueError("Service inventory is incomplete.")
         if (
             row.get("Name") == project
@@ -451,14 +487,14 @@ def first_empty_storage_snapshot(
                 raise ValueError("Service backing storage is unknown.")
             if mount.get("Type") == "bind" and overlaps_original(str(mount.get("Source", ""))):
                 raise ValueError("Original storage is referenced by a service.")
-        service_rows[identifier] = row
     volumes = inventory("volume", "ls", "--quiet")
     containers = inventory("ps", "-aq", "--no-trunc")
+    volume_rows = metadata(volumes, "volume", "inspect", "--format", "{{json .}}", key="Name")
     selected: dict[str, object] = {}
     for name in volumes:
         if name in storage_names:
             continue
-        row = metadata("volume", "inspect", name)
+        row = volume_rows[name]
         labels = row.get("Labels") or {}
         options = row.get("Options") or {}
         if (
@@ -475,6 +511,7 @@ def first_empty_storage_snapshot(
             raise ValueError(
                 "Other storage retains original project custody or aliases its backing path."
             )
+    selected_identities: set[tuple[int, int]] = set()
     for name in storage_names:
         directory = volume_root / name
         if name not in volumes:
@@ -482,7 +519,7 @@ def first_empty_storage_snapshot(
                 raise ValueError("Unregistered original storage has retained custody.")
             selected[name] = "absent"
             continue
-        row = metadata("volume", "inspect", name)
+        row = volume_rows[name]
         backing = directory / "_data"
         if (
             row.get("Name") != name
@@ -496,23 +533,27 @@ def first_empty_storage_snapshot(
         ):
             raise ValueError("Original storage is nonempty, aliased or unavailable.")
         stat = backing.stat()
+        identity = stat.st_dev, stat.st_ino
+        if identity in selected_identities:
+            raise ValueError("Original storage purposes alias the same backing directory.")
+        selected_identities.add(identity)
         selected[name] = {
             "device": stat.st_dev,
             "inode": stat.st_ino,
             "modified": stat.st_mtime_ns,
             "metadata": row,
         }
-    rows: dict[str, object] = {}
-    for identifier in containers:
-        row = metadata(
-            "inspect",
-            "--type",
-            "container",
-            "--format",
-            '[{"Id":{{json .Id}},"Name":{{json .Name}},"Labels":{{json .Config.Labels}},"Mounts":{{json .Mounts}}}]',
-            identifier,
-        )
-        if row.get("Id") != identifier or not isinstance(row.get("Mounts"), list):
+    rows = metadata(
+        containers,
+        "inspect",
+        "--type",
+        "container",
+        "--format",
+        '{"Id":{{json .Id}},"Name":{{json .Name}},"Labels":{{json .Config.Labels}},"Mounts":{{json .Mounts}}}',
+        key="Id",
+    )
+    for row in rows.values():
+        if not isinstance(row.get("Mounts"), list):
             raise ValueError("Container storage inventory is incomplete.")
         labels = row.get("Labels") or {}
         if not isinstance(labels, dict) or labels.get("com.docker.compose.project") == project:
@@ -524,7 +565,6 @@ def first_empty_storage_snapshot(
                 continue
             if mount.get("Name") in selected or overlaps_original(str(mount.get("Source", ""))):
                 raise ValueError("Original storage is referenced by a container.")
-        rows[identifier] = row
     return {
         "volumes": volumes,
         "containers": rows,
@@ -536,7 +576,7 @@ def first_empty_storage_snapshot(
     }
 
 
-def first_empty_storage_program() -> str:
+def first_empty_storage_program(*, compose_root: Path = Path("/etc/dokploy/compose")) -> str:
     from control_plane.testing_application_capabilities import single_local_swarm_node
 
     return (
@@ -547,22 +587,25 @@ def first_empty_storage_program() -> str:
         + inspect.getsource(single_local_swarm_node)
         + "\n"
         + inspect.getsource(first_empty_storage_snapshot)
+        + "\nCOMPOSE_ROOT=Path("
+        + repr(str(compose_root))
+        + ")\n"
         + """
 def docker(*arguments):
-    result = subprocess.run(['docker', *arguments], capture_output=True, text=True, timeout=8)
+    result = subprocess.run(['docker', '--host', 'unix:///var/run/docker.sock', *arguments], capture_output=True, timeout=8)
     if result.returncode:
         if docker_daemon_authorization_denied(result.stderr):
             raise PermissionError('Docker read refused')
         raise ValueError('Docker read unavailable')
     if len(result.stdout) > 8 * 1024 * 1024:
         raise ValueError('Docker inventory exceeds bound')
-    return result.stdout
+    return result.stdout.decode('utf-8')
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 try:
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
-    before = first_empty_storage_snapshot(docker, spec, compose_root=Path('/etc/dokploy/compose'), read_swarm=single_local_swarm_node)
-    after = first_empty_storage_snapshot(docker, spec, compose_root=Path('/etc/dokploy/compose'), read_swarm=single_local_swarm_node)
+    before = first_empty_storage_snapshot(docker, spec, compose_root=COMPOSE_ROOT, read_swarm=single_local_swarm_node)
+    after = first_empty_storage_snapshot(docker, spec, compose_root=COMPOSE_ROOT, read_swarm=single_local_swarm_node)
     if before != after:
         raise ValueError('Storage changed during observation')
     result = {'type':'complete', 'binding':digest(spec), 'storage':digest(before['selected'])}

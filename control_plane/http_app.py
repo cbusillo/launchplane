@@ -16501,7 +16501,10 @@ def create_launchplane_fastapi_app(
                     " product/context."
                 ),
             )
-        if product_config_request.odoo_business_hours is not None:
+        if (
+            product_config_request.odoo_business_hours is not None
+            or product_config_request.odoo_first_empty is not None
+        ):
             required_actions = [
                 (
                     "product_profile.read",
@@ -16516,7 +16519,10 @@ def create_launchplane_fastapi_app(
                     AuthorizationTarget(scope="instance", instances=("prod",)),
                 ),
             ]
-            if product_config_request.mode == "apply":
+            if (
+                product_config_request.mode == "apply"
+                and product_config_request.odoo_business_hours is not None
+            ):
                 required_actions.append(
                     (
                         "product_profile.write",
@@ -16542,7 +16548,7 @@ def create_launchplane_fastapi_app(
                         status_code=403,
                         trace_id=trace_id,
                         code="authorization_denied",
-                        message=f"Caller cannot perform {required_action} for calendar configuration.",
+                        message=f"Caller cannot perform {required_action} for this configuration.",
                     )
         if (
             not fixed_service_input
@@ -16808,7 +16814,9 @@ def create_launchplane_fastapi_app(
                 )
         lane_provider_env_reader: control_plane_product_config.LaneProviderEnvReader | None = None
         public_hosts_plan: product_public_hosts.PublicHostsPlan | None = None
-        calendar_plan = None
+        from control_plane.contracts.odoo_business_hours import OdooBusinessHoursConfigResult
+
+        calendar_plan: OdooBusinessHoursConfigResult | None = None
         calendar_replacement = None
         from control_plane.odoo_first_empty_inputs import (
             QualifiedFirstEmptyInputs,
@@ -16851,7 +16859,6 @@ def create_launchplane_fastapi_app(
                     OSError,
                     KeyError,
                     TypeError,
-                    StopIteration,
                     click.ClickException,
                 ):
                     raise _launchplane_http_error(
@@ -16863,7 +16870,9 @@ def create_launchplane_fastapi_app(
             if product_config_request.odoo_business_hours is not None:
                 assert config_profile is not None
                 try:
-                    calendar_plan, calendar_replacement = await asyncio.to_thread(
+                    planned_calendar: tuple[
+                        OdooBusinessHoursConfigResult, LaunchplaneProductProfileRecord
+                    ] = await asyncio.to_thread(
                         odoo_business_hours_config.plan_business_hours_config,
                         store=database_store,
                         profile=config_profile,
@@ -16872,6 +16881,7 @@ def create_launchplane_fastapi_app(
                         reason=product_config_request.reason,
                         source_label=product_config_request.source_label,
                     )
+                    calendar_plan, calendar_replacement = planned_calendar
                     if product_config_request.mode == "apply" and (
                         product_config_request.reviewed_plan_sha256 != calendar_plan.plan_digest
                         or not product_config_dry_run_exists(
@@ -17047,25 +17057,11 @@ def create_launchplane_fastapi_app(
         if first_empty_plan is not None:
             from control_plane.odoo_first_empty_inputs import (
                 FirstEmptyInputResult,
-                build_first_empty_data_policy_plan,
             )
 
             driver_result["odoo_first_empty"] = FirstEmptyInputResult(
-                intent=first_empty_plan.intent,
                 plan_sha256=first_empty_plan.plan_sha256,
                 applied=product_config_request.mode == "apply",
-                current_policy=next(
-                    lane.odoo_data_policy
-                    for lane in first_empty_plan.authority.profile.lanes
-                    if (lane.context, lane.instance) == (product_config_request.context, "prod")
-                ),
-                proposed_policy=next(
-                    lane.odoo_data_policy
-                    for lane in build_first_empty_data_policy_plan(first_empty_plan).lanes
-                    if (lane.context, lane.instance) == (product_config_request.context, "prod")
-                )
-                if first_empty_plan.intent == "data_policy"
-                else None,
             ).model_dump(mode="json")
         if calendar_plan is not None and calendar_replacement is not None:
             if product_config_request.mode == "apply":

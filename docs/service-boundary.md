@@ -2223,6 +2223,61 @@ changing the reviewed runtime or secret content. Idempotency replay is checked
 before the matching-dry-run marker so an already completed apply remains
 replayable.
 
+### First-empty Odoo production inputs
+
+The existing `POST /v1/product-config/apply` accepts a standalone
+`odoo_first_empty: "runtime_credentials"` intent for
+an owned Odoo `prod` lane. It uses the Director agent's existing product-config
+plan/apply authority, product-profile read and exact prod operations read.
+No route, profile write grant or testing recipient is added. The intent requires product, context, instance and reason. Run `mode: "dry-run"`
+first, then submit the same intent with `mode: "apply"`, the returned
+`result.odoo_first_empty.plan_sha256` as `reviewed_plan_sha256`, and an
+`Idempotency-Key`. No other config or policy operation can accompany the intent.
+
+The service resolves the whole current profile, original compose target and
+registered server, runtime storage settings, and secret selection metadata.
+It reads provider deployment history and executes a fixed, read-only storage
+observation through the existing managed-server transport. The original target
+must have no configured source/environment/mounts or automatic deployment;
+original project files, data, aliases, active or retained workloads, ambiguous
+ownership, shared storage, recorded use/custody, authoritative data, Live and
+production history refuse qualification. Missing desired records or absence of
+a workload alone never prove empty storage. The supported empty path positively
+checks the selected local volume backing paths, project directory and complete
+local Docker inventory; unsupported or incomplete observations remain unknown.
+No caller-supplied positive fact is accepted. The remote observation is a
+point-in-time read, not an external storage lock.
+
+There is no `data_policy` intent or stored empty/resettable classification.
+The existing prelaunch rebuild policy writer can record empty-rebuild intent on
+an unknown prod lane without changing data authority. The stable replacement
+planner requires fresh original empty storage and explicit prelaunch bootstrap
+authority, together with the existing enabled policy, confirmation, target and
+domain proof. Its executor requires the original service operation and rechecks
+whole profile/target/runtime/binding authority and physical storage before the
+first provider write and again against its exact staged inputs before workload
+dispatch. Only the operation's exact pending record is admitted; foreign history,
+data arrival or drift refuses. Failed qualification retains ordinary replacement
+proof requirements. Ordinary capture/restore, Live, held-state, bootstrap and
+release protections remain. The observation grants no later rebuild exception.
+
+`runtime_credentials` requires one or more generated entries as described in
+[Secrets](secrets.md#first-empty-odoo-runtime-credentials). Dry-run never generates.
+On an eligible apply the service generates and encrypts absent purposes and
+publishes versions, exact-instance bindings, audit and the original-key receipt
+in the existing atomic authority transaction. Profile, target, provider,
+runtime and binding expectations are compared at publication. Existing versions,
+bindings and non-secret settings survive unchanged. Completed replay returns
+its original receipt before remote reads or generation. A changed review must
+be inspected again; uncertain effects must reconcile the original key rather
+than substitute a new key. The optional `odoo_first_empty` result is absent for
+ordinary config callers.
+
+This preparation does not sync runtime, configure a provider, create a workload,
+create a person account, capture/restore data or release a product. Both installed service and compatible supported caller must be qualified before
+operational use. A dry-run performs remote reads, so a worker assigned no provider/host operation supplies
+an operator packet instead of running it against a real target.
+
 ### Odoo business-hours policy
 
 A standalone `odoo_business_hours` section selects an Odoo prod company's

@@ -254,7 +254,7 @@ def normalize_product_config_payload(payload: dict[str, object]) -> dict[str, ob
     if "odoo_first_empty" in payload:
         intent = payload["odoo_first_empty"]
         if (
-            intent not in {"data_policy", "runtime_credentials"}
+            intent != "runtime_credentials"
             or instance_name != "prod"
             or not context_name
             or runtime_env
@@ -264,14 +264,8 @@ def normalize_product_config_payload(payload: dict[str, object]) -> dict[str, ob
                 key in payload
                 for key in ("public_hosts", "odoo_business_hours", "disable_secret_bindings")
             )
-            or (intent == "data_policy" and secrets)
-            or (
-                intent == "runtime_credentials"
-                and (
-                    not secrets
-                    or any(secret.get("generate") != "odoo_first_empty" for secret in secrets)
-                )
-            )
+            or not secrets
+            or any(secret.get("generate") != "odoo_first_empty" for secret in secrets)
         ):
             raise ProductConfigError(
                 "First-empty preparation requires its standalone production intent."
@@ -676,8 +670,6 @@ def plan_product_config_authority_bundle(
         secret_audit_events=(*secret_audit_events, *disabled_bundle.secret_audit_events),
     )
     if first_empty_qualification is not None:
-        from control_plane.odoo_first_empty_inputs import build_first_empty_data_policy_plan
-
         proof = first_empty_qualification
         bundle = proof.authority.bundle.model_copy(
             update={
@@ -686,16 +678,6 @@ def plan_product_config_authority_bundle(
                 "secret_bindings": bundle.secret_bindings,
                 "secret_audit_events": bundle.secret_audit_events,
                 "absent_secret_ids": tuple(record.secret_id for record in bundle.secret_records),
-                "product_profiles": (
-                    build_first_empty_data_policy_plan(proof).model_copy(
-                        update={
-                            "source": f"service:odoo-first-empty:{proof.plan_sha256}",
-                            "updated_at": utc_now_timestamp(),
-                        }
-                    ),
-                )
-                if mode == "apply" and proof.intent == "data_policy"
-                else (),
             }
         )
     return result, bundle
