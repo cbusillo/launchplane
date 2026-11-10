@@ -896,7 +896,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 "website_bootstrap": None,
             },
         }
-        self.assertEqual(post(stable_null).status_code, 400)
+        self.assertEqual(post(stable_null).status_code, 202)
         stable_intent: dict[str, object] = {
             **stable_null,
             "override": {

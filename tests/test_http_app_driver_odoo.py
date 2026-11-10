@@ -6438,6 +6438,10 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             for post, payload in (
                 (_post_odoo_config_parameter_override, self._config_override_payload()),
                 (_post_odoo_website_bootstrap_override, self._website_override_payload()),
+                (
+                    _post_odoo_website_bootstrap_override,
+                    self._website_override_payload(withdraw=True),
+                ),
             ):
                 with (
                     self.subTest(scope=scope, writer=post.__name__),
@@ -6524,6 +6528,10 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             for post, payload in (
                 (_post_odoo_config_parameter_override, self._config_override_payload()),
                 (_post_odoo_website_bootstrap_override, self._website_override_payload()),
+                (
+                    _post_odoo_website_bootstrap_override,
+                    self._website_override_payload(withdraw=True),
+                ),
             ):
                 with self.subTest(
                     database_backed=database_backed, changed=changed, writer=post.__name__
@@ -6674,6 +6682,10 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                     for post, payload in (
                         (_post_odoo_config_parameter_override, self._config_override_payload()),
                         (_post_odoo_website_bootstrap_override, self._website_override_payload()),
+                        (
+                            _post_odoo_website_bootstrap_override,
+                            self._website_override_payload(withdraw=True),
+                        ),
                     ):
                         cast(dict[str, object], payload["override"])["instance"] = instance
                         response = await post(app, payload, authorization="Bearer override-token")
@@ -6698,14 +6710,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                             "value"
                         ],
                     )
-                    self.assertEqual(
-                        record.website_bootstrap,
-                        OdooWebsiteBootstrapPayload.model_validate(
-                            cast(dict[str, object], self._website_override_payload()["override"])[
-                                "website_bootstrap"
-                            ]
-                        ),
-                    )
+                    self.assertIsNone(record.website_bootstrap)
                 else:
                     with self.assertRaises(FileNotFoundError):
                         store.read_odoo_instance_override_record(
@@ -6898,14 +6903,17 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
-    def _website_override_payload(self) -> dict[str, object]:
+    @staticmethod
+    def _website_override_payload(*, withdraw: bool = False) -> dict[str, object]:
         return {
             "product": "odoo-tenant-cm",
             "override": {
                 "product": "odoo-tenant-cm",
                 "context": "cm",
                 "instance": "testing",
-                "website_bootstrap": {
+                "website_bootstrap": None
+                if withdraw
+                else {
                     "tenant": "cm",
                     "name": "Cell Mechanic",
                     "canonical_url": "https://cm-testing.shinycomputers.com",
@@ -7330,6 +7338,12 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                 _post_odoo_website_bootstrap_override,
                 self._website_override_payload(),
             ),
+            (
+                "odoo-website-bootstrap-override.yml",
+                "odoo_website_bootstrap_override.write",
+                _post_odoo_website_bootstrap_override,
+                self._website_override_payload(withdraw=True),
+            ),
         )
         for workflow, action, post, payload in cases:
             with self.subTest(workflow=workflow), TemporaryDirectory() as directory:
@@ -7578,7 +7592,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "invalid_request")
 
     async def test_stable_website_bootstrap_plan_is_read_only_and_scoped(self) -> None:
-        for existing in (False, True):
+        for existing, withdraw in ((False, False), (True, False), (False, True), (True, True)):
             for granted_instance in ("testing", "prod"):
                 with self.subTest(existing=existing, granted_instance=granted_instance):
                     with TemporaryDirectory() as temporary_directory_name:
@@ -7622,6 +7636,8 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                             if path.is_file()
                         }
                         payload = self._website_override_payload()
+                        if withdraw:
+                            cast(dict[str, object], payload["override"])["website_bootstrap"] = None
                         cast(dict[str, object], payload["override"])["mode"] = "dry-run"
                         response = await _asgi_request(
                             app,
@@ -7638,7 +7654,9 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                             self.assertFalse(result["applied"])
                             self.assertEqual(
                                 result["planned_website_bootstrap"],
-                                OdooWebsiteBootstrapPayload.model_validate(
+                                None
+                                if withdraw
+                                else OdooWebsiteBootstrapPayload.model_validate(
                                     cast(dict[str, object], payload["override"])[
                                         "website_bootstrap"
                                     ]
@@ -7761,6 +7779,113 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(planned.status_code, 202)
             self.assertFalse(planned.json()["result"]["applied"])
+
+    async def test_stable_bootstrap_withdrawal_preserves_neighbors_and_phases(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = self._store_with_tenant_profile(state_dir)
+            payload = self._website_override_payload()
+            override = cast(dict[str, object], payload["override"])
+            original = OdooInstanceOverrideRecord.model_validate(
+                {
+                    "context": "cm",
+                    "instance": "testing",
+                    "apply_on": ["manual", "restore"],
+                    "website_bootstrap": override["website_bootstrap"],
+                    "config_parameters": [
+                        {
+                            "key": "web.base.url",
+                            "value": {"source": "literal", "value": "https://example.test"},
+                        }
+                    ],
+                    "addon_settings": [
+                        {
+                            "addon": "sample",
+                            "setting": "enabled",
+                            "value": {"source": "literal", "value": True},
+                        }
+                    ],
+                    "website_settings": {
+                        "artifact_id": "synthetic-artifact",
+                        "settings": {"website_id": 1, "public_origin": "https://example.test"},
+                    },
+                    "updated_at": "2026-05-10T20:00:00Z",
+                }
+            )
+            store.write_odoo_instance_override_record(original)
+            workflow = "odoo-website-bootstrap-override.yml"
+            policy = self._tenant_policy(
+                action="odoo_website_bootstrap_override.write", workflow_name=workflow
+            )
+            policy.github_actions[0].products += ("launchplane",)
+            policy.github_actions[0].actions += ("operations.read",)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._tenant_identity(workflow_name=workflow)),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            before = {
+                path.relative_to(state_dir): path.read_bytes()
+                for path in state_dir.rglob("*")
+                if path.is_file()
+            }
+            override.update(website_bootstrap=None, mode="dry-run")
+            planned = await _post_odoo_website_bootstrap_override(
+                app, payload, idempotency_key="stable-withdrawal"
+            )
+            self.assertEqual(planned.status_code, 202, planned.text)
+            self.assertIsNone(planned.json()["result"]["planned_website_bootstrap"])
+            self.assertFalse(planned.json()["result"]["applied"])
+            self.assertEqual(
+                {
+                    path.relative_to(state_dir): path.read_bytes()
+                    for path in state_dir.rglob("*")
+                    if path.is_file()
+                },
+                before,
+            )
+            override["mode"] = "apply"
+            response = await _post_odoo_website_bootstrap_override(
+                app, payload, idempotency_key="stable-withdrawal"
+            )
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertFalse(response.json()["result"]["website_bootstrap"])
+            stored = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            )
+            self.assertIsNone(stored.website_bootstrap)
+            self.assertEqual(stored.apply_on, original.apply_on)
+            self.assertEqual(stored.config_parameters, original.config_parameters)
+            self.assertEqual(stored.addon_settings, original.addon_settings)
+            self.assertEqual(stored.website_settings, original.website_settings)
+            readback = await _asgi_request(
+                app,
+                method="GET",
+                path="/v1/products/odoo-tenant-cm/environments/testing/website-bootstrap",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            self.assertEqual(readback.status_code, 200, readback.text)
+            self.assertIsNone(readback.json()["website_bootstrap"])
+            replay = await _post_odoo_website_bootstrap_override(
+                app, payload, idempotency_key="stable-withdrawal"
+            )
+            self.assertTrue(replay.json()["replayed"])
+            self.assertEqual(replay.json()["result"], response.json()["result"])
+            assert original.website_bootstrap is not None
+            override["website_bootstrap"] = original.website_bootstrap.model_dump(mode="json")
+            conflict = await _post_odoo_website_bootstrap_override(
+                app, payload, idempotency_key="stable-withdrawal"
+            )
+            self.assertEqual(conflict.status_code, 409)
+            self.assertEqual(conflict.json()["error"]["code"], "idempotency_key_reused")
+            self.assertEqual(
+                store.read_odoo_instance_override_record(
+                    context_name="cm", instance_name="testing"
+                ),
+                stored,
+            )
 
     async def test_openapi_includes_odoo_post_deploy_override_contracts(self) -> None:
         response = await openapi_response()

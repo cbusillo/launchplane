@@ -182,8 +182,8 @@ class OdooWebsiteBootstrapOverrideRequest(BaseModel):
         if not self.instance:
             raise ValueError("Odoo website-bootstrap override requires instance.")
         if not self.preview_original_reservation_id:
-            if self.website_bootstrap is None or self.reviewed_plan_sha256 or self.inherit_template:
-                raise ValueError("Stable website-bootstrap writes require bootstrap intent.")
+            if self.reviewed_plan_sha256 or self.inherit_template:
+                raise ValueError("Stable website-bootstrap writes cannot use preview controls.")
         elif self.mode == "apply" and (
             len(self.reviewed_plan_sha256) != 64
             or any(c not in "0123456789abcdef" for c in self.reviewed_plan_sha256)
@@ -454,15 +454,17 @@ def write_odoo_website_bootstrap_override_record(
         )
     except FileNotFoundError:
         existing_record = None
-    apply_on = tuple(
-        dict.fromkeys(
-            (
-                *(existing_record.apply_on if existing_record is not None else ()),
-                "deploy",
-                "promotion",
+    apply_on = existing_record.apply_on if existing_record is not None else ()
+    if request.website_bootstrap is not None or existing_record is None:
+        apply_on = tuple(
+            dict.fromkeys(
+                (
+                    *apply_on,
+                    "deploy",
+                    "promotion",
+                )
             )
         )
-    )
     record = OdooInstanceOverrideRecord(
         context=request.context,
         instance=request.instance,

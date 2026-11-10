@@ -86,7 +86,9 @@ template inheritance, including after the preview is recorded. Its inert record
 retains the audit history. Other exact settings are never silently removed.
 
 This preparation uses only the Director agent's existing preview authority;
-stable-lane writes retain their original authorization and non-null contract.
+stable-lane writes retain their original authorization. Stable requests can also
+explicitly withdraw bootstrap with null, without preview controls; see the
+[stable record contract](records.md#odoo-instance-override-record).
 Apply holds the preview's executor lock. It accepts a completed original with
 no held operation, or the exact original as the target's only held operation
 after its lease and supersession grace expire, using the database clock.
