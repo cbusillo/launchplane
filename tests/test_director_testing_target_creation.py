@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -810,22 +811,42 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
                 {**self.environment("recovered-environment"), "name": "production"},
             )
         ]
+        self.retained_project: dict[str, Any] = {
+            "projectId": "recovered-project",
+            "name": "recovered-project",
+            "description": None,
+            "organizationId": "fixture-organization",
+            "createdAt": "2026-11-09T00:00:01Z",
+            "env": "",
+            "projectTags": [],
+            "environments": [
+                {
+                    **self.environment("recovered-environment"),
+                    "projectId": "recovered-project",
+                    "name": "production",
+                    "description": "Production environment",
+                    "isDefault": True,
+                    "env": "",
+                    "createdAt": "2026-11-09T00:00:01.002Z",
+                }
+            ],
+        }
 
         def read(**kwargs: Any) -> Any:
             if kwargs["path"] == "/api/project.one":
-                return {
-                    "projectId": "recovered-project",
-                    "name": "recovered-project",
-                    "createdAt": "2026-11-09T00:00:01Z",
-                }
+                return self.retained_project
             if kwargs["path"] == "/api/environment.one":
                 return {
-                    "environmentId": "recovered-environment",
-                    "projectId": "recovered-project",
-                    "name": "production",
-                    "isDefault": True,
-                    "env": "",
-                    "createdAt": "2026-11-09T00:00:01Z",
+                    **{
+                        key: value
+                        for key, value in self.retained_project["environments"][0].items()
+                        if key != "createdAt"
+                    },
+                    "project": {
+                        key: value
+                        for key, value in self.retained_project.items()
+                        if key not in {"environments", "projectTags"}
+                    },
                 }
             return self.inventory
 
@@ -844,6 +865,8 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         self.provider.assert_not_called()
         readback = await self.post(mode="readback", retained_compose_setup=evidence)
         self.assertEqual(readback.status_code, 202, readback.text)
+        self.assertTrue(readback.json()["result"]["recoverable"])
+        self.provider.assert_not_called()
         digest = readback.json()["result"]["recovery_sha256"]
         completed = await self.post(
             retained_compose_setup=evidence, expected_compose_recovery_sha256=digest
@@ -897,6 +920,67 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
                 result = await self.post(**payload)
                 self.assertIn(result.status_code, {400, 422}, result.text)
                 self.provider.assert_not_called()
+
+    async def test_retained_original_requires_both_actual_creation_times_in_window(self) -> None:
+        evidence = self.retained_partial()
+        baseline = await self.post(mode="readback", retained_compose_setup=evidence)
+        digest = baseline.json()["result"]["recovery_sha256"]
+        original_project = deepcopy(self.retained_project)
+        for kind in ("project", "environment"):
+            for timestamp in (
+                None,
+                "",
+                "invalid",
+                "2026-11-09T00:00:01",
+                "2026-11-08T23:59:59Z",
+                "2026-11-09T00:00:03Z",
+            ):
+                with self.subTest(kind=kind, timestamp=timestamp):
+                    self.retained_project = deepcopy(original_project)
+                    resource = (
+                        self.retained_project
+                        if kind == "project"
+                        else self.retained_project["environments"][0]
+                    )
+                    if timestamp is None:
+                        resource.pop("createdAt")
+                    else:
+                        resource["createdAt"] = timestamp
+                    for mode in ("readback", "apply"):
+                        refused = await self.post(
+                            mode=mode,
+                            retained_compose_setup=evidence,
+                            expected_compose_recovery_sha256=digest,
+                        )
+                        self.assertEqual(refused.status_code, 400, refused.text)
+                        self.provider.assert_not_called()
+        self.assert_production_unchanged()
+
+    async def test_retained_original_requires_unique_empty_bound_default_environment(self) -> None:
+        evidence = self.retained_partial()
+        baseline = await self.post(mode="readback", retained_compose_setup=evidence)
+        digest = baseline.json()["result"]["recovery_sha256"]
+        environment = self.retained_project["environments"][0]
+        for environments in (
+            [],
+            [environment, environment],
+            [{**environment, "environmentId": "another-environment"}],
+            [{**environment, "projectId": "another-project"}],
+            [{**environment, "isDefault": False}],
+            [{**environment, "name": "testing"}],
+            [{**environment, "env": "SETTING=value"}],
+        ):
+            with self.subTest(environments=environments):
+                self.retained_project["environments"] = environments
+                for mode in ("readback", "apply"):
+                    refused = await self.post(
+                        mode=mode,
+                        retained_compose_setup=evidence,
+                        expected_compose_recovery_sha256=digest,
+                    )
+                    self.assertEqual(refused.status_code, 400, refused.text)
+                    self.provider.assert_not_called()
+        self.assert_production_unchanged()
 
     async def test_terminal_director_stages_and_a_scoped_agent_cannot(self) -> None:
         with scoped_agent_transport():
