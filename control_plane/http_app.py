@@ -3448,7 +3448,7 @@ def canonical_product_config_request_payload(payload: dict[str, object]) -> dict
     normalized_payload = control_plane_product_config.normalize_product_config_payload(
         request.product_config_payload()
     )
-    if request.odoo_business_hours is not None:
+    if request.odoo_business_hours is not None or request.odoo_first_empty is not None:
         normalized_payload.pop("runtime_env", None)
     return {
         **normalized_payload,
@@ -16460,6 +16460,15 @@ def create_launchplane_fastapi_app(
         operator_identity = isinstance(
             identity, GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity
         )
+        if product_config_request.odoo_first_empty is not None and not director_agent_identity(
+            identity
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="First-empty preparation requires the Director agent's own product-config path.",
+            )
         fixed_service_slot = (
             product_config_request.fixed_service_secret_slot()
             if isinstance(identity, LocalOperatorIdentity) and director_agent_identity(identity)
@@ -16731,6 +16740,7 @@ def create_launchplane_fastapi_app(
             and product_config_request.mode == "apply"
             and product_config_request.public_hosts is None
             and product_config_request.odoo_business_hours is None
+            and product_config_request.odoo_first_empty is None
             and not product_config_dry_run_exists(
                 record_store=database_store,
                 identity=identity,
@@ -16800,7 +16810,56 @@ def create_launchplane_fastapi_app(
         public_hosts_plan: product_public_hosts.PublicHostsPlan | None = None
         calendar_plan = None
         calendar_replacement = None
+        from control_plane.odoo_first_empty_inputs import (
+            QualifiedFirstEmptyInputs,
+            qualify_first_empty_storage,
+        )
+
+        first_empty_plan: QualifiedFirstEmptyInputs | None = None
         try:
+            if product_config_request.odoo_first_empty is not None:
+                try:
+                    qualified: QualifiedFirstEmptyInputs = await asyncio.to_thread(
+                        qualify_first_empty_storage,
+                        database_store,
+                        root=resolved_control_plane_root,
+                        product=product_config_request.product,
+                        context=product_config_request.context,
+                        intent=product_config_request.odoo_first_empty,
+                    )
+                    if product_config_request.mode == "apply" and (
+                        product_config_request.reviewed_plan_sha256 != qualified.plan_sha256
+                        or not product_config_dry_run_exists(
+                            record_store=database_store,
+                            identity=identity,
+                            request_payload=request_payload,
+                            route_path=route_path,
+                            authority_plan_digest=qualified.plan_sha256,
+                        )
+                    ):
+                        raise ValueError("First-empty review changed.")
+                    first_empty_plan = qualified
+                except NativeSourceAuthorizationDenied:
+                    raise _launchplane_http_error(
+                        status_code=403,
+                        trace_id=trace_id,
+                        code="authorization_denied",
+                        message="The original target refused the first-empty observation.",
+                    ) from None
+                except (
+                    ValueError,
+                    OSError,
+                    KeyError,
+                    TypeError,
+                    StopIteration,
+                    click.ClickException,
+                ):
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="first_empty_qualification_required",
+                        message="The original target, current storage, custody or reviewed inputs could not be qualified. Keep the original key; read and review the current facts.",
+                    ) from None
             if product_config_request.odoo_business_hours is not None:
                 assert config_profile is not None
                 try:
@@ -16909,6 +16968,7 @@ def create_launchplane_fastapi_app(
                     source_label=product_config_request.source_label,
                     lane_provider_env_reader=lane_provider_env_reader,
                     secret_copy_source_authorizer=authorize_copy_source,
+                    first_empty_qualification=first_empty_plan,
                 )
             )
         except control_plane_product_config.ProductConfigError as error:
@@ -16984,6 +17044,29 @@ def create_launchplane_fastapi_app(
             **planned_driver_result,
             "reason": product_config_request.reason,
         }
+        if first_empty_plan is not None:
+            from control_plane.odoo_first_empty_inputs import (
+                FirstEmptyInputResult,
+                build_first_empty_data_policy_plan,
+            )
+
+            driver_result["odoo_first_empty"] = FirstEmptyInputResult(
+                intent=first_empty_plan.intent,
+                plan_sha256=first_empty_plan.plan_sha256,
+                applied=product_config_request.mode == "apply",
+                current_policy=next(
+                    lane.odoo_data_policy
+                    for lane in first_empty_plan.authority.profile.lanes
+                    if (lane.context, lane.instance) == (product_config_request.context, "prod")
+                ),
+                proposed_policy=next(
+                    lane.odoo_data_policy
+                    for lane in build_first_empty_data_policy_plan(first_empty_plan).lanes
+                    if (lane.context, lane.instance) == (product_config_request.context, "prod")
+                )
+                if first_empty_plan.intent == "data_policy"
+                else None,
+            ).model_dump(mode="json")
         if calendar_plan is not None and calendar_replacement is not None:
             if product_config_request.mode == "apply":
                 if calendar_plan.changed:
@@ -17025,6 +17108,14 @@ def create_launchplane_fastapi_app(
         if (
             requires_matching_review or public_hosts_plan is not None or calendar_plan is not None
         ) and product_config_request.mode == "dry-run":
+            if first_empty_plan is not None:
+                review_digest = first_empty_plan.plan_sha256
+            elif calendar_plan is not None:
+                review_digest = calendar_plan.plan_digest
+            elif public_hosts_plan is not None:
+                review_digest = public_hosts_plan.result.plan_digest
+            else:
+                review_digest = ""
             store_product_config_dry_run_record(
                 record_store=database_store,
                 identity=identity,
@@ -17032,11 +17123,7 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 response=product_config_response,
                 route_path=route_path,
-                authority_plan_digest=calendar_plan.plan_digest
-                if calendar_plan
-                else public_hosts_plan.result.plan_digest
-                if public_hosts_plan
-                else "",
+                authority_plan_digest=review_digest,
             )
         if product_config_request.mode == "dry-run":
             store_apply_idempotency(

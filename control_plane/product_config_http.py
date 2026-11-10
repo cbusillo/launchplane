@@ -39,6 +39,7 @@ from control_plane.contracts.odoo_business_hours import (
     OdooBusinessHoursConfigResult,
 )
 from control_plane.contracts.public_hosts import normalize_public_hosts
+from control_plane.odoo_first_empty_inputs import FirstEmptyInputResult, FirstEmptyIntent
 
 ProductConfigMode = Literal["dry-run", "apply"]
 
@@ -75,7 +76,7 @@ class ProductConfigSecretInput(BaseModel):
     binding_key: str | None = None
     value: str | None = Field(default=None, repr=False)
     copy_from: ProductSecretCopyFrom | None = None
-    generate: Literal["testing_local"] | None = None
+    generate: Literal["testing_local", "odoo_first_empty"] | None = None
     adopt_from_provider: Literal[True] | None = Field(
         default=None,
         description=(
@@ -342,6 +343,11 @@ class ProductConfigApplyResult(BaseModel):
     )
     summary: ProductConfigApplySummary
     next_actions: list[ProductConfigLiveTargetRuntimeNextAction] = Field(default_factory=list)
+    odoo_first_empty: FirstEmptyInputResult | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     odoo_business_hours: OdooBusinessHoursConfigResult | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -397,6 +403,7 @@ class ProductConfigApplyEnvelope(BaseModel):
     public_hosts: tuple[str, ...] | None = None
     odoo_business_hours: OdooBusinessHoursConfigRequest | None = None
     reviewed_plan_sha256: str = ""
+    odoo_first_empty: FirstEmptyIntent | None = None
 
     def fixed_service_secret_slot(self) -> tuple[str, str] | None:
         from control_plane.secrets import FIXED_SERVICE_SECRET_SLOTS
@@ -469,7 +476,38 @@ class ProductConfigApplyEnvelope(BaseModel):
             raise ValueError("Product config apply requires product.")
         if self.public_hosts is not None and (self.instance != "prod" or not self.context):
             raise ValueError("Public hosts require an exact prod lane.")
-        if self.odoo_business_hours is not None:
+        if self.odoo_first_empty is not None:
+            if (
+                self.instance != "prod"
+                or not self.context
+                or not self.reason
+                or self.runtime_env is not None
+                or self.runtime_environment is not None
+                or self.public_hosts is not None
+                or self.odoo_business_hours is not None
+                or self.disable_secret_bindings
+                or (self.odoo_first_empty == "data_policy" and self.secrets)
+                or (
+                    self.odoo_first_empty == "runtime_credentials"
+                    and (
+                        not self.secrets
+                        or any(secret.generate != "odoo_first_empty" for secret in self.secrets)
+                    )
+                )
+            ):
+                raise ValueError(
+                    "First-empty preparation requires a standalone exact production intent."
+                )
+            if (
+                self.mode == "apply"
+                and re.fullmatch(r"[a-f0-9]{64}", self.reviewed_plan_sha256) is None
+            ):
+                raise ValueError("First-empty apply requires the reviewed plan digest.")
+            if self.mode == "dry-run" and self.reviewed_plan_sha256:
+                raise ValueError("Dry run cannot supply a reviewed plan digest.")
+        elif any(secret.generate == "odoo_first_empty" for secret in self.secrets):
+            raise ValueError("First-empty generation requires its bounded preparation intent.")
+        elif self.odoo_business_hours is not None:
             if self.instance != "prod" or not self.context or not self.reason:
                 raise ValueError("Calendar policy requires an exact prod lane and reason.")
             if (
@@ -530,6 +568,8 @@ class ProductConfigApplyEnvelope(BaseModel):
             payload["disable_secret_bindings"] = [
                 item.model_dump() for item in self.disable_secret_bindings
             ]
+        if self.odoo_first_empty is not None:
+            payload["odoo_first_empty"] = self.odoo_first_empty
         return payload
 
 
