@@ -29,14 +29,11 @@ from control_plane.merge_train_github import (
     MergeTrainBaseCheckObservation,
     MergeTrainGitHubError,
 )
-from control_plane.contracts.merge_train_failure_evidence import (
+from control_plane.contracts.merge_train_batch import (
     MergeTrainBlockFailureEvidence,
     MergeTrainFailedRequiredCheck,
 )
 from control_plane.github_required_checks import CheckRequirement
-from control_plane.merge_train_candidate_failures import (
-    CandidateCheckFailures,
-)
 from control_plane.merge_train_base_retest_receipt import (
     BaseRetestReceipt,
     read_base_retest_receipt,
@@ -984,10 +981,12 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         ):
             result = self.advance(mutate=True)
         self.assertEqual(result["controller_action"], "recover_candidate_block")
-        required = tuple(
-            dict.fromkeys(CheckRequirement(check.name, check.app_id) for check in evidence.checks)
-        )
-        self.assertEqual(base.call_args.kwargs["attribution_requirements"], required)
+        required = {
+            CheckRequirement("security-gate", 19),
+            CheckRequirement("status-gate"),
+            CheckRequirement("external-gate", 77),
+        }
+        self.assertEqual(set(base.call_args.kwargs["attribution_requirements"]), required)
         receipt = read_base_retest_receipt(
             self.store, self.target.repository, self.old.number, self.old.head_sha
         )
@@ -1007,7 +1006,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.assertEqual(
             receipt.applied_label_event_id, read.record.block_intent.applied_label_event_id
         )
-        self.assertEqual(receipt.required_checks, required)
+        self.assertEqual(set(receipt.required_checks), required)
 
     def test_missing_decision_failure_evidence_preserves_the_old_hold(self) -> None:
         self.setup_base_retest()
@@ -1020,10 +1019,12 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             }
         )
         self.store.write_merge_train_batch_candidate_record(self.record)
+        from tests.test_merge_train_block_failure_evidence import FailureHistory
+
+        history = FailureHistory(self.record.candidate)
+        history.phase = 2
         with patch.object(
-            self.client,
-            "read_candidate_check_failures",
-            return_value=CandidateCheckFailures(checks=()),
+            self.client, "read_candidate_check_failures", return_value=history.observe()
         ):
             result = self.advance(mutate=True)
         self.assertNotEqual(result["controller_action"], "recover_candidate_block")
@@ -1788,6 +1789,9 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
     ) -> None:
         self._exercise_real_block_producer(lose_label_reply=False)
 
+    def test_unavailable_failure_origin_remains_visible_after_label_write(self) -> None:
+        self._exercise_real_block_producer(lose_label_reply=False, evidence_unavailable=True)
+
     def test_existing_label_does_not_create_a_successful_write_receipt(self) -> None:
         from control_plane.merge_train_controller_run_once import _block_failed_candidate_culprit
 
@@ -1816,7 +1820,9 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.assertEqual(self.store.list_merge_train_batch_candidate_records(), before)
         self.transport.request.assert_not_called()
 
-    def _exercise_real_block_producer(self, *, lose_label_reply: bool) -> None:
+    def _exercise_real_block_producer(
+        self, *, lose_label_reply: bool, evidence_unavailable: bool = False
+    ) -> None:
         from control_plane.merge_train_controller_run_once import (
             _block_failed_candidate_culprit,
             execute_merge_train_controller_with_client,
@@ -1824,12 +1830,17 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
         )
 
+        fixed = self.current
         self.setup_base_retest()
         assert self.record.block_intent is not None
         failure_evidence = self.record.block_intent.failure_evidence
+        assert failure_evidence is not None
+        if evidence_unavailable:
+            failure_evidence = failure_evidence.model_copy(
+                update={"checks": (), "unavailable_reason": "fixture_origin_unreadable"}
+            )
         self.record = self.record.model_copy(update={"block_intent": None})
         self.store.write_merge_train_batch_candidate_record(self.record)
-        fixed = self.current
         self.current = self.old
         self.snapshot = self.snapshot.model_copy(update={"pull_requests": (self.old,)})
         self.events = []
@@ -1910,6 +1921,11 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             )
         else:
             produced = produce()
+            if evidence_unavailable:
+                self.assertEqual(
+                    produced["details"]["block_failure_evidence_unavailable"],
+                    failure_evidence.unavailable_reason,
+                )
             self.assertNotIn("controller_reconciliation_status", produced)
             from control_plane.merge_train_controller_feedback import build_feedback_payloads
 
@@ -1920,6 +1936,9 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             self.assertEqual(block.pull_request_number, self.old.number)
             lease.release()
         self.current = fixed
+        self.comments[0]["body"] = (
+            f"Review result: weighed\nHead: {fixed.head_sha}\n\nFindings addressed."
+        )
         self.snapshot = self.snapshot.model_copy(update={"pull_requests": (fixed,)})
         self.transport.request.side_effect = requests
         self.store = FilesystemRecordStore(Path(self.directory.name))

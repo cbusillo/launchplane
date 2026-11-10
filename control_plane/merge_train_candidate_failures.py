@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
     from control_plane.github_required_checks import CheckRequirement
-    from control_plane.contracts.merge_train_failure_evidence import MergeTrainBlockFailureEvidence
+    from control_plane.contracts.merge_train_batch import MergeTrainBlockFailureEvidence
 
 from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 
@@ -56,7 +57,11 @@ class CandidateCheckFailures:
     attribution_requirements: tuple[CheckRequirement, ...] = ()
     retry_runs: tuple[tuple[int, int], ...] = ()
     checks_disagree: bool = False
-    decision_evidence: MergeTrainBlockFailureEvidence | None = None
+    capture_decision_evidence: Callable[[], MergeTrainBlockFailureEvidence] | None = None
+
+    @cached_property
+    def decision_evidence(self) -> MergeTrainBlockFailureEvidence | None:
+        return self.capture_decision_evidence() if self.capture_decision_evidence else None
 
     @property
     def conclusive(self) -> bool:

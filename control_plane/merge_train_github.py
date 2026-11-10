@@ -108,7 +108,7 @@ from control_plane.github_read_cache import GitHubReadCache, MERGE_TRAIN_READ_CA
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.merge_train_candidate_failures import CandidateCheckFailures
 from control_plane.merge_train_candidate_failures import classify_candidate_check_failures
-from control_plane.contracts.merge_train_failure_evidence import (
+from control_plane.contracts.merge_train_batch import (
     MergeTrainBlockFailureEvidence,
     MergeTrainFailedRequiredCheck,
 )
@@ -1370,27 +1370,41 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             checks=[check for check in normalized_runs if is_required(check, "check_run")],
             executions=executions,
         )
-        decision_evidence = None
-        if (
-            failures.conclusive
-            and failed_requirements
-            and check_payload.get("inventory_complete") is True
-            and not check_payload.get("actions_observation_error")
-            and status_payload.get("sha") == candidate.candidate_sha
-            and status_payload.get("inventory_complete") is True
-        ):
-            decision_evidence = self._candidate_block_failure_evidence(
+        unavailable_reason = next(
+            (
+                reason
+                for available, reason in (
+                    (
+                        failures.conclusive and bool(failed_requirements),
+                        "failure_selection_inconclusive",
+                    ),
+                    (check_payload.get("inventory_complete") is True, "check_inventory_incomplete"),
+                    (
+                        not check_payload.get("actions_observation_error"),
+                        "current_actions_selection_unavailable",
+                    ),
+                    (status_payload.get("sha") == candidate.candidate_sha, "status_head_unbound"),
+                    (
+                        status_payload.get("inventory_complete") is True,
+                        "status_inventory_incomplete",
+                    ),
+                )
+                if not available
+            ),
+            "",
+        )
+        return replace(
+            failures,
+            attribution_requirements=failed_requirements,
+            retry_runs=retry_runs,
+            capture_decision_evidence=lambda: self._candidate_block_failure_evidence(
                 candidate=candidate,
                 requirements=failed_requirements,
                 checks=normalized_runs,
                 statuses=cast(list[dict[str, object]], statuses),
                 executions=executions,
-            )
-        return replace(
-            failures,
-            attribution_requirements=failed_requirements,
-            retry_runs=retry_runs,
-            decision_evidence=decision_evidence,
+                unavailable_reason=unavailable_reason,
+            ),
             checks_disagree=not check_payload.get("actions_observation_error")
             and any(
                 _check_run_status(failed) == "fail"
@@ -1463,13 +1477,24 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         checks: list[dict[str, object]],
         statuses: list[dict[str, object]],
         executions: dict[int, dict[str, object]],
-    ) -> MergeTrainBlockFailureEvidence | None:
+        unavailable_reason: str,
+    ) -> MergeTrainBlockFailureEvidence:
+        def unavailable(reason: str) -> MergeTrainBlockFailureEvidence:
+            return MergeTrainBlockFailureEvidence(
+                repository=candidate.repository,
+                candidate_ref=candidate.candidate_ref,
+                candidate_sha=candidate.candidate_sha,
+                unavailable_reason=reason,
+            )
+
+        if unavailable_reason:
+            return unavailable(unavailable_reason)
         if candidate.candidate_ref != build_merge_train_batch_candidate_ref(
             repository=candidate.repository,
             base_branch=candidate.base_branch,
             batch_id=candidate.batch_id,
         ):
-            return None
+            return unavailable("candidate_ref_not_canonical")
         selected: list[MergeTrainFailedRequiredCheck] = []
         latest_statuses = {
             str(status.get("context") or "").casefold(): status for status in reversed(statuses)
@@ -1485,7 +1510,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                         if source == "check_run"
                         else commit_status_state(str(payload.get("state") or ""))
                     )
-                    if state != "fail":
+                    name = str(payload.get("name" if source == "check_run" else "context") or "")
+                    if state != "fail" or is_launchplane_projected_check(name):
                         continue
                     for requirement in requirements:
                         if not matches_required_check(
@@ -1499,7 +1525,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                         origin: dict[str, object] = {}
                         if source == "check_run":
                             if payload.get("head_sha") != candidate.candidate_sha:
-                                return None
+                                return unavailable("check_head_mismatch")
                             suite = _json_object(
                                 payload.get("check_suite"), "GitHub failed check suite"
                             )
@@ -1513,19 +1539,25 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                                     head_sha=candidate.candidate_sha,
                                 )
                                 if identity is None:
-                                    return None
+                                    return unavailable("actions_check_origin_unbound")
                                 run_id, suite_id = identity
                                 run = executions.get(run_id)
                                 if run is None:
                                     run = self._candidate_check_retry_run(
-                                        candidate=candidate, run_id=run_id
+                                        candidate=candidate,
+                                        run_id=run_id,
+                                        allowed_events=(
+                                            "push",
+                                            "pull_request",
+                                            "workflow_dispatch",
+                                        ),
                                     )
                                     executions[run_id] = run
                                 if (
                                     run.get("check_suite_id") != suite_id
                                     or run.get("status") != "completed"
                                 ):
-                                    return None
+                                    return unavailable("actions_execution_suite_or_state_mismatch")
                                 job = _json_object(
                                     self.transport.request(
                                         method="GET",
@@ -1548,7 +1580,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                                     "completed",
                                     payload.get("conclusion"),
                                 ):
-                                    return None
+                                    return unavailable("actions_job_attempt_or_origin_mismatch")
                                 origin.update(run_id=run_id, run_attempt=run["run_attempt"])
                         selected.append(
                             MergeTrainFailedRequiredCheck.model_validate(
@@ -1568,7 +1600,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             if {CheckRequirement(check.name, check.app_id) for check in selected} != set(
                 requirements
             ):
-                return None
+                return unavailable("failed_required_selection_incomplete")
             return MergeTrainBlockFailureEvidence(
                 repository=candidate.repository,
                 candidate_ref=candidate.candidate_ref,
@@ -1576,14 +1608,18 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 checks=tuple(selected),
             )
         except (ValidationError, _CandidateCheckRetryProvenanceUnavailable):
-            return None
+            return unavailable("failed_check_origin_invalid")
         except MergeTrainGitHubError as error:
             if error.status_code in {403, 404} and not error.rate_limited:
-                return None
+                return unavailable("provider_origin_unavailable")
             raise
 
     def _candidate_check_retry_run(
-        self, *, candidate: MergeTrainBatchCandidate, run_id: int
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        run_id: int,
+        allowed_events: tuple[str, ...] = ("push", "pull_request"),
     ) -> dict[str, object]:
         payload = self.transport.request(
             method="GET",
@@ -1591,14 +1627,21 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
         try:
             return self._validate_candidate_check_retry_run(
-                candidate=candidate, run_id=run_id, payload=payload
+                candidate=candidate,
+                run_id=run_id,
+                payload=payload,
+                allowed_events=allowed_events,
             )
         except MergeTrainGitHubError as error:
             raise _CandidateCheckRetryProvenanceUnavailable(str(error)) from error
 
     @staticmethod
     def _validate_candidate_check_retry_run(
-        *, candidate: MergeTrainBatchCandidate, run_id: int, payload: object
+        *,
+        candidate: MergeTrainBatchCandidate,
+        run_id: int,
+        payload: object,
+        allowed_events: tuple[str, ...] = ("push", "pull_request"),
     ) -> dict[str, object]:
         run = _json_object(payload, "GitHub candidate check execution")
         attempt = run.get("run_attempt")
@@ -1606,7 +1649,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             run.get("id") != run_id
             or run.get("head_sha") != candidate.candidate_sha
             or run.get("head_branch") != candidate.candidate_ref.removeprefix("refs/heads/")
-            or run.get("event") not in {"push", "pull_request"}
+            or run.get("event") not in allowed_events
             or _repository_full_name(run.get("repository"), "GitHub execution repository")
             != candidate.repository.casefold()
             or _repository_full_name(run.get("head_repository"), "GitHub execution head repository")

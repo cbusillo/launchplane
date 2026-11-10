@@ -298,7 +298,7 @@ def recover_candidate_block(
             failure_evidence = (
                 candidate.block_intent.failure_evidence if candidate.block_intent else None
             )
-            if failure_evidence is None:
+            if failure_evidence is None or not failure_evidence.checks:
                 return None
             requirements = tuple(
                 dict.fromkeys(

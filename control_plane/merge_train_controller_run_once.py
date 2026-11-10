@@ -1,5 +1,5 @@
 from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
-from control_plane.contracts.merge_train_failure_evidence import MergeTrainBlockFailureEvidence
+from control_plane.contracts.merge_train_batch import MergeTrainBlockFailureEvidence
 import hashlib
 from control_plane.merge_train_pr_feedback import queue_landing_planning_feedback
 from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
@@ -7273,6 +7273,13 @@ def _block_failed_candidate_culprit(
             "next_action_detail": detail,
         }
     )
+    if failure_evidence is None or failure_evidence.unavailable_reason:
+        details = {
+            **details,
+            "block_failure_evidence_unavailable": (
+                failure_evidence.unavailable_reason if failure_evidence else "not_captured"
+            ),
+        }
     result: dict[str, object] = {
         "repository": repository,
         "base_branch": base_branch,

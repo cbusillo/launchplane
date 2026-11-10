@@ -5,7 +5,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
-from control_plane.contracts.merge_train_failure_evidence import MergeTrainBlockFailureEvidence
+from control_plane.merge_train_candidate_failures import (
+    FAILURE_CONCLUSIONS,
+    INFRASTRUCTURE_CONCLUSIONS,
+)
+from control_plane.github_required_checks import commit_status_state
 
 from control_plane.contracts.merge_train_controller_state import build_merge_train_controller_key
 from control_plane.contracts.merge_train_historical_completion import (
@@ -410,6 +414,57 @@ class MergeTrainBatchLandingPlan(BaseModel):
             if normalized_digest != expected_digest:
                 raise ValueError("merge train batch landing plan digest does not match payload")
         self.landing_plan_sha256 = expected_digest
+        return self
+
+
+class MergeTrainFailedRequiredCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1)
+    app_id: int | None = Field(default=None, gt=0, strict=True)
+    source: Literal["check_run", "commit_status"]
+    provider_id: int = Field(gt=0, strict=True)
+    provider_app_id: int | None = Field(default=None, gt=0, strict=True)
+    provider_app_slug: str | None = None
+    conclusion: str = Field(min_length=1)
+    check_suite_id: int | None = Field(default=None, gt=0, strict=True)
+    run_id: int | None = Field(default=None, gt=0, strict=True)
+    run_attempt: int | None = Field(default=None, gt=0, strict=True)
+
+    @model_validator(mode="after")
+    def _validate_origin(self) -> MergeTrainFailedRequiredCheck:
+        if self.app_id is not None and self.app_id != self.provider_app_id:
+            raise ValueError("Failed check does not match its required App")
+        if self.source == "commit_status":
+            if commit_status_state(self.conclusion) != "fail" or any(
+                value is not None for value in (self.check_suite_id, self.run_id, self.run_attempt)
+            ):
+                raise ValueError("Failed commit status origin is invalid")
+        elif (
+            self.check_suite_id is None
+            or self.provider_app_id is None
+            or not self.provider_app_slug
+            or self.conclusion not in FAILURE_CONCLUSIONS | INFRASTRUCTURE_CONCLUSIONS
+            or (self.run_id is None) != (self.run_attempt is None)
+            or (self.provider_app_slug == "github-actions") != (self.run_id is not None)
+        ):
+            raise ValueError("Failed check run origin is invalid")
+        return self
+
+
+class MergeTrainBlockFailureEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    repository: str = Field(min_length=1)
+    candidate_ref: str = Field(min_length=1)
+    candidate_sha: str = Field(min_length=1)
+    checks: tuple[MergeTrainFailedRequiredCheck, ...] = ()
+    unavailable_reason: str = ""
+
+    @model_validator(mode="after")
+    def _validate_completeness(self) -> MergeTrainBlockFailureEvidence:
+        if bool(self.checks) == bool(self.unavailable_reason):
+            raise ValueError("Block failure evidence must be complete or explain its absence")
         return self
 
 
