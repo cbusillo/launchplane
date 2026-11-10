@@ -15,6 +15,7 @@ from control_plane.contracts.prepared_public_site import FrozenRecord
 from control_plane.dokploy.compose import TESTING_CONNECTION_CSP
 from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.traefik_cutover import http_route_payload
+from control_plane.preview_gateway import PREVIEW_EVENTED_PORT
 
 type TestingRouteHost = Annotated[str, Field(pattern=r"^[a-zA-Z0-9.-]+$")]
 
@@ -291,7 +292,39 @@ def router_configuration(router: dict[str, Any]) -> dict[str, Any]:
     return configuration
 
 
-def route_document(plan: TestingLaneRoute, backend: str | None) -> dict[str, Any]:
+def testing_worker_route_template(
+    template: dict[str, Any], route_id: str, *, enabled: bool
+) -> dict[str, Any]:
+    document = deepcopy(template)
+    http = document["http"]
+    service = route_id + "-websocket"
+    http["services"].pop(service, None)
+    http["routers"] = {
+        name: router for name, router in http["routers"].items() if not name.endswith("-websocket")
+    }
+    if not enabled:
+        return document
+    backend = http["services"][route_id]["loadBalancer"]["servers"][0]["url"]
+    origin = urlsplit(backend)
+    http["services"][service] = {
+        "loadBalancer": {
+            "passHostHeader": True,
+            "servers": [{"url": f"{origin.scheme}://{origin.hostname}:{PREVIEW_EVENTED_PORT}"}],
+        }
+    }
+    for name, router in tuple(http["routers"].items()):
+        http["routers"][name + "-websocket"] = {
+            **deepcopy(router),
+            "rule": "(" + router["rule"] + ") && (Path(`/websocket`) || PathPrefix(`/websocket/`))",
+            "service": service,
+            "priority": router["priority"] + 1,
+        }
+    return document
+
+
+def route_document(
+    plan: TestingLaneRoute, backend: str | None, *, evented: bool = False
+) -> dict[str, Any]:
     if backend not in {plan.old_backend, plan.new_backend}:
         raise ValueError("Testing traffic cannot select an unadmitted backend.")
     if backend is None:
@@ -305,19 +338,35 @@ def route_document(plan: TestingLaneRoute, backend: str | None) -> dict[str, Any
         return document
     document = deepcopy(plan.template)
     document["http"]["services"][plan.route_id]["loadBalancer"]["servers"] = [{"url": backend}]
-    return document
+    return testing_worker_route_template(document, plan.route_id, enabled=evented)
 
 
-def route_document_content(plan: TestingLaneRoute, backend: str | None) -> str | None:
+def route_document_content(
+    plan: TestingLaneRoute, backend: str | None, *, evented: bool = False
+) -> str | None:
     if backend is None:
         assert plan.unavailable_preimage is not None
         return plan.unavailable_preimage.file_content
-    return json.dumps(route_document(plan, backend), sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        route_document(plan, backend, evented=evented), sort_keys=True, separators=(",", ":")
+    )
 
 
-def route_document_digest(plan: TestingLaneRoute, backend: str | None) -> str:
-    content = route_document_content(plan, backend)
+def route_document_digest(
+    plan: TestingLaneRoute, backend: str | None, *, evented: bool = False
+) -> str:
+    content = route_document_content(plan, backend, evented=evented)
     return hashlib.sha256(content.encode()).hexdigest() if content is not None else "absent"
+
+
+def route_document_variants(
+    plan: TestingLaneRoute, backend: str | None
+) -> tuple[dict[str, Any], ...]:
+    return tuple(route_document(plan, backend, evented=mode) for mode in (False, True))
+
+
+def route_content_variants(plan: TestingLaneRoute, backend: str | None) -> tuple[str | None, ...]:
+    return tuple(route_document_content(plan, backend, evented=mode) for mode in (False, True))
 
 
 def testing_ingress_entrypoints(raw: dict[str, Any], host: str) -> tuple[str, ...]:
@@ -751,9 +800,8 @@ def _compile_testing_route(
             application_file_name=application_file_name,
             application_file_sha256=application_file_sha256,
         )
-        if owned_document != route_document(plan, old_backend):
-            raise ValueError("Testing route file differs from the serving copy's authority.")
-        observe_testing_route(plan, raw, owned_document)
+        if observe_testing_route(plan, raw, owned_document) != old_backend:
+            raise ValueError("Testing route no longer selects its admitted serving copy.")
         return plan
     if recorded_template is not None or not matches or len(legacy) != len(matches):
         raise ValueError("Initial testing traffic must have only its observed Docker predecessor.")
@@ -1290,14 +1338,29 @@ def observe_testing_route(
         if owned_document == original and scoped == preimage.raw:
             return None
     matches = possible_lane_routers(raw, plan.host, plan.public_entrypoints, plan.aliases)
-    owned = plan.template["http"]["routers"]
+    evented = bool(
+        owned_document
+        and plan.route_id + "-websocket" in owned_document.get("http", {}).get("services", {})
+    )
+    if not evented and any(
+        name + "-websocket@file" in matches for name in plan.template["http"]["routers"]
+    ):
+        backend = applied_service_backend(raw, plan.route_id, "file")
+        if (
+            backend is not None
+            and backend in {plan.old_backend, plan.new_backend}
+            and owned_document == route_document(plan, backend)
+        ):
+            observe_testing_route(plan, raw, route_document(plan, backend, evented=True))
+            raise TestingRoutePending("The prior evented overlay has not finished reloading.")
+    owned = route_document(plan, plan.new_backend, evented=evented)["http"]["routers"]
     names = {name + "@file" for name in owned}
     for name, router in matches.items():
         if name in names:
             expected = owned[name.removesuffix("@file")]
             observed = router_configuration(router)
             # Traefik qualifies file middleware/service references in rawdata.
-            expected = {**expected, "service": plan.route_id + "@file"}
+            expected = {**expected, "service": expected["service"] + "@file"}
             observed["service"] = str(observed.get("service") or "").removesuffix("@file") + "@file"
             if router.get("status") != "enabled" or observed != expected:
                 if preimage is None or router.get("status") == "enabled":
@@ -1348,6 +1411,14 @@ def observe_testing_route(
     backend = applied_service_backend(raw, plan.route_id, "file")
     if backend not in {plan.old_backend, plan.new_backend}:
         raise TestingRouteAuthorityChanged("Testing route selected an unadmitted backend.")
-    if owned_document != route_document(plan, backend):
+    if evented:
+        expected_evented = route_document(plan, backend, evented=True)["http"]["services"][
+            plan.route_id + "-websocket"
+        ]["loadBalancer"]["servers"][0]["url"]
+        if applied_service_backend(raw, plan.route_id + "-websocket", "file") != expected_evented:
+            raise TestingRouteAuthorityChanged(
+                "Testing websocket selected another copy or listener."
+            )
+    if owned_document != route_document(plan, backend, evented=evented):
         raise TestingRoutePending("Testing file and applied backend have not converged.")
     return backend

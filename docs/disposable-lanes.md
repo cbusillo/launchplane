@@ -2821,7 +2821,12 @@ one registered terminal connection into the candidate data volume, preserving
 only an exact verified prefix on interruption. Receiver size/hash verification still
 precedes restore. Streaming extraction rejects unsafe or duplicate paths and
 requires the exact declared full filestore count and bytes before publishing the
-dump. The existing credential boundary, quarantine, restore witness, private
+dump. The archive contains every regular file relative to its database directory,
+including root metadata and checklist files, without an attachment-name filter.
+File names must be canonical relative paths; links, special files, aliases and
+duplicates are refused. Extraction scratch stays in the original per-operation
+artifact staging directory, so retry cleanup cannot remove filestore members.
+The existing credential boundary, quarantine, restore witness, private
 readiness, route cutover and clean snapshot remain the normal rebuild path.
 
 Native rebuilds bind a capture to their original private candidate's recorded
@@ -4480,3 +4485,13 @@ A partial operation's readback reports `completed: false`, any independently
 verified snapshot receipts and whether raw source custody remains. It does not
 start a runtime or clear the provider journal. Missing terminal evidence never
 becomes a successful migration or retirement; keep the original operation key.
+
+Ordinary stable deployments of a published native Odoo testing copy also converge
+its owned route from the running copy's worker mode. Multiworker copies send
+`/websocket` and its subpaths to that same copy's evented listener; threaded
+copies retain the HTTP route. The original publication and address templates
+remain immutable. Readers admit only the original HTTP document or its exact
+derived two-port overlay, with unchanged hosts, TLS and middleware. The existing
+physical route fence, alias/identity checks and durable operation evidence govern
+the write. Address cancellation and rebuild inverses recognize both variants;
+no separate route amendment operation or receipt authority is introduced.

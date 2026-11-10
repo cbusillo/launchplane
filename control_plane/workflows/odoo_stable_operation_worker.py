@@ -2581,6 +2581,8 @@ def _execute_target_replacement_with_checkpoint(
                 record_store=cast(OdooStableTargetReplacementStore, record_store),
                 request=operation.request,
                 provider_effect_checkpoint=checkpoint_provider_effect,
+                operation_id=operation.operation_id,
+                operation_lease_owner=lease_owner,
                 hold_uncertain_effects=execution_checkpoint is not None,
                 before_records_commit=(
                     (lambda: execution_checkpoint("target_replacement_records_commit"))

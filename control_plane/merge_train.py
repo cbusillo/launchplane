@@ -217,6 +217,9 @@ class MergeTrainQueueEntry(BaseModel):
     head_sha: str
     labels: tuple[str, ...]
     actor_role: str
+    ready_handoff: MergeTrainReadyHandoff | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     mergeable: MergeTrainMergeableState
     requires_individual_landing: bool = Field(default=False, exclude_if=lambda value: not value)
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
@@ -932,6 +935,8 @@ def _build_queue_entry(
                 ineligible_reasons.append(handoff_refusal)
         elif pull_request.dependency_update_class != "patch_or_minor":
             ineligible_reasons.append("dependency update needs agent review")
+            if pull_request.ready_handoff is not None and pull_request.ready_handoff.comment_id:
+                ineligible_reasons.append(handoff_refusal)
     if (
         pull_request.preview_hold
         and pull_request.state == "open"
@@ -960,6 +965,7 @@ def _build_queue_entry(
         head_sha=pull_request.head_sha,
         labels=pull_request.labels,
         actor_role=actor_role,
+        ready_handoff=pull_request.ready_handoff,
         mergeable=pull_request.mergeable,
         requires_individual_landing=pull_request.requires_individual_landing,
         owner_review_required=pull_request.owner_review_required,

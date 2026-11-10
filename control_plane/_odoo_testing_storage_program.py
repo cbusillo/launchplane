@@ -6,7 +6,6 @@ TXG_SYNC_WAIT_SECONDS = 6
 
 STORAGE_MAINTENANCE_LIBRARY = r"""
 import os
-import re
 from pathlib import Path
 import subprocess
 import time
@@ -43,11 +42,12 @@ def copy_filestore(source, destination, clone):
     arguments = ['cp', '-a', '--reflink=always' if clone else '--reflink=auto', str(source) + '/.', str(destination)]
     try:
         command(arguments)
+        return
     except RuntimeError:
         if not clone:
             raise
         time.sleep(__TXG_SYNC_WAIT_SECONDS__)
-        command(arguments)
+    command(arguments)
 
 
 def storage_maintenance(spec, containers):
@@ -87,8 +87,7 @@ def populated_filestore_bytes(root):
     for path in root.rglob('*'):
         metadata=path.lstat()
         if stat.S_ISREG(metadata.st_mode):
-            if re.fullmatch(r'(?:checklist/)?[a-f0-9]{2}/[a-f0-9]{40}',str(path.relative_to(root))):
-                size+=metadata.st_size
+            size+=metadata.st_size
         elif not stat.S_ISDIR(metadata.st_mode):
             raise RuntimeError('Migrated partial filestore contains an unsupported entry')
     return size

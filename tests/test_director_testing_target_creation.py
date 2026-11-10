@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal
@@ -5,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -12,6 +14,8 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.http_routes.mutation_support import idempotency_scope
+from control_plane.service_auth import LocalOperatorIdentity
 from control_plane.dokploy_inventory import TARGET_COLLECTIONS
 from control_plane.dokploy_target_setup_http import (
     CREATE_COMPOSE_SOURCE_LABEL,
@@ -44,6 +48,9 @@ from tests.http_app_test_support import _local_operator_bearer_config, _Rejectin
 from tests.support.auth import scoped_agent_transport
 from tests.support.http import request
 from tests.support.profiles import _generic_site_profile_payload
+
+
+SETUP_KEY = "first-testing-setup"
 
 
 class _DirectorTestingSetupFixture(unittest.IsolatedAsyncioTestCase):
@@ -142,7 +149,7 @@ class _DirectorTestingSetupFixture(unittest.IsolatedAsyncioTestCase):
             control_plane_root_path=self.root,
         )
 
-    async def post(self, *, idempotency_key: str = "first-testing-setup", **changes: Any) -> Any:
+    async def post(self, *, idempotency_key: str = SETUP_KEY, **changes: Any) -> Any:
         return await request(
             self.app,
             "POST",
@@ -531,6 +538,7 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
 
     async def test_prelaunch_product_and_new_placement_also_stage(self) -> None:
         self.mark_production_use("prelaunch")
+        self.inventory = []
         result = await self.post(
             environment_id="", project_name="staged-project", environment_name="production"
         )
@@ -539,6 +547,356 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
             [call.args[2] for call in self.provider.call_args_list],
             [PROJECT_CREATE_PATH, ENVIRONMENT_CREATE_PATH, COMPOSE_CREATE_PATH],
         )
+
+    async def test_unknown_create_cannot_replay_under_original_or_replacement_key(self) -> None:
+        self.inventory = []
+        self.payload.update(
+            environment_id="", project_name="new-project", environment_name="production"
+        )
+        default = {
+            "environmentId": "new-environment",
+            "projectId": "new-project",
+            "name": "production",
+            "isDefault": True,
+        }
+
+        def create(_host: str, _token: str, path: str, _payload: Any) -> dict[str, Any]:
+            if path == PROJECT_CREATE_PATH:
+                self.inventory = [
+                    self.project(
+                        "new-project", {**self.environment("new-environment"), "name": "production"}
+                    )
+                ]
+                return {"project": {"projectId": "new-project"}, "environment": default}
+            raise RuntimeError("lost compose response")
+
+        self.provider.side_effect = create
+        failed = await self.post()
+        self.assertEqual(failed.status_code, 409, failed.text)
+        self.assertEqual(failed.json()["error"]["code"], "mutation_reconciliation_required")
+        self.provider.reset_mock()
+        replay = await self.post()
+        self.assertEqual(replay.status_code, 409, replay.text)
+        self.provider.assert_not_called()
+        other = await self.post(idempotency_key="replacement-key")
+        self.assertEqual(other.status_code, 409, other.text)
+        self.provider.assert_not_called()
+        readback = await self.post(mode="readback")
+        self.assertEqual(readback.status_code, 202, readback.text)
+        self.assertFalse(readback.json()["result"]["recoverable"])
+        self.provider.assert_not_called()
+
+    async def test_acknowledged_project_continues_only_after_original_key_readback(self) -> None:
+        self.inventory = []
+        self.payload.update(
+            environment_id="", project_name="new-project", environment_name="production"
+        )
+
+        def create(_host: str, _token: str, path: str, _payload: Any) -> dict[str, Any]:
+            self.assertEqual(path, PROJECT_CREATE_PATH)
+            self.mark_production_use("live")
+            self.inventory = [
+                self.project(
+                    "new-project", {**self.environment("new-environment"), "name": "production"}
+                )
+            ]
+            return {
+                "project": {"projectId": "new-project"},
+                "environment": {
+                    "environmentId": "new-environment",
+                    "projectId": "new-project",
+                    "name": "production",
+                    "isDefault": True,
+                },
+            }
+
+        self.provider.side_effect = create
+        failed = await self.post()
+        self.assertEqual(failed.status_code, 409, failed.text)
+        self.mark_production_use("prelaunch")
+        self.provider.reset_mock()
+        readback = await self.post(mode="readback")
+        self.assertEqual(readback.status_code, 202, readback.text)
+        self.assertTrue(readback.json()["result"]["recoverable"])
+        self.assertEqual((await self.post()).status_code, 409)
+        self.provider.assert_not_called()
+        self.provider.side_effect = None
+        self.provider.return_value = {"composeId": "created-compose"}
+        completed = await self.post(
+            expected_compose_recovery_sha256=readback.json()["result"]["recovery_sha256"]
+        )
+        self.assertEqual(completed.status_code, 202, completed.text)
+        self.assertEqual(
+            [call.args[2] for call in self.provider.call_args_list], [COMPOSE_CREATE_PATH]
+        )
+
+    async def recover_created_compose(self, failure: str) -> None:
+        self.inventory = []
+        self.payload.update(
+            environment_id="", project_name="new-project", environment_name="production"
+        )
+        default = {
+            "environmentId": "created-environment",
+            "projectId": "new-project",
+            "name": "production",
+            "isDefault": True,
+        }
+        raw = {
+            "composeId": "created-compose",
+            "environmentId": "created-environment",
+            "serverId": self.payload["server_id"],
+            "name": self.payload["target_name"],
+            "sourceType": "raw",
+        }
+
+        def create(_host: str, _token: str, path: str, _payload: Any) -> dict[str, Any]:
+            if path == PROJECT_CREATE_PATH:
+                if failure == "lost-project":
+                    self.inventory = [
+                        self.project(
+                            "new-project",
+                            {**self.environment("created-environment"), "name": "production"},
+                        )
+                    ]
+                    raise RuntimeError("lost project response")
+                return {"project": {"projectId": "new-project"}, "environment": default}
+            self.assertEqual(path, COMPOSE_CREATE_PATH)
+            self.inventory = [
+                self.project(
+                    "new-project",
+                    {
+                        **self.environment("created-environment", compose=[raw]),
+                        "name": "production",
+                    },
+                )
+            ]
+            if failure == "lost-response":
+                raise RuntimeError("lost response after creation")
+            return {"composeId": "created-compose"}
+
+        self.provider.side_effect = create
+
+        def read(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/compose.one":
+                return raw
+            if kwargs["path"] == "/api/project.one":
+                return {
+                    "projectId": "new-project",
+                    "createdAt": datetime.now(timezone.utc).isoformat(),
+                }
+            if kwargs["path"] == "/api/environment.one":
+                return {**default, "env": ""}
+            return self.inventory
+
+        self.provider_read.side_effect = read
+        if failure == "adoption-read":
+            with patch(
+                "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                side_effect=OSError("temporary read failure"),
+            ):
+                failed = await self.post()
+        elif failure == "receipt":
+            with patch(
+                "control_plane.dokploy_compose_allocation.provider_operation_response_payload",
+                side_effect=RuntimeError("receipt interrupted"),
+            ):
+                failed = await self.post()
+        else:
+            failed = await self.post()
+        self.assertEqual(failed.status_code, 409, failed.text)
+        self.provider.reset_mock()
+        readback = await self.post(mode="readback")
+        self.assertEqual(readback.status_code, 202, readback.text)
+        self.assertTrue(readback.json()["result"]["recoverable"], readback.text)
+        completed = await self.post(
+            expected_compose_recovery_sha256=readback.json()["result"]["recovery_sha256"]
+        )
+        self.assertEqual(completed.status_code, 202, completed.text)
+        if failure == "lost-project":
+            self.assertEqual(
+                [call.args[2] for call in self.provider.call_args_list], [COMPOSE_CREATE_PATH]
+            )
+        else:
+            self.provider.assert_not_called()
+        self.assertEqual(
+            self.store.read_dokploy_target_id_record(
+                context_name=self.payload["context"], instance_name="prod"
+            ).target_id,
+            raw["composeId"],
+        )
+
+    async def test_acknowledged_compose_finishes_adoption_without_another_create(self) -> None:
+        await self.recover_created_compose("adoption-read")
+
+    async def test_lost_project_response_uses_new_observed_placement(self) -> None:
+        await self.recover_created_compose("lost-project")
+
+    async def test_lost_compose_response_is_positively_observed_without_replay(self) -> None:
+        await self.recover_created_compose("lost-response")
+
+    async def test_committed_adoption_finishes_interrupted_receipt(self) -> None:
+        await self.recover_created_compose("receipt")
+
+    def retained_partial(self) -> dict[str, Any]:
+        self.payload.update(
+            environment_id="", project_name="recovered-project", environment_name="production"
+        )
+        project = {
+            "project_id": "recovered-project",
+            "name": "recovered-project",
+            "environments": [
+                {"environment_id": "recovered-environment", "name": "production", "targets": []}
+            ],
+        }
+
+        def page(projects: list[dict[str, Any]]) -> dict[str, Any]:
+            return {
+                "inventory_digest": canonical_json_sha256([p["project_id"] for p in projects]),
+                "total_projects": len(projects),
+                "total_environments": len(projects),
+                "total_targets": sum(
+                    len(e["targets"]) for p in projects for e in p["environments"]
+                ),
+                "offset": 0,
+                "limit": 100,
+                "next_offset": None,
+                "projects": projects,
+            }
+
+        historical = {
+            "project_id": "historical-project",
+            "name": "Historical",
+            "environments": [
+                {
+                    "environment_id": "historical-environment",
+                    "name": "production",
+                    "targets": [
+                        {
+                            "target_id": "historical-target",
+                            "category": "compose",
+                            "name": "Hydrated target name",
+                            "placement": {
+                                "kind": "server",
+                                "server_id": "historical-server",
+                                "server_name": "Hydrated server name",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        evidence = {
+            "original_key": SETUP_KEY,
+            "original_scope": idempotency_scope(
+                LocalOperatorIdentity(
+                    subject=_local_operator_bearer_config().local_operator_subject,
+                    token_label=_local_operator_bearer_config().local_operator_token_label,
+                )
+            ),
+            "original_trace_id": "launchplane_req_" + "1" * 32,
+            "original_request": dict(self.payload),
+            "original_request_sha256": canonical_json_sha256(self.payload),
+            "before": page([historical]),
+            "after": page([historical, project]),
+            "before_at": "2026-11-09T00:00:00Z",
+            "after_at": "2026-11-09T00:00:02Z",
+            "project_id": "recovered-project",
+            "environment_id": "recovered-environment",
+            "custody_evidence": "Fixture original operator custody and complete inventory delta.",
+        }
+        self.inventory = [
+            self.project(
+                "recovered-project",
+                {**self.environment("recovered-environment"), "name": "production"},
+            )
+        ]
+
+        def read(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/project.one":
+                return {
+                    "projectId": "recovered-project",
+                    "name": "recovered-project",
+                    "createdAt": "2026-11-09T00:00:01Z",
+                }
+            if kwargs["path"] == "/api/environment.one":
+                return {
+                    "environmentId": "recovered-environment",
+                    "projectId": "recovered-project",
+                    "name": "production",
+                    "isDefault": True,
+                    "env": "",
+                    "createdAt": "2026-11-09T00:00:01Z",
+                }
+            return self.inventory
+
+        self.provider_read.side_effect = read
+        return evidence
+
+    async def test_retained_original_requires_review_then_creates_only_missing_compose(
+        self,
+    ) -> None:
+        evidence = self.retained_partial()
+        unknown = await self.post(mode="readback")
+        self.assertEqual(unknown.json()["result"]["allocation_state"], "unrecorded_original")
+        self.provider.assert_not_called()
+        refused = await self.post(retained_compose_setup=evidence)
+        self.assertEqual(refused.status_code, 400, refused.text)
+        self.provider.assert_not_called()
+        readback = await self.post(mode="readback", retained_compose_setup=evidence)
+        self.assertEqual(readback.status_code, 202, readback.text)
+        digest = readback.json()["result"]["recovery_sha256"]
+        completed = await self.post(
+            retained_compose_setup=evidence, expected_compose_recovery_sha256=digest
+        )
+        self.assertEqual(completed.status_code, 202, completed.text)
+        self.assertEqual(
+            [call.args[2] for call in self.provider.call_args_list], [COMPOSE_CREATE_PATH]
+        )
+        self.assertEqual(self.provider.call_args.args[3]["environmentId"], "recovered-environment")
+        self.provider.reset_mock()
+        replay = await self.post(
+            retained_compose_setup=evidence, expected_compose_recovery_sha256=digest
+        )
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.provider.assert_not_called()
+        self.assert_production_unchanged()
+
+    async def test_retained_original_refuses_changed_caller_key_payload_and_old_placement(
+        self,
+    ) -> None:
+        evidence = self.retained_partial()
+        baseline = await self.post(mode="readback", retained_compose_setup=evidence)
+        self.assertEqual(baseline.status_code, 202, baseline.text)
+        digest = baseline.json()["result"]["recovery_sha256"]
+        for changes in (
+            {"idempotency_key": "new-key"},
+            {"target_name": "other-target"},
+            {"retained_compose_setup": {**evidence, "original_scope": "another-caller"}},
+            {"retained_compose_setup": {**evidence, "before": evidence["after"]}},
+            {
+                "retained_compose_setup": {
+                    **evidence,
+                    "before_at": "2026-11-10T00:00:00Z",
+                    "after_at": "2026-11-10T00:00:02Z",
+                }
+            },
+        ):
+            with self.subTest(changes=changes.keys()):
+                read_request: dict[str, Any] = {
+                    "mode": "readback",
+                    "retained_compose_setup": evidence,
+                    **changes,
+                }
+                refused = await self.post(**read_request)
+                self.assertIn(refused.status_code, {400, 422}, refused.text)
+                payload: dict[str, Any] = {
+                    "retained_compose_setup": evidence,
+                    "expected_compose_recovery_sha256": digest,
+                    **changes,
+                }
+                result = await self.post(**payload)
+                self.assertIn(result.status_code, {400, 422}, result.text)
+                self.provider.assert_not_called()
 
     async def test_terminal_director_stages_and_a_scoped_agent_cannot(self) -> None:
         with scoped_agent_transport():
@@ -708,6 +1066,8 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         self.assert_nothing_staged()
 
     async def test_going_live_mid_setup_stops_the_next_provider_effect(self) -> None:
+        self.inventory = []
+
         def create_project(*_args: Any) -> dict[str, str]:
             self.mark_production_use("live")
             return {"projectId": "created-project"}
@@ -716,7 +1076,8 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         result = await self.post(
             environment_id="", project_name="staged-project", environment_name="production"
         )
-        self.assertEqual(result.status_code, 400, result.text)
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertEqual(result.json()["error"]["code"], "mutation_reconciliation_required")
         self.provider.assert_called_once()
 
     async def test_a_concurrent_first_setup_is_refused(self) -> None:
