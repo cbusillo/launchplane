@@ -992,7 +992,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
     def test_same_build_route_repair_keeps_the_original_unknown_attempt(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.request()
-        original = str(self.reconcile()["queued_operation_id"])
+        original = cast(str, self.reconcile()["queued_operation_id"])
         self.finish(original, "reconciliation_required")
         self.running_route_inventory()
         with patch(
@@ -1073,7 +1073,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
     def previous_route_operation(self) -> OdooStableTargetReplacementOperationRecord:
         self.github.add_run(20, DEPLOYABLE)
         self.request()
-        original = str(self.reconcile()["queued_operation_id"])
+        original = cast(str, self.reconcile()["queued_operation_id"])
         self.finish(original, "pass")
         self.running_route_inventory()
         return self.store.read_odoo_stable_target_replacement_operation_record(original)
@@ -1086,7 +1086,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             self.request()
             planned = self.reconcile()
         successor = self.store.read_odoo_stable_target_replacement_operation_record(
-            str(planned["queued_operation_id"])
+            cast(str, planned["queued_operation_id"])
         )
         self.assertNotEqual(successor.operation_id, original.operation_id)
         self.assertIn(original.operation_id, successor.idempotency_key)

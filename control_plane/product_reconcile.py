@@ -551,14 +551,14 @@ def reconcile_testing_target(
     def native_route_current() -> bool | None:
         from control_plane.testing_copy_route import testing_copy_route_current
 
-        lane = next(lane for lane in profile.lanes if lane.instance == TESTING_INSTANCE)
+        testing_lane = next(item for item in profile.lanes if item.instance == TESTING_INSTANCE)
         if not isinstance(record_store, PostgresRecordStore):
             return None
         return testing_copy_route_current(
             root=control_plane_root,
             store=record_store,
             product=profile.product,
-            context=lane.context,
+            context=testing_lane.context,
         )
 
     if isinstance(desired, VerifiedBuildArtifact) and plan.get("reason") == "already_deployed":
