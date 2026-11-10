@@ -1702,8 +1702,6 @@ def advance_client_releases(
                 first_live_inverse_pending,
             )
 
-            # Only an existing native effect may enter inverse recovery under a hold.
-            # No new forward operation or release step is admitted here.
             for decision in store.list_release_review_decision_records(product=profile.product):
                 if (
                     not decision.checklist.first_live_origin

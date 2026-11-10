@@ -412,7 +412,6 @@ def complete_first_live(store: Any, root: Path, profile: Any, decision: Any) -> 
     from control_plane.storage.postgres import DbOnlyMutationRequest
     from control_plane.timestamps import utc_now_timestamp
 
-    # A completed acceptance is spent. It cannot override a later classification.
     if first_live_state_completed(store, decision):
         return
     if (
@@ -480,7 +479,6 @@ def complete_first_live(store: Any, root: Path, profile: Any, decision: Any) -> 
             raise WebsiteIndexingUnknown(
                 "The original first live indexing operation needs reconciliation."
             )
-    # Even a completed provider receipt needs fresh after-image proof before the state CAS.
     observation = adapter.observe("", "website-indexing", adapter.reconciliation_key())
     if observation.outcome != "present":
         raise WebsiteIndexingUnknown(
