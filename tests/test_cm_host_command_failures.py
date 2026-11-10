@@ -94,7 +94,10 @@ class CMHostCommandFailureTests(unittest.TestCase):
             ),
         )
         for program, spec, framed, stage in programs:
-            with self.subTest(program=program[:60]), TemporaryDirectory() as temporary:
+            with (
+                self.subTest(program=program[:60], stage=stage, mode=spec.get("mode")),
+                TemporaryDirectory() as temporary,
+            ):
                 output = io.StringIO()
                 private = "password=fixture-secret /credential/path dump-content"
 

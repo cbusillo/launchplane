@@ -269,7 +269,11 @@ class RetainedTestingCopyTests(unittest.TestCase):
     def test_command_failure_after_inventory_retains_private_output_bound_to_the_input(
         self,
     ) -> None:
-        from control_plane.copy_readback_diagnostics import COPY_FAILURE_STATE_DIRECTORY
+        from control_plane.copy_readback_diagnostics import (
+            COPY_FAILURE_STATE_DIRECTORY,
+            COPY_FAILURE_EVIDENCE_MARKER,
+            COPY_FAILURE_EXIT_MARKER,
+        )
         import hashlib
 
         spec = {**self.spec, "identity": self.identity}
@@ -301,7 +305,7 @@ class RetainedTestingCopyTests(unittest.TestCase):
             exec(compile(retained_copy_host_program(), "<retained-copy-host>", "exec"), {})
         frame = json.loads(output.getvalue().removeprefix("FRAME:"))
         self.assertNotIn(private.decode(), output.getvalue())
-        identity = frame["copy_failure_evidence_id"]
+        identity = frame[COPY_FAILURE_EVIDENCE_MARKER]
         evidence = json.loads(
             (home / COPY_FAILURE_STATE_DIRECTORY / (identity + ".json")).read_text()
         )
@@ -310,7 +314,7 @@ class RetainedTestingCopyTests(unittest.TestCase):
             evidence["input_sha256"],
             hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest(),
         )
-        self.assertEqual(frame["copy_failure_exit_status"], str(evidence["exit_status"]))
+        self.assertEqual(frame[COPY_FAILURE_EXIT_MARKER], str(evidence["exit_status"]))
 
     def test_host_read_binds_actual_storage_and_private_probe_uses_the_managed_port(self) -> None:
         read, _ = self.run_host()

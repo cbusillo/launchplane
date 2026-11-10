@@ -102,6 +102,7 @@ class NativeSourceTransportTests(unittest.TestCase):
             COPY_FAILURE_KIND_MARKER,
             COPY_FAILURE_STAGE_MARKER,
             COPY_FAILURE_EXIT_MARKER,
+            copy_failure_summary,
         )
 
         markers = {
@@ -135,7 +136,8 @@ class NativeSourceTransportTests(unittest.TestCase):
                 self.assertNotIn(private, str(error))
                 for key, value in expected.items():
                     self.assertEqual(error.evidence[key], value)
-                    self.assertIn(f"{key}={value}", str(error))
+                if expected:
+                    self.assertIn(copy_failure_summary(error.diagnostic_code), str(error))
                 with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
                     http_error_evidence.log_handled_error_cause(error, "command-test")
                 public = logs.records[-1].getMessage()

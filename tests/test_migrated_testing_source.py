@@ -600,7 +600,18 @@ class MigratedStreamTests(unittest.TestCase):
             self.assertIn(b'"type": "failed"', interrupted.stdout)
             failed = json.loads(interrupted.stdout.splitlines()[-1].removeprefix(b"FRAME:"))
             self.assertNotIn(COPY_FAILURE_KIND_MARKER, failed)
-            self.assertNotIn("predicate", failed)
+            from control_plane.dokploy import native_copy_stream as transport
+            from tests.test_odoo_testing_native_source import Connection
+
+            with self.assertRaises(transport.NativeProgramFailed) as raised:
+                transport._read_program(
+                    connection=Connection(failed),
+                    program=NATIVE_TESTING_STREAM_WRITE_PROGRAM,
+                    payload=spec,
+                    timeout_seconds=5,
+                    receive=lambda _frame: None,
+                )
+            self.assertFalse(raised.exception.has_diagnostic)
             rest = b"".join(
                 base64.b64encode(data[index : index + 65536]) + b"\n"
                 for index in range(65536, len(data), 65536)
