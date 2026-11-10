@@ -2877,7 +2877,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         assert provider_target is not None
         self.assertEqual(provider_target.target_id, "app-verireel-testing")
 
-    def test_dokploy_target_setup_endpoint_dry_run_does_not_persist(self) -> None:
+    def test_dokploy_target_setup_plan_only_caller_reports_apply_refusal_without_writes(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -2917,48 +2919,31 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
                 database_url=database_url,
             )
+            setup_payload = {
+                "schema_version": 1,
+                "mode": "dry-run",
+                "operation": "create-compose",
+                "product": "launchplane",
+                "context": "cm_website",
+                "instance": "testing",
+                "target_name": "cm-website-testing",
+                "project_name": "Odoo",
+                "environment_name": "production",
+                "server_id": "server-123",
+                "domains": ["cm-website-testing.shinycomputers.com"],
+                "runtime_port": 8069,
+                "deploy_timeout_seconds": 900,
+            }
             with patch(
                 "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.invalid", "token"),
             ):
-                status_code, payload = _invoke_dokploy_target_setup_app(
-                    app,
-                    method="POST",
-                    path="/v1/dokploy-targets/setup",
-                    payload={
-                        "schema_version": 1,
-                        "mode": "dry-run",
-                        "operation": "create-compose",
-                        "product": "launchplane",
-                        "context": "cm_website",
-                        "instance": "testing",
-                        "target_name": "cm-website-testing",
-                        "project_name": "Odoo",
-                        "environment_name": "production",
-                        "server_id": "server-123",
-                        "domains": ["cm-website-testing.shinycomputers.com"],
-                        "runtime_port": 8069,
-                        "deploy_timeout_seconds": 900,
-                    },
-                )
+                status_code, payload = _invoke_dokploy_target_setup_app(app, payload=setup_payload)
             apply_status, apply_payload = _invoke_dokploy_target_setup_app(
                 app,
-                method="POST",
-                path="/v1/dokploy-targets/setup",
                 payload={
-                    "schema_version": 1,
+                    **setup_payload,
                     "mode": "apply",
-                    "operation": "create-compose",
-                    "product": "launchplane",
-                    "context": "cm_website",
-                    "instance": "testing",
-                    "target_name": "cm-website-testing",
-                    "project_name": "Odoo",
-                    "environment_name": "testing",
-                    "server_id": "server-123",
-                    "domains": ["cm-website-testing.shinycomputers.com"],
-                    "runtime_port": 8069,
-                    "deploy_timeout_seconds": 900,
                     "confirmation": "APPLY DOKPLOY TARGET SETUP",
                     "reason": "Planner must not apply.",
                 },
@@ -2970,13 +2955,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["mode"], "dry-run")
-        self.assertFalse(payload["result"]["applied"])
-        self.assertEqual(
-            payload["result"]["setup"]["target_id_record"]["target_id"],
-            "planned-compose-id",
-        )
+        self.assertEqual(status_code, apply_status, payload)
+        self.assertEqual(payload["error"]["code"], apply_payload["error"]["code"])
+        self.assertEqual(payload["error"]["message"], apply_payload["error"]["message"])
         self.assertEqual(target_records, ())
         self.assertEqual(apply_status, 403)
         self.assertEqual(apply_payload["error"]["code"], "authorization_denied")

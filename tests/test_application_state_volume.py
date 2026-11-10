@@ -1747,21 +1747,22 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
             [PROJECT_CREATE_PATH, ENVIRONMENT_CREATE_PATH, APPLICATION_CREATE_PATH],
         )
 
-    def plain_setup(self, operation: str) -> dict[str, object]:
+    def plain_setup(self, operation: str, *, mode: str = "apply") -> dict[str, object]:
         from control_plane.dokploy_target_setup_http import execute_dokploy_target_setup
 
-        request = DokployTargetSetupEnvelope.model_validate(
-            {
-                **self.payload,
-                "operation": operation,
-                "target_id": "other-target"
-                if operation in {"adopt", "complete-compose-source"}
-                else "",
-                "state_volume_path": "",
-                "state_volume_plan_id": "",
-                "expected_plan_sha256": "",
-            }
-        )
+        payload = {
+            **self.payload,
+            "mode": mode,
+            "operation": operation,
+            "target_id": "other-target" if operation == "adopt" else "",
+            "state_volume_path": "",
+            "state_volume_plan_id": "",
+            "expected_plan_sha256": "",
+        }
+        if operation == "complete-compose-source":
+            payload = {key: payload[key] for key in ("mode", "operation", "context", "instance")}
+            payload.update(custom_git_branch="main", compose_path="docker-compose.yml")
+        request = DokployTargetSetupEnvelope.model_validate(payload)
         return execute_dokploy_target_setup(
             control_plane_root_path=self.root,
             record_store=self.store,
@@ -1793,8 +1794,12 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         self.assertEqual(result.status_code, 409, result.text)
         calls = self.provider.call_count
         for operation in ("adopt", "complete-compose-source"):
-            with self.subTest(operation=operation), self.assertRaises(ValueError):
-                self.plain_setup(operation)
+            with self.subTest(operation=operation):
+                with self.assertRaises(ValueError) as apply_error:
+                    self.plain_setup(operation)
+                with self.assertRaises(ValueError) as dry_error:
+                    self.plain_setup(operation, mode="dry-run")
+                self.assertEqual(str(dry_error.exception), str(apply_error.exception))
             self.assertEqual(self.provider.call_count, calls)
         with self.assertRaises(FileNotFoundError):
             self.store.read_provider_target_record(
