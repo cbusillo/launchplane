@@ -552,7 +552,7 @@ ODOO_DRIVER = DriverDescriptor(
         _action(
             "app_maintenance",
             "Run app maintenance",
-            "Run stable post-deploy maintenance, or an image-owned preview fixture using existing preview-apply authority.",
+            "Run stable maintenance, image-owned preview fixtures or fixed preview parts import using existing preview-apply authority.",
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/odoo/app-maintenance",
