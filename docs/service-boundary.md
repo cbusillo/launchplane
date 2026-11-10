@@ -142,6 +142,55 @@ remaining domain and storage removal is tracked in #2437.
     statuses, phases, times, attempt, the error code and the env-key names the
     failure is about, marked `free_text_omitted`. It never carries the error
     message, request, plan, checkpoint evidence or provider output.
+  - The target-replacement GET accepts `include_native_evidence=true` to add
+    `native_evidence`, defined by the closed
+    [NativeTestingRebuildEvidence](../control_plane/contracts/native_testing_rebuild_evidence.py)
+    schema. This uses the same stored product/context/instance authorization
+    as the normal GET. Without that query, the field is omitted and the
+    native evidence stores are not read. Existing status, result, recovery
+    and drain consumers keep their contracts. A caller that rejects unknown
+    top-level fields must adopt this schema before opting in; the existing
+    catalog reader's no-query request remains compatible.
+
+    The view reads existing original native reservation, original-intent,
+    rebuild-checkpoint, route-effect, publication and deployment records only.
+    It performs no provider IO, lock acquisition, write, probe or recovery.
+    Each item reports `source`, `availability`, `binding` and `coverage`;
+    retained states, observation times and reservation attempts are optional.
+    `present` means the named record or checkpoint snapshot was read and
+    bound, not that a provider effect happened or a copy is currently serving.
+    `missing` means the named retained row was not found; `null` means an
+    optional observation is null; `unavailable` means storage could not be
+    read; `unsupported` means the source was not read or its accessor/scope
+    is unsupported; `unbound` means retained evidence failed its original
+    binding checks. None means false or absent effects.
+
+    The operation attempt and provider reservation attempts are separate
+    counters. The checkpoint does not retain its worker attempt, reported as
+    `checkpoint_attempt_binding=not_recorded`. Candidate/predecessor items
+    cover admitted checkpoint snapshots, not current allocation or runtime
+    state. Route receipts report their retained reservation state, not the
+    actual route; selection reports the retained publication state, not
+    today's selection. A `reversed` publication can include an inverse of a
+    merely planned publication and does not prove a forward adoption happened.
+    Rollback/publication/retirement flags cover persisted intent only.
+
+    `terminal_probe` covers only a candidate observation still retained in
+    the checkpoint, with its own time, verification and identity agreement.
+    It never borrows the operation finish time or a predecessor's health.
+    When the checkpoint contains a predecessor observation instead, it
+    reports `not_retained` with `candidate_probe_not_retained` coverage.
+    The checkpoint has one route observation: a completed inverse can replace
+    the failed candidate observation. The public-health reader also does not
+    retain HTTP status, response bodies or transport exception details.
+    This view cannot reconstruct those historical details. It returns no
+    synthetic evidence locator and does not repurpose the preview-specific
+    private evidence reader for native stable operations.
+
+    No private identifiers, paths, hosts, URLs, keys, caller material, raw
+    payloads or stored prose are copied into this view. Provider effects stay
+    `unknown`, needed copies stay `retain_all` and `safe_to_release` is always
+    false. The existing recovery projection and eligibility are unchanged.
 - native FastAPI protected artifact inventory route:
   - `GET /v1/artifacts/protected`, requiring `artifact_protection.read` for
     the requested product and either the requested context or whole-product
