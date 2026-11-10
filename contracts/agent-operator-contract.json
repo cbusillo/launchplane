@@ -46,6 +46,37 @@
     },
     "operations": [
       {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_disposable_runtime_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "write_odoo_post_deploy",
+        "path": "/v1/drivers/odoo/post-deploy",
+        "purpose": "Configure native website indexing only when website_indexing is present, using recorded production_use, exact runtime/route binding and reviewed native baseline. Other requests retain normal post-deploy maintenance behavior.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "website_indexing.reviewed_plan"
+        ],
+        "schema_fingerprint_sha256": "c32aa37b6d31abfbddc257f151edcd0f2a69ffca749686fd704e840adc6627b3",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "optional",
         "identity_dependencies": [
           "read_browser_mutation_identity"
@@ -293,7 +324,7 @@
           "checklist_digest",
           "decision_reference"
         ],
-        "schema_fingerprint_sha256": "3974ab75b8a36c9b5b9632cc5c3e9640951a3259618f008724fa86de6a0e1d26",
+        "schema_fingerprint_sha256": "4ad3df29d31f97d21d1e9135369333d3124c13ad6df7cc874004ca3fb3b77ce5",
         "supported_surfaces": [
           "service_api",
           "browser"
@@ -1475,8 +1506,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "a00f508ea4bbb972f7ebd3e9f0a233a5116afe31"
+    "source_commit_sha": "43ef5139fc62d827ce92abd9f80f5d3d825d33be"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "0dec29b176809dc908a19ca8dbd2ffd980666cc08126b2b85306e77dad2b69bd"
+  "semantic_digest_sha256": "8704fb9f25f6756decef5310a317145fae06ece24d191f6be2fb3ac2d2ee36cd"
 }

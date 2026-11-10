@@ -497,7 +497,14 @@ def build_release_review(
             )
         except FileNotFoundError:
             pass
-    if production == candidate and not (stale_settings or settings_readback_failed):
+    first_live_origin = ""
+    if profile.driver_id == "odoo" and profile.production_use == "prelaunch":
+        from control_plane.odoo_website_indexing import production_origin
+
+        first_live_origin = production_origin(store, profile)
+    if production == candidate and not (
+        stale_settings or settings_readback_failed or first_live_origin
+    ):
         # The complete recorded identity already runs in production. There is
         # nothing to compare or accept; prior decisions/runs remain unchanged.
         checklist = ReleaseChecklist(
@@ -598,6 +605,7 @@ def build_release_review(
         untracked_commits=untracked,
         shared_sources=shared_sources,
         additional_changes=additional_changes,
+        first_live_origin=first_live_origin,
         production_website_settings=release_website_settings(
             store=store, profile=profile, artifact_id=production.artifact_id, instance="prod"
         ),

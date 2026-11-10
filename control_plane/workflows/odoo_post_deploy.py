@@ -33,6 +33,7 @@ from control_plane.dokploy.connection_isolation import (
     run_connection_isolation,
 )
 from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
+from control_plane.odoo_website_indexing import WebsiteIndexingRequest
 from control_plane.dokploy.native_copy_stream import NativeProgramFailed
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
@@ -72,6 +73,7 @@ class OdooPostDeployRequest(BaseModel):
     instance: str
     phase: OdooOverrideApplyPhase = "deploy"
     connection_isolation: OdooConnectionIsolationMode | None = None
+    website_indexing: WebsiteIndexingRequest | None = None
     reviewed_dry_run: bool = False
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
     reviewed_resource_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
@@ -85,6 +87,15 @@ class OdooPostDeployRequest(BaseModel):
             raise ValueError("Odoo post-deploy request requires context.")
         if not self.instance:
             raise ValueError("Odoo post-deploy request requires instance.")
+        if self.website_indexing is not None:
+            if self.instance != "prod" or self.connection_isolation is not None:
+                raise ValueError(
+                    "Website indexing requires its own production configuration operation."
+                )
+            if self.website_indexing.mode == "apply" and (
+                self.website_indexing.reviewed_plan is None or not self.reason.strip()
+            ):
+                raise ValueError("Website indexing apply requires its reviewed plan and reason.")
         if self.connection_isolation is not None:
             if runtime_key_safety_environment_class(self.instance) == "prod":
                 raise ValueError("Connection isolation refuses production.")
@@ -265,6 +276,8 @@ def execute_odoo_post_deploy(
     release_operation: bool = False,
     rollback: bool = False,
 ) -> OdooPostDeployResult:
+    if request.website_indexing is not None:
+        raise ValueError("Website indexing requires the guarded service configuration path.")
     if (
         fresh_testing_generation is not None
         and fresh_testing_generation.source_mode == "container-export"
@@ -360,7 +373,55 @@ def execute_odoo_post_deploy(
             record_store, request.context, rendering_record
         )
 
+    indexing_state = ""
+    selected_indexing = None
     try:
+        if request.instance == "prod" and release_operation:
+            from control_plane.odoo_website_indexing import (
+                WebsiteIndexingExecution,
+                production_origin,
+            )
+            from control_plane.contracts.odoo_website_settings import OdooWebsiteIndexing
+
+            profiles = [
+                profile
+                for profile in getattr(record_store, "list_product_profile_records")()
+                if profile.is_active
+                and profile.driver_id == "odoo"
+                and any(
+                    lane.context == request.context and lane.instance == "prod"
+                    for lane in profile.lanes
+                )
+            ]
+            if len(profiles) != 1:
+                raise click.ClickException("Release indexing requires one active product owner.")
+            profile = profiles[0]
+            try:
+                native_plan = WebsiteIndexingExecution(
+                    record_store,
+                    control_plane_root,
+                    profile.product,
+                    request.context,
+                    WebsiteIndexingRequest(
+                        mode="dry-run", public_origin=production_origin(record_store, profile)
+                    ),
+                    expected_artifact_id=artifact_id,
+                ).observe()
+            except (ValueError, RuntimeError, FileNotFoundError) as error:
+                raise click.ClickException(
+                    "Release indexing binding is unverified: " + str(error)
+                ) from error
+            selected_indexing = OdooWebsiteIndexing.model_validate(
+                {
+                    key: native_plan["native"][key]
+                    for key in ("website_id", "public_origin", "production_use")
+                }
+            )
+            indexing_state = selected_indexing.production_use
+            if rendering_record is None:
+                rendering_record = OdooInstanceOverrideRecord(
+                    context=request.context, instance="prod", updated_at=utc_now_timestamp()
+                )
         accepted_settings: OdooWebsiteSettingsIntent | None = None
         if rendering_record is not None:
             if control_plane_odoo_instance_overrides.odoo_instance_is_production(request.instance):
@@ -449,6 +510,7 @@ def execute_odoo_post_deploy(
                     record_store=record_store,
                     workflow_intent=workflow_intent,
                     protected_shopify_store_keys=protected_shopify_store_keys,
+                    selected_website_indexing=selected_indexing,
                     selected_website_settings=rendering_record.website_settings.settings
                     if rendering_record.website_settings is not None
                     else None,
@@ -556,6 +618,14 @@ def execute_odoo_post_deploy(
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             post_deploy_readback_markers
         )
+        if (
+            indexing_state
+            and post_deploy_readback_markers.get("website_indexing_production_use")
+            != indexing_state
+        ):
+            raise dokploy_post_deploy.OdooPostDeployReadbackFailure(
+                "Production indexing readback is unverified.", evidence=post_deploy_readback_markers
+            )
         if override_payload is not None and override_payload.website_settings is not None:
             if (
                 post_deploy_readback_markers.get("website_settings_sha256")
