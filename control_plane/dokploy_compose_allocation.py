@@ -267,14 +267,18 @@ class ComposeAllocationAdapter:
                     query={"projectId": evidence.project_id},
                 )
             )
-            environment = api.as_json_object(
-                api.dokploy_request(
-                    host=host,
-                    token=token,
-                    path="/api/environment.one",
-                    query={"environmentId": evidence.environment_id},
-                )
+            environments = project.get("environments") if project else None
+            matches = (
+                [
+                    item
+                    for item in environments
+                    if isinstance(item, dict)
+                    and item.get("environmentId") == evidence.environment_id
+                ]
+                if isinstance(environments, list)
+                else []
             )
+            environment = matches[0] if len(matches) == 1 else None
             if (
                 not project
                 or not environment
@@ -289,8 +293,17 @@ class ComposeAllocationAdapter:
                 raise ValueError(
                     "Retained placement is not the original empty default environment."
                 )
-            for resource in (project, environment):
-                created = datetime.fromisoformat(str(resource.get("createdAt", "")))
+            for kind, resource in (("project", project), ("environment", environment)):
+                created_at = resource.get("createdAt")
+                try:
+                    if not isinstance(created_at, str):
+                        raise ValueError("Missing creation timestamp")
+                    created = datetime.fromisoformat(created_at)
+                except ValueError as error:
+                    raise ValueError(
+                        f"Original {kind} creation timestamp is unavailable or invalid; "
+                        "retain custody and qualify provider metadata before recovery."
+                    ) from error
                 if (
                     created.utcoffset() is None
                     or not evidence.before_at <= created <= evidence.after_at

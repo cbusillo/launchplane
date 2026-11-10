@@ -2620,7 +2620,12 @@ self-consistent submitted copies alone cannot establish historical provenance.
 The pages must prove only one new project containing one empty production
 environment, with all older resources unchanged. Current provider identity,
 default-environment metadata, creation times within that observation window and
-empty placement must agree. Review those original receipts and the returned
+empty placement must agree. Recovery reads the project and its uniquely matching
+nested environment from `project.one`, including each resource's own `createdAt`.
+Dokploy's `environment.one` projection omits that environment timestamp; it is
+not a creation-time source. Missing, invalid or out-of-window timestamps refuse
+recovery; retain custody and qualify the provider metadata instead of substituting
+an observation time or another resource's timestamp. Review those original receipts and the returned
 digest before continuation. The same caller and original key are required;
 changed payloads, names alone, a project already present in the submitted before
 inventory, populated placement and incomplete evidence cannot qualify. Recovery records its new checkpoint at the current time
