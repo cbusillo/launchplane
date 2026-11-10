@@ -50,8 +50,10 @@ The descriptor contracts live in
   An empty readiness requirement set means the action does not yet support the
   operational-readiness endpoint; it must not be treated as implicitly ready.
   Production promotion actions may separately set
-  `requires_production_backup_policy`; this adds the exact typed backup-policy
-  dimension without embedding provider topology in the descriptor.
+  `production_backup_action` to the selector consumed by the promotion guard;
+  a nonempty selector adds the typed backup-policy dimension. It is independent
+  of `authz_action` and contains no provider topology. Preparation and readiness
+  use this selector, and status lists show each distinct selector once.
 - `DriverSettingGroupDescriptor`: setting/status groups the UI can render later
   without knowing product-specific storage internals.
 - `DriverContextView`: context or context/instance read model composed from

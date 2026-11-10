@@ -9,13 +9,19 @@ from control_plane.backup_policy_proposals import (
     decide_backup_policy,
     require_current_backup_policy_plan,
 )
-from control_plane.contracts.backup_policy_proposal import BackupPolicyHumanEvidence
+from control_plane.contracts.backup_policy_proposal import (
+    BackupPolicyHumanEvidence,
+    BackupPolicyProposalInput,
+)
 from control_plane.contracts.privileged_operation import (
     PrivilegedOperationRecord,
     PrivilegedOperationStatus,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
-from control_plane.privileged_operation_registry import PrivilegedOperationPlannerError
+from control_plane.privileged_operation_registry import (
+    PrivilegedOperationPlannerError,
+    require_backup_policy_promotion,
+)
 from control_plane.privileged_operation_service import (
     read_privileged_operation,
     require_privileged_operation_store,
@@ -87,6 +93,15 @@ def register_backup_policy_proposal_routes(
         human_admin = isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
         can_approve = human_admin and record.status == "planned"
         approval_unavailable_reason = None
+        try:
+            assert isinstance(record.request, BackupPolicyProposalInput)
+            require_backup_policy_promotion(record_store, record.request)
+        except (TypeError, ValueError, LookupError, FileNotFoundError):
+            can_approve = False
+            approval_unavailable_reason = (
+                "This proposal does not establish protection for the current production promotion. "
+                "Its recorded decision is unchanged. Ask an agent to check the current backup policy."
+            )
         if can_approve:
             try:
                 require_current_backup_policy_plan(record_store=record_store, record=record)

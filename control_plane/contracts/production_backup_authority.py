@@ -14,6 +14,9 @@ ProductionBackupAuthorityState = Literal["ready", "missing", "invalid", "stale",
 ProductionBackupProviderType = Literal["proxmox"]
 ProductionBackupDestinationKind = Literal["proxmox_guest", "proxmox_storage"]
 
+ODOO_PROMOTION_BACKUP_ACTION = "odoo_prod_promotion_run.execute"
+GENERIC_WEB_PROMOTION_BACKUP_ACTION = "generic_web_prod_promotion.execute"
+
 PRODUCTION_BACKUP_AUTHORITY_READ_ACTION = "production_backup_authority.read"
 PRODUCTION_BACKUP_AUTHORITY_WRITE_ACTION = "production_backup_authority.write"
 

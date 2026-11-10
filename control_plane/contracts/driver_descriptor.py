@@ -49,7 +49,7 @@ class DriverActionDescriptor(OperationDescriptor):
     output_schema: dict[str, object] = Field(default_factory=dict)
     writes_records: tuple[str, ...] = ()
     readiness_requirements: tuple[DriverActionReadinessRequirement, ...] = ()
-    requires_production_backup_policy: bool = False
+    production_backup_action: str = ""
 
 
 class DriverCapabilityDescriptor(BaseModel):

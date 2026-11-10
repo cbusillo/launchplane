@@ -123,14 +123,14 @@ def build_product_operational_readiness_service_result(
     )
     current_inventory_artifact_id = _read_current_inventory_artifact_id(lane_summary)
     production_backup_authority = None
-    if action is not None and action.requires_production_backup_policy:
+    if action is not None and action.production_backup_action:
         try:
             production_backup_authority = resolve_production_backup_authority(
                 record_store=require_production_backup_authority_store(record_store),
                 product=profile.product,
                 context=lane.context,
                 instance=lane.instance,
-                promotion_action=action.authz_action,
+                promotion_action=action.production_backup_action,
                 generated_at=generated_at,
             )
         except TypeError:
