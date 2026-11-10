@@ -482,8 +482,6 @@ class ComposeAllocationAdapter:
                 ):
                     raise ValueError("Reviewed original placement changed before continuation.")
                 if phase:
-                    # Positively observed identities are durable before continuing.
-                    # For retained originals this is a current recovery checkpoint.
                     lease.checkpoint_effect(json.dumps(phase))
 
                 def mutate(

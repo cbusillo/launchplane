@@ -38,8 +38,6 @@ class RetainedComposeSetup(BaseModel):
         if canonical_json_sha256(self.original_request) != self.original_request_sha256:
             raise ValueError("Original payload digest differs.")
         for page in (self.before, self.after):
-            # inventory_digest describes pre-hydration membership, not these
-            # returned target details. The recovery digest binds the full pages.
             environments = [e for p in page.projects for e in p.environments]
             if (
                 page.offset

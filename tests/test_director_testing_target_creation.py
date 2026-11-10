@@ -581,7 +581,6 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         other = await self.post(idempotency_key="replacement-key")
         self.assertEqual(other.status_code, 409, other.text)
         self.provider.assert_not_called()
-        # Empty target inventory does not prove an interrupted provider request had no effect.
         readback = await self.post(mode="readback")
         self.assertEqual(readback.status_code, 202, readback.text)
         self.assertFalse(readback.json()["result"]["recoverable"])
@@ -752,7 +751,6 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
 
         def page(projects: list[dict[str, Any]]) -> dict[str, Any]:
             return {
-                # The producer's opaque membership token is not a checksum of hydrated pages.
                 "inventory_digest": canonical_json_sha256([p["project_id"] for p in projects]),
                 "total_projects": len(projects),
                 "total_environments": len(projects),
