@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.contracts.production_backup_authority import ODOO_PROMOTION_BACKUP_ACTION
+from control_plane.drivers.registry import effective_driver_actions, read_driver_descriptor
 from control_plane.production_backup_authority import ProductionBackupAuthorityWriteEnvelope
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
@@ -469,13 +470,18 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(foreign.status_code, 403, foreign.text)
 
     async def test_wrong_promotion_action_is_never_reviewable(self) -> None:
-        for driver, action in (
-            ("generic-web", "unknown_promotion.execute"),
-            ("generic-web", "generic_web_prod_promotion.dispatch"),
-            ("odoo", "odoo_prod_promotion.execute"),
-        ):
+        cases = [("generic-web", "unknown_promotion.execute")]
+        for driver in ("generic-web", "odoo"):
+            actions = effective_driver_actions(read_driver_descriptor(driver))
+            selectors = {action.production_backup_action for action in actions}
+            cases.extend(
+                (driver, action.authz_action)
+                for action in actions
+                if action.production_backup_action and action.authz_action not in selectors
+            )
+        for driver, action in cases:
             with self.subTest(driver=driver, action=action):
-                self.payload["source_event_id"] = f"proposal:{action}"
+                self.payload["source_event_id"] = f"proposal:{driver}:{action}"
                 self.store.write_product_profile_record(
                     _profile().model_copy(update={"driver_id": driver})
                 )
@@ -515,7 +521,12 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
         self.store.write_product_profile_record(_profile().model_copy(update={"driver_id": "odoo"}))
         policy = self.payload["request"]["authority"]["policy"]
         policy.update(
-            promotion_action="odoo_prod_promotion.execute",
+            promotion_action=next(
+                action.authz_action
+                for action in effective_driver_actions(read_driver_descriptor("odoo"))
+                if action.production_backup_action
+                and action.authz_action != action.production_backup_action
+            ),
             policy_id="",
             record_id="",
             policy_digest="",

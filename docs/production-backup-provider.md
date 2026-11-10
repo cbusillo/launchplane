@@ -444,14 +444,9 @@ another selector remains an applied historical record, with its decision and
 values unchanged; its card warns that it does not establish current protection.
 Status and readiness resolve only the selectors the guards consume.
 
-Source corrections do not migrate an approval or policy between selectors.
-Continuation uses the existing exact-lane proposal and signed-in decision path,
-with current targets reused where valid. Preserve the original decision and
-approved values when qualifying the needed correction; an already recorded
-decision is not a reason to ask the same question again. The exact policy
-consumed by the guard must be applied and read back before dependent credential
-binding or capture. Policy application alone proves neither of those operations
-nor release readiness.
+Approvals and policies do not migrate between selectors. The exact policy
+consumed by the guard must be applied before dependent credential binding or
+capture; policy application alone does not establish release readiness.
 
 **Approve** and **Decline** send only the proposal ID, decision and stable source
 event to `/v1/production-backup-authority/proposals/{operation_id}/decision`.

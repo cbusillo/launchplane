@@ -94,13 +94,14 @@ def register_backup_policy_proposal_routes(
         can_approve = human_admin and record.status == "planned"
         approval_unavailable_reason = None
         try:
-            assert isinstance(record.request, BackupPolicyProposalInput)
+            if not isinstance(record.request, BackupPolicyProposalInput):
+                raise TypeError("Backup proposal request is unavailable.")
             require_backup_policy_promotion(record_store, record.request)
         except (TypeError, ValueError, LookupError, FileNotFoundError):
             can_approve = False
             approval_unavailable_reason = (
                 "This proposal does not establish protection for the current production promotion. "
-                "Its recorded decision is unchanged. Ask an agent to check the current backup policy."
+                "Ask an agent to check the current backup policy."
             )
         if can_approve:
             try:

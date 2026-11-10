@@ -10,8 +10,6 @@ from control_plane.contracts.product_environment_read_model import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.production_backup_authority import (
-    ODOO_PROMOTION_BACKUP_ACTION,
-    GENERIC_WEB_PROMOTION_BACKUP_ACTION,
     ProductionBackupPolicyRecord,
     ProductionBackupTargetRecord,
     ProxmoxGuestBackupDestinationReference,
@@ -452,15 +450,15 @@ class ProductionBackupAuthorityStorageTests(unittest.TestCase):
 
 class ProductionBackupAuthorityProjectionTests(unittest.TestCase):
     def test_preparation_uses_guard_selectors_despite_different_http_actions(self) -> None:
-        for driver, selector, irrelevant in (
-            ("odoo", ODOO_PROMOTION_BACKUP_ACTION, "odoo_prod_promotion.execute"),
-            (
-                "generic-web",
-                GENERIC_WEB_PROMOTION_BACKUP_ACTION,
-                "generic_web_prod_promotion.dispatch",
-            ),
-        ):
-            for policy_action in (selector, irrelevant):
+        for driver in ("odoo", "generic-web"):
+            actions = tuple(
+                action
+                for action in effective_driver_actions(read_driver_descriptor(driver))
+                if action.production_backup_action
+            )
+            selectors = {action.production_backup_action for action in actions}
+            irrelevant_actions = {action.authz_action for action in actions} - selectors
+            for policy_action in selectors | irrelevant_actions:
                 with (
                     self.subTest(driver=driver, policy_action=policy_action),
                     TemporaryDirectory() as directory,
@@ -493,22 +491,18 @@ class ProductionBackupAuthorityProjectionTests(unittest.TestCase):
                         instance_name="prod",
                         action_allowed=lambda *_: True,
                     )
-                    expected = "ready" if policy_action == selector else "missing"
                     for authorities in (
                         config.production_backup_authorities,
                         view.drivers[0].production_backup_authorities,
                     ):
                         by_action = {item.promotion_action: item for item in authorities}
-                        self.assertNotIn(irrelevant, by_action)
-                        self.assertEqual(by_action[selector].state, expected)
+                        self.assertEqual(set(by_action), selectors)
+                        for selector, authority in by_action.items():
+                            self.assertEqual(
+                                authority.state, "ready" if policy_action == selector else "missing"
+                            )
                         self.assertEqual(len(authorities), len(by_action))
-                    for action in effective_driver_actions(read_driver_descriptor(driver)):
-                        if action.action_id not in (
-                            {"prod_promotion", "prod_promotion_run"}
-                            if driver == "odoo"
-                            else {"prod_promotion", "prod_promotion_workflow"}
-                        ):
-                            continue
+                    for action in actions:
                         readiness = build_product_operational_readiness_service_result(
                             record_store=cast(ProductOperationalReadinessStore, store),
                             profile=profile,
@@ -524,7 +518,12 @@ class ProductionBackupAuthorityProjectionTests(unittest.TestCase):
                             for item in readiness.dimensions
                             if item.dimension == "production_backup_policy"
                         )
-                        self.assertEqual(dimension.state, expected)
+                        self.assertEqual(
+                            dimension.state,
+                            "ready"
+                            if policy_action == action.production_backup_action
+                            else "missing",
+                        )
 
     def test_product_config_driver_and_readiness_project_bounded_authority(self) -> None:
         with TemporaryDirectory() as temporary_directory:
