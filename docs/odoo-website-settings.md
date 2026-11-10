@@ -187,7 +187,10 @@ ambiguous, stale or mismatched product, route, target, runtime, database UUID,
 website or reviewed head evidence refuses the effect. A separate route digest
 does not waive topology's `stale_route_authority` warning. Apply locks the
 native website row, checks the reviewed baseline, reads back in the transaction,
-commits, then returns its receipt. A lost receipt is unknown, not success.
+commits and completes native cache notification, then returns its receipt.
+Odoo 20 includes notification in its transaction commit; Odoo 19's caller signals
+its invalidated caches afterward so running HTTP workers observe the change.
+A lost receipt is unknown, not success.
 Reconciliation checks stable target identity and fresh route authority separately.
 The exact native after-image proves completion; the unchanged reviewed before-image
 permits the original operation to retry. Any other image remains unknown.

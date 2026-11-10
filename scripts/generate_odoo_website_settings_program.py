@@ -117,6 +117,8 @@ if request["mode"] == "apply":
     if not readback or readback["before_sha256"] != plan["after_sha256"] or readback["changed"]:
         raise RuntimeError("Website indexing readback differs from the reviewed plan.")
     env.cr.commit()
+    if signal_changes := getattr(env.registry, "signal_changes", None):
+        signal_changes()
 else:
     env.cr.rollback()
 print("website_indexing_result=" + json.dumps({**plan, "database_uuid": database_uuid, "committed": request["mode"] == "apply"}, sort_keys=True))

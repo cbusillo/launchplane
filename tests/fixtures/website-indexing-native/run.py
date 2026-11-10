@@ -12,16 +12,18 @@ import requests
 import importlib
 from typing import Any, cast
 
+ROOT = Path("/workspace")
+RESULTS = ROOT / "results"
+RESULTS.mkdir(exist_ok=True)
+importlib.import_module("odoo.cli")
 odoo = importlib.import_module("odoo")
-api = odoo.api
+api = importlib.import_module("odoo.api")
+registry_module = importlib.import_module("odoo.modules.registry")
 psycopg2 = importlib.import_module("psycopg2")
 html = importlib.import_module("lxml.html")
 WEBSITE_INDEXING_PROGRAM = importlib.import_module("generated").WEBSITE_INDEXING_PROGRAM
 
 
-ROOT = Path("/workspace")
-RESULTS = ROOT / "results"
-RESULTS.mkdir(exist_ok=True)
 DATABASE = "launchplane_indexing"
 ARGS = [
     "--db_host=db",
@@ -55,7 +57,7 @@ with (RESULTS / "install.log").open("w") as log:
     )
 
 odoo.tools.config.parse_config(ARGS)
-registry = odoo.modules.registry.Registry(DATABASE)
+registry = registry_module.Registry(DATABASE)
 original = '<meta name="robots" content="nofollow"><script>window.synthetic="preserved";</script>'
 with registry.cursor() as cursor:
     env = api.Environment(cursor, 1, {})
@@ -134,7 +136,10 @@ def execute(
     ]
     if len(lines) != 1:
         raise RuntimeError("Missing producer receipt")
-    return cast(dict[str, Any], json.loads(lines[0]))
+    result = cast(dict[str, Any], json.loads(lines[0]))
+    with (RESULTS / "receipts.jsonl").open("a") as receipts:
+        receipts.write(json.dumps(result) + "\n")
+    return result
 
 
 def page(host: str = "indexing.example.test", path: str = "/contactus") -> str:
@@ -144,6 +149,7 @@ def page(host: str = "indexing.example.test", path: str = "/contactus") -> str:
         timeout=30,
     )
     response.raise_for_status()
+    (RESULTS / f"page-{len(list(RESULTS.glob('page-*.html')))}.html").write_text(response.text)
     return response.text
 
 
@@ -207,6 +213,9 @@ with (RESULTS / "web.log").open("w") as log:
             website = env["website"].browse(site_id)
             website.custom_code_head += "<script>window.concurrent=true;</script>"
             cursor.commit()
+            signal_changes = getattr(registry, "signal_changes", None)
+            if callable(signal_changes):
+                signal_changes()
         try:
             execute("live", stale)
         except RuntimeError:
