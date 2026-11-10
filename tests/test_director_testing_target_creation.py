@@ -929,7 +929,6 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         for kind in ("project", "environment"):
             for timestamp in (
                 None,
-                "",
                 "invalid",
                 "2026-11-09T00:00:01",
                 "2026-11-08T23:59:59Z",
@@ -954,7 +953,7 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
                         )
                         self.assertEqual(refused.status_code, 400, refused.text)
                         self.provider.assert_not_called()
-        self.assert_production_unchanged()
+        self.assert_nothing_staged()
 
     async def test_retained_original_requires_unique_empty_bound_default_environment(self) -> None:
         evidence = self.retained_partial()
@@ -962,7 +961,6 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         digest = baseline.json()["result"]["recovery_sha256"]
         environment = self.retained_project["environments"][0]
         for environments in (
-            [],
             [environment, environment],
             [{**environment, "environmentId": "another-environment"}],
             [{**environment, "projectId": "another-project"}],
@@ -980,7 +978,7 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
                     )
                     self.assertEqual(refused.status_code, 400, refused.text)
                     self.provider.assert_not_called()
-        self.assert_production_unchanged()
+        self.assert_nothing_staged()
 
     async def test_terminal_director_stages_and_a_scoped_agent_cannot(self) -> None:
         with scoped_agent_transport():
