@@ -882,6 +882,13 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
             },
         ):
             with self.subTest(changes=changes.keys()):
+                read_request: dict[str, Any] = {
+                    "mode": "readback",
+                    "retained_compose_setup": evidence,
+                    **changes,
+                }
+                refused = await self.post(**read_request)
+                self.assertIn(refused.status_code, {400, 422}, refused.text)
                 payload: dict[str, Any] = {
                     "retained_compose_setup": evidence,
                     "expected_compose_recovery_sha256": digest,
