@@ -29,11 +29,11 @@ from control_plane.merge_train_github import (
     MergeTrainBaseCheckObservation,
     MergeTrainGitHubError,
 )
-from control_plane.github_required_checks import CheckRequirement
-from control_plane.merge_train_candidate_failures import (
-    CandidateCheckFailure,
-    CandidateCheckFailures,
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBlockFailureEvidence,
+    MergeTrainFailedRequiredCheck,
 )
+from control_plane.github_required_checks import CheckRequirement
 from control_plane.merge_train_base_retest_receipt import (
     BaseRetestReceipt,
     read_base_retest_receipt,
@@ -834,24 +834,36 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.comments[0]["body"] = (
             f"Review result: weighed\nHead: {self.current.head_sha}\n\nFindings addressed."
         )
-        requirement = CheckRequirement(name="ci-gate", app_id=self.writer_app_id)
-        self.enterContext(
-            patch.object(
-                self.client,
-                "read_candidate_check_failures",
-                return_value=CandidateCheckFailures(
-                    checks=(
-                        CandidateCheckFailure(
-                            name="ci-gate",
-                            conclusion="failure",
-                            url="",
-                            identity_name="ci-gate",
-                        ),
-                    ),
-                    attribution_requirements=(requirement,),
+        assert self.record.block_intent is not None
+        candidate = self.record.candidate.model_copy(update={"candidate_sha": "c" * 40})
+        evidence = MergeTrainBlockFailureEvidence(
+            repository=candidate.repository,
+            candidate_ref=candidate.candidate_ref,
+            candidate_sha=candidate.candidate_sha,
+            checks=(
+                MergeTrainFailedRequiredCheck(
+                    name="ci-gate",
+                    app_id=self.writer_app_id,
+                    provider_app_id=self.writer_app_id,
+                    provider_app_slug="github-actions",
+                    source="check_run",
+                    provider_id=71,
+                    check_suite_id=10,
+                    run_id=41,
+                    run_attempt=1,
+                    conclusion="failure",
                 ),
-            )
+            ),
         )
+        self.record = self.record.model_copy(
+            update={
+                "candidate": candidate,
+                "block_intent": self.record.block_intent.model_copy(
+                    update={"failure_evidence": evidence}
+                ),
+            }
+        )
+        self.store.write_merge_train_batch_candidate_record(self.record)
         self.enterContext(
             patch.object(
                 self.client,
@@ -879,6 +891,189 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 self.target.repository,
                 self.current.number,
                 self.current.head_sha,
+            )
+        )
+
+    def test_block_producer_read_and_recovery_keep_the_blocking_repeat_selection(self) -> None:
+        from control_plane.http_routes.merge_train import read_candidate_evidence
+        from control_plane.merge_train_controller_run_once import (
+            _recover_failed_merge_train_candidate,
+        )
+        from tests.test_merge_train_block_failure_evidence import FailureHistory
+
+        self.setup_base_retest()
+        candidate = self.record.candidate.model_copy(update={"check_rerun_attempts": {41: 1}})
+        history = FailureHistory(candidate)
+        self.assertEqual(history.observe().check_names, ("ci-gate",))
+        history.phase = 2
+        blocking = history.observe()
+        history.phase = 3
+        self.assertFalse(history.observe().conclusive)
+        self.assertEqual(history.job_reads, 0)
+        self.record = self.record.model_copy(update={"candidate": candidate, "block_intent": None})
+        self.store.write_merge_train_batch_candidate_record(self.record)
+        self.events = []
+        self.current = self.old
+        requests = self.request
+
+        def apply_label(**kwargs: Any) -> object:
+            if kwargs["method"] == "POST":
+                self.events = [self.label_event]
+                self.current = self.current.model_copy(
+                    update={"labels": (self.target.blocked_label,)}
+                )
+                return []
+            return requests(**kwargs)
+
+        self.transport.request.side_effect = apply_label
+        snapshot = self.snapshot.model_copy(
+            update={"pull_requests": (self.old,), "base_sha": candidate.base_sha}
+        )
+        with (
+            patch.object(self.client, "read_candidate_check_failures", return_value=blocking),
+            patch.object(self.client, "retry_candidate_checks", return_value=None),
+            patch.object(self.client, "candidate_check_retry_finished", return_value=True),
+        ):
+
+            def produce(*, mutate: bool = True) -> dict[str, object] | None:
+                return _recover_failed_merge_train_candidate(
+                    candidate_store=self.store,
+                    stack_collapse_store=self.store,
+                    active_candidate_record=self.record,
+                    github_client=self.client,
+                    dry_run_result=build_merge_train_dry_run_result(
+                        policy=self.policy, snapshot=snapshot, batch_landing=True
+                    ),
+                    snapshot=snapshot,
+                    held_out=(),
+                    policy=self.policy,
+                    policy_sha256=self.policy_digest,
+                    repository=self.target.repository,
+                    base_branch=self.target.base_branch,
+                    mutate=mutate,
+                    lease=self.lease,
+                    recorded_at="2026-10-18T00:02:00Z",
+                    trace_id="decision",
+                )
+
+            with patch.object(
+                history.client.transport,
+                "request",
+                side_effect=MergeTrainGitHubError("quota exhausted", rate_limited=True),
+            ) as origin_read:
+                dry_run = produce(mutate=False)
+                assert dry_run is not None
+                self.assertEqual(dry_run["controller_action"], "block")
+                origin_read.assert_not_called()
+            for error in (
+                MergeTrainGitHubError("upstream unavailable", status_code=503),
+                MergeTrainGitHubError("quota exhausted", status_code=403, rate_limited=True),
+                MergeTrainGitHubError("transport unavailable"),
+            ):
+                with (
+                    self.subTest(error=error),
+                    patch.object(
+                        history.client.transport, "request", side_effect=error
+                    ) as origin_read,
+                ):
+                    self.assertIsNone(produce())
+                    origin_read.assert_called_once()
+                    self.assertFalse(self.events)
+                    self.assertTrue(
+                        all(
+                            record.block_intent is None
+                            for record in self.store.list_merge_train_batch_candidate_records()
+                        )
+                    )
+            produced = produce()
+        evidence = blocking.decision_evidence
+        assert evidence is not None
+        self.assertEqual(history.job_reads, 1)
+        self.assertEqual(
+            {
+                (
+                    check.name,
+                    check.provider_id,
+                    check.run_id,
+                    check.run_attempt,
+                    check.check_suite_id,
+                )
+                for check in evidence.checks
+            },
+            {
+                ("security-gate", 422, 42, 1, 20),
+                ("status-gate", 802, None, None, None),
+                ("external-gate", 901, None, None, 701),
+            },
+        )
+        assert produced is not None
+        record_id = produced["merge_train_batch_candidate_record_id"]
+        assert isinstance(record_id, str)
+        read = read_candidate_evidence(
+            store=self.store,
+            repository=self.target.repository,
+            base_branch=self.target.base_branch,
+            record_id=record_id,
+        )
+        assert read.record.block_intent is not None
+        self.assertEqual(read.record.block_intent.failure_evidence, evidence)
+        self.assertEqual(read.record.block_intent.applied_label_event_id, self.label_event["id"])
+        self.snapshot = self.snapshot.model_copy(update={"pull_requests": (self.current,)})
+        with (
+            patch.object(
+                self.client,
+                "read_candidate_check_failures",
+                side_effect=AssertionError(
+                    "Historical recovery must not read current candidate failures"
+                ),
+            ),
+            patch.object(
+                self.client,
+                "read_base_check_observation",
+                return_value=MergeTrainBaseCheckObservation("pass"),
+            ) as base,
+        ):
+            result = self.advance(mutate=True)
+        self.assertEqual(result["controller_action"], "recover_candidate_block")
+        required = {
+            CheckRequirement("security-gate", 19),
+            CheckRequirement("status-gate"),
+            CheckRequirement("external-gate", 77),
+        }
+        self.assertEqual(set(base.call_args.kwargs["attribution_requirements"]), required)
+        receipt = read_base_retest_receipt(
+            self.store, self.target.repository, self.old.number, self.old.head_sha
+        )
+        assert receipt is not None
+        self.assertEqual(
+            receipt.applied_label_event_id, read.record.block_intent.applied_label_event_id
+        )
+        self.assertEqual(set(receipt.required_checks), required)
+
+    def test_missing_decision_failure_evidence_preserves_the_old_hold(self) -> None:
+        self.setup_base_retest()
+        assert self.record.block_intent is not None
+        self.record = self.record.model_copy(
+            update={
+                "block_intent": self.record.block_intent.model_copy(
+                    update={"failure_evidence": None}
+                )
+            }
+        )
+        self.store.write_merge_train_batch_candidate_record(self.record)
+        from tests.test_merge_train_block_failure_evidence import FailureHistory
+
+        history = FailureHistory(self.record.candidate)
+        history.phase = 2
+        with patch.object(
+            self.client, "read_candidate_check_failures", return_value=history.observe()
+        ):
+            result = self.advance(mutate=True)
+        self.assertNotEqual(result["controller_action"], "recover_candidate_block")
+        self.assertEqual(self.mutations, [])
+        self.assertIsNone(
+            read_base_retest_receipt(
+                self.store, self.target.repository, self.old.number, self.old.head_sha
             )
         )
 
@@ -1636,6 +1831,9 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
     ) -> None:
         self._exercise_real_block_producer(lose_label_reply=False)
 
+    def test_unavailable_failure_origin_remains_visible_after_label_write(self) -> None:
+        self._exercise_real_block_producer(lose_label_reply=False, evidence_unavailable=True)
+
     def test_existing_label_does_not_create_a_successful_write_receipt(self) -> None:
         from control_plane.merge_train_controller_run_once import _block_failed_candidate_culprit
 
@@ -1646,12 +1844,14 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             batch_landing=True,
         )
         before = self.store.list_merge_train_batch_candidate_records()
+        capture = Mock(side_effect=AssertionError("Existing holds need no origin capture"))
         result = _block_failed_candidate_culprit(
             candidate_store=self.store,
             active_candidate_record=self.record,
             github_client=self.client,
             dry_run_result=dry,
             details={},
+            capture_failure_evidence=capture,
             repository=self.target.repository,
             base_branch=self.target.base_branch,
             mutate=True,
@@ -1662,8 +1862,11 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.assertNotIn("merge_train_batch_candidate_record_id", result)
         self.assertEqual(self.store.list_merge_train_batch_candidate_records(), before)
         self.transport.request.assert_not_called()
+        capture.assert_not_called()
 
-    def _exercise_real_block_producer(self, *, lose_label_reply: bool) -> None:
+    def _exercise_real_block_producer(
+        self, *, lose_label_reply: bool, evidence_unavailable: bool = False
+    ) -> None:
         from control_plane.merge_train_controller_run_once import (
             _block_failed_candidate_culprit,
             execute_merge_train_controller_with_client,
@@ -1671,9 +1874,17 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
         )
 
+        fixed = self.current
+        self.setup_base_retest()
+        assert self.record.block_intent is not None
+        failure_evidence = self.record.block_intent.failure_evidence
+        assert failure_evidence is not None
+        if evidence_unavailable:
+            failure_evidence = failure_evidence.model_copy(
+                update={"checks": (), "unavailable_reason": "fixture_origin_unreadable"}
+            )
         self.record = self.record.model_copy(update={"block_intent": None})
         self.store.write_merge_train_batch_candidate_record(self.record)
-        fixed = self.current
         self.current = self.old
         self.snapshot = self.snapshot.model_copy(update={"pull_requests": (self.old,)})
         self.events = []
@@ -1694,6 +1905,9 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                     if r.block_intent is not None
                 ]
                 self.assertEqual(len(intents), 1)
+                intent = intents[0].block_intent
+                assert intent is not None
+                self.assertEqual(intent.failure_evidence, failure_evidence)
                 self.assertEqual(intents[0].candidate.entries[0].head_sha, self.old.head_sha)
                 if lose_label_reply:
                     self.events = [self.label_event]
@@ -1734,6 +1948,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 github_client=self.client,
                 dry_run_result=dry,
                 details=failure_details,
+                capture_failure_evidence=lambda: failure_evidence,
                 repository=self.target.repository,
                 base_branch=self.target.base_branch,
                 mutate=True,
@@ -1751,6 +1966,11 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             )
         else:
             produced = produce()
+            if evidence_unavailable:
+                self.assertEqual(
+                    produced["details"]["block_failure_evidence_unavailable"],
+                    failure_evidence.unavailable_reason,
+                )
             self.assertNotIn("controller_reconciliation_status", produced)
             from control_plane.merge_train_controller_feedback import build_feedback_payloads
 
@@ -1761,6 +1981,9 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             self.assertEqual(block.pull_request_number, self.old.number)
             lease.release()
         self.current = fixed
+        self.comments[0]["body"] = (
+            f"Review result: weighed\nHead: {fixed.head_sha}\n\nFindings addressed."
+        )
         self.snapshot = self.snapshot.model_copy(update={"pull_requests": (fixed,)})
         self.transport.request.side_effect = requests
         self.store = FilesystemRecordStore(Path(self.directory.name))
