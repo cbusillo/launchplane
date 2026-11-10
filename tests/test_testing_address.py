@@ -1328,6 +1328,27 @@ class TestingAddressTests(unittest.TestCase):
         self.assertEqual(self.store.read_product_profile_record(self.product), changed)
         self.assertIsNone(read_testing_address(self.store, self.plan.publication_key))
 
+    def test_cancellation_restores_original_host_after_evented_forward(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.dokploy.testing_route import route_document
+
+        native, run = self.native_address_execution()
+        native.containers["new"]["Config"]["Env"].append("ODOO_WORKERS=6")
+        self.health = (self.health[0].model_copy(update={"status": "pending"}), self.health[1])
+        with self.assertRaises(NativeSourceUnavailable):
+            run(False)
+        self.assertEqual(
+            json.loads(native.route_file.read_text()),
+            route_document(self.plan.route_after, self.plan.route_after.new_backend, evented=True),
+        )
+        self.assertEqual(run(True).status, "completed")
+        self.assertEqual(
+            json.loads(native.route_file.read_text()),
+            route_document(
+                self.plan.route_before, self.plan.route_before.new_backend, evented=True
+            ),
+        )
+
     def test_lost_inverse_reply_settles_before_cancellation_completes(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
         from control_plane.testing_address_cancellation import INVERSE_ROUTE

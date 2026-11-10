@@ -9,7 +9,6 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Literal, Protocol, cast
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
 from control_plane.testing_serving_copy import (
     published_testing_copy,
     render_maintained_testing_copy,
@@ -3302,7 +3301,7 @@ def execute_odoo_stable_target_replacement_apply(
                 operation_id=operation_id,
                 lease_owner=operation_lease_owner,
             )
-        except (ValueError, NativeSourceUnavailable):
+        except ValueError:
             _write_failed_deployment(
                 record_store=record_store,
                 ship_request=ship_request,

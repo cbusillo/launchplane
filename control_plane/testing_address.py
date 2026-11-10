@@ -17,7 +17,7 @@ from control_plane.dokploy.native_copy_stream import (
     NativeSourceUnavailable,
     NativeSourceAuthorizationDenied,
 )
-from control_plane.dokploy.testing_route import observe_testing_route, route_document
+from control_plane.dokploy.testing_route import observe_testing_route, route_document_variants
 from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
 from control_plane.dokploy.testing_route_execution import (
     TestingRouteWriterAttempt,
@@ -181,11 +181,8 @@ class TestingAddressAdapter(DurableProviderMutationAdapter):
     def present(self) -> bool:
         frame = self.transport.read()
         owned = json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None
-        if owned in (
-            route_document(self.plan.route_before, self.plan.route_before.new_backend),
-            route_document(
-                self.plan.route_before, self.plan.route_before.new_backend, evented=True
-            ),
+        if owned in route_document_variants(
+            self.plan.route_before, self.plan.route_before.new_backend
         ):
             return False
         return (

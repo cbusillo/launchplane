@@ -116,6 +116,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
     database_url = ""
     migrated_candidate = False
+    route_workers = 0
 
     def setUp(self) -> None:
         self.fixture = publication_tests.TestingPublicationTests()
@@ -453,6 +454,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             "old_inventory_sha256": self.retained.get("inventory_sha256"),
             "old_web_process": self.retained.get("web_process"),
             "old_endpoints": tuple(endpoints),
+            "backend_workers": {self.fixture.route.new_backend: self.route_workers},
             "file_sha256": canonical_json_sha256(self.owned)
             if self.owned is not None
             else "absent",
@@ -507,7 +509,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 if self.owned is None:
                     return
             else:
-                self.owned = route_document(plan, backend)
+                self.owned = route_document(
+                    plan, backend, evented=backend == plan.new_backend and bool(self.route_workers)
+                )
             for section in ("routers", "services", "middlewares"):
                 for name, value in self.owned["http"].get(section, {}).items():
                     self.raw[section][name + "@file"] = {**value, "status": "enabled"}
@@ -709,6 +713,24 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(result.deploy_status, "pass", result.error_code)
         self.assertEqual(result.health_status, "pass")
         self.assertEqual(self.effects, ["switch-new"])
+
+    def test_multiworker_first_delivery_confirms_the_evented_candidate(self) -> None:
+        self.admit_unavailable("absent", first_delivery=True)
+        self.route_workers = 6
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertEqual(self.effects, ["switch-new"])
+        assert self.owned is not None
+        self.assertIn(self.fixture.route.route_id + "-websocket", self.owned["http"]["services"])
+
+    def test_multiworker_first_delivery_restores_absence_after_failed_health(self) -> None:
+        self.admit_unavailable("absent", first_delivery=True)
+        self.route_workers = 6
+        self.fail_public = True
+        result = self.execute()
+        self.assertEqual(result.error_code, "candidate_public_health_failed")
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertIsNone(self.owned)
 
     def test_first_empty_delivery_still_fails_its_normal_public_health_check(self) -> None:
         self.admit_unavailable("absent", first_delivery=True)

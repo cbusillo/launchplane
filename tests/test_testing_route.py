@@ -195,7 +195,12 @@ class TestingRouteTests(unittest.TestCase):
         )
 
     def apply(
-        self, plan: TestingLaneRoute, backend: str, *, retire_old: bool = False, evented: bool = False
+        self,
+        plan: TestingLaneRoute,
+        backend: str,
+        *,
+        retire_old: bool = False,
+        evented: bool = False,
     ) -> dict[str, Any]:
         raw = deepcopy(self.raw)
         document = route_document(plan, backend, evented=evented)["http"]
@@ -562,6 +567,18 @@ class TestingRouteTests(unittest.TestCase):
         plan = self.plan()
         document = route_document(plan, self.new, evented=True)
         raw = self.apply(plan, self.new, retire_old=True, evented=True)
+        with self.assertRaisesRegex(ValueError, "admitted serving copy"):
+            compile_testing_route(
+                product=plan.product,
+                context=plan.context,
+                host=plan.host,
+                old_backend=self.old,
+                new_backend=self.new,
+                raw=raw,
+                public_entrypoints=plan.public_entrypoints,
+                owned_document=document,
+                recorded_template=plan.template,
+            )
         rebuilt = compile_testing_route(
             product=plan.product,
             context=plan.context,
@@ -576,11 +593,17 @@ class TestingRouteTests(unittest.TestCase):
         self.assertEqual(observe_testing_route(rebuilt, raw, document), self.new)
         address = amend_testing_route_address(plan, "later.example.invalid")
         self.assertEqual(
-            observe_testing_route(address, self.apply(address, self.new, evented=True), route_document(address, self.new, evented=True)),
+            observe_testing_route(
+                address,
+                self.apply(address, self.new, evented=True),
+                route_document(address, self.new, evented=True),
+            ),
             self.new,
         )
         service = plan.route_id + "-websocket"
-        raw["services"][service + "@file"]["loadBalancer"]["servers"][0]["url"] = "http://another-copy:8072"
+        raw["services"][service + "@file"]["loadBalancer"]["servers"][0]["url"] = (
+            "http://another-copy:8072"
+        )
         with self.assertRaisesRegex(ValueError, "another copy or listener"):
             observe_testing_route(plan, raw, document)
 

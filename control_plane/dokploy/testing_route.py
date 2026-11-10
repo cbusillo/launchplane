@@ -359,6 +359,16 @@ def route_document_digest(
     return hashlib.sha256(content.encode()).hexdigest() if content is not None else "absent"
 
 
+def route_document_variants(
+    plan: TestingLaneRoute, backend: str | None
+) -> tuple[dict[str, Any], ...]:
+    return tuple(route_document(plan, backend, evented=mode) for mode in (False, True))
+
+
+def route_content_variants(plan: TestingLaneRoute, backend: str | None) -> tuple[str | None, ...]:
+    return tuple(route_document_content(plan, backend, evented=mode) for mode in (False, True))
+
+
 def testing_ingress_entrypoints(raw: dict[str, Any], host: str) -> tuple[str, ...]:
     """Discover potentially serving application listeners, not proxy-internal ones.
 
@@ -790,7 +800,8 @@ def _compile_testing_route(
             application_file_name=application_file_name,
             application_file_sha256=application_file_sha256,
         )
-        observe_testing_route(plan, raw, owned_document)
+        if observe_testing_route(plan, raw, owned_document) != old_backend:
+            raise ValueError("Testing route no longer selects its admitted serving copy.")
         return plan
     if recorded_template is not None or not matches or len(legacy) != len(matches):
         raise ValueError("Initial testing traffic must have only its observed Docker predecessor.")

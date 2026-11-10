@@ -66,7 +66,9 @@ class TestingRouteTransportTests(unittest.TestCase):
         list(payload["template"]["http"]["routers"].values())[-1]["priority"] += 5
         before = TestingLaneRoute.model_validate(payload)
         self.raw = self.fixture.apply(before, before.new_backend, evented=evented)
-        self.route_file.write_text(json.dumps(route_document(before, before.new_backend, evented=evented)))
+        self.route_file.write_text(
+            json.dumps(route_document(before, before.new_backend, evented=evented))
+        )
         self.containers["new"]["Config"]["Env"].append("ODOO_WORKERS=" + ("6" if evented else "0"))
         self.plan = routing.amend_testing_route_address(before, "canonical.invalid")
         self.client.payload.update(
@@ -1181,6 +1183,17 @@ class TestingRouteTransportTests(unittest.TestCase):
             ),
         }
         return content
+
+    def test_multiworker_first_delivery_and_inverse_keep_the_original_preimage(self) -> None:
+        before = self.unavailable_route(preserve_file=True)
+        self.containers["new"]["Config"]["Env"].append("ODOO_WORKERS=6")
+        self.publish(self.plan.new_backend, None)
+        self.assertEqual(
+            json.loads(self.route_file.read_text()),
+            route_document(self.plan, self.plan.new_backend, evented=True),
+        )
+        self.publish(None, self.plan.new_backend)
+        self.assertEqual(self.route_file.read_text(), before)
 
     def test_unavailable_inverse_restores_exact_file_bytes_or_absence_with_the_same_writer(
         self,

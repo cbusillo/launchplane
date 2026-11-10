@@ -89,7 +89,7 @@ class TestingCopyRouteTests(unittest.TestCase):
         ].__setitem__(-1, "ODOO_WORKERS=0")
         with self.assertRaisesRegex(ValueError, "worker mode changed"):
             self.run_route()
-        self.assertFalse(self.native.route_file.read_text().find("-websocket") >= 0)
+        self.assertNotIn("-websocket", self.native.route_file.read_text())
 
     def test_lost_reply_is_observed_by_a_fresh_invocation_without_another_writer(self) -> None:
         self.native.before_publish = lambda: setattr(self.native, "lose_writer_reply", True)
@@ -100,6 +100,11 @@ class TestingCopyRouteTests(unittest.TestCase):
         self.native.lose_writer_reply = False
         self.run_route()
         self.assertEqual(self.native.remote_modes.count("publish_v2"), effects)
+
+    def test_unrelated_invalid_worker_mode_does_not_block_this_copy(self) -> None:
+        self.native.containers["old"]["Config"]["Env"].append("ODOO_WORKERS=invalid")
+        self.run_route()
+        self.assertIn("-websocket", self.native.route_file.read_text())
 
     def test_threaded_copy_keeps_its_http_route_without_a_provider_write(self) -> None:
         self.native.containers["new"]["Config"]["Env"][-1] = "ODOO_WORKERS=0"

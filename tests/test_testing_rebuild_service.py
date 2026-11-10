@@ -27,7 +27,9 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     build_odoo_stable_target_replacement_plan,
 )
 from control_plane.workflows import odoo_stable_target_replacement as maintenance
-from control_plane.dokploy import api, compose, post_deploy, source
+from control_plane.dokploy import api, compose, post_deploy, source as dokploy_source
+from control_plane.testing_activation_compose import interpolate
+from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
 from control_plane.dokploy.testing_route import route_document
 from tests import test_testing_route_transport as transport_tests
 from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
@@ -36,6 +38,9 @@ from control_plane.workflows.odoo_verification import (
     OdooVerificationEvidence,
     OdooVerificationResult,
 )
+
+
+_NATIVE_ROUTE_READ = DokployTestingRouteTransport.read
 
 
 def exercise_published_copy_maintenance(
@@ -114,11 +119,15 @@ def exercise_published_copy_maintenance(
         case.assertFalse(kwargs["run_destructive_restore"])
         case.assertIsNone(kwargs["fresh_testing_generation"])
         kwargs["before_provider_mutation"](post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
-        environment = api.parse_dokploy_env_text(str(provider["env"]))
-        for key, value in yaml.safe_load(provider["composeFile"])["services"]["web"]["environment"].items():
-            if "${" not in str(value):
-                environment[key] = str(value)
-        native.containers["new"]["Config"]["Env"] = [key + "=" + value for key, value in environment.items()]
+        provided = api.parse_dokploy_env_text(str(provider["env"]))
+        web = yaml.safe_load(provider["composeFile"])["services"]["web"]
+        environment = {
+            **provided,
+            **{key: str(value) for key, value in interpolate(web["environment"], provided).items()},
+        }
+        native.containers["new"]["Config"]["Env"] = [
+            key + "=" + value for key, value in environment.items()
+        ]
         return {
             "log_available": "true",
             **dict.fromkeys(post_deploy.ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS, "true"),
@@ -127,10 +136,13 @@ def exercise_published_copy_maintenance(
     base_url = app.compiled.plan.base_url
     profile = fixture.store.read_product_profile_record(candidate.product)
     with (
+        patch.object(DokployTestingRouteTransport, "read", _NATIVE_ROUTE_READ),
         patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": fixture.store.database_url}),
         patch.object(api, "fetch_dokploy_target_payload", side_effect=fetch),
         patch.object(
-            source, "read_dokploy_config", return_value=("https://provider.invalid", "fixture")
+            dokploy_source,
+            "read_dokploy_config",
+            return_value=("https://provider.invalid", "fixture"),
         ),
         patch.object(compose, "sync_dokploy_compose_raw_source", side_effect=sync),
         patch.object(
@@ -185,7 +197,17 @@ def exercise_published_copy_maintenance(
     case.assertEqual(result.deploy_status, "pass", result.error_code)
     case.assertEqual(
         json.loads(native.route_file.read_text()),
-        route_document(native.plan, native.plan.new_backend, evented=True),
+        route_document(
+            native.plan,
+            native.plan.new_backend,
+            evented=bool(
+                int(
+                    api.parse_dokploy_env_text(
+                        "\n".join(native.containers["new"]["Config"]["Env"])
+                    )["ODOO_WORKERS"]
+                )
+            ),
+        ),
     )
     checkpoint.assert_called()
     current = fixture.current()

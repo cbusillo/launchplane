@@ -42,9 +42,10 @@ from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
     observe_testing_route,
-    route_document,
     route_document_content,
     route_document_digest,
+    route_document_variants,
+    route_content_variants,
     redirects_to_https,
     select_testing_route_raw,
     canonical_acme_challenge,
@@ -593,7 +594,7 @@ def main(spec):
         workers=environment.get('ODOO_WORKERS')
         if labels.get('com.docker.compose.service')=='web' and item.get('State',{}).get('Status')=='running' and environment.get('PLATFORM_INSTANCE')=='testing' and workers is not None:
             if not workers.isdigit():
-                raise RuntimeError('The testing Odoo worker mode is invalid')
+                continue
             port=environment.get('ODOO_HTTP_PORT') or '8069'
             for backend_name in proxy_dns_names(item,proxy_networks):
                 backend_workers['http://'+backend_name+':'+port]=int(workers)
@@ -1073,7 +1074,12 @@ class DokployTestingRouteTransport:
         same_copy = backend == expected_backend == plan.new_backend and address_preimage is None
         if not same_copy and plan.address_only != (address_preimage is not None):
             raise ValueError("An address-only publication needs its original route preimage.")
-        if plan.address_only and not same_copy and not address_inverse and "address_recipients" not in self.payload:
+        if (
+            plan.address_only
+            and not same_copy
+            and not address_inverse
+            and "address_recipients" not in self.payload
+        ):
             raise ValueError("An address amendment requires its retained recipient qualification.")
         if address_preimage is not None and plan != amend_testing_route_address(
             address_preimage, plan.host
@@ -1097,7 +1103,9 @@ class DokployTestingRouteTransport:
         ):
             raise ValueError("The desired testing runtime belongs to another lane.")
         evented = (
-            execution.document_sha256 == route_document_digest(document_plan, backend, evented=True)
+            execution.document_sha256 != route_document_digest(document_plan, backend)
+            and execution.document_sha256
+            == route_document_digest(document_plan, backend, evented=True)
             and backend is not None
         )
         if (
@@ -1146,27 +1154,19 @@ class DokployTestingRouteTransport:
         content = route_document_content(document_plan, backend, evented=evented)
         intended = json.loads(content) if content is not None else None
         if address_inverse:
-            if owned not in (
-                intended,
-                route_document(plan, backend),
-                route_document(plan, backend, evented=True),
-            ):
+            if owned not in (intended, *route_document_variants(plan, backend)):
                 raise ValueError("An address inverse cannot replace another route's document.")
         elif backend is None and plan.unavailable_preimage is not None:
-            if frame["owned_file"] not in {
+            if frame["owned_file"] not in (
                 content,
-                route_document_content(plan, plan.new_backend),
-            }:
+                *route_content_variants(plan, plan.new_backend),
+            ):
                 raise ValueError("The inverse cannot overwrite a foreign testing route file.")
         else:
             admitted = (
                 address_preimage
                 if address_preimage is not None
-                and owned
-                in (
-                    route_document(address_preimage, address_preimage.new_backend),
-                    route_document(address_preimage, address_preimage.new_backend, evented=True),
-                )
+                and owned in route_document_variants(address_preimage, address_preimage.new_backend)
                 else plan
             )
             if admitted is address_preimage and possible_lane_routers(

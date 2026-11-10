@@ -4480,3 +4480,13 @@ A partial operation's readback reports `completed: false`, any independently
 verified snapshot receipts and whether raw source custody remains. It does not
 start a runtime or clear the provider journal. Missing terminal evidence never
 becomes a successful migration or retirement; keep the original operation key.
+
+Ordinary stable deployments of a published native Odoo testing copy also converge
+its owned route from the running copy's worker mode. Multiworker copies send
+`/websocket` and its subpaths to that same copy's evented listener; threaded
+copies retain the HTTP route. The original publication and address templates
+remain immutable. Readers admit only the original HTTP document or its exact
+derived two-port overlay, with unchanged hosts, TLS and middleware. The existing
+physical route fence, alias/identity checks and durable operation evidence govern
+the write. Address cancellation and rebuild inverses recognize both variants;
+no separate route amendment operation or receipt authority is introduced.
