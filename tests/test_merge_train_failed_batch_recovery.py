@@ -113,6 +113,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         def request(**kwargs: Any) -> object:
             if kwargs["method"] == "GET" and "/annotations?" in kwargs["path"]:
                 return []
+            if kwargs["method"] == "GET" and kwargs["path"].endswith("/logs"):
+                return ""
             result = original_request(**kwargs)
             if kwargs["method"] == "GET" and "/check-runs?" in kwargs["path"]:
                 payload = cast(dict[str, Any], result)
