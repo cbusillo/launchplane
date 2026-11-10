@@ -1,0 +1,58 @@
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+
+
+TESTING_CANDIDATE_RELEASE_ROUTE = (
+    "/v1/products/{product}/testing-rebuild/{operation_id}/candidate-release"
+)
+
+TestingCandidateReleaseStatus = Literal["eligible", "absent", "released"]
+
+
+class TestingCandidateReleaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["dry-run", "apply", "readback"] = "dry-run"
+    reviewed_plan_sha256: str = ""
+
+    @model_validator(mode="after")
+    def validate_review(self) -> "TestingCandidateReleaseRequest":
+        self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
+        if self.mode in {"apply", "readback"} and len(self.reviewed_plan_sha256) != 64:
+            raise ValueError("Apply and readback require the reviewed release plan digest.")
+        if self.mode == "dry-run" and self.reviewed_plan_sha256:
+            raise ValueError("Dry-run rejects a reviewed plan digest.")
+        return self
+
+
+class TestingCandidateReleasePlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+    operation_id: str
+    error_code: str
+    namespace: str
+    resources_binding_sha256: str
+
+    def digest(self) -> str:
+        return nonvalidating_compact_sorted_json_sha256(self.model_dump(mode="json"))
+
+
+class TestingCandidateReleaseResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trace_id: str
+    product: str
+    operation_id: str
+    error_code: str
+    plan_sha256: str
+    status: TestingCandidateReleaseStatus
+    reclaimable_bytes: int | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
+    replayed: bool | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )

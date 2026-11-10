@@ -18,6 +18,7 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.http_routes import testing_rebuild as routes
 from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane import testing_rebuild_preflight as preflight
+from control_plane.testing_storage_admission import BackingMeasurement
 from control_plane import odoo_target_replacement_apply_http as admission
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
@@ -508,6 +509,17 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         )
         intent = self.fixture.intent.model_copy(update={"before": self.fixture.current()})
         self.enterContext(patch.object(preflight, "capture_rebuild_intent", return_value=intent))
+        free = {"bytes": 10**15}
+        self.enterContext(
+            patch.object(
+                preflight,
+                "read_testing_backings",
+                side_effect=lambda *_, **__: {
+                    role: BackingMeasurement(backing="zfs:testing", available=free["bytes"])
+                    for role in ("volumes", "writable", "snapshot")
+                },
+            )
+        )
         from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
         from control_plane.product_reconcile import ProductReconcileError
 
@@ -616,6 +628,24 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             },
         )
         self.assertEqual(ordinary.status_code, 403, ordinary.text)
+        free["bytes"] = 1
+        short = await request(
+            app,
+            "POST",
+            ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+            headers={"Authorization": "Bearer fixture-operator", "Idempotency-Key": "short"},
+            payload={"product": self.product, "replacement": replacement.model_dump(mode="json")},
+        )
+        self.assertEqual(short.status_code, 409, short.text)
+        self.assertEqual(short.json()["error"]["code"], "testing_storage_capacity_insufficient")
+        self.assertIn("bytes short", short.json()["error"]["message"])
+        self.assertFalse(
+            any(
+                item.idempotency_key == "short"
+                for item in self.store.list_odoo_stable_target_replacement_operation_records()
+            )
+        )
+        free["bytes"] = 10**15
         response = await request(
             app,
             "POST",
