@@ -63,6 +63,36 @@ class TestingCopyRouteTests(unittest.TestCase):
             lease_owner="stable-worker",
         )
 
+    def route_current(self) -> bool | None:
+        with patch.object(
+            self.fixture.store,
+            "read_environment_inventory",
+            return_value=SimpleNamespace(runtime_identity=self.native.new_identity),
+        ):
+            return maintenance.testing_copy_route_current(
+                root=self.native.root,
+                store=self.fixture.store,
+                product=self.native.new_identity.product,
+                context=self.native.new_identity.context,
+            )
+
+    def test_current_route_observation_detects_worker_drift_without_writing(self) -> None:
+        effects = self.native.effect_count
+        self.assertFalse(self.route_current())
+        self.assertEqual(self.native.effect_count, effects)
+        self.run_route()
+        effects = self.native.effect_count
+        self.assertTrue(self.route_current())
+        self.assertEqual(self.native.effect_count, effects)
+        self.native.containers["new"]["Config"]["Env"][-1] = "ODOO_WORKERS=0"
+        self.assertFalse(self.route_current())
+        self.assertEqual(self.native.effect_count, effects)
+
+    def test_threaded_http_route_is_current_without_a_write(self) -> None:
+        self.native.containers["new"]["Config"]["Env"][-1] = "ODOO_WORKERS=0"
+        self.assertTrue(self.route_current())
+        self.assertEqual(self.native.effect_count, 0)
+
     def test_same_copy_publication_and_replay_preserve_the_http_authority(self) -> None:
         self.run_route()
         self.assertEqual(

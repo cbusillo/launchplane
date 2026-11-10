@@ -44,7 +44,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
-from control_plane.contracts.promotion_record import DeploymentEvidence
+from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimePlan
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -928,6 +928,199 @@ class ProductReconcileStoreTests(ProductReconcileTestCase):
 
 
 class ProductReconcileTestingTests(ProductReconcileTestCase):
+    def running_route_inventory(self) -> None:
+        self._running_release(20, DEPLOYABLE)
+        release = self.store.read_release_tuple_record(context_name="cm", channel_name="testing")
+        identity = RuntimeIdentity(
+            product="site",
+            context=release.context,
+            instance="testing",
+            deployment_record_id="route-fixture-deployment",
+            artifact_id=release.artifact_id,
+            source_git_ref=release.repo_shas["site"],
+            image_reference=f"{release.image_repository}@{release.image_digest}",
+        )
+        self.store.write_environment_inventory(
+            EnvironmentInventory(
+                context=identity.context,
+                instance=identity.instance,
+                source_git_ref=identity.source_git_ref,
+                artifact_identity=ArtifactIdentityReference(artifact_id=identity.artifact_id),
+                runtime_identity=identity,
+                deployment_record_id=identity.deployment_record_id,
+                deploy=DeploymentEvidence(
+                    target_name="route-fixture",
+                    target_type="compose",
+                    deploy_mode="image",
+                    status="pass",
+                ),
+                updated_at="2026-09-30T12:00:00Z",
+            )
+        )
+
+    def test_same_build_native_route_drift_converges_once_without_empty_data(self) -> None:
+        self.running_route_inventory()
+        with patch(
+            "control_plane.testing_copy_route.testing_copy_route_current",
+            return_value=False,
+        ) as route:
+            self.request()
+            planned = self.reconcile()
+            self.assertEqual(planned["action"], "deploy")
+            (operation,) = self.store.list_odoo_stable_target_replacement_operation_records()
+            self.assertFalse(operation.request.allow_empty_data)
+            self.assertEqual(
+                operation.request.expected_current_artifact_id,
+                operation.request.artifact_id,
+            )
+            self.assertEqual(
+                operation.authorization,
+                build_launchplane_reconcile_authorization(
+                    product=operation.product,
+                    context=operation.context,
+                    authorized_at=operation.created_at,
+                ),
+            )
+            self.request()
+            self.assertEqual(self.reconcile()["queued_operation_id"], operation.operation_id)
+            self.finish(operation.operation_id, "pass")
+            route.return_value = True
+            self.request()
+            self.assertEqual(self.reconcile()["action"], "none")
+        self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 1)
+
+    def test_same_build_route_repair_keeps_the_original_unknown_attempt(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        original = str(self.reconcile()["queued_operation_id"])
+        self.finish(original, "reconciliation_required")
+        self.running_route_inventory()
+        with patch(
+            "control_plane.testing_copy_route.testing_copy_route_current",
+            return_value=False,
+        ):
+            self.request()
+            planned = self.reconcile()
+        self.assertEqual(planned["queued_operation_id"], original)
+        self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 1)
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(original).status,
+            "reconciliation_required",
+        )
+
+    def test_same_build_route_repair_obeys_the_existing_staff_hold(self) -> None:
+        self.running_route_inventory()
+        self.hold_testing()
+        with patch(
+            "control_plane.testing_copy_route.testing_copy_route_current",
+            return_value=False,
+        ):
+            self.request()
+            planned = self.reconcile()
+        self.assertEqual(planned["action"], "wait")
+        self.assertTrue(planned["held"])
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
+
+    def test_unknown_native_route_cannot_be_reported_as_current(self) -> None:
+        self.running_route_inventory()
+        with patch(
+            "control_plane.testing_copy_route.testing_copy_route_current",
+            side_effect=ValueError("The native route cannot be qualified."),
+        ):
+            self.request()
+            planned = self.reconcile()
+        self.assertEqual(planned["action"], "wait")
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
+
+    def test_route_drift_pins_inventory_when_a_repeated_build_has_the_same_image(self) -> None:
+        self.running_route_inventory()
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        assert inventory.artifact_identity is not None
+        self.github.add_run(40, DEPLOYABLE)
+        with patch(
+            "control_plane.testing_copy_route.testing_copy_route_current", return_value=False
+        ):
+            self.request()
+            planned = self.reconcile()
+        (operation,) = self.store.list_odoo_stable_target_replacement_operation_records()
+        self.assertNotEqual(operation.request.artifact_id, inventory.artifact_identity.artifact_id)
+        self.assertEqual(operation.request.artifact_id, planned["desired_artifact_id"])
+        self.assertEqual(
+            operation.request.expected_current_artifact_id, inventory.artifact_identity.artifact_id
+        )
+
+    def previous_route_operation(self) -> OdooStableTargetReplacementOperationRecord:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        original = str(self.reconcile()["queued_operation_id"])
+        self.finish(original, "pass")
+        self.running_route_inventory()
+        return self.store.read_odoo_stable_target_replacement_operation_record(original)
+
+    def test_route_convergence_follows_the_passed_attempt_without_rewriting_it(self) -> None:
+        original = self.previous_route_operation()
+        with patch(
+            "control_plane.testing_copy_route.testing_copy_route_current", return_value=False
+        ):
+            self.request()
+            planned = self.reconcile()
+        successor = self.store.read_odoo_stable_target_replacement_operation_record(
+            str(planned["queued_operation_id"])
+        )
+        self.assertNotEqual(successor.operation_id, original.operation_id)
+        self.assertIn(original.operation_id, successor.idempotency_key)
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(original.operation_id),
+            original,
+        )
+
+    def test_route_corrected_after_the_plan_read_needs_no_second_deploy(self) -> None:
+        self.previous_route_operation()
+        with patch(
+            "control_plane.testing_copy_route.testing_copy_route_current", side_effect=[False, True]
+        ):
+            self.request()
+            planned = self.reconcile()
+        self.assertEqual(planned["action"], "none")
+        self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 1)
+
+    def test_native_publication_disappearing_after_the_plan_read_keeps_the_lane(self) -> None:
+        self.previous_route_operation()
+        with patch(
+            "control_plane.testing_copy_route.testing_copy_route_current", side_effect=[False, None]
+        ):
+            self.request()
+            planned = self.reconcile()
+        self.assertEqual(planned["action"], "wait")
+        self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 1)
+
+    def test_route_drift_cannot_restart_an_incomplete_generation_restore(self) -> None:
+        from tests.test_odoo_testing_restore import generation
+
+        self.running_route_inventory()
+        unfinished = generation().model_copy(
+            update={
+                "product": "site",
+                "context": "cm",
+                "reconcile_requested_at": "2026-10-15T00:01:00Z",
+            }
+        )
+        with (
+            patch(
+                "control_plane.testing_copy_route.testing_copy_route_current", return_value=False
+            ),
+            patch(
+                "control_plane.odoo_testing_restore.read_current_testing_generation",
+                return_value=unfinished,
+            ),
+        ):
+            self.request()
+            planned = self.reconcile()
+        self.assertEqual(planned["action"], "wait")
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
+
     def test_migrated_release_selects_its_pair_main_build_after_main_moves_on(self) -> None:
         from control_plane.product_reconcile import verified_testing_rebuild_artifact
 
