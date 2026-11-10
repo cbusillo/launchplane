@@ -1232,10 +1232,10 @@ def project_created_environment(payload: JsonObject, project_id: str, name: str)
         return ""
     if not isinstance(environment, dict):
         raise ValueError("Project creation returned an invalid environment; reconcile its effect.")
-    if environment.get("projectId") != project_id:
-        raise ValueError("Project creation returned another project's environment.")
     if environment.get("name") != name:
         return ""
+    if environment.get("projectId") != project_id:
+        raise ValueError("Project creation returned another project's environment.")
     if environment.get("isDefault") is not True:
         raise ValueError("Project creation did not identify its default environment.")
     return _extract_provider_id(environment, "environmentId", "environment")
