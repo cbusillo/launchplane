@@ -711,6 +711,7 @@ def reconcile_testing_target(
             hold_recorded_at=hold.recorded_at,
         )
         return ReconcileOutcome(plan)
+    expected_current_artifact_id = ""
     if native_route_drift:
         try:
             route_current = native_route_current()
@@ -722,6 +723,15 @@ def reconcile_testing_target(
         if route_current:
             plan.update(action="none", held=False, reason="already_deployed")
             return ReconcileOutcome(plan)
+        inventory = _testing_inventory(record_store, lane)
+        if (
+            inventory is None
+            or inventory.artifact_identity is None
+            or inventory.artifact_identity.artifact_id != plan["current_artifact_id"]
+        ):
+            plan.update(action="wait", held=True, reason="testing_runtime_unverified")
+            return ReconcileOutcome(plan)
+        expected_current_artifact_id = inventory.artifact_identity.artifact_id
     manifest = record_verified_build_artifact(
         record_store=cast(VerifiedArtifactStore, record_store), verified=desired
     )
@@ -769,9 +779,7 @@ def reconcile_testing_target(
             data_source_mode=data_source_mode,
             artifact_id=manifest.artifact_id,
             source_git_ref=manifest.source_commit,
-            expected_current_artifact_id=str(plan["current_artifact_id"])
-            if native_route_drift
-            else "",
+            expected_current_artifact_id=expected_current_artifact_id,
         ),
     )
     idempotency_scope = reconcile_reservation_scope(profile.product)

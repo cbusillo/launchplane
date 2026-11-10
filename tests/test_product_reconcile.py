@@ -1051,6 +1051,25 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             operation.request.expected_current_artifact_id, inventory.artifact_identity.artifact_id
         )
 
+    def test_route_drift_waits_when_inventory_and_release_disagree(self) -> None:
+        self.running_route_inventory()
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        self.store.write_environment_inventory(
+            inventory.model_copy(
+                update={"artifact_identity": ArtifactIdentityReference(artifact_id="another-copy")}
+            )
+        )
+        with patch(
+            "control_plane.testing_copy_route.testing_copy_route_current", return_value=False
+        ):
+            self.request()
+            planned = self.reconcile()
+        self.assertEqual(planned["reason"], "testing_runtime_unverified")
+        self.assertEqual(planned["action"], "wait")
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
+
     def previous_route_operation(self) -> OdooStableTargetReplacementOperationRecord:
         self.github.add_run(20, DEPLOYABLE)
         self.request()
@@ -1078,8 +1097,10 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
 
     def test_route_corrected_after_the_plan_read_needs_no_second_deploy(self) -> None:
         self.previous_route_operation()
+        observations = iter((False, True))
         with patch(
-            "control_plane.testing_copy_route.testing_copy_route_current", side_effect=[False, True]
+            "control_plane.testing_copy_route.testing_copy_route_current",
+            side_effect=lambda **_: next(observations, True),
         ):
             self.request()
             planned = self.reconcile()
@@ -1088,8 +1109,10 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
 
     def test_native_publication_disappearing_after_the_plan_read_keeps_the_lane(self) -> None:
         self.previous_route_operation()
+        observations = iter((False, None))
         with patch(
-            "control_plane.testing_copy_route.testing_copy_route_current", side_effect=[False, None]
+            "control_plane.testing_copy_route.testing_copy_route_current",
+            side_effect=lambda **_: next(observations, None),
         ):
             self.request()
             planned = self.reconcile()
@@ -1097,6 +1120,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 1)
 
     def test_route_drift_cannot_restart_an_incomplete_generation_restore(self) -> None:
+        from control_plane.odoo_testing_restore import fresh_testing_mode_refusal
         from tests.test_odoo_testing_restore import generation
 
         self.running_route_inventory()
@@ -1119,6 +1143,9 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             self.request()
             planned = self.reconcile()
         self.assertEqual(planned["action"], "wait")
+        refusal = fresh_testing_mode_refusal(unfinished, "existing")
+        assert refusal is not None
+        self.assertEqual(planned["reason"], refusal[0])
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
 
     def test_migrated_release_selects_its_pair_main_build_after_main_moves_on(self) -> None:
