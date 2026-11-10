@@ -254,15 +254,54 @@ class MigratedUploadTests(unittest.TestCase):
 
 
 class MigratedArtifactConsumptionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
+
+        self.fixture = NativeArtifactConsumptionTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.staging = self.fixture.root / "volumes/data" / (".lp-native-" + self.fixture.identity)
+        self.filestore = self.fixture.root / "volumes/data/filestore" / self.fixture.database
+
+    def stage(
+        self, files: list[tuple[str, bytes]] | None = None, member_type: bytes | None = None
+    ) -> dict[str, Any]:
+        import io
+        import tarfile
+
+        fixture = self.fixture
+        files = files if files is not None else [(fixture.name, fixture.attachment)]
+        capture = fixture.stage()
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as handle:
+            for name, data in files:
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                if member_type is not None:
+                    member.type = member_type
+                    member.linkname = fixture.name
+                handle.addfile(member, io.BytesIO(data))
+        content = archive.getvalue()
+        (fixture.root / "tmp" / f"lp-native-{fixture.identity}-filestore-0").write_bytes(content)
+        capture["filestore"] = {"size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+        capture["source_observation"] = {
+            "kind": "migrated",
+            "filestore_expanded_bytes": sum(len(data) for _, data in files),
+            "filestore_files": len(files),
+        }
+        self.staging.mkdir(parents=True, exist_ok=True)
+        for part in ("database", "filestore"):
+            (fixture.root / "tmp" / f"lp-native-{fixture.identity}-{part}-0").rename(
+                self.staging / (part + ".artifact")
+            )
+        return capture
+
     def test_fresh_receiver_inspects_no_artifacts_before_the_first_stream(self) -> None:
         import io
         import json
         from contextlib import redirect_stdout
-        from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
 
-        fixture = NativeArtifactConsumptionTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
+        fixture = self.fixture
         capture = fixture.stage()
         capture["source_observation"] = {"kind": "migrated"}
         output = io.StringIO()
@@ -272,154 +311,159 @@ class MigratedArtifactConsumptionTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["artifacts"], {})
 
     def test_extraction_retry_removes_only_its_owned_interrupted_temporary(self) -> None:
-        from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
-
-        fixture = NativeArtifactConsumptionTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        capture = fixture.stage()
-        capture["source_observation"] = {
-            "kind": "migrated",
-            "filestore_expanded_bytes": len(fixture.attachment),
-            "filestore_files": 1,
-        }
-        staging = fixture.root / "volumes/data" / (".lp-native-" + fixture.identity)
-        staging.mkdir(parents=True)
-        for part in ("database", "filestore"):
-            (fixture.root / "tmp" / f"lp-native-{fixture.identity}-{part}-0").rename(
-                staging / (part + ".artifact")
-            )
-        filestore = fixture.root / "volumes/data/filestore" / fixture.database
-        filestore.mkdir(parents=True)
-        owned = filestore / (".lp-native-" + fixture.identity + "-interrupted")
-        other_identity = f"{int(fixture.identity, 16) ^ 1:032x}"
-        other = filestore / (".lp-native-" + other_identity + "-other")
+        fixture = self.fixture
+        capture = self.stage()
+        owned = self.staging / (".lp-native-" + fixture.identity + "-interrupted")
         owned.write_bytes(b"partial")
-        other.write_bytes(b"retained other owner")
         with self.assertRaises(SystemExit):
             fixture.consume(capture)
         self.assertFalse(owned.exists())
-        self.assertEqual(other.read_bytes(), b"retained other owner")
         self.assertEqual(
             fixture.mapped_path(fixture.dump_path).read_bytes(), b"custom database fixture"
         )
 
-    def test_checklist_subdirectories_are_preserved_in_the_full_filestore(self) -> None:
-        from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
-
-        fixture = NativeArtifactConsumptionTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        capture = fixture.stage(name="checklist/" + fixture.name)
-        capture["source_observation"] = {
-            "kind": "migrated",
-            "filestore_expanded_bytes": len(fixture.attachment),
-            "filestore_files": 1,
-        }
-        staging = fixture.root / "volumes/data" / (".lp-native-" + fixture.identity)
-        staging.mkdir(parents=True)
-        for part in ("database", "filestore"):
-            (fixture.root / "tmp" / f"lp-native-{fixture.identity}-{part}-0").rename(
-                staging / (part + ".artifact")
-            )
-        with self.assertRaises(SystemExit) as exited:
-            fixture.consume(capture)
-        self.assertEqual(exited.exception.code, 0)
-        self.assertEqual(
-            (
-                fixture.root
-                / "volumes/data/filestore"
-                / fixture.database
-                / "checklist"
-                / fixture.name
-            ).read_bytes(),
-            fixture.attachment,
-        )
-
-    def test_complete_filestore_is_streamed_and_checked_before_database_publication(self) -> None:
-        from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
-
-        fixture = NativeArtifactConsumptionTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        capture = fixture.stage()
-        capture["source_observation"] = {
-            "kind": "migrated",
-            "filestore_expanded_bytes": len(fixture.attachment),
-            "filestore_files": 1,
-        }
-        staging = fixture.root / "volumes/data" / (".lp-native-" + fixture.identity)
-        staging.mkdir(parents=True)
-        for part in ("database", "filestore"):
-            (fixture.root / "tmp" / f"lp-native-{fixture.identity}-{part}-0").rename(
-                staging / (part + ".artifact")
-            )
-        with self.assertRaises(SystemExit) as exited:
-            fixture.consume(capture)
-        self.assertEqual(exited.exception.code, 0)
-        self.assertEqual(
-            fixture.mapped_path(fixture.dump_path).read_bytes(), b"custom database fixture"
-        )
-        self.assertEqual(
-            (
-                fixture.root / "volumes/data/filestore" / fixture.database / fixture.name
-            ).read_bytes(),
-            fixture.attachment,
-        )
-
-    def test_retry_does_not_allocate_another_copy_of_matching_attachments(self) -> None:
+    def test_all_metadata_and_attachment_bytes_survive_extraction_and_retry(self) -> None:
+        from contextlib import nullcontext
         from unittest.mock import patch
-        from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
 
-        fixture = NativeArtifactConsumptionTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        capture = fixture.stage()
-        capture["source_observation"] = {
-            "kind": "migrated",
-            "filestore_expanded_bytes": len(fixture.attachment),
-            "filestore_files": 1,
-        }
-        staging = fixture.root / "volumes/data" / (".lp-native-" + fixture.identity)
-        staging.mkdir(parents=True)
-        for part in ("database", "filestore"):
-            (fixture.root / "tmp" / f"lp-native-{fixture.identity}-{part}-0").rename(
-                staging / (part + ".artifact")
-            )
-        with self.assertRaises(SystemExit):
-            fixture.consume(capture)
-        fixture.mapped_path(fixture.dump_path).unlink()
-        with (
-            patch(
-                "tests.test_odoo_testing_native_source.NamedTemporaryFile",
-                side_effect=OSError("No room for a duplicate attachment"),
-            ),
-            self.assertRaises(SystemExit) as exited,
+        fixture = self.fixture
+        files = [
+            (".DS_Store", b"synthetic metadata"),
+            ("nested/notes with spaces.txt", b"nested metadata"),
+            (fixture.name, fixture.attachment),
+            ("checklist/" + fixture.name, b"checklist attachment"),
+            (".lp-native-" + fixture.identity + "-member", b"legitimate former scratch name"),
+        ]
+        capture = self.stage(files)
+        for retry in (False, True):
+            with self.subTest(retry=retry):
+                if retry:
+                    fixture.mapped_path(fixture.dump_path).unlink()
+                scratch = (
+                    patch(
+                        "tests.test_odoo_testing_native_source.NamedTemporaryFile",
+                        side_effect=OSError("No room for duplicate files"),
+                    )
+                    if retry
+                    else nullcontext()
+                )
+                with (
+                    scratch,
+                    self.assertRaises(SystemExit) as exited,
+                ):
+                    fixture.consume(capture)
+                self.assertEqual(exited.exception.code, 0)
+                self.assertEqual(
+                    {
+                        str(path.relative_to(self.filestore)): path.read_bytes()
+                        for path in self.filestore.rglob("*")
+                        if path.is_file()
+                    },
+                    dict(files),
+                )
+                self.assertEqual(
+                    fixture.mapped_path(fixture.dump_path).read_bytes(), b"custom database fixture"
+                )
+
+    def test_unsafe_and_aliased_member_names_never_publish_the_database(self) -> None:
+        for name in (
+            "/outside",
+            "../outside",
+            "nested/../outside",
+            ".",
+            "./metadata",
+            "nested//metadata",
         ):
-            fixture.consume(capture)
-        self.assertEqual(exited.exception.code, 0)
+            with self.subTest(name=name):
+                capture = self.stage([(name, b"metadata")])
+                with self.assertRaises(RuntimeError):
+                    self.fixture.consume(capture)
+                self.assertFalse(self.fixture.mapped_path(self.fixture.dump_path).exists())
 
-    def test_incomplete_declared_inventory_does_not_publish_database(self) -> None:
-        from tests.test_odoo_testing_native_source import NativeArtifactConsumptionTests
+    def test_links_and_special_members_never_publish_the_database(self) -> None:
+        import tarfile
 
-        fixture = NativeArtifactConsumptionTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        capture = fixture.stage()
-        capture["source_observation"] = {
-            "kind": "migrated",
-            "filestore_expanded_bytes": len(fixture.attachment),
-            "filestore_files": 2,
-        }
-        staging = fixture.root / "volumes/data" / (".lp-native-" + fixture.identity)
-        staging.mkdir(parents=True)
-        for part in ("database", "filestore"):
-            (fixture.root / "tmp" / f"lp-native-{fixture.identity}-{part}-0").rename(
-                staging / (part + ".artifact")
-            )
-        with self.assertRaisesRegex(RuntimeError, "inventory is incomplete"):
-            fixture.consume(capture)
-        self.assertFalse(fixture.mapped_path(fixture.dump_path).exists())
+        for member_type in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE, tarfile.CHRTYPE):
+            with self.subTest(member_type=member_type):
+                capture = self.stage([("metadata", b"")], member_type)
+                with self.assertRaises(RuntimeError):
+                    self.fixture.consume(capture)
+                self.assertFalse(self.fixture.mapped_path(self.fixture.dump_path).exists())
+
+    def test_duplicate_metadata_is_refused_before_database_publication(self) -> None:
+        capture = self.stage([(".DS_Store", b"first"), (".DS_Store", b"other")])
+        with self.assertRaises(RuntimeError):
+            self.fixture.consume(capture)
+        self.assertEqual((self.filestore / ".DS_Store").read_bytes(), b"first")
+        self.assertFalse(self.fixture.mapped_path(self.fixture.dump_path).exists())
+
+    def test_metadata_inventory_limits_remain_exact(self) -> None:
+        for field in ("filestore_files", "filestore_expanded_bytes"):
+            for adjustment in (-1, 1):
+                with self.subTest(field=field, adjustment=adjustment):
+                    capture = self.stage([("metadata", b"metadata")])
+                    capture["source_observation"][field] += adjustment
+                    with self.assertRaises(RuntimeError):
+                        self.fixture.consume(capture)
+                    self.assertFalse(self.fixture.mapped_path(self.fixture.dump_path).exists())
+
+    def test_metadata_never_overwrites_different_existing_bytes(self) -> None:
+        capture = self.stage([("metadata", b"new bytes")])
+        self.filestore.mkdir(parents=True)
+        destination = self.filestore / "metadata"
+        destination.write_bytes(b"old bytes")
+        with self.assertRaises(RuntimeError):
+            self.fixture.consume(capture)
+        self.assertEqual(destination.read_bytes(), b"old bytes")
+        self.assertFalse(self.fixture.mapped_path(self.fixture.dump_path).exists())
+
+    def test_metadata_never_follows_a_destination_alias(self) -> None:
+        capture = self.stage([("nested/metadata", b"new bytes")])
+        self.filestore.mkdir(parents=True)
+        outside = self.fixture.root / "outside"
+        outside.mkdir()
+        (self.filestore / "nested").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(RuntimeError):
+            self.fixture.consume(capture)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse(self.fixture.mapped_path(self.fixture.dump_path).exists())
+
+    def test_tampered_complete_archive_is_refused_by_normal_inspection(self) -> None:
+        capture = self.stage([("metadata", b"original")])
+        artifact = self.staging / "filestore.artifact"
+        original = artifact.read_bytes()
+        artifact.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+        with self.assertRaises(RuntimeError):
+            self.fixture.consume(capture, mode="inspect")
+        self.assertFalse(self.fixture.mapped_path(self.fixture.dump_path).exists())
+
+    def test_normal_cleanup_removes_interrupted_staging_scratch(self) -> None:
+        capture = self.stage([("metadata", b"metadata")])
+        scratch = self.staging / (".lp-native-" + self.fixture.identity + "-interrupted")
+        scratch.write_bytes(b"partial metadata")
+        with self.assertRaises(SystemExit):
+            self.fixture.consume(capture, mode="cleanup")
+        self.assertEqual(list(self.staging.iterdir()), [])
+        self.assertFalse(self.filestore.exists())
+
+    def test_metadata_extraction_preserves_space_before_and_during_writes(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        for probe, space in (
+            ("shutil.disk_usage", SimpleNamespace(free=0)),
+            ("os.fstatvfs", SimpleNamespace(f_bavail=0, f_frsize=1)),
+        ):
+            with self.subTest(probe=probe):
+                capture = self.stage([("metadata", b"metadata")])
+                with (
+                    patch(probe, return_value=space),
+                    self.assertRaises(RuntimeError),
+                ):
+                    self.fixture.consume(capture)
+                self.assertFalse((self.filestore / "metadata").exists())
+                self.assertFalse(list(self.staging.glob(".lp-native-*")))
+                self.assertFalse(self.fixture.mapped_path(self.fixture.dump_path).exists())
 
 
 class MigratedStreamTests(unittest.TestCase):

@@ -2821,7 +2821,12 @@ one registered terminal connection into the candidate data volume, preserving
 only an exact verified prefix on interruption. Receiver size/hash verification still
 precedes restore. Streaming extraction rejects unsafe or duplicate paths and
 requires the exact declared full filestore count and bytes before publishing the
-dump. The existing credential boundary, quarantine, restore witness, private
+dump. The archive contains every regular file relative to its database directory,
+including root metadata and checklist files, without an attachment-name filter.
+File names must be canonical relative paths; links, special files, aliases and
+duplicates are refused. Extraction scratch stays in the original per-operation
+artifact staging directory, so retry cleanup cannot remove filestore members.
+The existing credential boundary, quarantine, restore witness, private
 readiness, route cutover and clean snapshot remain the normal rebuild path.
 
 Native rebuilds bind a capture to their original private candidate's recorded
