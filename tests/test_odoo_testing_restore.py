@@ -978,6 +978,57 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertEqual(frame["kind"], "unavailable")
         self.assertNotIn("private-native-files", output)
 
+    def test_scheduled_migrated_restore_consumes_uploaded_artifacts_without_native_chunks(
+        self,
+    ) -> None:
+        from tests.test_migrated_testing_source import MigratedArtifactConsumptionTests
+
+        migrated = MigratedArtifactConsumptionTests()
+        migrated.setUp()
+        self.addCleanup(migrated.doCleanups)
+        capture = migrated.stage()
+        capture.update(
+            generation_binding_sha256=self.spec["copy_binding_sha256"],
+            source_binding_sha256="e" * 64,
+        )
+        self.spec["native_capture"] = capture
+        self.spec["generation"].update(
+            source_mode="container-export",
+            source_binding_sha256=capture["source_binding_sha256"],
+            migrated_source={
+                **capture["source_observation"],
+                "database": capture["database"],
+                "filestore": capture["filestore"],
+            },
+        )
+        original = self.command
+        modes: list[str] = []
+
+        def consume(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            program = kwargs.get("input")
+            if program != self.spec["native_files_program"].encode():
+                return original(arguments, **kwargs)
+            receiver = json.loads(base64.b64decode(arguments[-1]))
+            modes.append(receiver["mode"])
+            try:
+                migrated.fixture.consume(receiver["capture"], receiver["mode"], program.decode())
+            except SystemExit as error:
+                self.assertEqual(error.code, 0)
+            return subprocess.CompletedProcess(arguments, 0, stdout=b"", stderr=b"")
+
+        with patch.object(self, "command", side_effect=consume):
+            status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.assertEqual(modes, ["prepare", "cleanup"])
+        self.assertEqual(
+            migrated.fixture.mapped_path(migrated.fixture.dump_path).read_bytes(),
+            b"custom database fixture",
+        )
+        self.assertEqual(
+            (migrated.filestore / migrated.fixture.name).read_bytes(), migrated.fixture.attachment
+        )
+        self.assertFalse(any(migrated.staging.iterdir()))
+
     def test_public_verification_requires_live_copy_digest_identity_and_open_gate_without_writes(
         self,
     ) -> None:
