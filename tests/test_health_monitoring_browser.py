@@ -1,10 +1,13 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from typing import Any
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from unittest.mock import patch
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -28,6 +31,105 @@ from tests.support.stores import _sqlite_database_url
 
 
 class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
+    async def test_selected_public_endpoint_binds_authority_and_replays_without_reenrollment(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=_sqlite_database_url(Path(directory) / "db"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            data = _product_health_monitoring_profile().model_dump(mode="json")
+            data["lanes"][0]["instance"] = "prod"
+            profile = LaunchplaneProductProfileRecord.model_validate(data)
+            store.write_product_profile_record(profile)
+            target = DokployTargetRecord(
+                context="cm",
+                instance="prod",
+                updated_at=profile.updated_at,
+                public_hosts=("business.example.com", "www.business.example.com"),
+            )
+            store.write_dokploy_target_record(target)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                bearer_identity_config=BearerIdentityConfig.model_validate(
+                    {
+                        "local_operator_token": "fixture-token",
+                        "local_operator_subject": "fixture-agent",
+                        "local_operator_token_label": "fixture-label",
+                    }
+                ),
+                authz_policy=LaunchplaneAuthzPolicy(schema_version=3),
+                record_store_factory=lambda: store,
+            )
+            headers = {"Authorization": "Bearer fixture-token"}
+            route = "/v1/product-profiles/health-monitoring/apply"
+            for host in target.public_hosts:
+                with self.subTest(host=host):
+                    payload = {
+                        **_product_health_monitoring_payload(),
+                        "instance": "prod",
+                        "check_name": host,
+                        "public_url": f"https://{host}/health",
+                    }
+                    planned = await request(app, "POST", route, payload=payload, headers=headers)
+                    self.assertEqual(planned.status_code, 202, planned.text)
+                    plan = planned.json()["result"]
+                    self.assertEqual(plan["current_resolved_url"], profile.lanes[0].health_url)
+                    self.assertEqual(plan["resolved_url"], payload["public_url"])
+                    applied = {
+                        **payload,
+                        "mode": "apply",
+                        "reviewed_plan_sha256": plan["plan_sha256"],
+                    }
+                    apply_headers = {**headers, "Idempotency-Key": host}
+                    result = await request(
+                        app, "POST", route, payload=applied, headers=apply_headers
+                    )
+                    self.assertEqual(result.status_code, 202, result.text)
+                    stored = store.read_product_profile_record(profile.product)
+                    self.assertEqual(
+                        stored.lanes[0].health_monitoring.checks[-1].url, payload["public_url"]
+                    )
+                    self.assertEqual(
+                        stored.lanes[0].health_monitoring.checks[0],
+                        profile.lanes[0].health_monitoring.checks[0],
+                    )
+                    store.write_dokploy_target_record(
+                        target.model_copy(update={"public_hosts": ()})
+                    )
+                    replay = await request(
+                        app, "POST", route, payload=applied, headers=apply_headers
+                    )
+                    self.assertEqual(replay.status_code, 202, replay.text)
+                    self.assertTrue(replay.json()["replayed"])
+                    store.write_dokploy_target_record(target)
+
+            before = store.read_product_profile_record(profile.product)
+            payload["check_name"] = "racing-check"
+            planned = await request(app, "POST", route, payload=payload, headers=headers)
+            applied = {
+                **payload,
+                "mode": "apply",
+                "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
+            }
+            write = store.compare_and_write_product_profile_record
+
+            def race(**kwargs: Any) -> object:
+                store.write_dokploy_target_record(target.model_copy(update={"public_hosts": ()}))
+                return write(**kwargs)
+
+            with patch.object(store, "compare_and_write_product_profile_record", side_effect=race):
+                stale = await request(
+                    app,
+                    "POST",
+                    route,
+                    payload=applied,
+                    headers={**headers, "Idempotency-Key": "racing"},
+                )
+            self.assertEqual(stale.status_code, 409, stale.text)
+            self.assertEqual(stale.json()["error"]["code"], "stale")
+            self.assertEqual(store.read_product_profile_record(profile.product), before)
+
     async def test_director_agents_apply_monitoring_without_per_action_grants(self) -> None:
         for transport in ("local_operator", "terminal_agent"):
             for instance in ("testing", "prod"):
@@ -146,6 +248,7 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("requested_dependency_health", plan.json()["result"])
                 self.assertNotIn("current_expected_dns_targets", plan.json()["result"])
                 self.assertNotIn("requested_expected_dns_targets", plan.json()["result"])
+                self.assertNotIn("current_resolved_url", plan.json()["result"])
                 applied = {
                     **payload,
                     "mode": "apply",
@@ -161,6 +264,7 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("requested_dependency_health", response.json()["result"])
                     self.assertNotIn("current_expected_dns_targets", response.json()["result"])
                     self.assertNotIn("requested_expected_dns_targets", response.json()["result"])
+                    self.assertNotIn("current_resolved_url", response.json()["result"])
                     if creating:
                         for field in (
                             "current_check_kind",

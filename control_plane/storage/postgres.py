@@ -28822,9 +28822,12 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> ProductProfileCompareWriteResult:
         if expected_provider_targets or expected_dokploy_targets or expected_dokploy_target_ids:
             target_expectations_match = (
-                self._provider_target_expectations_match(
-                    session=session,
-                    expected_records=expected_provider_targets,
+                (
+                    not expected_provider_targets
+                    or self._provider_target_expectations_match(
+                        session=session,
+                        expected_records=expected_provider_targets,
+                    )
                 )
                 and self._dokploy_target_expectations_match(
                     session=session,

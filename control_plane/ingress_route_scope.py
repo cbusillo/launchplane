@@ -79,7 +79,7 @@ def validate_ingress_route_instance_scope(
         if other_lane is lane:
             continue
         if requested & (
-            _lane_public_domains(other_lane, require_domains=False)
+            _lane_public_domains(other_lane, require_domains=False, include_monitoring=True)
             | _tracked_domains(tracked_targets, other_lane.context, other_lane.instance)
         ):
             raise IngressRouteInstanceScopeError(
@@ -162,11 +162,12 @@ def _lane_public_domains(
     lane: ProductLaneProfile,
     *,
     require_domains: bool,
+    include_monitoring: bool = False,
 ) -> frozenset[str]:
     domains = {
         _public_https_domain(value=value, label=label)
         for label, value in _lane_public_urls(lane)
-        if value.strip()
+        if value.strip() and (include_monitoring or label in {"base_url", "health_url"})
     }
     if require_domains and not domains:
         raise IngressRouteInstanceScopeError(

@@ -38,11 +38,16 @@ def split_ingress_monitoring_policy(
         if check.kind == "public_http" and check.enabled
     )
     threshold = max((check.recovery_observation_threshold for check in checks), default=1)
-    supported_urls = {_url_key(canonical_lane.base_url)} | {
-        _url_key(split_ingress_health_url(profile, canonical_lane, domain)) for domain in domains
-    }
+    supported_urls = _split_ingress_supported_urls(profile, canonical_lane, domains)
+    independent = tuple(
+        check for check in checks if check.url and _url_key(check.url) not in supported_urls
+    )
+    derived_names = {split_ingress_check_name(domain) for domain in domains}
     unsupported = tuple(
-        check.name for check in checks if check.url and _url_key(check.url) not in supported_urls
+        check.name
+        for check in independent
+        if check.name in derived_names
+        or _url_key(check.url)[:2] != ("https", urlsplit(check.url).hostname)
     )
     if unsupported:
         return SplitIngressMonitoringPolicy(
@@ -50,7 +55,12 @@ def split_ingress_monitoring_policy(
             threshold,
             f"Split monitoring cannot replace these additional public checks: {', '.join(unsupported)}.",
         )
-    expectations = tuple(target for check in checks for target in check.expected_dns_targets)
+    expectations = tuple(
+        target
+        for check in checks
+        if check not in independent
+        for target in check.expected_dns_targets
+    )
     if any(target.public_name not in domains for target in expectations):
         return SplitIngressMonitoringPolicy(
             (), threshold, "A configured DNS expectation is outside the recorded route hosts."
@@ -61,6 +71,14 @@ def split_ingress_monitoring_policy(
             (), threshold, f"Configured DNS expectations disagree for {host}."
         )
     return SplitIngressMonitoringPolicy(matching[:1], threshold)
+
+
+def _split_ingress_supported_urls(
+    profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile, domains: tuple[str, ...]
+) -> set[tuple[str, str, str, str]]:
+    return {_url_key(lane.base_url)} | {
+        _url_key(split_ingress_health_url(profile, lane, domain)) for domain in domains
+    }
 
 
 def split_ingress_health_url(
@@ -141,6 +159,9 @@ def split_ingress_monitoring_lane(
         for domain in binding.domains
     )
     derived_names = {check.name for check in checks}
+    supported_urls = _split_ingress_supported_urls(
+        profile, lane, tuple(domain.domain_name for domain in binding.domains)
+    )
     return lane.model_copy(
         update={
             "health_monitoring": lane.health_monitoring.model_copy(
@@ -148,7 +169,12 @@ def split_ingress_monitoring_lane(
                     "checks": tuple(
                         check
                         for check in lane.health_monitoring.checks
-                        if check.kind != "public_http" and check.name not in derived_names
+                        if check.name not in derived_names
+                        and (
+                            check.kind != "public_http"
+                            or not check.enabled
+                            or (check.url and _url_key(check.url) not in supported_urls)
+                        )
                     )
                     + checks,
                 }

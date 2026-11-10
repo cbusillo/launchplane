@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.public_hosts import retained_hostname_identity
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -476,10 +477,15 @@ def _external_domains(
         findings=findings,
         required=False,
     )
+    declared_domains = {domain for domain in (primary_domain, health_domain) if domain}
     strict_checks = tuple(
         check
         for check in lane.health_monitoring.checks
-        if check.enabled and check.kind == "public_http" and check.require_runtime_identity
+        if check.enabled
+        and check.kind == "public_http"
+        and check.require_runtime_identity
+        and retained_hostname_identity(check.url or lane.health_url or lane.base_url)
+        in declared_domains
     )
     if not strict_checks:
         findings.append(
@@ -491,25 +497,14 @@ def _external_domains(
                 ),
             )
         )
-    declared_domains = {domain for domain in (primary_domain, health_domain) if domain}
     for check in strict_checks:
         check_url = check.url or lane.health_url or lane.base_url
-        check_domain = _https_domain(
+        _https_domain(
             value=check_url,
             label=f"public HTTP check {check.name!r}",
             findings=findings,
             required=True,
         )
-        if check_domain and check_domain not in declared_domains:
-            findings.append(
-                RouteBindingReconcileFinding(
-                    code="strict_public_runtime_identity_domain_unowned",
-                    detail=(
-                        "The strict public runtime-identity check targets a domain not owned "
-                        "by the lane base_url or health_url."
-                    ),
-                )
-            )
     if not primary_domain:
         return ()
     domains = [RouteBindingDomain(domain_name=primary_domain, role="primary")]

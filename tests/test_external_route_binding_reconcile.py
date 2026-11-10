@@ -195,6 +195,46 @@ def _request(
 
 
 class ExternalRouteBindingPlannerTests(unittest.TestCase):
+    def test_independent_monitor_neither_supplies_nor_blocks_origin_proof(self) -> None:
+        profile = _profile()
+        lane = profile.lanes[0]
+        origin = lane.health_monitoring.checks[0].model_copy(
+            update={"url": f"{lane.base_url}./health"}
+        )
+        extra = ProductLaneHealthCheck(
+            name="business",
+            url="https://business.example.com/health",
+            require_runtime_identity=True,
+        )
+        for checks, expected in (
+            ((origin, extra), "ready"),
+            ((extra,), "blocked"),
+        ):
+            configured = lane.model_copy(
+                update={
+                    "health_monitoring": lane.health_monitoring.model_copy(
+                        update={"checks": checks}
+                    )
+                }
+            )
+            plan = plan_external_route_binding_reconcile(
+                record_store=_Store(
+                    profile=profile.model_copy(update={"lanes": (configured,)}),
+                    provider_target=_provider_target(),
+                ),
+                request=_request(),
+            )
+            self.assertEqual(plan.status, expected, plan.findings)
+            if plan.record is not None:
+                self.assertEqual(
+                    tuple(domain.domain_name for domain in plan.record.domains),
+                    ("app.example.test",),
+                )
+            else:
+                self.assertIn(
+                    "strict_public_runtime_identity_check_missing", {f.code for f in plan.findings}
+                )
+
     def test_plans_external_edge_binding_from_db_records(self) -> None:
         plan = plan_external_route_binding_reconcile(
             record_store=_Store(profile=_profile(), provider_target=_provider_target()),
