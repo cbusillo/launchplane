@@ -188,6 +188,21 @@ class PreviewMaintenanceAdapter:
             }
         )
 
+    def verified_binding(
+        self, connection: reads.OdooRuntimeConnection, *, mode: str
+    ) -> PreviewFixtureBinding:
+        binding = self.binding or self.capture_binding()
+        if (
+            binding.identity != connection.selection.identity
+            or binding.target_id != connection.evidence.target_id
+            or mode != "readback"
+            and binding.container_id != connection.evidence.container_id
+            or binding.database != connection.credentials["ODOO_DB_NAME"]
+            or binding.app_name != connection.app_name
+        ):
+            raise ValueError("Maintenance runtime differs from its retained binding.")
+        return self.runtime_binding(connection) if mode == "readback" else binding
+
     def response(self, receipt: BaseModel, *, recovered: bool = False) -> dict[str, object]:
         return provider_operation_response_payload(
             trace_id=self.trace_id,
@@ -225,19 +240,8 @@ class PreviewFixtureAdapter(PreviewMaintenanceAdapter):
     ) -> PreviewFixtureReceipt:
         self.failure_reason = None
         connection = self.connect(mutation=mode == "apply")
-        binding = self.binding or self.capture_binding()
+        binding = self.verified_binding(connection, mode=mode)
         selection = connection.selection
-        if (
-            binding.identity != selection.identity
-            or binding.target_id != connection.evidence.target_id
-            or mode != "readback"
-            and binding.container_id != connection.evidence.container_id
-            or binding.database != connection.credentials["ODOO_DB_NAME"]
-            or binding.app_name != connection.app_name
-        ):
-            raise ValueError("Fixture runtime differs from its retained binding.")
-        if mode == "readback":
-            binding = self.runtime_binding(connection)
 
         def checkpoint(phase: str) -> None:
             self.selection(mutation=mode == "apply")
@@ -359,8 +363,8 @@ def fixture_schedule_script(
     return host_schedule("preview_fixture", spec)
 
 
-def fixture_schedule_app_name(script: str) -> str:
-    return "preview-fixture-" + canonical_json_sha256(script)
+def fixture_schedule_app_name(script: str, *, action: str = "preview-fixture") -> str:
+    return action + "-" + canonical_json_sha256(script)
 
 
 def run_fixture_schedule(
@@ -400,7 +404,7 @@ def run_preview_maintenance_schedule(
     before_provider_mutation: Callable[[str], None] | None = None,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> dict[str, str]:
-    schedule_app_name = action + "-" + canonical_json_sha256(script)
+    schedule_app_name = fixture_schedule_app_name(script, action=action)
     schedule_name = "Launchplane " + schedule_app_name
     return post_deploy.run_manual_data_schedule(
         host=host,

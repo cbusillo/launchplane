@@ -122,6 +122,12 @@ def main() -> int:
             }
         )
     )
+    if isinstance(receipt, PreviewPartsImportReceipt):
+        return (
+            0
+            if (receipt.outcome == "qualified" if args.mode == "dry-run" else receipt.committed)
+            else 1
+        )
     return 0
 
 

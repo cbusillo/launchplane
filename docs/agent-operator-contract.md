@@ -12,7 +12,9 @@ delivery.
 
 The maintenance operation includes the [exact-preview parts-import contract](preview-parts-import.md),
 using the installed catalog transport and repository helper. Import readback
-is original-key recovery; standalone readback remains fixture-only.
+is original-key recovery; standalone readback remains fixture-only. Route-level
+modes aggregate the discriminated preview actions; stable post-deploy maintenance
+retains its legacy request shape. The OpenAPI action schema selects the fields.
 
 ## Generate And Check
 

@@ -111,7 +111,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         "/v1/drivers/odoo/app-maintenance",
-        "Run stable maintenance, image-owned preview fixtures, or fixed exact-preview Fishbowl parts import with configured-account grants preflight and durable original recovery.",
+        "Run stable post-deploy maintenance; preview fixtures support dry-run/apply/readback, and fixed parts import supports dry-run/apply with original-key recovery. Preview apply binds reviewed_plan_sha256.",
         ("agent_helper", "service_api"),
         ("dry-run", "apply", "readback"),
         "apply",

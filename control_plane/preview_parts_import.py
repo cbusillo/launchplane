@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import hashlib
 import hmac
+import click
 
 from control_plane import odoo_runtime_reads as reads
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -98,7 +99,7 @@ class PreviewPartsImportAdapter(PreviewMaintenanceAdapter):
         )
         password_key = config_parameter_secret_env_key("fishbowl.password")
         if not hmac.compare_digest(
-            before.get(password_key, ""), selected.environment[password_key]
+            before.get(password_key, "").encode(), selected.environment[password_key].encode()
         ):
             raise ValueError("Preview secret differs from its current managed source.")
         return selected.authority_sha256, settings_sha256
@@ -130,9 +131,7 @@ class PreviewPartsImportAdapter(PreviewMaintenanceAdapter):
         self, mode: str, lease: ProviderOperationLease | None = None, *, operation: str = ""
     ) -> PreviewPartsImportReceipt:
         connection = self.connect(mutation=mode == "apply")
-        binding = self.binding or self.capture_binding()
-        if binding != self.runtime_binding(connection):
-            raise ValueError("Import runtime differs from its retained exact binding.")
+        binding = self.verified_binding(connection, mode=mode)
         authority, settings = self.qualified_source(connection)
         if self.source_authority_sha256 and authority != self.source_authority_sha256:
             raise ValueError("Import managed source differs from its retained original.")
@@ -246,6 +245,6 @@ class PreviewPartsImportAdapter(PreviewMaintenanceAdapter):
                 return ProviderObservation(
                     "present", response_payload=self.response(receipt, recovered=True)
                 )
-        except Exception:
+        except (ValueError, OSError, RuntimeError, KeyError, click.ClickException):
             return ProviderObservation("unknown")
         return ProviderObservation("unknown")

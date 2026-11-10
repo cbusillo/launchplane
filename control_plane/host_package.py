@@ -47,7 +47,7 @@ def host_package() -> HostPackage:
     from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
     from control_plane.testing_activation import PORT_INSPECTION_PROGRAM
     from control_plane._preview_fixture_program import PREVIEW_FIXTURE_PROGRAM
-    from control_plane._preview_parts_import_program import parts_import_programs
+    from control_plane.preview_parts_import_programs import parts_import_programs
 
     programs = {
         "activation": (

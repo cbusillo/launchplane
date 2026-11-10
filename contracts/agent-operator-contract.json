@@ -58,7 +58,7 @@
         ],
         "operation_id": "write_odoo_app_maintenance",
         "path": "/v1/drivers/odoo/app-maintenance",
-        "purpose": "Run stable maintenance, image-owned preview fixtures, or fixed exact-preview Fishbowl parts import with configured-account grants preflight and durable original recovery.",
+        "purpose": "Run stable post-deploy maintenance; preview fixtures support dry-run/apply/readback, and fixed parts import supports dry-run/apply with original-key recovery. Preview apply binds reviewed_plan_sha256.",
         "response_statuses": [
           "202",
           "400",
@@ -1446,8 +1446,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "ad52cc1ad0ef061d727ece1c539950fb9980209e"
+    "source_commit_sha": "fb9556cbbd046f5c80ceb4e34493e7fe04a41e0c"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "6a1bf27d28252d1448a2701e6532a0768c02e331335ac6a74bc4e413660c7232"
+  "semantic_digest_sha256": "2a7dc9eca35bb7e74ef941a0a06a4c04549a1865941614c34f45cda24cbef382"
 }

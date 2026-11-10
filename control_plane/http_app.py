@@ -7528,7 +7528,9 @@ def create_launchplane_fastapi_app(
                         trace_id=trace_id,
                         route_path=_ODOO_APP_MAINTENANCE_ROUTE,
                         in_progress_message="The original preview maintenance operation is running.",
-                        reconcile_message="Read back the original preview maintenance operation before retrying.",
+                        reconcile_message="Repeat the original apply request, saved review and key to recover this import."
+                        if isinstance(fixture, PreviewPartsImportRequest)
+                        else "Read back the original preview maintenance operation before retrying.",
                     )
 
             try:
@@ -7545,7 +7547,9 @@ def create_launchplane_fastapi_app(
                     if isinstance(fixture, PreviewPartsImportRequest)
                     else "preview_fixture_unavailable",
                     reason=adapter.failure_reason,
-                    message="Preview maintenance evidence is unavailable; inspect the original operation.",
+                    message="Preview import evidence is unavailable; preserve its original apply request, review and key."
+                    if isinstance(fixture, PreviewPartsImportRequest)
+                    else "Preview maintenance evidence is unavailable; inspect the original operation.",
                 ) from error
         try:
             product_profile = resolve_odoo_app_maintenance_product_route(

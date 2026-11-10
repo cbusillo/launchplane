@@ -3,9 +3,11 @@ from control_plane.copy_readback_diagnostics import readback_predicate_library
 PREVIEW_FIXTURE_RESULT_MARKER = "preview_fixture_result"
 
 PREVIEW_PROCESS_LIBRARY = r"""
-def bounded_child_output(child, *, timeout_seconds, maximum_bytes):
+def bounded_child_output(child, *, timeout_seconds, maximum_bytes, deadline=None):
     output = bytearray()
-    deadline = time.monotonic() + timeout_seconds
+    absolute_deadline = deadline is not None
+    if deadline is None:
+        deadline = time.monotonic() + timeout_seconds
     with selectors.DefaultSelector() as selector:
         selector.register(child.stdout, selectors.EVENT_READ)
         while selector.get_map():
@@ -19,7 +21,10 @@ def bounded_child_output(child, *, timeout_seconds, maximum_bytes):
                 output.extend(chunk)
                 if len(output) > maximum_bytes:
                     raise ValueError('Maintenance output exceeds bound')
-    if child.wait(timeout=max(0.01, deadline-time.monotonic())) != 0:
+    remaining = deadline-time.monotonic()
+    if absolute_deadline and remaining <= 0:
+        raise TimeoutError('Maintenance deadline exceeded')
+    if child.wait(timeout=remaining if absolute_deadline else max(1, remaining)) != 0:
         raise ValueError('Maintenance command failed')
     return output
 """

@@ -2,10 +2,10 @@
 
 `POST /v1/drivers/odoo/app-maintenance` accepts fixed
 `maintenance.action: preview-parts-import` and matching `intent`. It invokes only
-the installed `fishbowl.importer.run_full_import(parts_only=True)`. The public
-method must explicitly accept `parts_only`; an older no-argument method is
-unavailable at stage `entrypoint`. There is no private-method fallback, addon
-installation or recurring importer.
+the installed `fishbowl.importer.run_full_import()`. This is the product's public
+parts-only entrypoint: its native importer delegates with `parts_only=True` as
+its default. The callable must accept that fixed no-argument invocation. There is no
+private-method invocation, addon installation or recurring importer.
 
 The envelope names `product`; `maintenance` contains `action`, `intent`, `context`,
 native `instance`, `preview_id`, `generation_id`, `reason` and `mode` (`dry-run` or
@@ -22,7 +22,9 @@ creates its own durable original and never replays preparation.
 
 The action shares preview maintenance's existing authority, execution mutex,
 resource ownership and disposable/in-use/only-copy/production isolation checks.
-Apply binds the exact container and database. Selection and managed-source
+Apply binds the exact container and database. Readback may use a replacement web
+container only within the unchanged identity, generation, target and database;
+apply and cancellation retain the original container binding. Selection and managed-source
 agreement are rechecked before dispatch and before accepting the receipt. No
 grant, account, secret, hold or authorization mode is created.
 
@@ -36,7 +38,7 @@ private-source TLS behavior is preserved; no new TLS choice is made.
 Dry run performs preflight without importing. Review its identity, source digest
 and qualification. Apply repeats preflight, obtains the native data-workflow lock
 and calls the fixed public entrypoint. A supervisor **inside the container**
-bounds the complete native worker to 600 seconds, kills its process group and
+bounds the native Odoo subprocess to 600 seconds from before spawn, kills its process group and
 waits for termination before releasing the native lock. The host observer has a
 separate deadline. Losing or stopping that observer does not prove the writer
 stopped, rolled back or never committed.
@@ -52,12 +54,12 @@ independently verified original-container cancellation.
 
 ## Maintained helper and readback
 
-Use `scripts/preview-parts-import.py` with the installed catalog transport. Its
+Use `scripts/preview-fixture.py` with the installed catalog transport. Its
 request/review transport is shared with preview fixtures; the discriminator
 selects the real import action.
 
 ```sh
-uv run python scripts/preview-parts-import.py dry-run \
+uv run python scripts/preview-fixture.py dry-run \
   --operator-helper /installed/launchplane/scripts/launchplane-write-action.py \
   --payload-file /private/import.json --evidence-file /private/import-review.json
 ```
@@ -67,8 +69,12 @@ Apply uses the same arguments, mode `apply`, `--reviewed-dry-run` and a stable
 After response loss, repeat that **same apply request, saved review and key**.
 The durable original replays its completed result or reads its historical witness
 without invoking the importer again. There is no public standalone `readback`
-mode for imports and no new-key recovery. Before a recorded trigger, the original
+mode for imports and no new-key recovery. The helper exits nonzero for unavailable
+qualification or uncommitted apply while printing its bounded receipt. Before a recorded trigger, the original
 may retry preflight; after a trigger, missing commit evidence retains the fence.
+
+The receipt elapsed time measures the script through its represented stage; the
+subprocess deadline also includes Odoo startup.
 
 Evidence includes exact runtime/artifact/generation identity, source digest,
 opaque operation identity, grants class, closed stage/outcome, elapsed seconds,
