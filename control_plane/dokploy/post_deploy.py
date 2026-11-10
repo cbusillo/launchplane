@@ -77,6 +77,7 @@ from control_plane.copy_readback_diagnostics import (
     COPY_FAILURE_STAGE_MARKER,
     ReadbackPredicate,
     copy_failure_marker_is_safe,
+    COPY_FAILURE_KIND_MARKER,
     readback_failure_evidence,
     readback_marker_is_safe,
 )
@@ -2659,6 +2660,7 @@ def extract_odoo_post_deploy_readback_markers(deployment: api.JsonObject | None)
         if not _safe_odoo_post_deploy_marker(normalized_key, normalized_value):
             continue
         if normalized_key in {
+            COPY_FAILURE_KIND_MARKER,
             COPY_FAILURE_STAGE_MARKER,
             COPY_FAILURE_EXIT_MARKER,
             COPY_FAILURE_EVIDENCE_MARKER,

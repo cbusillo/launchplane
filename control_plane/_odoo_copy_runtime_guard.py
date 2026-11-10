@@ -47,6 +47,7 @@ import subprocess
 
 
 def copy_readback_failure_frame(error: Exception, predicate: str = ReadbackPredicate.NATIVE_READ) -> dict[str, object]:
+    error = copy_failure_cause(error)
     frame = {'type': 'failed', 'predicate': error.predicate if isinstance(error, CopyReadbackRefused) else predicate,
         'kind': 'refused' if isinstance(error, CopyReadbackRefused) else 'unavailable'}
     sites = []
@@ -73,7 +74,7 @@ def foreign_volume_inventory(containers, own):
     if result.returncode and not (result.stderr.strip() and all(
         re.fullmatch(r'Error response from daemon: (?:volume .+ not found|no such volume: .+)', line, re.IGNORECASE)
         for line in result.stderr.decode().splitlines() if line.strip())):
-        raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
+        raise copy_command_failure(CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE), result, globals().get('spec', {}), containers=containers)
     rows = json.loads(result.stdout)
     found = {row.get('Name'): row for row in rows}
     if len(found) != len(rows) or not set(found) <= names or not result.returncode and set(found) != names:
@@ -137,6 +138,7 @@ COPY_RUNTIME_INSPECTION_LIBRARY = (
     + f"CLEAN_SNAPSHOT_STATE_DIRECTORY = {CLEAN_SNAPSHOT_STATE_DIRECTORY!r}\n"
     + r"""
 def inspect_copy_runtime(spec, *, expected_instance):
+    global copy_failure_containers
     gen = spec["generation"]
     namespace, project, database = gen["namespace"], spec["compose_project"], spec["database_name"]
     if expected_instance not in {"testing", "rehearsal", "preview"} or gen["instance"] != expected_instance:
@@ -166,6 +168,7 @@ def inspect_copy_runtime(spec, *, expected_instance):
             containers[service] = (identifier, container)
     if set(containers) - optional_services != {"web", "database", "script-runner"}:
         raise CopyReadbackRefused(ReadbackPredicate.SERVICES)
+    copy_failure_containers = all_containers
     gateway = containers.pop('preview-router', None)
     if gateway is not None:
         try:
@@ -253,8 +256,7 @@ def inspect_copy_runtime(spec, *, expected_instance):
         for mount in container.get('Mounts', []):
             if mount.get('Source'):
                 source_path = Path(mount['Source']).resolve(strict=False)
-                failure_state = Path.home().resolve(strict=True) / COPY_FAILURE_STATE_DIRECTORY
-                if failure_state.is_relative_to(source_path) or source_path.is_relative_to(failure_state):
+                if not copy_failure_mount_is_private(str(source_path)):
                     raise CopyReadbackRefused(ReadbackPredicate.PRIVATE_STATE)
                 snapshot_state = Path.home().resolve(strict=True) / CLEAN_SNAPSHOT_STATE_DIRECTORY
                 if ((expected_instance == 'preview' or gen.get('clean_snapshot_enabled') or snapshot_state.exists())
