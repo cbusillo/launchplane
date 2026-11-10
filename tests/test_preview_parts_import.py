@@ -105,7 +105,7 @@ class PreviewPartsImportTests(unittest.TestCase):
             patch.object(adapter, "invoke", side_effect=lost_writer),
         ):
             with self.assertRaises(ProviderMutationUnknownError):
-                adapter.apply("original-key", cast(ProviderOperationLease, Mock()))
+                adapter.apply("original-key", cast(ProviderOperationLease, cast(object, Mock())))
         with patch.object(
             adapter, "invoke", return_value=import_receipt(mode="readback", outcome="unknown")
         ) as invoke:
@@ -133,7 +133,7 @@ class PreviewPartsImportTests(unittest.TestCase):
             patch.object(adapter, "invoke") as invoke,
         ):
             with self.assertRaises(ProviderMutationRejectedError):
-                adapter.apply("key", cast(ProviderOperationLease, Mock()))
+                adapter.apply("key", cast(ProviderOperationLease, cast(object, Mock())))
             invoke.assert_not_called()
 
     def test_import_original_retains_binding_and_shares_existing_disposable_guards(self) -> None:
@@ -648,7 +648,7 @@ class ImportOriginalTests(unittest.TestCase):
             writes = []
 
             def invoke(
-                mode: str, lease: Any = None, *, operation: str = ""
+                mode: str, lease: ProviderOperationLease | None = None, *, operation: str = ""
             ) -> PreviewPartsImportReceipt:
                 if mode == "dry-run":
                     return planned
@@ -702,7 +702,7 @@ class ImportOriginalTests(unittest.TestCase):
                 self.assertEqual(len(writes), 1)
 
             def refused(
-                mode: str, lease: Any = None, *, operation: str = ""
+                mode: str, lease: ProviderOperationLease | None = None, *, operation: str = ""
             ) -> PreviewPartsImportReceipt:
                 if mode == "dry-run":
                     return planned
