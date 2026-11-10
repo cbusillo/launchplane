@@ -161,6 +161,10 @@ class _DirectorTestingSetupFixture(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    def assert_same_refusal(self, dry: Any, applied: Any) -> None:
+        self.assertEqual(dry.status_code, applied.status_code, dry.text)
+        self.assertEqual(dry.json()["error"], applied.json()["error"])
+
     def assert_production_unchanged(self) -> None:
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
         self.assertEqual(
@@ -329,9 +333,7 @@ class DirectorTestingTargetCreationTests(_DirectorTestingSetupFixture):
         )
         applied = await self.post(runtime_port=8787, domains=["testing.example.invalid"])
         self.assertEqual(applied.status_code, 400, applied.text)
-        self.assertEqual(result.status_code, applied.status_code, result.text)
-        self.assertEqual(result.json()["error"]["code"], applied.json()["error"]["code"])
-        self.assertEqual(result.json()["error"]["message"], applied.json()["error"]["message"])
+        self.assert_same_refusal(result, applied)
         self.provider.assert_not_called()
         self.assert_production_unchanged()
 
@@ -362,9 +364,7 @@ class DirectorTestingTargetCreationTests(_DirectorTestingSetupFixture):
         denied = await self.post(instance="prod")
         dry = await self.post(mode="dry-run", instance="prod")
         self.assertEqual(denied.status_code, 403, denied.text)
-        self.assertEqual(dry.status_code, denied.status_code, dry.text)
-        self.assertEqual(dry.json()["error"]["code"], denied.json()["error"]["code"])
-        self.assertEqual(dry.json()["error"]["message"], denied.json()["error"]["message"])
+        self.assert_same_refusal(dry, denied)
         self.provider.assert_not_called()
         source = await self.post(custom_git_branch="main", compose_path="docker-compose.yml")
         self.assertEqual(source.status_code, 400, source.text)
@@ -543,6 +543,17 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         self.provider.assert_not_called()
         self.assert_production_unchanged()
 
+    async def test_recovery_creation_dry_run_uses_readback_instead_of_fresh_placement(self) -> None:
+        evidence = self.retained_partial()
+        provider_reads = self.provider_read.call_count
+        dry = await self.post(mode="dry-run", retained_compose_setup=evidence)
+        self.assertEqual(dry.status_code, 400, dry.text)
+        self.assertEqual(self.provider_read.call_count, provider_reads)
+        self.provider.assert_not_called()
+        readback = await self.post(mode="readback", retained_compose_setup=evidence)
+        self.assertEqual(readback.status_code, 202, readback.text)
+        self.assertTrue(readback.json()["result"]["recoverable"])
+
     async def test_prelaunch_product_and_new_placement_also_stage(self) -> None:
         self.mark_production_use("prelaunch")
         placement = {
@@ -553,11 +564,7 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         dry_refusal = await self.post(mode="dry-run", **placement)
         apply_refusal = await self.post(**placement)
         self.assertEqual(apply_refusal.status_code, 400, apply_refusal.text)
-        self.assertEqual(dry_refusal.status_code, apply_refusal.status_code, dry_refusal.text)
-        self.assertEqual(dry_refusal.json()["error"]["code"], apply_refusal.json()["error"]["code"])
-        self.assertEqual(
-            dry_refusal.json()["error"]["message"], apply_refusal.json()["error"]["message"]
-        )
+        self.assert_same_refusal(dry_refusal, apply_refusal)
         self.assert_nothing_staged()
         self.inventory = []
         dry = await self.post(mode="dry-run", **placement)
@@ -867,13 +874,6 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         readback = await self.post(mode="readback", retained_compose_setup=evidence)
         self.assertEqual(readback.status_code, 202, readback.text)
         digest = readback.json()["result"]["recovery_sha256"]
-        provider_reads = self.provider_read.call_count
-        dry = await self.post(
-            mode="dry-run", retained_compose_setup=evidence, expected_compose_recovery_sha256=digest
-        )
-        self.assertEqual(dry.status_code, 400, dry.text)
-        self.assertEqual(self.provider_read.call_count, provider_reads)
-        self.provider.assert_not_called()
         completed = await self.post(
             retained_compose_setup=evidence, expected_compose_recovery_sha256=digest
         )
@@ -932,9 +932,7 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
             denied = await self.post()
             dry = await self.post(mode="dry-run")
         self.assertEqual(denied.status_code, 403, denied.text)
-        self.assertEqual(dry.status_code, denied.status_code, dry.text)
-        self.assertEqual(dry.json()["error"]["code"], denied.json()["error"]["code"])
-        self.assertEqual(dry.json()["error"]["message"], denied.json()["error"]["message"])
+        self.assert_same_refusal(dry, denied)
         self.assert_nothing_staged()
         self.app = self.make_app(
             _local_operator_bearer_config().model_copy(
@@ -1088,9 +1086,7 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
                 dry = await self.post(mode="dry-run")
                 result = await self.post()
                 self.assertEqual(result.status_code, 400, result.text)
-                self.assertEqual(dry.status_code, result.status_code, dry.text)
-                self.assertEqual(dry.json()["error"]["code"], result.json()["error"]["code"])
-                self.assertEqual(dry.json()["error"]["message"], result.json()["error"]["message"])
+                self.assert_same_refusal(dry, result)
                 self.assert_nothing_staged()
 
     async def test_unreadable_provider_or_wrong_project_is_refused(self) -> None:

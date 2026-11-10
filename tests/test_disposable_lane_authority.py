@@ -1476,12 +1476,7 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
                 apply_refusal = await stage()
             self.assertEqual(apply_refusal.status_code, 400, apply_refusal.text)
             self.assertEqual(dry_refusal.status_code, apply_refusal.status_code, dry_refusal.text)
-            self.assertEqual(
-                dry_refusal.json()["error"]["code"], apply_refusal.json()["error"]["code"]
-            )
-            self.assertEqual(
-                dry_refusal.json()["error"]["message"], apply_refusal.json()["error"]["message"]
-            )
+            self.assertEqual(dry_refusal.json()["error"], apply_refusal.json()["error"])
             self.assertFalse(posted)
             dry = await stage("dry-run")
             self.assertEqual(dry.status_code, 202, dry.text)
