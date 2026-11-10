@@ -110,6 +110,15 @@ class OperationSpec:
 OPERATION_SPECS = (
     OperationSpec(
         "POST",
+        "/v1/product-onboarding/apply",
+        "Review advanced manifests without effects using product read scope; protected apply retains its existing authority and accepts a current-record-bound reviewed digest.",
+        ("service_api",),
+        ("dry_run", "apply"),
+        "optional",
+        ("reviewed_plan_sha256",),
+    ),
+    OperationSpec(
+        "POST",
         "/v1/drivers/odoo/app-maintenance",
         "Run stable post-deploy maintenance; preview fixtures support dry-run/apply/readback, and fixed parts import supports dry-run/apply with original-key recovery. Preview apply binds reviewed_plan_sha256.",
         ("agent_helper", "service_api"),
