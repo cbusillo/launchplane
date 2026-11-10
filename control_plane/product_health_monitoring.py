@@ -564,7 +564,7 @@ def _validate_public_host_authority(
         or public_target.pending_public_host_effects
     ):
         raise ProductHealthMonitoringTargetError(
-            "Strict public runtime-identity monitoring must use a lane-owned host."
+            "Public HTTP monitoring must use a lane-owned host."
         )
 
 

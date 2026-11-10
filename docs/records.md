@@ -1222,6 +1222,11 @@ domains, pending public-host effects and another lane's intent cannot qualify a
 business hostname. Selection does not create intent, ingress routes, DNS records
 or certificates. The ordinary public-only outbound policy still validates every
 resolved address and redirect; normal TLS and strict runtime identity remain in force.
+Later strict updates of a selected business check revalidate that same recorded
+intent even when `public_url` is omitted. Monitoring URLs remain protective host
+claims, but cannot authorize proxy writes or supply external-origin proof.
+Independent explicit checks keep their complete policy and execute alongside
+derived split-ingress checks; they do not change recorded redirect custody.
 
 Only explicit selection returns `current_resolved_url` alongside the desired
 `resolved_url`. The current URL is the existing selected check URL or its lane

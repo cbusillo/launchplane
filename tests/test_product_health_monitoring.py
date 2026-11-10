@@ -80,8 +80,8 @@ def _request(
 
 
 class ProductHealthMonitoringTests(unittest.TestCase):
-    # noinspection HttpUrlsUsage
     def test_public_url_rejects_private_destinations_and_nonpublic_request_shapes(self) -> None:
+        # noinspection HttpUrlsUsage
         for url in (
             "",
             "http://business.example.com/health",
@@ -204,6 +204,19 @@ class ProductHealthMonitoringTests(unittest.TestCase):
                 )
                 expected["source"] = updated.source
                 self.assertEqual(updated.model_dump(mode="json"), expected)
+                legacy_update = request.model_copy(update={"public_url": None})
+                legacy_plan = build_product_health_monitoring_plan(
+                    profile=updated, request=legacy_update, public_target=target
+                )
+                self.assertEqual(legacy_plan.operation, "unchanged")
+                self.assertEqual(legacy_plan.resolved_url, url)
+                self.assertNotIn("current_resolved_url", legacy_plan.model_dump(mode="json"))
+                with self.assertRaises(ProductHealthMonitoringTargetError):
+                    build_product_health_monitoring_plan(
+                        profile=updated,
+                        request=legacy_update,
+                        public_target=target.model_copy(update={"public_hosts": ()}),
+                    )
 
     def test_no_website_conflict_is_rejected_in_plan_and_apply(self) -> None:
         payload = _profile().model_dump(mode="json")
