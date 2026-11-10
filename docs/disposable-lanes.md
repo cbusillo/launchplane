@@ -2812,6 +2812,11 @@ a prepared candidate removes the completed pair cache after the normal restore
 and private-readiness proof. Candidate volumes retain the normal disposable-copy
 custody and collection protections.
 
+The scheduled restore derives migrated-file handling from the generation's
+retained migrated-source metadata. Its reduced capture receipt omits source
+observations; that omission must not select the live-capture chunk path for an
+uploaded database and filestore pair.
+
 Migrated uploads use actual free space, the lane's existing storage reserve and
 their declared complete inventories instead of the small live-capture limits
 above. Capacity charges the larger of the existing filestore allowance and the
