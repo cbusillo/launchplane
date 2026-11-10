@@ -88,6 +88,8 @@ class FailureHistory:
                 return next(run for run in runs if path.endswith(f"/{run['id']}"))
             if "/annotations?" in path:
                 return []
+            if path.endswith("/logs"):
+                return ""
             if "/actions/jobs/" in path:
                 self.job_reads += 1
                 check = next(check for check in checks if path.endswith(f"/{check['id']}"))

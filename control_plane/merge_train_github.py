@@ -1303,6 +1303,19 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 raise MergeTrainGitHubError("GitHub check run annotations response must be a list.")
             return [_json_object(item, "GitHub check run annotation") for item in payload]
 
+        def read_job_log(check_run_id: int) -> str | None:
+            try:
+                log = self.transport.request(
+                    method="GET", path=f"/repos/{repository_path}/actions/jobs/{check_run_id}/logs"
+                )
+            except ValueError:
+                return None
+            except MergeTrainGitHubError as error:
+                if error.rate_limited or error.status_code not in {401, 403, 404, 410}:
+                    raise
+                return None
+            return log if isinstance(log, str) else None
+
         def is_required(
             payload: dict[str, object], source: Literal["check_run", "commit_status"]
         ) -> bool:
@@ -1348,6 +1361,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 if is_required(status, "commit_status")
             ],
             read_annotations=read_annotations,
+            read_job_log=read_job_log,
         )
         verdict = _required_check_evidence_verdict(
             required_checks=tuple((check.name, check.app_id) for check in requirements),

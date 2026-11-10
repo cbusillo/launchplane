@@ -7,6 +7,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.browser_route_repair import BrowserRouteRepairRequest
+from control_plane.contracts.compose_setup_recovery import RetainedComposeSetup
 from control_plane.generic_web_onboarding import GenericWebOnboardingIntent
 from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -378,6 +379,10 @@ class DokployTargetSetupEnvelope(BaseModel):
     state_volume_path: str = ""
     state_volume_plan_id: str = ""
     expected_plan_sha256: str = ""
+    expected_compose_recovery_sha256: str = Field(default="", exclude_if=lambda value: not value)
+    retained_compose_setup: RetainedComposeSetup | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     onboarding: GenericWebOnboardingIntent | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -399,6 +404,28 @@ class DokployTargetSetupEnvelope(BaseModel):
     @model_validator(mode="after")
     def _validate_setup(self) -> "DokployTargetSetupEnvelope":
         supplied_fields = self.model_fields_set.copy()
+        if self.retained_compose_setup is not None or self.expected_compose_recovery_sha256:
+            if (
+                self.operation != "create-compose"
+                or self.instance != "prod"
+                or self.environment_id
+                or self.project_id
+                or not self.project_name
+            ):
+                raise ValueError(
+                    "Compose recovery only continues original first-production new placement."
+                )
+        if (
+            self.mode == "readback"
+            and self.operation == "create-compose"
+            and (
+                self.instance != "prod"
+                or self.project_id
+                or self.environment_id
+                or not self.project_name
+            )
+        ):
+            raise ValueError("Compose readback requires original first-production new placement.")
         if self.browser_review is not None:
             if self.operation != "repair-domain-authority":
                 raise ValueError("Browser review is only supported for domain authority repair.")
@@ -446,7 +473,10 @@ class DokployTargetSetupEnvelope(BaseModel):
 
             validate_volume_request(self)
         elif (
-            self.mode == "readback"
+            (
+                self.mode == "readback"
+                and not (self.operation == "create-compose" and self.instance == "prod")
+            )
             or self.retain_allocation
             or self.expected_allocation_custody_sha256
         ):
@@ -769,6 +799,8 @@ def execute_dokploy_target_setup(
     ]
     | None = None,
     lane_lock_held: bool = False,
+    compose_mutate: Callable[[str, str, str, dokploy_api.JsonObject], dokploy_api.JsonObject]
+    | None = None,
 ) -> dict[str, object]:
     from control_plane.application_state_volume import LANE_LOCK_PREFIX
 
@@ -792,6 +824,7 @@ def execute_dokploy_target_setup(
             director_source_completion=director_source_completion,
             director_testing_domain=director_testing_domain,
             application_mutate=application_mutate,
+            compose_mutate=compose_mutate,
         )
 
 
@@ -806,6 +839,8 @@ def _execute_dokploy_target_setup(
     disposable_placement: tuple[str, str] | None = None,
     director_source_completion: bool = False,
     director_testing_domain: bool = False,
+    compose_mutate: Callable[[str, str, str, dokploy_api.JsonObject], dokploy_api.JsonObject]
+    | None = None,
     application_mutate: Callable[
         [str, str, str, dict[str, dokploy_api.JsonValue]], dict[str, dokploy_api.JsonValue]
     ]
@@ -1023,9 +1058,8 @@ def _execute_dokploy_target_setup(
             expected_current_provider_target=request.expected_current_provider_target,
             source_label=CREATE_COMPOSE_SOURCE_LABEL,
             apply=apply_changes,
-            mutate_provider=mutate_setup
-            if disposable_checkpoint
-            else mutate_dokploy_payload_for_target_setup,
+            mutate_provider=compose_mutate
+            or (mutate_setup if disposable_checkpoint else mutate_dokploy_payload_for_target_setup),
             fetch_target_payload=fetch_setup
             if disposable_checkpoint
             else fetch_dokploy_target_payload_for_setup,

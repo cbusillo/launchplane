@@ -39,18 +39,25 @@ def build_feedback_payloads(
     result = _as_dict(response.get("result"))
     records = _as_dict(response.get("records"))
     controller_action = _controller_action(result=result, phase=phase)
+    controller_record_id = _controller_record_id(records)
     repository, base_branch = _response_identity(result=result, phase=phase)
+    queue_payloads = _queue_feedback(
+        result=result,
+        repository=repository,
+        base_branch=base_branch,
+        source=source,
+        controller_record_id=controller_record_id,
+    )
     event = _feedback_event(controller_action=controller_action, result=result)
     if event == "skip":
-        return []
+        return queue_payloads
 
     pull_request_numbers = _pull_request_numbers(
         result, controller_action=controller_action, phase=phase
     )
     if not pull_request_numbers:
-        return []
+        return queue_payloads
 
-    controller_record_id = _controller_record_id(records)
     message = _feedback_message(
         controller_action=controller_action,
         event=event,
@@ -91,22 +98,51 @@ def build_feedback_payloads(
                 stopped=controller_action == "candidate_failed",
             )
         )
-    payloads.extend(
-        {
-            "schema_version": 1,
-            "repository": repository,
-            "base_branch": base_branch,
-            "pull_request_number": entry["number"],
-            "event": "blocked",
-            "controller_action": "stack_unsupported",
-            "controller_record_id": controller_record_id,
-            "message": "; ".join(entry["deferred_reasons"])
-            + ". Unrelated pull requests can proceed.",
-            "source": source,
-        }
-        for value in _as_list(_as_dict(result.get("dry_run_result")).get("queue"))
-        if (entry := _as_dict(value)).get("eligible") is False and entry.get("deferred_reasons")
-    )
+    reported = {payload["pull_request_number"] for payload in payloads}
+    payloads.extend(p for p in queue_payloads if p["pull_request_number"] not in reported)
+    return payloads
+
+
+def _queue_feedback(
+    *,
+    result: dict[str, Any],
+    repository: str,
+    base_branch: str,
+    source: str,
+    controller_record_id: str,
+) -> list[dict[str, object]]:
+    payloads: list[dict[str, object]] = []
+    dry_run = _as_dict(result.get("dry_run_result"))
+    blocked_label = _string(dry_run.get("blocked_label")).casefold()
+    for value in _as_list(dry_run.get("queue")):
+        entry = _as_dict(value)
+        if entry.get("eligible") is not False:
+            continue
+        if blocked_label and blocked_label in {
+            _string(label).casefold() for label in _as_list(entry.get("labels"))
+        }:
+            continue
+        deferred = _as_list(entry.get("deferred_reasons"))
+        handoff = _as_dict(entry.get("ready_handoff"))
+        if not deferred and not (handoff.get("comment_id") and handoff.get("head_sha")):
+            continue
+        reasons = deferred or _as_list(entry.get("ineligible_reasons"))
+        if not reasons:
+            continue
+        payloads.append(
+            {
+                "schema_version": 1,
+                "repository": repository,
+                "base_branch": base_branch,
+                "pull_request_number": entry["number"],
+                "event": "blocked" if deferred else "waiting",
+                "controller_action": "stack_unsupported" if deferred else "",
+                "controller_record_id": controller_record_id if deferred else "",
+                "message": "; ".join(_string(reason) for reason in reasons)
+                + ". Unrelated pull requests can proceed.",
+                "source": source,
+            }
+        )
     return payloads
 
 

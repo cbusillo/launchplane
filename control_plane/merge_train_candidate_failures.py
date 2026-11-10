@@ -8,7 +8,7 @@ retries the second kind and isolates the change behind the first.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Callable, Literal
 
@@ -27,6 +27,11 @@ RUNNER_LOSS_MESSAGES = (
     "lost communication with the server",
     "received a shutdown signal",
     "was not acquired by runner",
+)
+STEP_ENV_LINE_OF_JOB_RESULTS_WITH_ABANDONED = re.compile(
+    r"^\S*\s+[A-Z][A-Z0-9_]*: (?:(?:success|failure|cancelled|skipped|abandoned) )*"
+    r"abandoned(?: (?:success|failure|cancelled|skipped|abandoned))*\r?$",
+    re.MULTILINE,
 )
 # A CI job names each failed test with an annotation titled this way.
 FAILED_TEST_ANNOTATION_TITLE = "failed test"
@@ -47,6 +52,7 @@ class CandidateCheckFailure:
     source: Literal["check_run", "commit_status"] = "check_run"
     # Provider identity stays separate from the sanitized name rendered in feedback.
     identity_name: str = ""
+    check_run_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,7 @@ def classify_candidate_check_failures(
     check_runs: list[dict[str, object]],
     commit_statuses: list[dict[str, object]],
     read_annotations: Callable[[int], list[dict[str, object]]],
+    read_job_log: Callable[[int], str | None] | None = None,
 ) -> CandidateCheckFailures:
     """Name each failing check and decide whether runner infrastructure caused it.
 
@@ -145,6 +152,7 @@ def classify_candidate_check_failures(
                 url=_safe_url(check_run.get("html_url")),
                 runner_lost=runner_lost,
                 failed_tests=tuple(failed_tests),
+                check_run_id=check_run_id,
             )
         )
     seen_contexts: set[str] = set()
@@ -164,7 +172,65 @@ def classify_candidate_check_failures(
                     source="commit_status",
                 )
             )
+    if read_job_log is not None:
+        failures = _mark_gates_whose_needed_jobs_never_ran(failures, check_runs, read_job_log)
     return CandidateCheckFailures(checks=tuple(failures), checks_pending=checks_pending)
+
+
+def _mark_gates_whose_needed_jobs_never_ran(
+    failures: list[CandidateCheckFailure],
+    check_runs: list[dict[str, object]],
+    read_job_log: Callable[[int], str | None],
+) -> list[CandidateCheckFailure]:
+    sole_failed_gates = _sole_failed_check_run_ids(check_runs)
+    marked = [
+        replace(failure, runner_lost=True)
+        if _gate_needed_jobs_never_ran(failure, sole_failed_gates, read_job_log)
+        else failure
+        for failure in failures
+    ]
+    return marked if all(_infrastructure_shaped(failure) for failure in marked) else failures
+
+
+def _infrastructure_shaped(failure: CandidateCheckFailure) -> bool:
+    return failure.runner_lost or failure.conclusion in INFRASTRUCTURE_CONCLUSIONS
+
+
+def _gate_needed_jobs_never_ran(
+    failure: CandidateCheckFailure,
+    sole_failed_gates: set[int],
+    read_job_log: Callable[[int], str | None],
+) -> bool:
+    if (
+        failure.check_run_id is None
+        or failure.check_run_id not in sole_failed_gates
+        or failure.conclusion != "failure"
+        or failure.runner_lost
+        or failure.failed_tests
+    ):
+        return False
+    log = read_job_log(failure.check_run_id)
+    return log is not None and STEP_ENV_LINE_OF_JOB_RESULTS_WITH_ABANDONED.search(log) is not None
+
+
+def _sole_failed_check_run_ids(check_runs: list[dict[str, object]]) -> set[int]:
+    failed_by_suite: dict[int, list[int | None]] = {}
+    for check_run in check_runs:
+        suite_id = _check_suite_id(check_run)
+        conclusion = _text(check_run.get("conclusion")).strip().lower()
+        if suite_id is None or conclusion not in INFRASTRUCTURE_CONCLUSIONS | FAILURE_CONCLUSIONS:
+            continue
+        failed_by_suite.setdefault(suite_id, []).append(_check_run_id(check_run.get("id")))
+    return {
+        check_run_ids[0]
+        for check_run_ids in failed_by_suite.values()
+        if len(check_run_ids) == 1 and check_run_ids[0] is not None
+    }
+
+
+def _check_suite_id(check_run: dict[str, object]) -> int | None:
+    suite = check_run.get("check_suite")
+    return _check_run_id(suite.get("id")) if isinstance(suite, dict) else None
 
 
 def _more(count: int) -> str:

@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 import click
 from pydantic import Field, model_validator
 
+from control_plane.copy_readback_diagnostics import copy_failure_summary
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.durable_operation_authorization import (
@@ -94,7 +95,7 @@ from control_plane.dokploy.testing_route import (
     testing_ingress_entrypoints,
     observe_testing_route,
     testing_route_id,
-    route_document_content,
+    route_content_variants,
     route_document_digest,
     testing_route_static_sha256,
     testing_route_external_middlewares,
@@ -2068,7 +2069,9 @@ class NativeTestingRebuildExecution:
         if self.route.unavailable_preimage is not None:
             if frame["owned_file"] == self.route.unavailable_preimage.file_content:
                 return self.original_ingress_readback(plan, frame)
-            if frame["owned_file"] != route_document_content(self.route, self.route.new_backend):
+            if frame["owned_file"] not in route_content_variants(
+                self.route, self.route.new_backend
+            ):
                 raise NativeTestingRebuildPending("The owned testing route file changed custody.")
         backend = observe_testing_route(
             self.route,
@@ -2168,7 +2171,7 @@ class NativeTestingRebuildExecution:
             if frame["owned_file"] == self.route.unavailable_preimage.file_content:
                 require_original_testing_route_applied(self.route, frame["raw"])
                 return None
-            if frame["owned_file"] == route_document_content(self.route, self.route.new_backend):
+            if frame["owned_file"] in route_content_variants(self.route, self.route.new_backend):
                 return self.route.new_backend
             raise NativeTestingRebuildPending("The owned testing route file changed custody.")
         return observe_testing_route(
@@ -2676,6 +2679,7 @@ def rebuild_result(
 ) -> OdooStableTargetReplacementApplyResult:
     app = allocation.application
     complete = record.step == "complete"
+    cause = copy_failure_summary(record.preparation_failure_evidence)
     return OdooStableTargetReplacementApplyResult(
         product=record.plan.product,
         context=record.plan.context,
@@ -2705,6 +2709,7 @@ def rebuild_result(
             "testing_rebuild": record.plan.operation_id,
             "testing_candidate": allocation.namespace,
             "copy_source": app.plan.source if app else record.plan.source,
+            **({"copy_failure": cause} if cause else {}),
         },
         error_code=record.error,
         error_message=record.admission_refusal

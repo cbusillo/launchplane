@@ -1,5 +1,6 @@
 """The ordinary replacement action admits a native rebuild only on testing."""
 
+import json
 import os
 from typing import Any
 import unittest
@@ -26,13 +27,25 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     build_odoo_stable_target_replacement_plan,
 )
 from control_plane.workflows import odoo_stable_target_replacement as maintenance
-from control_plane.dokploy import api, compose, post_deploy
+from control_plane.dokploy import api, compose, post_deploy, source as dokploy_source
+from control_plane.testing_activation_compose import interpolate
+from control_plane.testing_route_effects import TestingRouteFenceController
+from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
+from control_plane.dokploy.testing_route import route_document
+from tests import test_testing_route_transport as transport_tests
 from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.workflows.runtime_identity_health import HealthcheckPass
 from control_plane.workflows.odoo_verification import (
     OdooVerificationEvidence,
     OdooVerificationResult,
 )
+
+
+_NATIVE_ROUTE_IO = {
+    name: getattr(DokployTestingRouteTransport, name)
+    for name in ("read", "publish", "settle_attempt")
+}
+_NATIVE_FENCE_ENSURE = TestingRouteFenceController.ensure
 
 
 def exercise_published_copy_maintenance(
@@ -56,6 +69,21 @@ def exercise_published_copy_maintenance(
     before = fixture.current()
     credentials = fixture.store.list_secret_records()
     provider = app.provider_state
+    native = transport_tests.TestingRouteTransportTests()
+    native.setUp(initialize_fence=False)
+    case.addCleanup(native.doCleanups)
+    from control_plane.testing_address_storage import effective_testing_route
+
+    native.plan = effective_testing_route(fixture.store, publication)
+    native.route_file = native.root / (native.plan.route_id + ".yml")
+    native.route_file.write_text(json.dumps(route_document(native.plan, native.plan.new_backend)))
+    native.raw = {"routers": {}, "services": {}, "middlewares": {}}
+    native.apply_document()
+    native.containers["new"]["Config"]["Labels"]["com.docker.compose.project"] = provider["appName"]
+    native.containers["new"]["Name"] = "/" + str(provider["appName"]) + "-web-1"
+    native.containers["new"]["NetworkSettings"]["Networks"]["dokploy-network"]["Aliases"] = [
+        candidate.namespace
+    ]
     checkpoint = Mock()
 
     def fetch(**kwargs: Any) -> Any:
@@ -96,6 +124,15 @@ def exercise_published_copy_maintenance(
         case.assertFalse(kwargs["run_destructive_restore"])
         case.assertIsNone(kwargs["fresh_testing_generation"])
         kwargs["before_provider_mutation"](post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
+        provided = api.parse_dokploy_env_text(str(provider["env"]))
+        web = yaml.safe_load(provider["composeFile"])["services"]["web"]
+        environment = {
+            **provided,
+            **{key: str(value) for key, value in interpolate(web["environment"], provided).items()},
+        }
+        native.containers["new"]["Config"]["Env"] = [
+            key + "=" + value for key, value in environment.items()
+        ]
         return {
             "log_available": "true",
             **dict.fromkeys(post_deploy.ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS, "true"),
@@ -104,8 +141,15 @@ def exercise_published_copy_maintenance(
     base_url = app.compiled.plan.base_url
     profile = fixture.store.read_product_profile_record(candidate.product)
     with (
+        patch.multiple(DokployTestingRouteTransport, **_NATIVE_ROUTE_IO),
+        patch.object(TestingRouteFenceController, "ensure", _NATIVE_FENCE_ENSURE),
         patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": fixture.store.database_url}),
         patch.object(api, "fetch_dokploy_target_payload", side_effect=fetch),
+        patch.object(
+            dokploy_source,
+            "read_dokploy_config",
+            return_value=("https://provider.invalid", "fixture"),
+        ),
         patch.object(compose, "sync_dokploy_compose_raw_source", side_effect=sync),
         patch.object(
             compose,
@@ -153,8 +197,24 @@ def exercise_published_copy_maintenance(
             ),
             dokploy_request=request,
             provider_effect_checkpoint=checkpoint,
+            operation_id="fixture-stable-deploy",
+            operation_lease_owner="fixture-stable-worker",
         )
     case.assertEqual(result.deploy_status, "pass", result.error_code)
+    case.assertEqual(
+        json.loads(native.route_file.read_text()),
+        route_document(
+            native.plan,
+            native.plan.new_backend,
+            evented=bool(
+                int(
+                    api.parse_dokploy_env_text(
+                        "\n".join(native.containers["new"]["Config"]["Env"])
+                    )["ODOO_WORKERS"]
+                )
+            ),
+        ),
+    )
     checkpoint.assert_called()
     current = fixture.current()
     case.assertEqual(current.target_id, before.target_id)

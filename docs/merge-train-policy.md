@@ -497,6 +497,15 @@ quoted, fenced, stale or unreadable head evidence cannot admit a PR. The adapter
 reports unavailable or incomplete discussion evidence as unreadable rather than
 guessing a previous handoff is still current.
 
+An excluded trusted handoff receives the queue's refusal reasons in the existing
+managed PR comment, even when no candidate can start or other PRs are proceeding.
+This includes a disallowed PR author and a dependency update whose head changed
+after Ready. Queue feedback reports a wait without a controller action or record
+from unrelated work. An unchanged queue message reuses its feedback record and
+any failed delivery's retry deadline. Blocked-label PRs retain their existing failure diagnosis
+and recovery evidence. PRs without a trusted handoff receive no extra queue
+feedback. This changes no label or admission rule.
+
 Edited comments from trusted authors remain unproven even when the handoff
 text has been erased. Unrelated managed-comment updates are ignored only when
 the provider's [comment editor](https://docs.github.com/en/graphql/reference/issues#issuecomment)
@@ -1409,6 +1418,9 @@ unrelated optional workflows cannot change its classification:
   annotation on a failed or cancelled run (lost communication, a shutdown signal,
   or a job never acquired by a runner) marks the failure as infrastructure;
   generic dependent-job exit annotations do not establish a separate product failure.
+  A failed gate that is the only failure in its run, and whose job log shows a step
+  environment value made only of needed-job results including `abandoned` (a job
+  GitHub never created), counts the same when that explains every failure.
   Runs that were cancelled, went stale or failed to start count only when no
   run failed outright, because fail-fast also cancels the siblings of a real
   failure. A named failed test in that execution or a matching required failing commit status rules

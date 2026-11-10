@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from control_plane.contracts.testing_address import ADDRESS_SCOPE
 from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
-from control_plane.dokploy.testing_route import observe_testing_route, route_document
+from control_plane.dokploy.testing_route import observe_testing_route, route_document_variants
 from control_plane.dokploy.testing_route_execution import (
     TestingRouteExecutionIntent,
     TestingRouteWriterAttempt,
@@ -35,7 +35,7 @@ def address_preimage_present(adapter: TestingAddressAdapter) -> bool:
     frame = adapter.transport.read()
     owned = json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None
     before = adapter.plan.route_before
-    if owned == route_document(adapter.plan.route_after, before.new_backend):
+    if owned in route_document_variants(adapter.plan.route_after, before.new_backend):
         return False
     return observe_testing_route(before, frame["raw"], owned) == before.new_backend
 

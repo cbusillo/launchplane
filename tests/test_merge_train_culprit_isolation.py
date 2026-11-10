@@ -23,7 +23,11 @@ from control_plane.merge_train_candidate_failures import (
 )
 from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_controller_run_once import try_reflow_failed_merge_train_candidate
-from control_plane.merge_train_github import MergeTrainBaseCheckObservation, GitHubMergeTrainClient
+from control_plane.merge_train_github import (
+    GitHubMergeTrainClient,
+    MergeTrainBaseCheckObservation,
+    MergeTrainGitHubError,
+)
 from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.github_required_checks import CheckRequirement
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -694,15 +698,41 @@ class CulpritIsolationTests(unittest.TestCase):
 
 
 def _check_run(
-    check_run_id: int, name: str, conclusion: str, *, status: str = "completed"
+    check_run_id: int,
+    name: str,
+    conclusion: str,
+    *,
+    status: str = "completed",
+    suite_id: int | None = None,
 ) -> dict[str, object]:
-    return {
+    check_run: dict[str, object] = {
         "id": check_run_id,
         "name": name,
         "status": status,
         "conclusion": conclusion,
         "html_url": f"https://github.com/o/r/actions/runs/1/job/{check_run_id}",
     }
+    if suite_id is not None:
+        check_run["check_suite"] = {"id": suite_id}
+    return check_run
+
+
+def _sellyouroutboard_candidate() -> MergeTrainBatchCandidate:
+    return MergeTrainBatchCandidate.model_validate(
+        {
+            "batch_id": "batch",
+            "repository": "cbusillo/sellyouroutboard",
+            "base_branch": "main",
+            "base_sha": "base",
+            "policy_key": "key",
+            "policy_sha256": "digest",
+            "candidate_ref": "refs/heads/launchplane/train/batch",
+            "candidate_sha": "candidate-sha",
+            "entries": [{"pull_request_number": 1, "position": 1, "head_sha": "head-1"}],
+            "created_at": "2026-10-10T12:00:00Z",
+            "updated_at": "2026-10-10T12:00:00Z",
+        }
+    )
 
 
 def _exit_code() -> dict[str, object]:
@@ -715,12 +745,83 @@ class CandidateFailureClassificationTests(unittest.TestCase):
         check_runs: list[dict[str, object]],
         annotations: dict[int, list[dict[str, object]]],
         statuses: list[dict[str, object]] | None = None,
+        logs: dict[int, str] | None = None,
     ) -> CandidateCheckFailures:
         return classify_candidate_check_failures(
             check_runs=check_runs,
             commit_statuses=statuses or [],
             read_annotations=lambda check_run_id: annotations.get(check_run_id, []),
+            read_job_log=lambda check_run_id: (logs or {}).get(check_run_id),
         )
+
+    def test_gate_whose_needed_jobs_never_ran_is_infrastructure(self) -> None:
+        never_ran_shapes = {
+            "runner_pool abandoned": (
+                [
+                    _check_run(1, "candidate_ci", "success", suite_id=7),
+                    _check_run(2, "audit_policy", "success", suite_id=7),
+                    _check_run(3, "test", "skipped", suite_id=7),
+                    _check_run(4, "ci-gate", "failure", suite_id=7),
+                ],
+                {4: "2026-11-09T18:19:12Z   RUNNER_POOL_RESULT: abandoned\n"},
+            ),
+            "needed security job absent": (
+                [
+                    _check_run(1, "workflow-lint", "success", suite_id=8),
+                    _check_run(2, "secret-scan", "success", suite_id=8),
+                    _check_run(4, "security-gate", "failure", suite_id=8),
+                ],
+                {4: "2026-11-09T18:23:13Z   RESULTS: success abandoned success\n"},
+            ),
+        }
+        never_ran_shapes["abandoned gates in two workflows"] = (
+            [
+                _check_run(4, "security-gate", "failure", suite_id=8),
+                _check_run(5, "security-gate", "failure", suite_id=9),
+            ],
+            {
+                4: "2026-11-09T18:23:13Z   RESULTS: success abandoned success\n",
+                5: "2026-11-09T18:24:05Z   RESULTS: abandoned abandoned abandoned\n",
+            },
+        )
+        for shape, (check_runs, logs) in never_ran_shapes.items():
+            with self.subTest(shape):
+                failures = self._classify(
+                    check_runs, {4: [_exit_code()], 5: [_exit_code()]}, logs=logs
+                )
+                self.assertTrue(failures.infrastructure_only)
+
+    def test_gate_failing_beside_a_real_failure_is_not_infrastructure(self) -> None:
+        abandoned_gate_log = {4: "2026-11-09T18:19:12Z   RUNNER_POOL_RESULT: abandoned\n"}
+        real_failure_shapes = {
+            "failed job in the same run": [
+                _check_run(3, "static_checks", "failure", suite_id=7),
+                _check_run(4, "ci-gate", "failure", suite_id=7),
+            ],
+            "gate run unidentified": [_check_run(4, "ci-gate", "failure")],
+            "failed job in another workflow": [
+                _check_run(3, "static_checks", "failure", suite_id=8),
+                _check_run(4, "ci-gate", "failure", suite_id=7),
+            ],
+        }
+        for shape, check_runs in real_failure_shapes.items():
+            with self.subTest(shape):
+                failures = self._classify(
+                    check_runs, {3: [_exit_code()], 4: [_exit_code()]}, logs=abandoned_gate_log
+                )
+                self.assertFalse(failures.infrastructure_only)
+        sole_failure_logs = {
+            "needed job failed": "2026-11-09T18:19:12Z   TEST_RESULT: failure\n",
+            "word in ordinary output": "2026-11-09T18:19:12Z Package acme/widgets is abandoned.\n",
+        }
+        for shape, log in sole_failure_logs.items():
+            with self.subTest(shape):
+                failures = self._classify(
+                    [_check_run(4, "dependency-audit", "failure", suite_id=7)],
+                    {4: [_exit_code()]},
+                    logs={4: log},
+                )
+                self.assertFalse(failures.infrastructure_only)
 
     def test_unacquired_hosted_runner_is_infrastructure(self) -> None:
         # Shape of the October 5 train run whose hosted jobs never got a runner.
@@ -852,23 +953,8 @@ class CandidateFailureClassificationTests(unittest.TestCase):
                 [],
             )
         )
-        candidate = MergeTrainBatchCandidate.model_validate(
-            {
-                "batch_id": "batch",
-                "repository": "cbusillo/sellyouroutboard",
-                "base_branch": "main",
-                "base_sha": "base",
-                "policy_key": "key",
-                "policy_sha256": "digest",
-                "candidate_ref": "refs/heads/launchplane/train/batch",
-                "candidate_sha": "candidate-sha",
-                "entries": [{"pull_request_number": 1, "position": 1, "head_sha": "head-1"}],
-                "created_at": "2026-10-10T12:00:00Z",
-                "updated_at": "2026-10-10T12:00:00Z",
-            }
-        )
         failures = GitHubMergeTrainClient(transport=transport).read_candidate_check_failures(
-            candidate=candidate
+            candidate=_sellyouroutboard_candidate()
         )
         annotation_paths = [
             request.path for request in transport.requests if "/annotations" in request.path
@@ -882,6 +968,38 @@ class CandidateFailureClassificationTests(unittest.TestCase):
         )
         self.assertFalse(failures.infrastructure_only)
         self.assertEqual(failures.check_names, ("test_shard (0)", "audit_policy"))
+
+    def test_client_reads_the_sole_failed_gate_log_and_fails_closed_without_it(self) -> None:
+        gate_log_outcomes = {
+            "abandoned need": ("2026-11-09T18:19:12Z   RUNNER_POOL_RESULT: abandoned\n", True),
+            "log unavailable": (MergeTrainGitHubError("gone", status_code=410), False),
+        }
+        for outcome, (log_response, infrastructure_only) in gate_log_outcomes.items():
+            with self.subTest(outcome):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate", "audit_policy", app_id=None),
+                        [],
+                        {
+                            "total_count": 2,
+                            "check_runs": [
+                                _check_run(12, "audit_policy", "success", suite_id=7),
+                                _check_run(11, "ci-gate", "failure", suite_id=7),
+                            ],
+                        },
+                        {"total_count": 0, "statuses": []},
+                        [_exit_code()],
+                        log_response,
+                    )
+                )
+                failures = GitHubMergeTrainClient(
+                    transport=transport
+                ).read_candidate_check_failures(candidate=_sellyouroutboard_candidate())
+                self.assertIn(
+                    "/repos/cbusillo/sellyouroutboard/actions/jobs/11/logs",
+                    [request.path for request in transport.requests],
+                )
+                self.assertEqual(failures.infrastructure_only, infrastructure_only)
 
 
 if __name__ == "__main__":
