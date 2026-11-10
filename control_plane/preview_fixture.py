@@ -3,6 +3,7 @@ from contextlib import AbstractContextManager
 from collections.abc import Callable
 import json
 import click
+from pydantic import BaseModel
 from pathlib import Path
 from typing import cast
 
@@ -19,6 +20,7 @@ from control_plane.contracts.preview_fixture import (
     PreviewFixtureIntent,
     PreviewFixtureReceipt,
     PreviewFixtureRequest,
+    PreviewPartsImportRequest,
 )
 from control_plane.disposable_lanes import (
     DisposableLaneStore,
@@ -72,11 +74,11 @@ def fixture_plan_sha256(receipt: PreviewFixtureReceipt) -> str:
 
 
 @dataclass
-class PreviewFixtureAdapter:
+class PreviewMaintenanceAdapter:
     store: PostgresRecordStore
     root: Path
     product: str
-    request: PreviewFixtureRequest
+    request: PreviewFixtureRequest | PreviewPartsImportRequest
     trace_id: str
     binding: PreviewFixtureBinding | None = None
     failure_reason: str | None = None
@@ -186,6 +188,34 @@ class PreviewFixtureAdapter:
             }
         )
 
+    def verified_binding(
+        self, connection: reads.OdooRuntimeConnection, *, mode: str
+    ) -> PreviewFixtureBinding:
+        binding = self.binding or self.capture_binding()
+        if (
+            binding.identity != connection.selection.identity
+            or binding.target_id != connection.evidence.target_id
+            or mode != "readback"
+            and binding.container_id != connection.evidence.container_id
+            or binding.database != connection.credentials["ODOO_DB_NAME"]
+            or binding.app_name != connection.app_name
+        ):
+            raise ValueError("Maintenance runtime differs from its retained binding.")
+        return self.runtime_binding(connection) if mode == "readback" else binding
+
+    def response(self, receipt: BaseModel, *, recovered: bool = False) -> dict[str, object]:
+        return provider_operation_response_payload(
+            trace_id=self.trace_id,
+            records={
+                "preview_id": self.request.preview_id,
+                "generation_id": self.request.generation_id,
+            },
+            result={"receipt": receipt.model_dump(mode="json"), "recovered": recovered},
+        )
+
+
+@dataclass
+class PreviewFixtureAdapter(PreviewMaintenanceAdapter):
     def original_intent(self, retained: dict[str, object] | None = None) -> dict[str, object]:
         if retained:
             intent = PreviewFixtureIntent.model_validate(retained)
@@ -210,19 +240,8 @@ class PreviewFixtureAdapter:
     ) -> PreviewFixtureReceipt:
         self.failure_reason = None
         connection = self.connect(mutation=mode == "apply")
-        binding = self.binding or self.capture_binding()
+        binding = self.verified_binding(connection, mode=mode)
         selection = connection.selection
-        if (
-            binding.identity != selection.identity
-            or binding.target_id != connection.evidence.target_id
-            or mode != "readback"
-            and binding.container_id != connection.evidence.container_id
-            or binding.database != connection.credentials["ODOO_DB_NAME"]
-            or binding.app_name != connection.app_name
-        ):
-            raise ValueError("Fixture runtime differs from its retained binding.")
-        if mode == "readback":
-            binding = self.runtime_binding(connection)
 
         def checkpoint(phase: str) -> None:
             self.selection(mutation=mode == "apply")
@@ -244,7 +263,9 @@ class PreviewFixtureAdapter:
                 token=connection.token,
                 binding=binding,
                 mode=mode,
-                fixture=self.request.fixture,
+                fixture=self.request.fixture
+                if isinstance(self.request, PreviewFixtureRequest)
+                else "",
                 before_provider_mutation=checkpoint,
                 expected_fixture_sha256=expected_fixture_sha256,
             )
@@ -259,6 +280,7 @@ class PreviewFixtureAdapter:
         receipt = PreviewFixtureReceipt.model_validate(json.loads(bytes.fromhex(encoded)))
         if (
             receipt.identity != selection.identity
+            or not isinstance(self.request, PreviewFixtureRequest)
             or receipt.fixture != self.request.fixture
             or receipt.mode != mode
         ):
@@ -269,18 +291,6 @@ class PreviewFixtureAdapter:
     def plan(self) -> tuple[PreviewFixtureReceipt, str]:
         receipt = self.invoke("dry-run")
         return receipt, fixture_plan_sha256(receipt)
-
-    def response(
-        self, receipt: PreviewFixtureReceipt, *, recovered: bool = False
-    ) -> dict[str, object]:
-        return provider_operation_response_payload(
-            trace_id=self.trace_id,
-            records={
-                "preview_id": self.request.preview_id,
-                "generation_id": self.request.generation_id,
-            },
-            result={"receipt": receipt.model_dump(mode="json"), "recovered": recovered},
-        )
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -353,8 +363,8 @@ def fixture_schedule_script(
     return host_schedule("preview_fixture", spec)
 
 
-def fixture_schedule_app_name(script: str) -> str:
-    return "preview-fixture-" + canonical_json_sha256(script)
+def fixture_schedule_app_name(script: str, *, action: str = "preview-fixture") -> str:
+    return action + "-" + canonical_json_sha256(script)
 
 
 def run_fixture_schedule(
@@ -371,7 +381,30 @@ def run_fixture_schedule(
     script = fixture_schedule_script(
         binding, fixture=fixture, mode=mode, expected_fixture_sha256=expected_fixture_sha256
     )
-    schedule_app_name = fixture_schedule_app_name(script)
+    return run_preview_maintenance_schedule(
+        host=host,
+        token=token,
+        binding=binding,
+        script=script,
+        action="preview-fixture",
+        timeout_seconds=240,
+        before_provider_mutation=before_provider_mutation,
+        provider_mutation_guard=provider_mutation_guard,
+    )
+
+
+def run_preview_maintenance_schedule(
+    *,
+    host: str,
+    token: str,
+    binding: PreviewFixtureBinding,
+    script: str,
+    action: str,
+    timeout_seconds: int,
+    before_provider_mutation: Callable[[str], None] | None = None,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+) -> dict[str, str]:
+    schedule_app_name = fixture_schedule_app_name(script, action=action)
     schedule_name = "Launchplane " + schedule_app_name
     return post_deploy.run_manual_data_schedule(
         host=host,
@@ -392,14 +425,14 @@ def run_fixture_schedule(
             "appName": schedule_app_name,
             "shellType": "bash",
             "scheduleType": binding.schedule_type,
-            "command": "control-plane preview fixture",
+            "command": "control-plane " + action.replace("-", " "),
             "script": script,
             "serverId": binding.server_id,
             "userId": binding.lookup_id if binding.schedule_type == "dokploy-server" else None,
             "enabled": False,
             "timezone": "UTC",
         },
-        resolved_schedule_execution_timeout_seconds=240,
+        resolved_schedule_execution_timeout_seconds=timeout_seconds,
         before_provider_mutation=before_provider_mutation,
         provider_mutation_guard=provider_mutation_guard,
     )
@@ -470,7 +503,9 @@ def require_fixture_container_cancelled(
         token=token,
         binding=binding,
         mode="cancel" if cancel else "cancel-readback",
-        fixture=intent.maintenance.fixture,
+        fixture=intent.maintenance.fixture
+        if isinstance(intent.maintenance, PreviewFixtureRequest)
+        else "",
         before_provider_mutation=before_provider_mutation,
         provider_mutation_guard=provider_mutation_guard,
     )

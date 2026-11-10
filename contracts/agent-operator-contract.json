@@ -46,6 +46,38 @@
     },
     "operations": [
       {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_write_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "write_odoo_app_maintenance",
+        "path": "/v1/drivers/odoo/app-maintenance",
+        "purpose": "Run stable post-deploy maintenance; preview fixtures support dry-run/apply/readback, and fixed parts import supports dry-run/apply with original-key recovery. Preview apply binds reviewed_plan_sha256.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "d96df8a3cf4b02db7820c109e1db2517bb4a4b15682f8a8cf31d8841e5cb9c61",
+        "supported_surfaces": [
+          "agent_helper",
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_identity"
@@ -1414,8 +1446,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "3ff7372a3df7c552940d4dbe0d63624fa4d1c858"
+    "source_commit_sha": "fb9556cbbd046f5c80ceb4e34493e7fe04a41e0c"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "0444d31babd591a91ef0011b92ad74e3bc756a09673ca8a3b0c662e2f0d057f6"
+  "semantic_digest_sha256": "2a7dc9eca35bb7e74ef941a0a06a4c04549a1865941614c34f45cda24cbef382"
 }

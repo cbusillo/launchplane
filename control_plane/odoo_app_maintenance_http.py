@@ -6,7 +6,7 @@ from typing import Annotated
 from pydantic import Field, model_validator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.preview_fixture import PreviewFixtureRequest
+from control_plane.contracts.preview_fixture import PreviewFixtureRequest, PreviewPartsImportRequest
 from control_plane.drivers.dispatch import (
     _ProductRouteEnvelope,
     _validate_driver_envelope_product,
@@ -36,7 +36,8 @@ class OdooAppMaintenanceRouteDependencyError(OdooRouteDependencyError):
 class OdooAppMaintenanceEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     maintenance: Annotated[
-        OdooAppMaintenanceRequest | PreviewFixtureRequest, Field(discriminator="action")
+        OdooAppMaintenanceRequest | PreviewFixtureRequest | PreviewPartsImportRequest,
+        Field(discriminator="action"),
     ]
 
     @model_validator(mode="after")

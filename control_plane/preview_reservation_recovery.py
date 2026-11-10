@@ -187,7 +187,7 @@ def classify_preview_reservation(
             )
         ):
             available = fixture_available = True
-            action = "preview-fixture"
+            action = fixture.maintenance.action
             number = fixture.fixture_binding.anchor_pr_number
         if not available and reservation.route_path == WALKTHROUGH_ROUTE:
             try:
@@ -234,7 +234,9 @@ def classify_preview_reservation(
         "pull_request_number": number,
         "target_pull_request_number": target_number,
         "classification": "original_available" if available else "original_evidence_unavailable",
-        "next_action": "read_fixture_or_destroy"
+        "next_action": "repeat_original_or_destroy"
+        if fixture_available and action == "preview-parts-import"
+        else "read_fixture_or_destroy"
         if fixture_available
         else "observe_original"
         if available

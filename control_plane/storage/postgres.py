@@ -9963,10 +9963,9 @@ class PostgresRecordStore(HumanSessionStore):
                 original.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
                 original.idempotency_key == LaunchplaneIdempotencyRow.record_id,
                 original.request_fingerprint == LaunchplaneIdempotencyRow.request_fingerprint,
-                original.payload["response_payload"]["original_intent"]["maintenance"][
-                    "intent"
-                ].as_string()
-                == "preview-fixture",
+                original.payload["response_payload"]["original_intent"]["maintenance"]["intent"]
+                .as_string()
+                .in_(("preview-fixture", "preview-parts-import")),
             )
             .exists()
         )
