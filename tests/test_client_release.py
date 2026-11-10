@@ -395,19 +395,47 @@ class ClientReleaseTests(unittest.TestCase):
         self.assertEqual(run.state, "passed")
         self.assertEqual(release_start_for_acceptance(store=self.store, profile=current), "promote")
 
-    def test_incomplete_odoo_standing_checklist_never_records_acceptance(self) -> None:
+    def test_new_testing_candidate_does_not_supersede_odoo_promotion_or_inverse(self) -> None:
         self.switch("director_standing")
-        review = build_release_review(
-            store=self.store,
-            profile=self.store.read_product_profile_record(PRODUCT),
-            read=self.review_read,
-        )
+        accepted = self.accept()
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        (promotion_id,) = self.advance()
+        testing = self.store.read_release_tuple_record(context_name=CONTEXT, channel_name="testing")
+        artifact = self.store.read_artifact_manifest(testing.artifact_id)
+        newer = artifact.model_copy(update={"artifact_id": "artifact-next"})
+        self.store.write_artifact_manifest(newer)
+        for promoted in (False, True):
+            with self.subTest(promoted=promoted):
+                if promoted:
+                    self.finish(promotion_id)
+                    self.set_prod(accepted.checklist.candidate.artifact_id)
+                self.store.write_release_tuple_record(
+                    testing.model_copy(
+                        update={"tuple_id": "tuple-next", "artifact_id": newer.artifact_id}
+                    )
+                )
+                with patch("control_plane.client_release.publish_release_decision") as publish:
+                    self.advance()
+                self.assertEqual(
+                    self.store.list_release_review_decision_records(product=PRODUCT), (accepted,)
+                )
+                publish.assert_not_called()
+                self.store.write_release_tuple_record(testing)
+
+    def test_failed_odoo_standing_release_keeps_native_failure_without_web_restart(self) -> None:
+        self.switch("director_standing")
+        accepted = self.accept()
+        (backup_id,) = self.advance()
+        self.finish(backup_id, "fail")
         with patch(
-            "control_plane.client_release.current_release_review",
-            return_value=review.model_copy(update={"checklist_complete": False}),
-        ):
+            "control_plane.client_release.qualified_generic_web_source_inventory"
+        ) as web_source:
             self.assertEqual(self.advance(), ())
-        self.assertEqual(self.store.list_release_review_decision_records(product=PRODUCT), ())
+        web_source.assert_not_called()
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=PRODUCT), (accepted,)
+        )
 
     def test_held_product_of_the_standing_client_still_starts_no_release(self) -> None:
         self.switch("held")

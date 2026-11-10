@@ -1355,21 +1355,11 @@ site exists, so the service does not silently interpret missing evidence as a
 first release. Bootstrap a non-live lane explicitly, then request review before
 live activation. The CM baseline must be verified from deployed service records.
 
-For an empty Odoo target, the existing target-replacement planner accepts a first
-workload without inventory once its desired inputs are recorded: instance
-runtime/database and dedicated volume settings through product-config, the
-lane's qualified data authority through the onboarding manifest, and local
-provider domains through target setup. Explicit prelaunch classification and
-the exact-instance [prelaunch rebuild policy](operations.md) remain separate
-reviewed settings. Empty rebuild requires resettable data authority; unknown or
-authoritative data, and every Live production rebuild, retain backup proof.
-Missing history alone establishes none of these facts. Stable bootstrap requires
-an existing inventory artifact and cannot supply this first workload.
-
-Keep release acceptance held while preparing that baseline. Then review the
-complete candidate through the existing release-review surface and the recorded
-Client's supported acceptance setting. Source delivery does not activate the
-setting, qualify actual storage or authorize public ingress changes.
+Keep release acceptance held while preparing the baseline through the existing
+[operational paths](operations.md). Then use the reviewed Client setting above;
+source delivery does not activate it. Odoo retains its native stopped-run and
+recovery behavior; same-candidate redeploy restart qualification remains specific
+to generic web.
 
 Release decisions are persisted in `launchplane_release_review_decisions`, with
 file storage reserved for tests and rehearsal. Deployments must migrate the

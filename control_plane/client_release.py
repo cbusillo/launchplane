@@ -1250,8 +1250,6 @@ def _require_standing_release_available(store: PostgresRecordStore, product: str
     if covered is None:
         return
     profile, decision = covered
-    if profile.driver_id != "generic-web":
-        return
     steps = client_release_steps(decision.release_start)
     statuses: dict[str, ClientReleaseStepStatus] = {}
     for step in steps:
@@ -1259,6 +1257,8 @@ def _require_standing_release_available(store: PostgresRecordStore, product: str
         statuses[step.name] = status
         if step.kind in {"promote", "rollback"} and (
             status == "reconciliation_required"
+            or profile.driver_id == "odoo"
+            and status in {"pending", "running"}
             or status == "running"
             and bool(getattr(operation, "provider_effect_started_at", ""))
         ):
@@ -1272,6 +1272,8 @@ def _require_standing_release_available(store: PostgresRecordStore, product: str
         production = release_version(store=store, profile=profile, instance="prod")
         if production != decision.checklist.candidate:
             return
+        if profile.driver_id == "odoo":
+            raise ClientReleaseNotReady("standing_release_inverse_outstanding")
         try:
             if _native_recipient_inverse(store, profile, decision) is None:
                 _generic_web_drill_target(store, profile, decision)
@@ -1288,7 +1290,7 @@ def _stopped_standing_release_can_restart(
     decision: ReleaseReviewDecisionRecord,
     run: ClientReleaseRunView | None,
 ) -> bool:
-    if run is None or run.state != "stopped":
+    if profile.driver_id != "generic-web" or run is None or run.state != "stopped":
         return False
     stopped = tuple(step for step in run.steps if step.status in _STOPPED_STATUSES)
     if any(step.status != "fail" or step.failure is None for step in stopped):
