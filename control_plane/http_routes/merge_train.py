@@ -2,7 +2,23 @@ from collections.abc import Callable
 from typing import Annotated, Literal, cast
 
 from fastapi import Depends, Query
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy.exc import SQLAlchemyError
+
+from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
+from control_plane.merge_train_batch_candidate import (
+    MergeTrainBatchCandidateRecordStore,
+    MergeTrainBatchCandidateRecordNotFoundError,
+    read_merge_train_batch_candidate_record,
+)
+from control_plane.merge_train_base_retest_receipt import (
+    BaseRetestReceipt,
+    read_base_retest_receipt,
+)
+from control_plane.merge_train_setup_recovery_receipt import (
+    SetupRecoveryReceipt,
+    read_setup_recovery_receipt,
+)
 
 from control_plane.contracts.merge_train_policy import (
     MERGE_TRAIN_POLICY_TARGETS_READ_ACTION,
@@ -68,12 +84,56 @@ class MergeTrainAdmissionResponse(BaseModel):
     admission: dict[str, object]
 
 
+class MergeTrainCandidateRecoveryReservations(BaseModel):
+    pull_request_number: int
+    head_sha: str
+    base_retest: BaseRetestReceipt | None
+    setup_recovery: SetupRecoveryReceipt | None
+
+
+class MergeTrainCandidateEvidence(BaseModel):
+    record: MergeTrainBatchCandidateRecord
+    recovery_reservations: tuple[MergeTrainCandidateRecoveryReservations, ...]
+
+
+def read_candidate_evidence(
+    *, store: object, repository: str, base_branch: str, record_id: str
+) -> MergeTrainCandidateEvidence:
+    record = read_merge_train_batch_candidate_record(
+        record_store=cast(MergeTrainBatchCandidateRecordStore, store),
+        repository=repository,
+        base_branch=base_branch,
+        record_id=record_id,
+    )
+    return MergeTrainCandidateEvidence(
+        record=record,
+        recovery_reservations=tuple(
+            MergeTrainCandidateRecoveryReservations(
+                pull_request_number=entry.pull_request_number,
+                head_sha=entry.head_sha,
+                base_retest=read_base_retest_receipt(
+                    store, repository, entry.pull_request_number, entry.head_sha
+                ),
+                setup_recovery=read_setup_recovery_receipt(
+                    store, repository, entry.pull_request_number, entry.head_sha
+                ),
+            )
+            for entry in record.candidate.entries
+        ),
+    )
+
+
 class MergeTrainControllerStatusResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["ok"] = "ok"
     trace_id: str
     controller_status: MergeTrainControllerStatusReadModel
+    candidate_evidence: MergeTrainCandidateEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class MergeTrainPolicySummary(BaseModel):
@@ -349,6 +409,7 @@ def register_merge_train_read_routes(
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
         repository: Annotated[str, Query()] = "",
         base_branch: Annotated[str, Query()] = "main",
+        candidate_record_id: Annotated[str, Query(max_length=256, pattern=r"^\S*$")] = "",
     ) -> MergeTrainControllerStatusResponse:
         trace_id = dependencies.next_trace_id()
         status_request = merge_train_admission_query(
@@ -360,6 +421,29 @@ def register_merge_train_read_routes(
         policy_record, repository_policy = require_diagnostic_policy(
             identity, record_store, status_request, trace_id
         )
+        candidate_evidence = None
+        if candidate_record_id:
+            try:
+                candidate_evidence = read_candidate_evidence(
+                    store=record_store,
+                    repository=status_request.repository,
+                    base_branch=status_request.base_branch,
+                    record_id=candidate_record_id,
+                )
+            except MergeTrainBatchCandidateRecordNotFoundError as error:
+                raise dependencies.http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="candidate_record_not_found",
+                    message="The candidate record does not exist in the requested scope.",
+                ) from error
+            except (OSError, ValueError, TypeError, KeyError, SQLAlchemyError) as error:
+                raise dependencies.http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="candidate_evidence_unavailable",
+                    message="Original candidate or recovery reservation evidence is unavailable.",
+                ) from error
         merge_train_store = cast(MergeTrainRunHistoryStore, record_store)
         read_model = build_merge_train_controller_status_read_model(
             store=merge_train_store,
@@ -373,6 +457,7 @@ def register_merge_train_read_routes(
         return MergeTrainControllerStatusResponse(
             trace_id=trace_id,
             controller_status=read_model,
+            candidate_evidence=candidate_evidence,
         )
 
     def read_merge_train_review_history(
@@ -507,7 +592,7 @@ def register_merge_train_read_routes(
         response_model=MergeTrainControllerStatusResponse,
         operation_id="read_merge_train_controller_status",
         summary="Read merge train controller status",
-        responses=responses,
+        responses={**responses, 404: {"model": dependencies.error_response_model}},
     )
     app.add_api_route(
         "/v1/work-graph/merge-train/policy-targets",
