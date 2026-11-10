@@ -1424,7 +1424,7 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
                 raise AssertionError(f"Unexpected provider mutation: {path}")
             return created[path]
 
-        async def stage() -> Any:
+        async def stage(mode: str = "apply") -> Any:
             return await request(
                 self.app,
                 "POST",
@@ -1433,7 +1433,7 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
                     "Authorization": "Bearer local-operator-token",
                     "Idempotency-Key": "empty-rebuild",
                 },
-                payload=payload,
+                payload={**payload, "mode": mode},
             )
 
         from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
@@ -1468,6 +1468,18 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             with scoped_agent_transport():
                 client = await stage()
             self.assertEqual(client.status_code, 403, client.text)
+            self.assertFalse(posted)
+            with patch.object(
+                self.store, "read_disposable_replacement_preparation", return_value=None
+            ):
+                dry_refusal = await stage("dry-run")
+                apply_refusal = await stage()
+            self.assertEqual(apply_refusal.status_code, 400, apply_refusal.text)
+            self.assertEqual(dry_refusal.status_code, apply_refusal.status_code, dry_refusal.text)
+            self.assertEqual(dry_refusal.json()["error"], apply_refusal.json()["error"])
+            self.assertFalse(posted)
+            dry = await stage("dry-run")
+            self.assertEqual(dry.status_code, 202, dry.text)
             self.assertFalse(posted)
             applied = await stage()
             self.assertEqual(applied.status_code, 202, applied.text)
