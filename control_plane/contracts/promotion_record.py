@@ -24,6 +24,9 @@ class ArtifactIdentityReference(BaseModel):
     manifest_version: int = Field(default=1, ge=1)
 
 
+HealthFailureKind = Literal["connection", "tls", "timeout", "invalid_response", "redirect"]
+
+
 class HealthcheckEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

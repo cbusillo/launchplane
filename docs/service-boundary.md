@@ -172,8 +172,11 @@ remaining domain and storage removal is tracked in #2437.
     to null (unknown).
 
     The operation attempt and provider reservation attempts are separate
-    counters. The checkpoint does not retain its worker attempt; its attempt
-    field remains unknown. Candidate preparation/private-readiness items
+    counters. New candidate probe snapshots retain their native reservation
+    and operation attempts within the original bound checkpoint. A later worker
+    re-claim does not invalidate an earlier observed attempt. The probe item's
+    `attempt` is that captured native reservation attempt. Older checkpoint
+    worker attempts remain unknown. Candidate preparation/private-readiness items
     describe receipt availability in that checkpoint. `predecessor_snapshot`
     reports the original plan's recorded identity, stopped or absent state,
     never current provider absence. Route receipts report their retained
@@ -187,15 +190,33 @@ remaining domain and storage removal is tracked in #2437.
     Rollback/publication/retirement flags cover persisted intent only. A
     generic-web intent leaves native checkpoint/receipt sources unsupported.
 
-    `terminal_probe` covers only a candidate observation still retained in
-    the checkpoint, with its own time, verification and identity agreement.
-    It never borrows the operation finish time or a predecessor's health.
-    When the checkpoint contains a predecessor observation instead, it
-    reports `not_retained` with `candidate_probe_not_retained` coverage.
-    The checkpoint has one route observation: a completed inverse can replace
-    the failed candidate observation. The public-health reader also does not
-    retain HTTP status, response bodies or transport exception details.
-    This view cannot reconstruct those historical details. It returns no
+    `terminal_probe` uses the separately retained candidate probe in the
+    existing checkpoint, so an inverse and terminal predecessor observation
+    cannot overwrite it. A later passing observation clears an earlier pending
+    snapshot before completion. The snapshot retains its actual time, result,
+    verification, identity agreement and original binding. New observations
+    include optional `http_status` (100 through 599) and `failure_kind`
+    (`connection`, `tls`, `timeout`, `invalid_response` or `redirect`). HTTP
+    failure status and identity disagreement stay distinct from unverified
+    transport outcomes. No response body or uncontrolled exception text is
+    retained by this capture. Extra health detail is an in-memory subtype;
+    other persisted health records keep the existing base schema. The existing health criteria, five-second
+    timeout, probe count, traffic and rollback decisions are unchanged.
+
+    An unavailable candidate observation is saved without advancing its step;
+    failure of that optional save preserves the original health exception.
+    Health-failure transitions retain the snapshot with their existing durable
+    intent, and mandatory intent persistence keeps its existing failure
+    semantics. A failed terminal write leaves the earlier health cause and
+    inverse intent available for original-key continuation.
+
+    Old checkpoints fall back to their original route observation. If it is a
+    predecessor, `terminal_probe` remains `not_retained` with
+    `candidate_probe_not_retained` coverage. Reads never backfill a record or
+    borrow the operation finish time or predecessor health. This view cannot
+    reconstruct historical missing observations. Closed catalog consumers must
+    adopt the two optional fields before reading new populated probe evidence;
+    absent fields keep the prior wire shape. It returns no
     synthetic evidence locator and does not repurpose the preview-specific
     private evidence reader for native stable operations.
 
