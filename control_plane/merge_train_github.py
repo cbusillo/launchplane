@@ -1306,19 +1306,12 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         def is_required(
             payload: dict[str, object], source: Literal["check_run", "commit_status"]
         ) -> bool:
-            app = payload.get("app")
-            raw_app_id = app.get("id") if isinstance(app, dict) else None
-            app_id = (
-                raw_app_id
-                if isinstance(raw_app_id, int) and not isinstance(raw_app_id, bool)
-                else None
-            )
             name = str(payload.get("name" if source == "check_run" else "context") or "")
             return any(
                 matches_required_check(
                     requirement=requirement,
                     name=name,
-                    app_id=app_id,
+                    app_id=_check_payload_app_id(payload),
                 )
                 for requirement in requirements
             )
@@ -1556,6 +1549,16 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                                         ),
                                     )
                                     executions[run_id] = run
+                                if run.get("status") in (
+                                    "queued",
+                                    "in_progress",
+                                    "waiting",
+                                    "pending",
+                                    "requested",
+                                ):
+                                    raise MergeTrainGitHubError(
+                                        "Candidate failed-check execution is not complete."
+                                    )
                                 if (
                                     run.get("check_suite_id") != suite_id
                                     or run.get("status") != "completed"

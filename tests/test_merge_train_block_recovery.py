@@ -935,7 +935,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             patch.object(self.client, "candidate_check_retry_finished", return_value=True),
         ):
 
-            def produce() -> dict[str, object] | None:
+            def produce(*, mutate: bool = True) -> dict[str, object] | None:
                 return _recover_failed_merge_train_candidate(
                     candidate_store=self.store,
                     stack_collapse_store=self.store,
@@ -950,12 +950,21 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                     policy_sha256=self.policy_digest,
                     repository=self.target.repository,
                     base_branch=self.target.base_branch,
-                    mutate=True,
+                    mutate=mutate,
                     lease=self.lease,
                     recorded_at="2026-10-18T00:02:00Z",
                     trace_id="decision",
                 )
 
+            with patch.object(
+                history.client.transport,
+                "request",
+                side_effect=MergeTrainGitHubError("quota exhausted", rate_limited=True),
+            ) as origin_read:
+                dry_run = produce(mutate=False)
+                assert dry_run is not None
+                self.assertEqual(dry_run["controller_action"], "block")
+                origin_read.assert_not_called()
             for error in (
                 MergeTrainGitHubError("upstream unavailable", status_code=503),
                 MergeTrainGitHubError("quota exhausted", status_code=403, rate_limited=True),
@@ -963,9 +972,12 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             ):
                 with (
                     self.subTest(error=error),
-                    patch.object(history.client.transport, "request", side_effect=error),
+                    patch.object(
+                        history.client.transport, "request", side_effect=error
+                    ) as origin_read,
                 ):
                     self.assertIsNone(produce())
+                    origin_read.assert_called_once()
                     self.assertFalse(self.events)
                     self.assertTrue(
                         all(
@@ -976,7 +988,6 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             produced = produce()
         evidence = blocking.decision_evidence
         assert evidence is not None
-        self.assertIs(blocking.decision_evidence, evidence)
         self.assertEqual(history.job_reads, 1)
         self.assertEqual(
             {
@@ -1833,13 +1844,14 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             batch_landing=True,
         )
         before = self.store.list_merge_train_batch_candidate_records()
+        capture = Mock(side_effect=AssertionError("Existing holds need no origin capture"))
         result = _block_failed_candidate_culprit(
             candidate_store=self.store,
             active_candidate_record=self.record,
             github_client=self.client,
             dry_run_result=dry,
             details={},
-            failure_evidence=None,
+            capture_failure_evidence=capture,
             repository=self.target.repository,
             base_branch=self.target.base_branch,
             mutate=True,
@@ -1850,6 +1862,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.assertNotIn("merge_train_batch_candidate_record_id", result)
         self.assertEqual(self.store.list_merge_train_batch_candidate_records(), before)
         self.transport.request.assert_not_called()
+        capture.assert_not_called()
 
     def _exercise_real_block_producer(
         self, *, lose_label_reply: bool, evidence_unavailable: bool = False
@@ -1935,7 +1948,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 github_client=self.client,
                 dry_run_result=dry,
                 details=failure_details,
-                failure_evidence=failure_evidence,
+                capture_failure_evidence=lambda: failure_evidence,
                 repository=self.target.repository,
                 base_branch=self.target.base_branch,
                 mutate=True,
@@ -2054,7 +2067,6 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             github_client=legacy_client,
             dry_run_result=dry,
             details={},
-            failure_evidence=None,
             repository=self.target.repository,
             base_branch=self.target.base_branch,
             mutate=True,

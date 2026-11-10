@@ -719,14 +719,18 @@ and Apps, provider check/status IDs and conclusions, the candidate repository,
 ref and SHA, and Actions execution, attempt and suite identities authenticated
 against the failed jobs. Non-Actions checks retain their provider suite; commit
 statuses retain their own IDs rather than acquiring an invented execution.
-The attempt is the job's own authenticated attempt, which can precede the
-workflow's current attempt after a partial rerun. Current check selection stays
-unchanged; a newer workflow attempt never rewrites an earlier job's origin.
+The attempt is the selected job's own authenticated attempt, bounded by the
+observed workflow attempt. Current check selection stays unchanged; a newer
+workflow attempt never rewrites an earlier job's origin.
 Incomplete origin evidence never becomes a partial recovery proof. Capture runs
 only when the controller chooses a block. Malformed or unavailable origins record
 their reason in that intent and the block details. Transient provider and quota
-errors follow the existing failure-reader observation path, deferring the decision
-without persisting partial proof or applying a label.
+errors and executions still running follow the existing failure-reader observation path, deferring the decision
+without persisting partial proof or applying a label. Dry runs, absent culprits
+and existing label holds never capture origins. Missing Actions read permission,
+incomplete execution history or an unbound job origin leaves that block ineligible
+for automatic moved-base recovery; current requirement names cannot replace the
+decision's missing proof.
 It then confirms the applied
 label event ID. A successful POST is also saved as a positive write receipt
 before observing event/detail reads. If both reads lag, that receipt retains

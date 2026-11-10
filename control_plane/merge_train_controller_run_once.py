@@ -6674,18 +6674,13 @@ def _recover_failed_merge_train_candidate(
             mutate=mutate,
             lease=lease,
         )
-    try:
-        failure_evidence = failures.decision_evidence
-    except MergeTrainGitHubError:
-        lease.observe(reason_code="candidate_failure_read_unavailable")
-        return None
     return _block_failed_candidate_culprit(
         candidate_store=candidate_store,
         active_candidate_record=active_candidate_record,
         github_client=github_client,
         dry_run_result=dry_run_result,
         details=details,
-        failure_evidence=failure_evidence,
+        capture_failure_evidence=lambda: failures.decision_evidence,
         repository=repository,
         base_branch=base_branch,
         mutate=mutate,
@@ -7250,7 +7245,7 @@ def _block_failed_candidate_culprit(
     github_client: GitHubMergeTrainClient,
     dry_run_result: MergeTrainDryRunResult,
     details: dict[str, object],
-    failure_evidence: MergeTrainBlockFailureEvidence | None,
+    capture_failure_evidence: Callable[[], MergeTrainBlockFailureEvidence | None] | None = None,
     repository: str,
     base_branch: str,
     mutate: bool,
@@ -7278,13 +7273,6 @@ def _block_failed_candidate_culprit(
             "next_action_detail": detail,
         }
     )
-    if failure_evidence is None or failure_evidence.unavailable_reason:
-        details = {
-            **details,
-            "block_failure_evidence_unavailable": (
-                failure_evidence.unavailable_reason if failure_evidence else "not_captured"
-            ),
-        }
     result: dict[str, object] = {
         "repository": repository,
         "base_branch": base_branch,
@@ -7341,6 +7329,19 @@ def _block_failed_candidate_culprit(
         prior = history[-1].get("id") if history else 0
         if type(prior) is not int:
             raise MergeTrainControllerRequestError("Block label history is incomplete")
+        try:
+            failure_evidence = capture_failure_evidence() if capture_failure_evidence else None
+        except MergeTrainGitHubError:
+            lease.observe(reason_code="candidate_failure_read_unavailable")
+            return None
+        if failure_evidence is None or failure_evidence.unavailable_reason:
+            details = {
+                **details,
+                "block_failure_evidence_unavailable": (
+                    failure_evidence.unavailable_reason if failure_evidence else "not_captured"
+                ),
+            }
+            result["details"] = details
         intent = build_merge_train_batch_candidate_record(
             candidate=failed,
             source="service:controller:candidate-block-intent",

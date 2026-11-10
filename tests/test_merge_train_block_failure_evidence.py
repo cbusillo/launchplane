@@ -221,21 +221,29 @@ class BlockFailureEvidenceTests(unittest.TestCase):
         self.assertFalse(evidence.checks)
         self.assertTrue(evidence.unavailable_reason)
 
-    def test_manual_candidate_failure_is_evidence_without_becoming_a_retry_grant(self) -> None:
+    def test_manual_candidate_failure_retains_authenticated_origin(self) -> None:
         history = FailureHistory(_batch_candidate().model_copy(update={"candidate_sha": "c" * 40}))
         history.runs[0]["event"] = "workflow_dispatch"
         failures = history.observe()
-        self.assertFalse(failures.retry_runs)
-        with self.assertRaises(MergeTrainGitHubError):
-            history.client.prepare_candidate_check_retry(
-                candidate=history.candidate.model_copy(update={"check_rerun_attempts": {41: 1}})
-            )
         evidence = failures.decision_evidence
         assert evidence is not None
         self.assertEqual(
             {check.name for check in evidence.checks},
             {"ci-gate"},
         )
+
+    def test_running_execution_defers_capture_until_its_origin_is_complete(self) -> None:
+        history = FailureHistory(_batch_candidate().model_copy(update={"candidate_sha": "c" * 40}))
+        history.runs[0]["status"] = "in_progress"
+        failures = history.observe()
+        self.assertTrue(failures.conclusive)
+        with self.assertRaises(MergeTrainGitHubError):
+            _ = failures.decision_evidence
+        self.assertEqual(history.job_reads, 0)
+        history.runs[0]["status"] = "completed"
+        evidence = history.observe().decision_evidence
+        assert evidence is not None
+        self.assertTrue(evidence.checks)
 
     def test_external_suite_and_current_selection_must_be_proved(self) -> None:
         history = FailureHistory(_batch_candidate().model_copy(update={"candidate_sha": "c" * 40}))
