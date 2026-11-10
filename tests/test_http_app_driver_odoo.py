@@ -7,7 +7,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Event
+from threading import Event, get_ident
 from typing import Any, Literal, cast
 from unittest.mock import MagicMock, patch
 
@@ -1948,12 +1948,12 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             )
             apply_started = Event()
             release_apply = Event()
-            apply_wait_timed_out = Event()
+            event_loop_thread = get_ident()
 
             def blocking_apply(**_: object) -> dict[str, object]:
+                self.assertNotEqual(get_ident(), event_loop_thread)
                 apply_started.set()
-                if not release_apply.wait(timeout=5):
-                    apply_wait_timed_out.set()
+                release_apply.wait()
                 return {
                     "status": "pass",
                     "operation": "refresh",
@@ -1982,7 +1982,6 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                         _asgi_get(app, "/v1/health"), timeout=5
                     )
                     self.assertEqual(health_response.status_code, 200)
-                    self.assertFalse(apply_wait_timed_out.is_set())
                     self.assertFalse(apply_task.done())
                 finally:
                     release_apply.set()
@@ -2021,12 +2020,12 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             )
             apply_started = Event()
             release_apply = Event()
-            apply_wait_timed_out = Event()
+            event_loop_thread = get_ident()
 
             def blocking_apply(**_: object) -> dict[str, object]:
+                self.assertNotEqual(get_ident(), event_loop_thread)
                 apply_started.set()
-                if not release_apply.wait(timeout=5):
-                    apply_wait_timed_out.set()
+                release_apply.wait()
                 return {
                     "status": "pass",
                     "operation": "refresh",
@@ -2050,23 +2049,33 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                         idempotency_key=idempotency_key,
                     )
                 )
-                self.assertTrue(await asyncio.to_thread(apply_started.wait, 5))
-                first_apply_task.cancel()
-                await asyncio.sleep(0.1)
-                self.assertFalse(first_apply_task.done())
-                first_apply_task.cancel()
-                in_progress_response = await _post_odoo_preview_apply(
-                    app,
-                    _ready_odoo_preview_apply_payload(),
-                    idempotency_key=idempotency_key,
-                )
-                self.assertEqual(in_progress_response.status_code, 409)
-                self.assertEqual(
-                    in_progress_response.json()["error"]["code"],
-                    "mutation_in_progress",
-                )
-                self.assertEqual(apply_driver.call_count, 1)
-                release_apply.set()
+                apply_tasks = [first_apply_task]
+                try:
+                    self.assertTrue(await asyncio.to_thread(apply_started.wait, 5))
+                    first_apply_task.cancel()
+                    await asyncio.sleep(0.1)
+                    self.assertFalse(first_apply_task.done())
+                    first_apply_task.cancel()
+                    in_progress_task = asyncio.create_task(
+                        _post_odoo_preview_apply(
+                            app,
+                            _ready_odoo_preview_apply_payload(),
+                            idempotency_key=idempotency_key,
+                        )
+                    )
+                    apply_tasks.append(in_progress_task)
+                    done, _ = await asyncio.wait((in_progress_task,), timeout=5)
+                    self.assertIn(in_progress_task, done)
+                    in_progress_response = in_progress_task.result()
+                    self.assertEqual(in_progress_response.status_code, 409)
+                    self.assertEqual(
+                        in_progress_response.json()["error"]["code"],
+                        "mutation_in_progress",
+                    )
+                    self.assertEqual(apply_driver.call_count, 1)
+                finally:
+                    release_apply.set()
+                    await asyncio.gather(*apply_tasks, return_exceptions=True)
 
                 with self.assertRaises(asyncio.CancelledError):
                     await asyncio.wait_for(first_apply_task, timeout=5)
@@ -2076,7 +2085,6 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                     idempotency_key=idempotency_key,
                 )
 
-        self.assertFalse(apply_wait_timed_out.is_set())
         self.assertEqual(apply_driver.call_count, 1)
         self.assertEqual(replay_response.status_code, 202)
         self.assertTrue(replay_response.json()["replayed"])
