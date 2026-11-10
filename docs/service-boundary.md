@@ -2584,6 +2584,43 @@ records are written, recover by re-running the workflow with `operation=adopt`
 and the created provider target id, not by creating a second target for the same
 lane.
 
+A Director agent's first production Compose setup in new placement uses the
+existing durable provider-operation runner. The original caller, key, request
+and provider binding are retained before creation, and each creation is
+checkpointed before dispatch. A provider failure after dispatch returns
+`409 mutation_reconciliation_required`, even when its underlying error is a
+bad request. A new key cannot bypass the held context. Project creation's
+matching default environment is reused; an unrelated environment is never
+substituted for the requested one.
+
+For this path, send the unchanged setup fields and original `Idempotency-Key`
+to the same endpoint with `mode=readback`. This performs no mutation. A
+recoverable acknowledged placement returns `recovery_sha256`; continuation
+uses `mode=apply`, the same key and fields, exact normal confirmation, and
+`expected_compose_recovery_sha256`. Current ownership, no-live-product,
+hostname and empty-placement checks run again. An uncertain create without
+positive identity evidence remains held. Do not use the general `adopt` path
+or a different project/key to get around that result.
+
+Older failed setup attempts may have no durable reservation. Readback reports
+`unrecorded_original`, not a no-effect success. Their custodian can supply
+`retained_compose_setup` in that same request: the original caller scope/key,
+apply trace, original private request and its canonical JSON SHA-256, complete
+before/after inventory pages and observation timestamps, exact new project and
+environment IDs, and the recorded custody evidence. This is explicitly supplied
+historical evidence, not a claim that the service retained an old reservation.
+The pages must prove only one new project containing one empty production
+environment, with all older resources unchanged. Current provider identity,
+default-environment metadata, creation times within that observation window and
+empty placement must agree. Review those original receipts and the returned
+digest before continuation. The same caller and original key are required;
+changed payloads, names alone, an old project, populated placement and incomplete
+evidence cannot qualify. Recovery records its new checkpoint at the current time
+and preserves the supplied original evidence. It only creates the missing empty
+Compose target; it does not deploy, configure ingress, grant access or release.
+This native service contract does not imply an installed catalog command; callers
+must use a supported authenticated service client that preserves all fields.
+
 A failed reconcile/prune route attempt, a tracked-record write failure after
 route attempts, or a failed domain step after `create-compose` creation/adoption, returns HTTP 502 `dokploy_domain_partial_outcome`, rather than
 HTTP 400 `invalid_dokploy_target_setup`. The response's existing string-valued

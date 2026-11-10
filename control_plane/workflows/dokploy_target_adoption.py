@@ -899,6 +899,7 @@ def create_dokploy_compose_target(
             host=host, token=token, server_id=normalized_server_id, required_networks=1
         )
     created_project_id = normalized_project_id
+    created_environment_id = normalized_environment_id
     if not created_project_id and not normalized_environment_id:
         project_payload: JsonObject = {"name": normalized_project_name}
         if project_description.strip():
@@ -906,7 +907,9 @@ def create_dokploy_compose_target(
         created_project = mutate_provider(host, token, PROJECT_CREATE_PATH, project_payload)
         created_project_id = _extract_provider_id(created_project, "projectId", "project")
 
-    created_environment_id = normalized_environment_id
+        created_environment_id = project_created_environment(
+            created_project, created_project_id, normalized_environment_name
+        )
     if not created_environment_id:
         environment_payload: JsonObject = {
             "name": normalized_environment_name,
@@ -1201,6 +1204,22 @@ def _project_plan_action(*, project_id: str, environment_id: str) -> str:
     if environment_id:
         return "not_required"
     return "create"
+
+
+def project_created_environment(payload: JsonObject, project_id: str, name: str) -> str:
+    """Use only the matching environment returned by this project creation."""
+    environment = payload.get("environment")
+    if environment is None:
+        return ""
+    if not isinstance(environment, dict):
+        raise ValueError("Project creation returned an invalid environment; reconcile its effect.")
+    if environment.get("projectId") != project_id:
+        raise ValueError("Project creation returned another project's environment.")
+    if environment.get("name") != name:
+        return ""
+    if environment.get("isDefault") is not True:
+        raise ValueError("Project creation did not identify its default environment.")
+    return _extract_provider_id(environment, "environmentId", "environment")
 
 
 def _extract_provider_id(payload: JsonObject, id_key: str, object_key: str) -> str:

@@ -1329,6 +1329,59 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         self.assertEqual(provider_target.provider_target_type, "compose")
         self.assertEqual(provider_target.target_id, "compose-123")
 
+    def test_compose_uses_project_created_default_environment(self) -> None:
+        """Dokploy rejects environment.create for its reserved production name."""
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=_sqlite_database_url(Path(directory) / "db"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            requests: list[tuple[str, JsonObject]] = []
+
+            def mutate(_host: str, _token: str, path: str, payload: JsonObject) -> JsonObject:
+                requests.append((path, payload))
+                if path == "/api/project.create":
+                    return {
+                        "project": {"projectId": "new-project"},
+                        "environment": {
+                            "environmentId": "default-environment",
+                            "projectId": "new-project",
+                            "name": "production",
+                            "isDefault": True,
+                        },
+                    }
+                if path == "/api/environment.create":
+                    raise ValueError("You cannot create a environment with the name 'production'")
+                self.assertEqual(path, "/api/compose.create")
+                self.assertEqual(payload["environmentId"], "default-environment")
+                return {"composeId": "new-compose"}
+
+            with patch(
+                "control_plane.workflows.dokploy_target_adoption.require_bridge_network_capacity"
+            ):
+                result = create_dokploy_compose_target(
+                    record_store=store,
+                    host="https://provider.invalid",
+                    token="fixture",
+                    context="fixture",
+                    instance="prod",
+                    target_name="fixture-prod",
+                    project_name="fixture-prod",
+                    environment_name="production",
+                    server_id="fixture-server",
+                    apply=True,
+                    mutate_provider=mutate,
+                    fetch_target_payload=lambda *_: {
+                        "name": "fixture-prod",
+                        "sourceType": "raw",
+                        "environmentId": "default-environment",
+                        "environment": {"project": {"name": "fixture-prod"}},
+                    },
+                )
+            self.assertTrue(result.applied)
+            self.assertEqual(
+                [path for path, _ in requests], ["/api/project.create", "/api/compose.create"]
+            )
+
     def test_create_compose_refuses_records_when_the_context_changed_owner(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

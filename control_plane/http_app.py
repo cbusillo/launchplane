@@ -26913,6 +26913,83 @@ def create_launchplane_fastapi_app(
                     code="idempotency_key_required",
                     message="Dokploy target setup apply requires an Idempotency-Key header.",
                 )
+        if (
+            setup_request.operation == "create-compose"
+            and setup_request.instance == "prod"
+            and setup_request.project_name
+            and not setup_request.environment_id
+            and setup_request.mode in {"apply", "readback"}
+            and director_agent_identity(identity)
+            and lane_owner
+        ):
+            from control_plane.dokploy_compose_allocation import ComposeAllocationAdapter
+
+            compose_adapter = ComposeAllocationAdapter(
+                resolved_control_plane_root,
+                database_store,
+                setup_request,
+                lane_owner,
+                idempotency_scope(identity),
+                idempotency_key.strip(),
+                trace_id,
+            )
+            try:
+                if not idempotency_key.strip():
+                    raise ValueError("Original target setup key is required.")
+                prior = database_store.read_idempotency_record(
+                    scope=idempotency_scope(identity),
+                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                    idempotency_key=idempotency_key.strip(),
+                )
+                if (
+                    prior is not None
+                    and not prior.reconciliation_key
+                    and setup_request.mode == "apply"
+                ):
+                    _, _, legacy_replay = await replay_apply_idempotency(
+                        request=request,
+                        record_store=database_store,
+                        identity=identity,
+                        route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                        idempotency_key=idempotency_key,
+                        trace_id=trace_id,
+                        check_replay=True,
+                    )
+                    if legacy_replay is not None:
+                        return legacy_replay
+                if setup_request.mode == "readback":
+                    return accepted_evidence_response(
+                        trace_id=trace_id, records={}, result=compose_adapter.readback()
+                    )
+
+                def compose_operation(store: PostgresRecordStore) -> DurableProviderOperationResult:
+                    return run_durable_provider_operation(
+                        store=store,
+                        scope=idempotency_scope(identity),
+                        route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                        idempotency_key=idempotency_key.strip(),
+                        request_fingerprint=compose_adapter.reconciliation_key(),
+                        lease_owner=trace_id,
+                        response_trace_id=trace_id,
+                        adapter=compose_adapter,
+                        original_intent=compose_adapter.intent(),
+                    )
+
+                return await run_provider_operation_http(
+                    record_store=database_store,
+                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                    trace_id=trace_id,
+                    operation=compose_operation,
+                    in_progress_message="Original target setup is running.",
+                    reconcile_message="Target creation may have partial effects. Preserve the original request and key; inspect readback before recovery.",
+                )
+            except (ValueError, FileNotFoundError, click.ClickException) as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_dokploy_target_setup",
+                    message=str(error),
+                ) from error
         ordinary_allocation = (
             setup_request.operation == "create-application"
             and setup_request.instance == "testing"
