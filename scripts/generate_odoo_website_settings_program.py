@@ -126,6 +126,12 @@ print("website_indexing_result=" + json.dumps({**plan, "database_uuid": database
         '.replace("__INSTANCE__", repr(sys.argv[2]))',
         '.replace("__REQUEST__", repr(sys.argv[2]))',
     )
+    indexing_wrapper = indexing_wrapper.replace(
+        "import tempfile\n", "import tempfile\nimport subprocess\n"
+    ).replace(
+        'startup._run_odoo_shell(settings, program, label="accepted website settings")',
+        "subprocess.run(startup._build_odoo_shell_command(settings), input=program.encode(), env=startup._odoo_environment(settings), check=True)",
+    )
     compile(indexing_wrapper, "website_indexing_configuration", "exec")
     generated = (
         "# Generated from committed odoo-devkit source; do not edit.\n"

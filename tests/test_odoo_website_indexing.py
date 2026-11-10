@@ -57,6 +57,32 @@ class WebsiteIndexingPayloadTests(unittest.TestCase):
                     }
                 )
 
+    def test_indexing_shell_never_runs_startup_credential_preparation(self) -> None:
+        import os
+        import sys
+        from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PROGRAM
+
+        preparation = Mock(side_effect=AssertionError("credential preparation invoked"))
+        startup = SimpleNamespace(
+            _load_settings=lambda arguments: arguments,
+            _write_runtime_config=lambda settings: None,
+            _run_odoo_shell=preparation,
+            _build_odoo_shell_command=lambda settings: ["/odoo/odoo-bin", "shell", "--no-http"],
+            _odoo_environment=lambda settings: {"PGPASSWORD": "synthetic-only"},
+        )
+        with (
+            patch.dict(sys.modules, {"run_odoo_startup": startup}),
+            patch.object(sys, "argv", ["program", "fixture-db", "{}"]),
+            patch.object(sys, "path", list(sys.path)),
+            patch.dict(os.environ, {"ODOO_COPY_PURPOSE": "testing-copy"}),
+            patch("subprocess.run") as shell,
+        ):
+            exec(WEBSITE_INDEXING_PROGRAM, {})
+        preparation.assert_not_called()
+        shell.assert_called_once()
+        self.assertEqual(shell.call_args.kwargs["env"]["PGPASSWORD"], "synthetic-only")
+        self.assertIsInstance(shell.call_args.kwargs["input"], bytes)
+
 
 class IndexingStore(TopologyStore):
     def __init__(self) -> None:
