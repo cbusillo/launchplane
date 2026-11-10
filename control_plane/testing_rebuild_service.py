@@ -1548,7 +1548,18 @@ class NativeTestingRebuildExecution:
                 raise NativeTestingRebuildAdmissionChanged(
                     "The admitted candidate build is no longer eligible."
                 ) from error
-            if current.manifest != candidate:
+            manifest = current.manifest
+            if manifest.source_build is not None and candidate.source_build is not None:
+                manifest = manifest.model_copy(
+                    update={
+                        "source_build": manifest.source_build.model_copy(
+                            update={
+                                "pull_request_number": candidate.source_build.pull_request_number
+                            }
+                        )
+                    }
+                )
+            if manifest != candidate:
                 raise NativeTestingRebuildAdmissionChanged(
                     "The admitted candidate provenance changed."
                 )

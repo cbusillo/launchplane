@@ -20,7 +20,7 @@ from control_plane.build_provenance import (
     verify_generic_web_build,
     verify_requested_build_artifact,
 )
-from control_plane.contracts.artifact_identity import ArtifactIdentityManifest, BuildPurpose
+from control_plane.contracts.artifact_identity import BuildPurpose
 from control_plane.github_read_cache import GitHubReadCache
 from tests.support.artifact_manifests import artifact_manifest_v2
 
@@ -183,17 +183,34 @@ class BuildProvenanceTests(unittest.TestCase):
                 assert verified.manifest.source_build is not None
                 self.assertIsNone(verified.manifest.source_build.pull_request_number)
                 self.assertEqual(verified.manifest.source_build.purpose, "preview")
-                self.assertEqual(
-                    ArtifactIdentityManifest.model_validate_json(
-                        verified.manifest.model_dump_json()
-                    ),
-                    verified.manifest,
-                )
                 if original is None:
                     original = verified
                 self.assertEqual(verified, original)
-                with self.assertRaises(BuildProvenanceError):
-                    _verify(github, purpose="preview", pull_request_number=9)
+        for changes in (
+            {"pull_request_head": TIP, "pull_request_state": "open"},
+            {"pull_request_head": COMMIT, "pull_request_state": "closed"},
+            {
+                "pull_request_head": COMMIT,
+                "pull_request_state": "open",
+                "pull_request_repository_id": 202,
+            },
+        ):
+            with self.subTest(ordinary_preview=changes):
+                for field, value in changes.items():
+                    setattr(github, field, value)
+                with self.assertRaises(BuildProvenanceError) as caught:
+                    verify_build_artifact(
+                        transport=github,
+                        repository=REPOSITORY,
+                        repository_id=REPOSITORY_ID,
+                        commit=COMMIT,
+                        purpose="preview",
+                        context="site",
+                        image_repository=IMAGE_REPOSITORY,
+                        pull_request_number=9,
+                        require_open_pull_request=True,
+                    )
+                self.assertEqual(caught.exception.code, "pull_request_head_mismatch")
 
     def test_requested_candidate_refuses_unverified_run_product_and_attempt(
         self,

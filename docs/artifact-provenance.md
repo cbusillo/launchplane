@@ -101,6 +101,8 @@ identity, and promotion and rollback read that.
   private application plan. Before first application preparation the worker
   rechecks it; retained preparation and recovery use the original evidence even
   if the PR later changes. This supplies no release artifact or release tuple.
+  When an older admitted operation recorded a PR number, revalidation retains
+  that original attribution and compares every other manifest field exactly.
 
 ## Why a `release` run is trustworthy
 

@@ -1182,7 +1182,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                 "get_json",
                 side_effect=lambda path: read(path.partition("/attempts/")[0]),
             ),
-            self.assertRaises(BuildProvenanceError),
+            self.assertRaises(BuildProvenanceError) as caught,
         ):
             verified_testing_rebuild_artifact(
                 self.store,
@@ -1191,6 +1191,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                 artifact_id="artifact-cm-run-50-1",
                 source_git_ref=PR_HEAD,
             )
+        self.assertEqual(caught.exception.code, "not_on_first_parent_history")
 
     def serving_candidate(
         self, status: Literal["pass", "reconciliation_required", "fail"] = "pass"

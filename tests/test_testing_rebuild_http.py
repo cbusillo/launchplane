@@ -218,6 +218,34 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             )
             run["pull_requests"] = [{"number": 99}]
             execution.require_candidate_build()
+            source = candidate.source_build
+            assert source is not None
+            retained = candidate.model_copy(
+                update={"source_build": source.model_copy(update={"pull_request_number": 9})}
+            )
+            execution.operation = type(operation).model_validate_json(
+                operation.model_copy(
+                    update={"testing_candidate_manifest": retained}
+                ).model_dump_json()
+            )
+            execution.require_candidate_build()
+            self.assertEqual(execution.operation.testing_candidate_manifest, retained)
+            execution.operation = operation.model_copy(
+                update={
+                    "testing_candidate_manifest": retained.model_copy(
+                        update={
+                            "source_build": source.model_copy(
+                                update={
+                                    "manifest_artifact_id": source.manifest_artifact_id + "-changed"
+                                }
+                            )
+                        }
+                    )
+                }
+            )
+            with self.assertRaises(worker.NativeTestingRebuildAdmissionChanged):
+                execution.require_candidate_build()
+            execution.operation = operation
             image = github.manifest["image"]
             assert isinstance(image, dict)
             image["digest"] = candidate.image.digest[:-1] + (
