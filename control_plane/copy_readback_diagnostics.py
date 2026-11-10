@@ -56,6 +56,24 @@ def copy_failure_marker_is_safe(key: str, value: str) -> bool:
     )
 
 
+def safe_copy_failure_markers(values: object) -> dict[str, str]:
+    if not isinstance(values, Mapping):
+        return {}
+    return {
+        key: value
+        for key, value in values.items()
+        if isinstance(key, str)
+        and isinstance(value, str)
+        and copy_failure_marker_is_safe(key, value)
+    }
+
+
+def copy_failure_receipt(values: object) -> str:
+    return "".join(
+        f":{key}={value}" for key, value in sorted(safe_copy_failure_markers(values).items())
+    )
+
+
 def copy_failure_summary(receipt: str) -> str:
     markers: dict[str, str] = {}
     for part in receipt.split(":"):

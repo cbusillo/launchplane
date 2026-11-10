@@ -72,9 +72,10 @@ cause as preview snapshots and fresh testing restores. Framed failures carry the
 validated stage, command failure kind, exit status and private evidence reference
 through the native transport and handled-error log. Candidate readiness receipts
 keep these markers too. Denials, route writes that never started, and uncertain
-stream effects retain their existing classifications. Migrated streams have no
-qualified host-wide mount inventory for private capture, so their evidence ID is
-`unavailable`; their child stderr is not published or archived.
+stream effects retain their existing classifications. The empty-resource schedule
+and migrated stream have no qualified host-wide mount inventory for private
+capture, so their evidence ID is `unavailable`. The stream child
+stderr is not published or archived.
 
 When a preview-snapshot or fresh-testing host command fails, its exception carries
 the captured output until the failure escapes the program. The host then retains

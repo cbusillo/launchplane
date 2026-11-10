@@ -266,6 +266,52 @@ class RetainedTestingCopyTests(unittest.TestCase):
             self.assertNotIn("fixture-" + key, stdout.getvalue())
         return json.loads(stdout.getvalue().removeprefix("FRAME:")), commands
 
+    def test_command_failure_after_inventory_retains_private_output_bound_to_the_input(
+        self,
+    ) -> None:
+        from control_plane.copy_readback_diagnostics import COPY_FAILURE_STATE_DIRECTORY
+        import hashlib
+
+        spec = {**self.spec, "identity": self.identity}
+        private = b"password=fixture-secret /credential/path dump-content"
+
+        def command(arguments: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if arguments[1:3] == ["ps", "-aq"]:
+                data = "\n".join(item["Id"] for item in self.containers).encode()
+            elif arguments[1] == "inspect":
+                data = json.dumps(self.containers).encode()
+            else:
+                self.assertEqual(arguments[1:3], ["volume", "inspect"])
+                return subprocess.CompletedProcess(arguments, 7, stdout=b"", stderr=private)
+            return subprocess.CompletedProcess(arguments, 0, stdout=data, stderr=b"")
+
+        home = self.root / "private-home"
+        home.mkdir()
+        output = io.StringIO()
+        with (
+            patch.object(Path, "home", return_value=home),
+            patch.object(subprocess, "run", side_effect=command),
+            patch.object(
+                sys,
+                "argv",
+                ["fixture", base64.b64encode(json.dumps(spec).encode()).decode(), "FRAME:"],
+            ),
+            redirect_stdout(output),
+        ):
+            exec(compile(retained_copy_host_program(), "<retained-copy-host>", "exec"), {})
+        frame = json.loads(output.getvalue().removeprefix("FRAME:"))
+        self.assertNotIn(private.decode(), output.getvalue())
+        identity = frame["copy_failure_evidence_id"]
+        evidence = json.loads(
+            (home / COPY_FAILURE_STATE_DIRECTORY / (identity + ".json")).read_text()
+        )
+        self.assertEqual(base64.b64decode(evidence["stderr"]), private)
+        self.assertEqual(
+            evidence["input_sha256"],
+            hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest(),
+        )
+        self.assertEqual(frame["copy_failure_exit_status"], str(evidence["exit_status"]))
+
     def test_host_read_binds_actual_storage_and_private_probe_uses_the_managed_port(self) -> None:
         read, _ = self.run_host()
         self.assertEqual(read["type"], "complete")

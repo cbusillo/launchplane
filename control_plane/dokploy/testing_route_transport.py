@@ -35,6 +35,8 @@ from control_plane.copy_readback_diagnostics import (
     CopyReadbackRefused,
     copy_failure_diagnostics_library,
     copy_failure_summary,
+    copy_failure_receipt,
+    readback_predicate_library,
 )
 from control_plane.dokploy.native_copy_stream import (
     _read_remote,
@@ -120,6 +122,7 @@ def testing_route_host_program() -> str:
         + inspect.getsource(qualify_testing_address_tcp_routes)
         + inspect.getsource(qualify_testing_address_recipients)
         + "\n"
+        + readback_predicate_library()
         + copy_failure_diagnostics_library()
         + inspect.getsource(CopyReadbackRefused)
         + inspect.getsource(docker_daemon_authorization_denied)
@@ -720,7 +723,10 @@ if __name__=='__main__':
             if trace.tb_frame.f_code.co_filename==main.__code__.co_filename:
                 sites.append(trace.tb_lineno)
             trace=trace.tb_next
-        frame={'type':kind,'sites':sites[-SOURCE_SITE_LIMIT:],**copy_failure_frame_markers(error)}
+        frame={'type':kind,'sites':sites[-SOURCE_SITE_LIMIT:]}
+        markers=copy_failure_frame_markers(error)
+        if markers:
+            frame.update(predicate=ReadbackPredicate.NATIVE_READ,kind='unavailable',**markers)
         if isinstance(error,RetainedTaskSpecMismatch):
             frame['container_fields']=error.container_fields
         print(sys.argv[2]+json.dumps(frame),flush=True)
@@ -797,11 +803,7 @@ class DokployTestingRouteTransport:
                     "allocate_lock_v2",
                 }:
                     raise ValueError("A route writer receipt cannot qualify an observation.")
-                cause = copy_failure_summary(
-                    ":".join(
-                        f"{key}={value}" for key, value in frame.items() if isinstance(value, str)
-                    )
-                )
+                cause = copy_failure_summary(copy_failure_receipt(frame))
                 raise TestingRouteWriteNotStarted(
                     "The original route writer was not started." + (" " + cause if cause else "")
                 )

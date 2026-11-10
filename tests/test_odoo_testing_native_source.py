@@ -92,7 +92,7 @@ class Connection:
 
 
 class NativeSourceTransportTests(unittest.TestCase):
-    def test_command_failure_frame_preserves_only_bounded_cause_without_settling_a_write(
+    def test_command_failure_frame_preserves_only_bounded_cause_in_error_and_log(
         self,
     ) -> None:
         from control_plane import http_error_evidence
@@ -125,7 +125,6 @@ class NativeSourceTransportTests(unittest.TestCase):
                         receive=lambda _frame: None,
                     )
                 error = raised.exception
-                self.assertFalse(getattr(error, "provider_effect_terminal", False))
                 self.assertEqual(error.copy_failure_markers, expected)
                 self.assertNotIn(private, str(error))
                 for key, value in expected.items():

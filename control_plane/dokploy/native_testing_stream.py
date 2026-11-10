@@ -9,6 +9,7 @@ from typing import Literal
 from control_plane.copy_readback_diagnostics import (
     CopyReadbackRefused,
     copy_failure_diagnostics_library,
+    readback_predicate_library,
 )
 
 from control_plane.contracts.odoo_testing_source import (
@@ -95,7 +96,8 @@ def write_native_testing_stream(
 
 
 NATIVE_TESTING_STREAM_WRITE_PROGRAM = (
-    copy_failure_diagnostics_library()
+    readback_predicate_library()
+    + copy_failure_diagnostics_library()
     + inspect.getsource(CopyReadbackRefused)
     + r'''
 import base64,hashlib,json,os,re,subprocess,sys
@@ -104,6 +106,14 @@ copy_failure_stage=CopyFailureStage.SOURCE_TRANSFER
 child=None
 def emit(value):
     print(prefix+json.dumps(value,sort_keys=True),flush=True)
+def receiver_frame():
+    line=child.stdout.readline()
+    if not line:
+        status=child.wait()
+        if status:
+            raise copy_command_failure(RuntimeError('Migrated receiver command failed'),subprocess.CompletedProcess([],status,b'',b''),spec)
+        raise RuntimeError('Migrated receiver frame is incomplete')
+    return json.loads(line)
 try:
     if not re.fullmatch(r'[a-f0-9]{64}',spec['container']) or not re.fullmatch(r'[a-f0-9]{32}',spec['capture_id']) or spec['part'] not in {'database','filestore'}:
         raise RuntimeError('Invalid migrated receiver')
@@ -173,7 +183,7 @@ print(json.dumps(expected),flush=True)
     child=subprocess.Popen(['docker','exec','-i','-u','root',spec['container'],'python3','-u','-c',writer,json.dumps(spec)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
     try:
         while True:
-            start=json.loads(child.stdout.readline())
+            start=receiver_frame()
             if start=={'progress':True}:
                 emit({'type':'progress'})
             else:
@@ -192,16 +202,17 @@ print(json.dumps(expected),flush=True)
                         raise RuntimeError('Migrated input window size differs')
                     child.stdin.write(data);child.stdin.flush();offset+=len(data)
         child.stdin.close()
-        result=json.loads(child.stdout.readline())
-        if child.wait()!=0 or result!=spec['artifact']:
+        result=receiver_frame()
+        status=child.wait()
+        if status:
+            raise copy_command_failure(RuntimeError('Migrated receiver command failed'),subprocess.CompletedProcess([],status,b'',b''),spec)
+        if result!=spec['artifact']:
             raise RuntimeError('Migrated receiver did not complete')
         emit({'type':'complete',**result})
     finally:
         if child.poll() is None:
             child.stdin.close();child.wait()
 except Exception as error:
-    if child is not None and child.poll() is not None and child.wait()!=0:
-        error=copy_command_failure(error,subprocess.CompletedProcess([],child.wait(),b'',b''),spec)
-    emit({'type':'failed','predicate':'native_inspection_complete','kind':'unavailable',**copy_failure_frame_markers(error)})
+    emit({'type':'failed','predicate':ReadbackPredicate.NATIVE_READ,'kind':'unavailable',**copy_failure_frame_markers(error)})
 '''
 )

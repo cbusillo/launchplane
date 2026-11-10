@@ -306,8 +306,8 @@ def inventory():
 
 try:
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
-    containers=inventory()
     copy_failure_stage=CopyFailureStage.CLEANUP if spec['mode']=='remove' else CopyFailureStage.HOST_PREPARATION
+    containers=inventory()
     own={item['Id'] for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==spec['project']}
     if spec['mode'] in {'remove','removal-readback'}:
         expected=spec.get('container_ids')

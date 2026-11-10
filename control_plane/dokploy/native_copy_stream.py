@@ -26,7 +26,9 @@ from control_plane.copy_readback_diagnostics import (
     NATIVE_PROGRAM_SOURCE_SITE_LIMIT as NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
     COPY_FAILURE_EVIDENCE_MARKER,
     copy_failure_evidence_id,
-    copy_failure_marker_is_safe,
+    safe_copy_failure_markers,
+    copy_failure_receipt,
+    copy_failure_summary,
     ReadbackPredicate,
     readback_failure_evidence,
 )
@@ -98,17 +100,7 @@ class NativeProgramFailed(NativeSourceUnavailable):
         failure_evidence_id: object = None,
         failure_markers: object = None,
     ) -> None:
-        self.copy_failure_markers = (
-            {
-                key: value
-                for key, value in failure_markers.items()
-                if isinstance(key, str)
-                and isinstance(value, str)
-                and copy_failure_marker_is_safe(key, value)
-            }
-            if isinstance(failure_markers, dict)
-            else {}
-        )
+        self.copy_failure_markers = safe_copy_failure_markers(failure_markers)
         if set(self.copy_failure_markers) == {COPY_FAILURE_EVIDENCE_MARKER}:
             self.copy_failure_markers = {}
         self.copy_failure_evidence_id = copy_failure_evidence_id(failure_evidence_id)
@@ -155,12 +147,8 @@ class NativeProgramFailed(NativeSourceUnavailable):
         self.predicate = ReadbackPredicate(self.evidence["readback_failed_predicate"])
         self.unavailable = self.evidence["readback_failure_kind"] == "unavailable"
         self.code = self.predicate.value + "_" + self.evidence["readback_failure_kind"]
-        self.diagnostic_code = self.code + "".join(
-            f":{key}={value}" for key, value in sorted(self.copy_failure_markers.items())
-        )
-        summary = " ".join(
-            f"{key}={value}" for key, value in sorted(self.copy_failure_markers.items())
-        )
+        self.diagnostic_code = self.code + copy_failure_receipt(self.copy_failure_markers)
+        summary = copy_failure_summary(self.diagnostic_code)
         super().__init__(message + (" " + summary if summary else ""))
 
 

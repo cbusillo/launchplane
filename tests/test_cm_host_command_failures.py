@@ -17,6 +17,10 @@ from control_plane.copy_readback_diagnostics import (
     COPY_FAILURE_EVIDENCE_MARKER,
     CopyFailureStage,
 )
+from control_plane import http_error_evidence
+from control_plane.dokploy import native_copy_stream as transport
+from tests.test_odoo_testing_native_source import Connection
+
 from control_plane.dokploy.native_testing_stream import NATIVE_TESTING_STREAM_WRITE_PROGRAM
 from control_plane.dokploy.testing_retained_copy import retained_copy_host_program
 from control_plane.dokploy.testing_route_transport import testing_route_host_program
@@ -48,6 +52,12 @@ class CMHostCommandFailureTests(unittest.TestCase):
                 {"mode": "read", "project": "retained"},
                 True,
                 CopyFailureStage.HOST_PREPARATION,
+            ),
+            (
+                retained_copy_host_program(),
+                {"mode": "remove", "project": "retained"},
+                True,
+                CopyFailureStage.CLEANUP,
             ),
             (
                 testing_route_host_program(),
@@ -136,3 +146,27 @@ class CMHostCommandFailureTests(unittest.TestCase):
                 self.assertEqual(frame.get(COPY_FAILURE_EXIT_MARKER), "7")
                 self.assertEqual(frame.get(COPY_FAILURE_EVIDENCE_MARKER), "unavailable")
                 self.assertEqual(list(Path(temporary).iterdir()), [])
+                if framed:
+                    with self.assertRaises(transport.NativeProgramFailed) as raised:
+                        transport._read_program(
+                            connection=Connection(frame),
+                            program=program,
+                            payload=spec,
+                            timeout_seconds=5,
+                            receive=lambda _frame: None,
+                        )
+                    with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+                        http_error_evidence.log_handled_error_cause(
+                            raised.exception, "host-command-test"
+                        )
+                    public_log = logs.records[-1].getMessage()
+                    for value in private.split():
+                        self.assertNotIn(value, public_log)
+                    native = json.loads(public_log)["native_programs"][0]
+                    self.assertEqual(
+                        native[COPY_FAILURE_KIND_MARKER], frame[COPY_FAILURE_KIND_MARKER]
+                    )
+                    self.assertEqual(native[COPY_FAILURE_STAGE_MARKER], stage)
+                    self.assertEqual(
+                        native[COPY_FAILURE_EXIT_MARKER], frame[COPY_FAILURE_EXIT_MARKER]
+                    )

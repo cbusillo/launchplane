@@ -592,6 +592,8 @@ class MigratedStreamTests(unittest.TestCase):
             self.assertTrue(partial.exists(), (interrupted.stdout, interrupted.stderr))
             self.assertEqual(partial.read_bytes(), data[:65536])
             self.assertIn(b'"type": "failed"', interrupted.stdout)
+            failed = json.loads(interrupted.stdout.splitlines()[-1].removeprefix(b"FRAME:"))
+            self.assertNotIn("copy_failure_kind", failed)
             rest = b"".join(
                 base64.b64encode(data[index : index + 65536]) + b"\n"
                 for index in range(65536, len(data), 65536)
