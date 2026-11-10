@@ -8,11 +8,13 @@ retries the second kind and isolates the change behind the first.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from functools import cached_property
 from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
     from control_plane.github_required_checks import CheckRequirement
+    from control_plane.contracts.merge_train_batch import MergeTrainBlockFailureEvidence
 
 from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 
@@ -61,6 +63,13 @@ class CandidateCheckFailures:
     attribution_requirements: tuple[CheckRequirement, ...] = ()
     retry_runs: tuple[tuple[int, int], ...] = ()
     checks_disagree: bool = False
+    capture_decision_evidence: Callable[[], MergeTrainBlockFailureEvidence] | None = field(
+        default=None, compare=False, repr=False
+    )
+
+    @cached_property
+    def decision_evidence(self) -> MergeTrainBlockFailureEvidence | None:
+        return self.capture_decision_evidence() if self.capture_decision_evidence else None
 
     @property
     def conclusive(self) -> bool:
