@@ -50,7 +50,7 @@ elif args[:3]==['inspect','--type','container']:
             mounts=[{'Type':'volume','Name':name,'Source':root+'/volumes/'+name+'/_data'}]
         if state.get('bind_ref'):
             mounts=[{'Type':'bind','Source':root+'/volumes/'+name}]
-        rows.append({'Id':identifier,'Mounts':mounts,'Config':{'Labels':state.get('container_labels',{})},'State':{'Running':state.get('running',False)},'NetworkSettings':{'Networks':state.get('networks',{})}})
+        rows.append({'Id':identifier,'Image':'fixture-image','HostConfig':{},'Mounts':mounts,'Config':{'Labels':state.get('container_labels',{})},'State':{'Running':state.get('running',False),'StartedAt':'fixture-start'},'NetworkSettings':{'Networks':state.get('networks',{})}})
     if state.get('malformed_containers'):
         rows=rows[:-1]
     if state.get('duplicate_containers') and rows:
@@ -159,6 +159,8 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         retirement: dict[str, object] | None = None,
         observed_device: int | None = None,
         filesystem_id: int = FILESYSTEM_ID,
+        original_retirement_binding: bool = False,
+        planned_container_removals: dict[str, object] | None = None,
     ) -> dict[str, object]:
         engine_id = self.state.get("engine", "engine-one")
         assert isinstance(engine_id, str)
@@ -175,6 +177,10 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         }
         if retirement is not None:
             spec["retirement"] = retirement
+        if original_retirement_binding:
+            spec["original_retirement_binding"] = True
+        if planned_container_removals is not None:
+            spec["planned_container_removals"] = planned_container_removals
         payload = base64.b64encode(json.dumps(spec).encode()).decode()
         environment = os.environ | {
             "HOME": str(self.home),
@@ -200,6 +206,69 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         self.assertTrue(result.stdout.startswith("FRAME:"), result)
         self.assertNotIn(str(self.data), result.stdout)
         return cast(dict[str, object], json.loads(result.stdout.removeprefix("FRAME:"))["result"])
+
+    def test_original_receipt_readback_binds_ownership_without_reusing_an_expired_dispatch_permit(
+        self,
+    ) -> None:
+        permit = {
+            "binding": "a" * 64,
+            "fresh_until": 1000000,
+            "boot_id": "fixture-boot",
+            "monotonic_deadline": 1000000,
+        }
+        original = self.identity()
+        self.assertEqual(self.run_program("apply", retirement=permit)["status"], "removed")
+        earlier = {**permit, "monotonic_deadline": 0}
+        self.assertEqual(
+            self.run_program("readback", identity=original, retirement=earlier)["status"], "unknown"
+        )
+        self.assertEqual(
+            self.run_program(
+                "readback", identity=original, retirement=earlier, original_retirement_binding=True
+            )["status"],
+            "absent",
+        )
+        self.assertEqual(
+            self.run_program(
+                "readback",
+                identity=original,
+                retirement={**earlier, "binding": "b" * 64},
+                original_retirement_binding=True,
+            )["status"],
+            "unknown",
+        )
+
+    def test_planned_container_detachment_never_relaxes_apply_mount_protection(self) -> None:
+        from control_plane.dokploy.testing_retained_copy import retained_container_snapshot
+
+        self.state.update(containers=["a" * 64], container_ref=True)
+        self.write_state()
+        process = subprocess.run(
+            [
+                str(self.bin / "docker"),
+                "--host",
+                "unix:///var/run/docker.sock",
+                "inspect",
+                "--type",
+                "container",
+                "a" * 64,
+            ],
+            env=os.environ | {"FAKE_DOCKER_STATE": str(self.state_path)},
+            capture_output=True,
+            check=True,
+        )
+        containers = json.loads(process.stdout)
+        planned: dict[str, object] = {
+            "ids": [row["Id"] for row in containers],
+            "snapshot": retained_container_snapshot(containers),
+        }
+        self.assertEqual(self.run_program(planned_container_removals=planned)["status"], "eligible")
+        self.assertEqual(
+            self.run_program("apply", planned_container_removals=planned)["status"], "held"
+        )
+        self.assertNotIn("rm_args", json.loads(self.state_path.read_text()))
+        planned["snapshot"] = "b" * 64
+        self.assertEqual(self.run_program(planned_container_removals=planned)["status"], "held")
 
     @staticmethod
     def fixture_program(

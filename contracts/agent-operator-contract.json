@@ -1039,7 +1039,7 @@
         ],
         "operation_id": "sweep_retained_volumes",
         "path": "/v1/retained-volume-sweep",
-        "purpose": "Inspect, apply, or read back one reviewed retained-volume retirement sweep without exposing provider bindings.",
+        "purpose": "Inspect, apply, or read back a reviewed retired-product volume sweep or original-bound failed native testing candidate sweep.",
         "response_statuses": [
           "200",
           "400",
@@ -1051,10 +1051,9 @@
         ],
         "reviewed_evidence": [
           "reviewed_plan_sha256",
-          "retirement_record_id",
-          "minimum_age_seconds"
+          "exact_original_and_resource_custody"
         ],
-        "schema_fingerprint_sha256": "97c57a4d12f191da974363dd089db8bc5baeb8826ac3edb59ac28d97c6ac9ca5",
+        "schema_fingerprint_sha256": "6b5331e1c7c7ab516659373ae45d55cd60305c6507450cffbbc15255ba728052",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1475,8 +1474,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "a00f508ea4bbb972f7ebd3e9f0a233a5116afe31"
+    "source_commit_sha": "eb7039861992855cd8547aa7d2f548bc6131924d"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "0dec29b176809dc908a19ca8dbd2ffd980666cc08126b2b85306e77dad2b69bd"
+  "semantic_digest_sha256": "f52dd177f84eb808ac9b21d05706ddb81aaccaf4a25d7b7a55cd1f0da18c1838"
 }

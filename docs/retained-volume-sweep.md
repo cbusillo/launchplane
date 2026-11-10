@@ -55,3 +55,69 @@ Provider database resources need explicit complete mount details; absent details
 are unknown. Compose declarations are checked through converted provider source.
 Namespace references, ancestor bind mounts and
 unrelated held provider reservations also conservatively retain volumes.
+
+## Failed native testing candidates
+
+The same route accepts `kind: native-testing`, `product`, `context`,
+`instance: testing` and `operation_id` identifying the receiver's existing native
+rebuild original. This is independent of product retirement and works for an
+active product's unused failed testing candidates. It never edits or resumes
+that receiver original. The existing administrator/Director authorization applies.
+
+Start with `mode: dry-run` and no `candidates` to inspect every recorded candidate
+in the exact product and testing context. Each result identifies its original,
+namespace, target, ownership digest, source-evidence digest and per-volume
+eligibility or refusal. There is no truncated first page. Unbound provider
+objects are not adopted. Selected/current targets, receiver candidates, active
+originals or leases, completed prepared copies, provider jobs, schedules, public
+use, current/recovery references and explicit only-copy observations hold their
+resources. A missing historical journal or legacy `safe_to_release: false` alone
+does not hold an otherwise qualified failed copy.
+
+Repeat dry-run with the exact candidate namespaces in `candidates`. Review its
+`plan_sha256` and resource results. Apply that same request with `mode: apply`,
+`reviewed_plan_sha256` and a new bounded `Idempotency-Key`. Readback uses the same
+candidate list, original, digest and key with `mode: readback`. A changed request
+cannot reuse the key. An interrupted request only reads its existing receipts;
+it never repeats deletion. No supported catalog command is claimed until its
+caller has adopted this optional request contract.
+
+Apply holds the candidate executor exclusion, original row lock and existing
+product-configuration lock. Immediately before each effect it rechecks candidate
+ownership, current references, provider activity, exact physical identity and
+source evidence. Nonempty failed copies require independently verified preserved
+source artifacts or an originally empty build; staged `.lp-native-*` source
+directories always stay. A prior web gate or unknown completed-copy evidence
+holds nonempty resources. Original operations, failure records, candidates,
+provider targets and source input pairs remain recorded and unchanged.
+
+Mounted volumes remain held unless the candidate's existing terminal abandonment,
+preserved source and exact native container custody qualify detachment. A stopped
+container alone is insufficient. The lifecycle snapshot binds the original IDs,
+images, configuration, mount identities and process starts. Active web processes,
+execs, published ports, foreign writable mounts and changed snapshots refuse.
+For a qualified abandoned candidate, the operation uses the existing native
+Compose stop followed by exact non-force container removal and absence readback.
+Each phase has its own original-bound durable provider receipt. A timeout only
+reconciles that phase; it never replays stop or removal blindly. The compose
+target, deployment history and schedules remain as evidence.
+
+Only after detachment readback does the existing host sweep remove positively
+bound, unneeded local volumes. Its apply path still refuses every container
+mount. The planning-only allowance for reviewed container IDs cannot authorize
+volume deletion. A fresh short-lived host permit is captured before each volume
+effect; original readback uses the same ownership digest and host receipt without
+renewing dispatch permission. Foreign volumes, production labels, aliases and
+unknown backings refuse. There is no compose deletion, storage resize or lane
+deletion. Staged source volumes and original input artifacts remain intact.
+
+The receiver's `capacity` groups demand by actual backing, reporting observed
+free bytes, required additional bytes, reserve and remaining deficit. It uses
+the restore's existing capacity calculation, including populated filestore,
+remaining migrated staging and any enabled clean-snapshot capture. It neither
+adds configured budgets into a universal minimum nor changes them. Unqualified
+receiver requirements return `capacity_refusal`, never a guessed zero deficit.
+Physical results report `before_bytes`, `after_bytes` and the signed observed
+free-space change on the same backing. These observations include concurrent
+filesystem activity; logical volume size is never reported as freed space.
+Unknown backing readback remains explicit.

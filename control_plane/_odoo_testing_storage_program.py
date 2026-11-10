@@ -111,13 +111,7 @@ def remaining_migrated_staging(data_root, identity, source):
     return remaining
 
 
-def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0, *,
-        runner_staging_bytes=None, host_staging_bytes=None, database_staging_bytes=0,
-        filestore_clone_source=None, clone_decisions=None, filestore_existing_bytes=0,
-        data_staging_bytes=0, probe_clones=True):
-    gen = spec['generation']
-    decisions = {} if clone_decisions is None else clone_decisions
-    filestore_charged_as_staging = host_staging_bytes is None and gen.get('source_mode', 'ssh') != 'container-export'
+def storage_backing_pools():
     zfs_pools = {}
     try:
         mounts = Path('/proc/self/mountinfo').read_text().splitlines()
@@ -131,6 +125,17 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         if fields[0] == 'zfs':
             major, minor = backing.split()[2].split(':')
             zfs_pools[os.makedev(int(major), int(minor))] = fields[1].split('/')[0]
+    return zfs_pools
+
+
+def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0, *,
+        runner_staging_bytes=None, host_staging_bytes=None, database_staging_bytes=0,
+        filestore_clone_source=None, clone_decisions=None, filestore_existing_bytes=0,
+        data_staging_bytes=0, probe_clones=True, observations=None):
+    gen = spec['generation']
+    decisions = {} if clone_decisions is None else clone_decisions
+    filestore_charged_as_staging = host_staging_bytes is None and gen.get('source_mode', 'ssh') != 'container-export'
+    zfs_pools = storage_backing_pools()
     required = {}
     available = {}
     def demand(path, size):
@@ -181,6 +186,14 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
             decisions['snapshot'] = filestore_clone_proved(backings['data'], snapshot_path)
         demand(snapshot_path, budget['database_bytes'] + budget['filestore_bytes'])
     capacity = all(available[backing] >= size + budget['reserve_bytes'] for backing, size in required.items())
+    if observations is not None:
+        observations.extend({
+            'backing': list(backing),
+            'free_bytes': available[backing],
+            'required_additional_bytes': size,
+            'reserve_bytes': budget['reserve_bytes'],
+            'deficit_bytes': max(0, size + budget['reserve_bytes'] - available[backing]),
+        } for backing, size in sorted(required.items()))
     return capacity
 """
 STORAGE_MAINTENANCE_LIBRARY = (
