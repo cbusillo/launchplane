@@ -172,8 +172,9 @@ remaining domain and storage removal is tracked in #2437.
     to null (unknown).
 
     The operation attempt and provider reservation attempts are separate
-    counters. New candidate probe snapshots bind the original plan digest,
-    native reservation ID/attempt and operation attempt. The probe item's
+    counters. New candidate probe snapshots retain their native reservation
+    and operation attempts within the original bound checkpoint. A later worker
+    re-claim does not invalidate an earlier observed attempt. The probe item's
     `attempt` is that captured native reservation attempt. Older checkpoint
     worker attempts remain unknown. Candidate preparation/private-readiness items
     describe receipt availability in that checkpoint. `predecessor_snapshot`
@@ -191,13 +192,15 @@ remaining domain and storage removal is tracked in #2437.
 
     `terminal_probe` uses the separately retained candidate probe in the
     existing checkpoint, so an inverse and terminal predecessor observation
-    cannot overwrite it. The snapshot retains its actual time, result,
+    cannot overwrite it. A later passing observation clears an earlier pending
+    snapshot before completion. The snapshot retains its actual time, result,
     verification, identity agreement and original binding. New observations
     include optional `http_status` (100 through 599) and `failure_kind`
     (`connection`, `tls`, `timeout`, `invalid_response` or `redirect`). HTTP
     failure status and identity disagreement stay distinct from unverified
     transport outcomes. No response body or uncontrolled exception text is
-    retained by this capture. The existing health criteria, five-second
+    retained by this capture. Extra health detail is an in-memory subtype;
+    other persisted health records keep the existing base schema. The existing health criteria, five-second
     timeout, probe count, traffic and rollback decisions are unchanged.
 
     An unavailable candidate observation is saved without advancing its step;

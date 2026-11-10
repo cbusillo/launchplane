@@ -156,6 +156,11 @@ class TestingRouteObservation(FrozenRecord):
     public_health: HealthcheckEvidence | None = None
 
 
+class TestingPublicHealthEvidence(HealthcheckEvidence):
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    failure_kind: HealthFailureKind | None = None
+
+
 class TestingCandidateProbe(FrozenRecord):
     observed_at: datetime
     state: ReleaseStatus | None
@@ -163,8 +168,6 @@ class TestingCandidateProbe(FrozenRecord):
     runtime_identity_matches: bool | None
     http_status: int | None = Field(default=None, ge=100, le=599)
     failure_kind: HealthFailureKind | None = None
-    plan_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
-    reservation_id: str | None = None
     reservation_attempt: int | None = Field(default=None, ge=1)
     operation_attempt: int | None = Field(default=None, ge=0)
 

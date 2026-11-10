@@ -2753,6 +2753,7 @@ def read_public_testing_health(
     from urllib.error import HTTPError, URLError
     from urllib.request import HTTPRedirectHandler, Request, build_opener
     from ssl import SSLError
+    from control_plane.contracts.testing_rebuild import TestingPublicHealthEvidence
     from control_plane.contracts.runtime_identity import (
         runtime_identity_from_health_payload,
         health_payload_runtime_identity_status,
@@ -2770,7 +2771,7 @@ def read_public_testing_health(
         with build_opener(NoRedirect()).open(Request(url, method="GET"), timeout=5) as response:
             http_status = response.status
             if response.geturl() != url:
-                return HealthcheckEvidence(
+                return TestingPublicHealthEvidence(
                     status="pending", urls=(url,), http_status=http_status, failure_kind="redirect"
                 )
             payload = json.loads(response.read(262144).decode())
@@ -2786,7 +2787,7 @@ def read_public_testing_health(
                     "runtime_identity_status": status,
                     "runtime_identity_detail": detail,
                 }
-            return HealthcheckEvidence(
+            return TestingPublicHealthEvidence(
                 verified=True,
                 urls=(url,),
                 timeout_seconds=5,
@@ -2797,7 +2798,7 @@ def read_public_testing_health(
             )
     except HTTPError as error:
         error.close()
-        return HealthcheckEvidence(
+        return TestingPublicHealthEvidence(
             verified=not 300 <= error.code < 400,
             urls=(url,),
             timeout_seconds=5,
@@ -2818,7 +2819,7 @@ def read_public_testing_health(
             kind = "invalid_response"
         else:
             kind = "connection"
-        return HealthcheckEvidence(
+        return TestingPublicHealthEvidence(
             status="pending", urls=(url,), http_status=http_status, failure_kind=kind
         )
 

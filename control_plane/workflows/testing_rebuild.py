@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from control_plane.contracts.testing_rebuild import (
     TestingCandidateProbe,
+    TestingPublicHealthEvidence,
     TestingCopyReadiness,
     TestingCopyReceipt,
     TestingRebuildPlan,
@@ -253,34 +254,6 @@ def execute_testing_rebuild(
 
         def save(**changes: object) -> None:
             nonlocal record
-            route = changes.get("route")
-            if (
-                isinstance(route, TestingRouteObservation)
-                and route.slot_id == plan.new.copy_id
-                and not record.error
-            ):
-                health = route.public_health
-                if (
-                    health is None
-                    or not health.verified
-                    or health.status != "pass"
-                    or health.observed_runtime_identity != plan.new.runtime_identity
-                ):
-                    changes["candidate_probe"] = TestingCandidateProbe(
-                        observed_at=route.observed_at,
-                        state=health.status if health else None,
-                        verified=health.verified if health else None,
-                        runtime_identity_matches=health.observed_runtime_identity
-                        == plan.new.runtime_identity
-                        if health and health.observed_runtime_identity is not None
-                        else None,
-                        http_status=health.http_status if health else None,
-                        failure_kind=health.failure_kind if health else None,
-                        plan_digest=plan.digest,
-                        reservation_id=reservation.record_id if reservation else None,
-                        reservation_attempt=reservation.attempt if reservation else None,
-                        operation_attempt=operation_attempt,
-                    )
             replacement = TestingRebuildRecord.model_validate(
                 {**record.model_dump(), **changes, "updated_at": clock()}
             )
@@ -288,14 +261,39 @@ def execute_testing_rebuild(
             record = replacement
 
         def serving_candidate(observation: TestingRouteReadback) -> None:
+            nonlocal record
             try:
                 _serving(observation, plan, plan.new, clock())
-            except TestingRebuildObservationUnavailable as error:
+            except (TestingRebuildObservationUnavailable, TestingRebuildHealthFailure) as error:
+                assert isinstance(observation, TestingRouteObservation)
+                health = observation.public_health
+                probe = TestingCandidateProbe(
+                    observed_at=observation.observed_at,
+                    state=health.status if health else None,
+                    verified=health.verified if health else None,
+                    runtime_identity_matches=health.observed_runtime_identity
+                    == plan.new.runtime_identity
+                    if health and health.observed_runtime_identity is not None
+                    else None,
+                    http_status=health.http_status
+                    if isinstance(health, TestingPublicHealthEvidence)
+                    else None,
+                    failure_kind=health.failure_kind
+                    if isinstance(health, TestingPublicHealthEvidence)
+                    else None,
+                    reservation_attempt=reservation.attempt if reservation else None,
+                    operation_attempt=operation_attempt,
+                )
+                if isinstance(error, TestingRebuildHealthFailure):
+                    record = record.model_copy(update={"candidate_probe": probe})
+                    raise
                 try:
-                    save(route=observation)
-                except (OSError, SQLAlchemyError):
+                    save(route=observation, candidate_probe=probe)
+                except (OSError, SQLAlchemyError, ValueError):
                     raise error from None
                 raise
+            else:
+                record = record.model_copy(update={"candidate_probe": None})
 
         if record.step in {"complete", "failed"}:
             return record

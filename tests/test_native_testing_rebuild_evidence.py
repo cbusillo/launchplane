@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import asyncio
 import socket
 from typing import Any, cast
@@ -26,6 +26,7 @@ from control_plane.contracts.testing_rebuild import (
     TestingRebuildPlan,
     TestingRebuildRecord,
     TestingRouteObservation,
+    TestingPublicHealthEvidence,
 )
 from control_plane.native_testing_rebuild_evidence import (
     NativeTestingEvidenceStore,
@@ -120,6 +121,16 @@ class NativeTestingEvidenceTests(unittest.TestCase):
         self.rows[(REBUILD_SCOPE, REBUILD_ROUTE, self.operation.operation_id)] = self.reservation
         provider = TestingProvider(self.plan)
         provider.bad_public = True
+        original_switch = provider.switch
+
+        def switch(
+            plan: TestingRebuildPlan, previous: Any, desired: Any, *, reconcile_only: bool
+        ) -> None:
+            if desired == plan.old:
+                provider.now += timedelta(seconds=1)
+            original_switch(plan, previous, desired, reconcile_only=reconcile_only)
+
+        self.enterContext(patch.object(provider, "switch", side_effect=switch))
         self.checkpoint = execute_testing_rebuild(
             self.plan,
             RecordTestingRebuildStore(cast(RebuildRecordStore, cast(object, self.store))),
@@ -169,7 +180,23 @@ class NativeTestingEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.availability, "present")
         self.assertEqual(evidence.state, "fail")
         self.assertTrue(evidence.verified)
-        self.assertEqual(evidence.observed_at, self.checkpoint.route.observed_at)
+        assert self.checkpoint.candidate_probe is not None
+        self.assertEqual(evidence.observed_at, self.checkpoint.candidate_probe.observed_at)
+        assert evidence.observed_at is not None
+        self.assertLess(evidence.observed_at, self.checkpoint.route.observed_at)
+
+    def test_retained_probe_stays_bound_after_worker_reclaim(self) -> None:
+        self.operation = self.operation.model_copy(update={"attempt": self.operation.attempt + 1})
+        self.reservation = self.reservation.model_copy(
+            update={"attempt": self.reservation.attempt + 1}
+        )
+        self.rows[(REBUILD_SCOPE, REBUILD_ROUTE, self.operation.operation_id)] = self.reservation
+        evidence = self.read().terminal_probe
+        self.assertEqual(evidence.availability, "present")
+        self.assertEqual(evidence.binding, "matched")
+        self.assertEqual(evidence.state, "fail")
+        assert self.checkpoint.candidate_probe is not None
+        self.assertEqual(evidence.attempt, self.checkpoint.candidate_probe.reservation_attempt)
 
     def test_candidate_probe_binding_is_independent_of_the_inverse_route(self) -> None:
         probe = self.checkpoint.candidate_probe
@@ -177,10 +204,8 @@ class NativeTestingEvidenceTests(unittest.TestCase):
         key = next(key for key in self.rows if key[0] == REBUILD_CHECKPOINT_SCOPE)
         original = self.rows[key]
         for changes in (
-            {"reservation_id": "foreign"},
             {"reservation_attempt": self.reservation.attempt + 1},
             {"operation_attempt": self.operation.attempt + 1},
-            {"plan_digest": "a" * 64},
         ):
             with self.subTest(changes=changes):
                 checkpoint = self.checkpoint.model_copy(
@@ -205,8 +230,9 @@ class NativeTestingEvidenceTests(unittest.TestCase):
             observation = original_route(plan)
             if observation.slot_id == plan.new.copy_id:
                 assert observation.public_health is not None
-                health = observation.public_health.model_copy(
-                    update={
+                health = TestingPublicHealthEvidence.model_validate(
+                    {
+                        **observation.public_health.model_dump(),
                         "http_status": 503,
                         "urls": (plan.base_url + "/health?token=private-query",),
                         "runtime_identity_detail": "private-body-or-error",

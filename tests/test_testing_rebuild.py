@@ -18,6 +18,7 @@ from control_plane.contracts.testing_rebuild import (
     TestingRebuildRecord,
     TestingRouteObservation,
     TestingPredecessor,
+    TestingPublicHealthEvidence,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
@@ -270,6 +271,34 @@ class TestingRebuildTests(unittest.TestCase):
             self.plan, self.store, self.provider, clock=lambda: self.provider.now
         )
 
+    def test_pending_probe_does_not_override_a_later_successful_completion(self) -> None:
+        original_route = self.provider.current_route
+
+        def current_route(plan: TestingRebuildPlan) -> TestingRouteObservation:
+            route = original_route(plan)
+            if route.slot_id == plan.new.copy_id:
+                return route.model_copy(
+                    update={"public_health": HealthcheckEvidence(status="pending")}
+                )
+            return route
+
+        with (
+            patch.object(self.provider, "current_route", side_effect=current_route),
+            self.assertRaises(TestingRebuildObservationUnavailable),
+        ):
+            self.run_rebuild()
+        pending = self.store.load(self.plan)
+        assert pending.candidate_probe is not None
+        self.assertEqual(pending.candidate_probe.state, "pending")
+        complete = self.run_rebuild()
+        self.assertEqual(complete.step, "complete")
+        self.assertIsNone(complete.candidate_probe)
+        assert (
+            isinstance(complete.route, TestingRouteObservation)
+            and complete.route.public_health is not None
+        )
+        self.assertEqual(complete.route.public_health.status, "pass")
+
     def test_terminal_persistence_failure_keeps_health_cause_and_completed_inverse(self) -> None:
         self.provider.bad_public = True
         original_save = self.store.save
@@ -304,7 +333,7 @@ class TestingRebuildTests(unittest.TestCase):
             if route.slot_id == plan.new.copy_id:
                 return route.model_copy(
                     update={
-                        "public_health": HealthcheckEvidence(
+                        "public_health": TestingPublicHealthEvidence(
                             status="pending", failure_kind="timeout", urls=(plan.base_url,)
                         )
                     }
@@ -319,9 +348,7 @@ class TestingRebuildTests(unittest.TestCase):
         with (
             patch.object(self.provider, "current_route", side_effect=current_route),
             patch.object(self.store, "save", side_effect=save),
-            self.assertRaisesRegex(
-                TestingRebuildObservationUnavailable, "Public health evidence is unavailable"
-            ),
+            self.assertRaises(TestingRebuildObservationUnavailable),
         ):
             self.run_rebuild()
         retained = self.store.load(self.plan)

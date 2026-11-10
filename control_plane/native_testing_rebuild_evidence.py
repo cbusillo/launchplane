@@ -144,11 +144,10 @@ def _terminal_probe(
 ) -> NativeTestingEvidenceItem:
     probe = checkpoint.candidate_probe
     if probe is not None and (
-        probe.plan_digest != checkpoint.plan.digest
-        or probe.observed_at.utcoffset() is None
+        probe.observed_at.utcoffset() is None
         or not checkpoint.began_at <= probe.observed_at <= checkpoint.updated_at
-        or probe.reservation_id != reservation.record_id
-        or probe.operation_attempt != operation.attempt
+        or probe.operation_attempt is None
+        or probe.operation_attempt > operation.attempt
         or probe.reservation_attempt is None
         or probe.reservation_attempt > reservation.attempt
     ):
@@ -212,8 +211,6 @@ def _terminal_probe(
         coverage="checkpoint_probe_only",
         state=health.status,
         observed_at=route.observed_at,
-        http_status=health.http_status,
-        failure_kind=health.failure_kind,
         verified=health.verified,
         runtime_identity_matches=health.observed_runtime_identity
         == checkpoint.plan.new.runtime_identity
