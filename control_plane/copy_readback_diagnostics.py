@@ -26,6 +26,7 @@ class CopyFailureStage(StrEnum):
 
 COPY_FAILURE_STAGE_MARKER = "copy_failure_stage"
 COPY_FAILURE_KIND_MARKER = "copy_failure_kind"
+COPY_COMMAND_FAILURE_KIND = "command_failed"
 COPY_FAILURE_EXIT_MARKER = "copy_failure_exit_status"
 COPY_FAILURE_EVIDENCE_MARKER = "copy_failure_evidence_id"
 COPY_FAILURE_OUTPUT_BYTES = 1024 * 1024
@@ -43,7 +44,7 @@ def copy_failure_evidence_id(value: object) -> str:
 
 def copy_failure_marker_is_safe(key: str, value: str) -> bool:
     if key == COPY_FAILURE_KIND_MARKER:
-        return value in {"command_failed", "refused", "unavailable"}
+        return value in {COPY_COMMAND_FAILURE_KIND, "refused", "unavailable"}
     if key == COPY_FAILURE_STAGE_MARKER:
         return value in CopyFailureStage
     if key == COPY_FAILURE_EVIDENCE_MARKER:
@@ -53,6 +54,24 @@ def copy_failure_marker_is_safe(key: str, value: str) -> bool:
         and re.fullmatch(r"-?[0-9]{1,3}", value) is not None
         and -255 <= int(value) <= 255
         and int(value) != 0
+    )
+
+
+def safe_copy_failure_markers(values: object) -> dict[str, str]:
+    if not isinstance(values, Mapping):
+        return {}
+    return {
+        key: value
+        for key, value in values.items()
+        if isinstance(key, str)
+        and isinstance(value, str)
+        and copy_failure_marker_is_safe(key, value)
+    }
+
+
+def copy_failure_receipt(values: object) -> str:
+    return "".join(
+        f":{key}={value}" for key, value in sorted(safe_copy_failure_markers(values).items())
     )
 
 
@@ -74,6 +93,7 @@ def copy_failure_diagnostics_library() -> str:
         + f"\nCOPY_FAILURE_STAGES = {tuple(stage.value for stage in CopyFailureStage)!r}\n"
         + f"COPY_FAILURE_STAGE_MARKER = {COPY_FAILURE_STAGE_MARKER!r}\n"
         + f"COPY_FAILURE_KIND_MARKER = {COPY_FAILURE_KIND_MARKER!r}\n"
+        + f"COPY_COMMAND_FAILURE_KIND = {COPY_COMMAND_FAILURE_KIND!r}\n"
         + f"COPY_FAILURE_EXIT_MARKER = {COPY_FAILURE_EXIT_MARKER!r}\n"
         + f"COPY_FAILURE_EVIDENCE_MARKER = {COPY_FAILURE_EVIDENCE_MARKER!r}\n"
         + f"COPY_FAILURE_OUTPUT_BYTES = {COPY_FAILURE_OUTPUT_BYTES!r}\n"
@@ -166,13 +186,17 @@ def copy_failure_cause(error: Exception) -> Exception:
         stage = command.copy_command_stage
         identity = retain_copy_command_failure(result, stage, command.copy_command_spec) if command.copy_command_private else 'unavailable'
         command.copy_failure_markers = {COPY_FAILURE_STAGE_MARKER: stage,
-            COPY_FAILURE_KIND_MARKER: 'command_failed', COPY_FAILURE_EXIT_MARKER: str(result.returncode),
+            COPY_FAILURE_KIND_MARKER: COPY_COMMAND_FAILURE_KIND, COPY_FAILURE_EXIT_MARKER: str(result.returncode),
             COPY_FAILURE_EVIDENCE_MARKER: identity}
         del command.copy_command_result, command.copy_command_spec
     if hasattr(command, 'copy_failure_markers'):
         error.copy_failure_markers = command.copy_failure_markers
         setattr(error, COPY_FAILURE_EVIDENCE_MARKER, command.copy_failure_markers[COPY_FAILURE_EVIDENCE_MARKER])
     return error
+
+
+def copy_failure_frame_markers(error: Exception) -> dict[str, str]:
+    return getattr(copy_failure_cause(error), 'copy_failure_markers', {})
 
 
 def emit_copy_failure(error: Exception) -> None:

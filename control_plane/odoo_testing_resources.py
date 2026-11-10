@@ -1,10 +1,15 @@
 """Provision new local Docker volumes without adopting or changing existing data."""
 
+import inspect
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.copy_readback_diagnostics import (
+    CopyReadbackRefused,
+    copy_failure_diagnostics_library,
+)
 
 
 TESTING_RESOURCES_INCOMPLETE_MARKER = "testing_resources_incomplete"
@@ -125,6 +130,8 @@ def resource_readback_passes(evidence: dict[str, str], resources: OdooTestingRes
 # it never deletes a volume to make a retry pass.
 ODOO_TESTING_RESOURCE_PROGRAM = (
     f"INCOMPLETE_MARKER = {TESTING_RESOURCES_INCOMPLETE_MARKER!r}\n"
+    + copy_failure_diagnostics_library()
+    + inspect.getsource(CopyReadbackRefused)
     + r"""
 import base64
 import hashlib
@@ -140,7 +147,9 @@ def docker(*arguments):
         ["docker", *arguments], check=False, capture_output=True, text=True
     )
     if result.returncode:
-        raise RuntimeError("Docker resource inspection or preparation failed")
+        raise copy_command_failure(RuntimeError("Docker resource inspection or preparation failed"),
+            subprocess.CompletedProcess(result.args, result.returncode, result.stdout.encode(), result.stderr.encode()),
+            globals().get("spec", {}))
     return result.stdout
 
 
@@ -152,6 +161,7 @@ def inspect_volume(name):
 
 
 def main():
+    global spec
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     namespace = spec["namespace"]
     rehearsal = spec.get("resource_kind") == "odoo-upgrade-rehearsal"
@@ -273,8 +283,8 @@ def main():
 
 try:
     main()
-except Exception:
-    # Docker output and paths can contain private state; never forward exceptions.
+except Exception as error:
+    emit_copy_failure(error)
     print("testing_resources_ok=false")
     sys.exit(1)
 """

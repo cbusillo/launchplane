@@ -120,8 +120,8 @@ def docker(*arguments, stdin=None):
         if docker_daemon_authorization_denied(result.stderr):
             raise PermissionError('Candidate runtime refused the operation')
         if inspection_predicate == ReadbackPredicate.CANDIDATE_READINESS and result.stdout.splitlines() == [b'candidate_private_readiness_ok=false']:
-            raise CopyReadbackRefused(ReadbackPredicate.CANDIDATE_READINESS)
-        raise RuntimeError('Candidate runtime readback failed')
+            raise copy_command_failure(CopyReadbackRefused(ReadbackPredicate.CANDIDATE_READINESS), result, spec)
+        raise copy_command_failure(RuntimeError('Candidate runtime readback failed'), result, spec)
     return result.stdout
 
 def one_inspection(identifier):

@@ -99,8 +99,18 @@ remain until the normal supported recovery proves their resolution.
     upstream response text and API paths. Missing evidence
     leaves the lane unchanged with a recorded reason.
   - If testing already runs the desired artifact, stop unless its declared
-    application testing inputs or product qualification need the existing
-    deployment path again, as described below.
+    application testing inputs, product qualification or native Odoo worker route
+    need the existing deployment path again, as described below.
+  - A published native Odoo copy's owned route is observed from its current
+    immutable publication, runtime identity and running worker mode. An exact
+    matching route, including threaded HTTP, needs no deploy. A missing evented
+    overlay or an obsolete overlay queues the ordinary existing-data testing
+    deployment under the reconciler's existing authority. It pins the current
+    inventory artifact and refuses empty-data initialization. This uses the
+    existing artifact attempt chain and failed-attempt budget; active or uncertain
+    originals and staff holds still stop delivery. Unavailable route evidence or
+    changed publication, target or resource custody waits with
+    `testing_runtime_unverified`. The observation writes no provider state.
   - Odoo existing-data reconciliation waits with `testing_restore_required` if
     this target's latest attempted restore lacks completion proof. A later failed
     maintenance deploy or a newer artifact cannot repair that missing data.
@@ -123,7 +133,7 @@ remain until the normal supported recovery proves their resolution.
     the artifact id, so a crashed or repeated reconcile can't queue it twice.
   - An active attempt (including one awaiting provider reconciliation) is
     reported, never bypassed. When the last attempt ended (failed, cancelled,
-    or passed but rolled back) and testing still differs, the next attempt's
+    or passed but testing's artifact or native route now differs), the next attempt's
     key names the attempt before it. A testing replacement retains its original
     execution failure and deployment record separately from a provider-recovery
     disposition. Recovery cancellation after observed provider quiescence does not

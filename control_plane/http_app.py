@@ -7420,9 +7420,14 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
-        from control_plane.contracts.preview_fixture import PreviewFixtureRequest
+        from control_plane.contracts.preview_fixture import (
+            PreviewFixtureRequest,
+            PreviewPartsImportRequest,
+        )
 
-        if isinstance(maintenance_request.maintenance, PreviewFixtureRequest):
+        if isinstance(
+            maintenance_request.maintenance, (PreviewFixtureRequest, PreviewPartsImportRequest)
+        ):
             from control_plane.preview_fixture import PreviewFixtureAdapter
             from control_plane.contracts.preview_execution import preview_execution_lock_name
             from control_plane.http_routes.support import run_in_worker_thread
@@ -7442,7 +7447,7 @@ def create_launchplane_fastapi_app(
                     status_code=403,
                     trace_id=trace_id,
                     code="authorization_denied",
-                    message="The caller cannot apply a fixture to this product preview.",
+                    message="The caller cannot maintain this product preview.",
                 )
             fixture_store = require_provider_operation_store(
                 record_store=record_store, trace_id=trace_id
@@ -7453,9 +7458,16 @@ def create_launchplane_fastapi_app(
                     status_code=400,
                     trace_id=trace_id,
                     code="idempotency_key_required",
-                    message="Fixture apply requires a bounded Idempotency-Key.",
+                    message="Preview maintenance apply requires a bounded Idempotency-Key.",
                 )
-            adapter = PreviewFixtureAdapter(
+            from control_plane.preview_parts_import import PreviewPartsImportAdapter
+
+            adapter_type = (
+                PreviewPartsImportAdapter
+                if isinstance(fixture, PreviewPartsImportRequest)
+                else PreviewFixtureAdapter
+            )
+            adapter = adapter_type(
                 fixture_store,
                 resolved_control_plane_root,
                 maintenance_request.product,
@@ -7515,8 +7527,10 @@ def create_launchplane_fastapi_app(
                         result=result,
                         trace_id=trace_id,
                         route_path=_ODOO_APP_MAINTENANCE_ROUTE,
-                        in_progress_message="The original fixture operation is running.",
-                        reconcile_message="Read back the original fixture operation before retrying.",
+                        in_progress_message="The original preview maintenance operation is running.",
+                        reconcile_message="Repeat the original apply request, saved review and key to recover this import."
+                        if isinstance(fixture, PreviewPartsImportRequest)
+                        else "Read back the original preview maintenance operation before retrying.",
                     )
 
             try:
@@ -7529,9 +7543,13 @@ def create_launchplane_fastapi_app(
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
-                    code="preview_fixture_unavailable",
+                    code="preview_import_unavailable"
+                    if isinstance(fixture, PreviewPartsImportRequest)
+                    else "preview_fixture_unavailable",
                     reason=adapter.failure_reason,
-                    message="The fixture or its preview evidence is unavailable; inspect the original operation.",
+                    message="Preview import evidence is unavailable; preserve its original apply request, review and key."
+                    if isinstance(fixture, PreviewPartsImportRequest)
+                    else "Preview maintenance evidence is unavailable; inspect the original operation.",
                 ) from error
         try:
             product_profile = resolve_odoo_app_maintenance_product_route(
@@ -26685,6 +26703,12 @@ def create_launchplane_fastapi_app(
         lane_owner = _lane_setup_context_owner(
             record_store=database_store, context=setup_request.context
         )
+        authorization_mode = (
+            "apply"
+            if setup_request.mode == "dry-run"
+            and setup_request.operation in {"create-compose", "create-application"}
+            else setup_request.mode
+        )
         native_onboarding = setup_request.onboarding is not None and (
             isinstance(identity, GitHubHumanIdentity) or director_agent_identity(identity)
         )
@@ -26694,7 +26718,7 @@ def create_launchplane_fastapi_app(
             product=setup_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
-        if isinstance(identity, TerminalAgentIdentity) and setup_request.mode == "apply":
+        if isinstance(identity, TerminalAgentIdentity) and authorization_mode == "apply":
             service_scoped = False
         disposable_rebuild_setup = (
             director_agent_identity(identity)
@@ -26703,7 +26727,7 @@ def create_launchplane_fastapi_app(
         )
         first_testing_setup = (
             director_agent_identity(identity)
-            and setup_request.mode == "apply"
+            and authorization_mode == "apply"
             and setup_request.operation in {"create-compose", "create-application"}
             and setup_request.instance == "testing"
             and not setup_request.replaces_operation_id
@@ -26711,7 +26735,7 @@ def create_launchplane_fastapi_app(
         )
         first_production_setup = (
             director_agent_identity(identity)
-            and setup_request.mode == "apply"
+            and authorization_mode == "apply"
             and setup_request.operation == "create-compose"
             and setup_request.instance == "prod"
             and bool(lane_owner)
@@ -26725,14 +26749,14 @@ def create_launchplane_fastapi_app(
         )
         director_testing_domain = (
             director_agent_identity(identity)
-            and setup_request.mode == "apply"
+            and authorization_mode == "apply"
             and setup_request.operation == "reconcile-compose-domain"
             and setup_request.instance == "testing"
             and bool(lane_owner)
         )
         if (
             isinstance(identity, TerminalAgentIdentity)
-            and setup_request.mode == "apply"
+            and authorization_mode == "apply"
             and not disposable_rebuild_setup
             and not first_testing_setup
             and not first_production_setup
@@ -26797,7 +26821,7 @@ def create_launchplane_fastapi_app(
                 context=_LAUNCHPLANE_SERVICE_CONTEXT,
             )
         )
-        can_plan_target = setup_request.mode != "apply" and (
+        can_plan_target = authorization_mode != "apply" and (
             can_setup_target
             or resolved_authz_policy_runtime.allows(
                 identity=identity,
@@ -26810,7 +26834,7 @@ def create_launchplane_fastapi_app(
         if setup_request.operation == "repair-domain-authority":
             authorized = (
                 can_repair_domain_authority
-                if setup_request.mode == "apply"
+                if authorization_mode == "apply"
                 else (
                     can_repair_domain_authority
                     or resolved_authz_policy_runtime.allows(
@@ -26823,8 +26847,8 @@ def create_launchplane_fastapi_app(
                 )
             )
         else:
-            authorized = can_setup_target if setup_request.mode == "apply" else can_plan_target
-        role_only_setup = not authorized and setup_request.mode != "apply" and bool(lane_owner)
+            authorized = can_setup_target if authorization_mode == "apply" else can_plan_target
+        role_only_setup = not authorized and authorization_mode != "apply" and bool(lane_owner)
         if role_only_setup:
             authorized = resolved_authz_policy_runtime.allows(
                 identity=identity,
@@ -26918,7 +26942,7 @@ def create_launchplane_fastapi_app(
             and setup_request.instance == "prod"
             and setup_request.project_name
             and not setup_request.environment_id
-            and setup_request.mode in {"apply", "readback"}
+            and setup_request.mode in {"dry-run", "apply", "readback"}
             and director_agent_identity(identity)
             and lane_owner
             and (
@@ -26941,55 +26965,68 @@ def create_launchplane_fastapi_app(
                 trace_id,
             )
             try:
-                if not idempotency_key.strip():
-                    raise ValueError("Original target setup key is required.")
-                prior = database_store.read_idempotency_record(
-                    scope=idempotency_scope(identity),
-                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
-                    idempotency_key=idempotency_key.strip(),
-                )
-                if (
-                    prior is not None
-                    and not prior.reconciliation_key
-                    and setup_request.mode == "apply"
-                ):
-                    _, _, legacy_replay = await replay_apply_idempotency(
-                        request=request,
-                        record_store=database_store,
-                        identity=identity,
-                        route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
-                        idempotency_key=idempotency_key,
-                        trace_id=trace_id,
-                        check_replay=True,
-                    )
-                    if legacy_replay is not None:
-                        return legacy_replay
-                if setup_request.mode == "readback":
-                    return accepted_evidence_response(
-                        trace_id=trace_id, records={}, result=compose_adapter.readback()
-                    )
-
-                def compose_operation(store: PostgresRecordStore) -> DurableProviderOperationResult:
-                    return run_durable_provider_operation(
-                        store=store,
+                if setup_request.mode == "dry-run":
+                    if (
+                        setup_request.retained_compose_setup is not None
+                        or setup_request.expected_compose_recovery_sha256
+                    ):
+                        raise ValueError(
+                            "Review original-operation recovery through mode=readback."
+                        )
+                    compose_adapter.checkpoint()
+                    compose_adapter.placement({})
+                else:
+                    if not idempotency_key.strip():
+                        raise ValueError("Original target setup key is required.")
+                    prior = database_store.read_idempotency_record(
                         scope=idempotency_scope(identity),
                         route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
                         idempotency_key=idempotency_key.strip(),
-                        request_fingerprint=compose_adapter.reconciliation_key(),
-                        lease_owner=trace_id,
-                        response_trace_id=trace_id,
-                        adapter=compose_adapter,
-                        original_intent=compose_adapter.intent(),
                     )
+                    if (
+                        prior is not None
+                        and not prior.reconciliation_key
+                        and setup_request.mode == "apply"
+                    ):
+                        _, _, legacy_replay = await replay_apply_idempotency(
+                            request=request,
+                            record_store=database_store,
+                            identity=identity,
+                            route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                            idempotency_key=idempotency_key,
+                            trace_id=trace_id,
+                            check_replay=True,
+                        )
+                        if legacy_replay is not None:
+                            return legacy_replay
+                    if setup_request.mode == "readback":
+                        return accepted_evidence_response(
+                            trace_id=trace_id, records={}, result=compose_adapter.readback()
+                        )
 
-                return await run_provider_operation_http(
-                    record_store=database_store,
-                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
-                    trace_id=trace_id,
-                    operation=compose_operation,
-                    in_progress_message="Original target setup is running.",
-                    reconcile_message="Target creation may have partial effects. Preserve the original request and key; inspect readback before recovery.",
-                )
+                    def compose_operation(
+                        store: PostgresRecordStore,
+                    ) -> DurableProviderOperationResult:
+                        return run_durable_provider_operation(
+                            store=store,
+                            scope=idempotency_scope(identity),
+                            route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                            idempotency_key=idempotency_key.strip(),
+                            request_fingerprint=compose_adapter.reconciliation_key(),
+                            lease_owner=trace_id,
+                            response_trace_id=trace_id,
+                            adapter=compose_adapter,
+                            original_intent=compose_adapter.intent(),
+                        )
+
+                    return await run_provider_operation_http(
+                        record_store=database_store,
+                        route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                        trace_id=trace_id,
+                        operation=compose_operation,
+                        in_progress_message="Original target setup is running.",
+                        reconcile_message="Target creation may have partial effects. Preserve the original request and key; inspect readback before recovery.",
+                    )
             except BridgeNetworkCapacityRefused as error:
                 raise _launchplane_http_error(
                     status_code=409, trace_id=trace_id, code=error.code, message=str(error)
@@ -27142,7 +27179,7 @@ def create_launchplane_fastapi_app(
                     database_store, setup_request, product=lane_owner
                 )
                 return
-            if not disposable_rebuild_setup or setup_request.mode != "apply":
+            if not disposable_rebuild_setup or setup_request.mode not in {"dry-run", "apply"}:
                 return
             operation = database_store.read_odoo_stable_target_replacement_operation_record(
                 setup_request.replaces_operation_id
@@ -27192,12 +27229,18 @@ def create_launchplane_fastapi_app(
             execution_request = named_application_request(setup_request, ordinary_preview)
         try:
             rebuild_checkpoint()
+            if first_production_setup and setup_request.mode == "dry-run":
+                require_empty_owned_environment(
+                    database_store,
+                    setup_request,
+                    control_plane_root_path=resolved_control_plane_root,
+                )
             # Replacing a testing target holds the lock its event deploys run under.
             replacement_lock = (
                 first_testing_replacement_lock_name(database_store, setup_request)
                 if first_testing_setup
                 else first_production_target_lock_name(setup_request.context)
-                if first_production_setup
+                if first_production_setup and setup_request.mode == "apply"
                 else None
             )
             lock = (

@@ -972,6 +972,8 @@ def restore_main():
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     inspection_only = bool(spec.get('inspection_only'))
     gen = spec["generation"]
+    if gen.get('migrated_source') is not None and spec.get('native_capture') is not None:
+        spec['native_capture']['source_observation'] = gen['migrated_source']
     namespace = gen["namespace"]
     project = spec["compose_project"]
     database = spec["database_name"]

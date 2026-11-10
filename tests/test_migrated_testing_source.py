@@ -7,6 +7,12 @@ if TYPE_CHECKING:
 
 from pydantic import ValidationError
 
+from control_plane.copy_readback_diagnostics import (
+    COPY_FAILURE_KIND_MARKER,
+    COPY_FAILURE_EXIT_MARKER,
+    COPY_COMMAND_FAILURE_KIND,
+)
+
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
 )
@@ -592,6 +598,20 @@ class MigratedStreamTests(unittest.TestCase):
             self.assertTrue(partial.exists(), (interrupted.stdout, interrupted.stderr))
             self.assertEqual(partial.read_bytes(), data[:65536])
             self.assertIn(b'"type": "failed"', interrupted.stdout)
+            failed = json.loads(interrupted.stdout.splitlines()[-1].removeprefix(b"FRAME:"))
+            self.assertNotIn(COPY_FAILURE_KIND_MARKER, failed)
+            from control_plane.dokploy import native_copy_stream as transport
+            from tests.test_odoo_testing_native_source import Connection
+
+            with self.assertRaises(transport.NativeProgramFailed) as raised:
+                transport._read_program(
+                    connection=Connection(failed),
+                    program=NATIVE_TESTING_STREAM_WRITE_PROGRAM,
+                    payload=spec,
+                    timeout_seconds=5,
+                    receive=lambda _frame: None,
+                )
+            self.assertFalse(raised.exception.has_diagnostic)
             rest = b"".join(
                 base64.b64encode(data[index : index + 65536]) + b"\n"
                 for index in range(65536, len(data), 65536)
@@ -605,6 +625,21 @@ class MigratedStreamTests(unittest.TestCase):
             self.assertEqual(frames[0]["offset"], 65536)
             self.assertEqual(frames[-1], {"type": "complete", **artifact})
             self.assertEqual(partial.with_suffix("").read_bytes(), data)
+            docker.write_text(
+                "#!"
+                + sys.executable
+                + "\nimport hashlib,json,sys\nprint(json.dumps({'offset':0,'prefix_sha256':hashlib.sha256(b'').hexdigest()}),flush=True)\nsys.exit(7)\n"
+            )
+            content = b"".join(
+                base64.b64encode(data[index : index + 65536]) + b"\n"
+                for index in range(0, len(data), 65536)
+            )
+            dead_receiver = subprocess.run(
+                command, input=content, capture_output=True, env=env, timeout=15
+            )
+            terminal = json.loads(dead_receiver.stdout.splitlines()[-1].removeprefix(b"FRAME:"))
+            self.assertEqual(terminal[COPY_FAILURE_KIND_MARKER], COPY_COMMAND_FAILURE_KIND)
+            self.assertEqual(terminal[COPY_FAILURE_EXIT_MARKER], "7")
 
 
 class MigratedUploadRouteTests(unittest.IsolatedAsyncioTestCase):

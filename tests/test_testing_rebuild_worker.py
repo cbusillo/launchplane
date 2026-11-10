@@ -2290,14 +2290,28 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
     def test_transient_initial_route_capture_keeps_the_admitted_worker_pending(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeProgramFailed
-        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+        from control_plane.copy_readback_diagnostics import (
+            ReadbackPredicate,
+            CopyFailureStage,
+            COPY_FAILURE_STAGE_MARKER,
+            COPY_FAILURE_KIND_MARKER,
+            COPY_COMMAND_FAILURE_KIND,
+            COPY_FAILURE_EXIT_MARKER,
+        )
 
         self.operation = self.operation.model_copy(
             update={"operation_id": "fresh-transient-capture"}
         )
         self.capture.side_effect = self.capture_function
         cause = NativeProgramFailed(
-            "private-value", predicate=ReadbackPredicate.CUSTODY, kind="refused"
+            "private-value",
+            predicate=ReadbackPredicate.CUSTODY,
+            kind="refused",
+            failure_markers={
+                COPY_FAILURE_STAGE_MARKER: CopyFailureStage.HOST_PREPARATION.value,
+                COPY_FAILURE_KIND_MARKER: COPY_COMMAND_FAILURE_KIND,
+                COPY_FAILURE_EXIT_MARKER: "7",
+            },
         )
         with patch.object(
             DokployTestingRouteTransport,
@@ -2306,7 +2320,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         ):
             with self.assertRaises(service.NativeTestingRebuildPending) as caught:
                 self.execute()
-            self.assertIn(cause.code, str(caught.exception))
+            self.assertIn(cause.diagnostic_code, str(caught.exception))
             self.assertNotIn("private-value", str(caught.exception))
         self.capture.assert_called_once()
         self.assertEqual(self.effects, [])
