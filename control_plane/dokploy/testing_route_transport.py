@@ -17,6 +17,7 @@ import yaml
 from control_plane.contracts.runtime_identity import RuntimeIdentity, parse_runtime_identity_payload
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.dokploy.compose import TESTING_CONNECTION_CSP
+from control_plane.preview_gateway import PREVIEW_EVENTED_PORT
 from control_plane.dokploy.testing_route_execution import (
     ALLOCATE_TESTING_ROUTE_LOCK,
     FENCED_TESTING_ROUTE_WRITER,
@@ -41,9 +42,10 @@ from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
     observe_testing_route,
-    route_document,
     route_document_content,
     route_document_digest,
+    route_document_variants,
+    route_content_variants,
     redirects_to_https,
     select_testing_route_raw,
     canonical_acme_challenge,
@@ -53,6 +55,7 @@ from control_plane.dokploy.testing_route import (
     testing_route_https_redirect,
     amend_testing_route_address,
     possible_lane_routers,
+    testing_worker_route_template,
 )
 from control_plane.dokploy.testing_address_recipients import (
     qualify_testing_address_recipients,
@@ -96,7 +99,9 @@ def testing_route_host_program() -> str:
     """The emitted host program uses the same conservative rule evaluator."""
     return (
         "import base64,hashlib,json,os,re,subprocess,sys\nfrom typing import Any\n"
-        "from urllib.parse import urlsplit\n"
+        "from urllib.parse import urlsplit\nfrom copy import deepcopy\n"
+        + f"PREVIEW_EVENTED_PORT={PREVIEW_EVENTED_PORT!r}\n"
+        + inspect.getsource(testing_worker_route_template)
         + retained_application_inventory_header()
         + inspect.getsource(host_rule_may_match)
         + "\n"
@@ -582,6 +587,17 @@ def main(spec):
                 if any(item['Id']!=old[0]['Id'] and alias.casefold() in proxy_dns_names(item,proxy_networks) for item in containers):
                     raise RuntimeError('Retained testing alias is shared')
                 endpoints.append('http://'+alias+':'+port)
+    backend_workers={}
+    for item in containers:
+        labels=item.get('Config',{}).get('Labels') or {}
+        environment=dict(value.split('=',1) for value in item.get('Config',{}).get('Env',[]) if '=' in value)
+        workers=environment.get('ODOO_WORKERS')
+        if labels.get('com.docker.compose.service')=='web' and item.get('State',{}).get('Status')=='running' and environment.get('PLATFORM_INSTANCE')=='testing' and workers is not None:
+            if not workers.isdigit():
+                continue
+            port=environment.get('ODOO_HTTP_PORT') or '8069'
+            for backend_name in proxy_dns_names(item,proxy_networks):
+                backend_workers['http://'+backend_name+':'+port]=int(workers)
     if spec['mode']=='publish_v2':
         custody_matches=same_physical_root(spec['execution_custody'],custody)
         if not custody_matches or not re.fullmatch(r'[a-f0-9]{64}',spec['execution_key']):
@@ -640,7 +656,13 @@ def main(spec):
             outcome=fenced_call(proxy['Id'],spec,custody,'publish',document).strip()
             return {'type':'complete','execution_key':spec['execution_key'],'document_sha256':desired_digest,'execution_custody':custody,'writer_outcome':outcome}
         document=spec['document']
-        http=document.get('http',{})
+        evented=spec['route_id']+'-websocket' in document.get('http',{}).get('services',{})
+        if evented and not backend_workers.get(spec['desired_backend']):
+            raise RuntimeError('The testing evented route has no observed multiworker process')
+        base=testing_worker_route_template(document,spec['route_id'],enabled=False)
+        if document!=testing_worker_route_template(base,spec['route_id'],enabled=evented):
+            raise RuntimeError('The testing evented route differs from its owned HTTP route')
+        http=base.get('http',{})
         if set(document)!={'http'} or set(http)-{'routers','services','middlewares'} or set(http.get('services',{}))!={spec['route_id']}:
             raise RuntimeError('Testing publication contains another route or service')
         for router_name,item in http.get('routers',{}).items():
@@ -672,7 +694,7 @@ def main(spec):
         return {'type':'complete','execution_key':spec['execution_key'],'document_sha256':hashlib.sha256(document).hexdigest(),'execution_custody':custody,'writer_outcome':outcome}
     elif spec['mode']!='read':
         raise RuntimeError('Unsupported testing route operation')
-    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity,'old_availability':old_availability,'old_inventory_sha256':old_inventory_sha256,'old_web_process':old_web_process,'old_service_id':old_service_id,'old_task_template_sha256':old_task_template_sha256,'execution_custody':custody,'execution_fence':read_fence(proxy['Id'],name,filesystem), 'application_file':application_file,'application_file_name':application_file_name if application_file is not None else '', 'application_file_sha256':application_file_sha256,'address_recipients_sha256':recipient_sha256}
+    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity,'backend_workers':backend_workers,'old_availability':old_availability,'old_inventory_sha256':old_inventory_sha256,'old_web_process':old_web_process,'old_service_id':old_service_id,'old_task_template_sha256':old_task_template_sha256,'execution_custody':custody,'execution_fence':read_fence(proxy['Id'],name,filesystem), 'application_file':application_file,'application_file_name':application_file_name if application_file is not None else '', 'application_file_sha256':application_file_sha256,'address_recipients_sha256':recipient_sha256}
 
 if __name__=='__main__':
     payload={}
@@ -870,7 +892,9 @@ class DokployTestingRouteTransport:
             route_id=plan.route_id,
             route_digest=plan.digest,
             backend=backend,
-            document_sha256=route_document_digest(document_plan, backend),
+            document_sha256=route_document_digest(
+                document_plan, backend, evented=bool(frame["backend_workers"].get(backend))
+            ),
             custody=TestingRouteExecutionCustody.model_validate(frame["execution_custody"]),
         )
 
@@ -1047,9 +1071,15 @@ class DokployTestingRouteTransport:
             self.public_aliases,
         ) or expected_backend not in {plan.old_backend, plan.new_backend}:
             raise ValueError("Testing route publication crossed its admitted lane or copy.")
-        if plan.address_only != (address_preimage is not None):
+        same_copy = backend == expected_backend == plan.new_backend and address_preimage is None
+        if not same_copy and plan.address_only != (address_preimage is not None):
             raise ValueError("An address-only publication needs its original route preimage.")
-        if plan.address_only and not address_inverse and "address_recipients" not in self.payload:
+        if (
+            plan.address_only
+            and not same_copy
+            and not address_inverse
+            and "address_recipients" not in self.payload
+        ):
             raise ValueError("An address amendment requires its retained recipient qualification.")
         if address_preimage is not None and plan != amend_testing_route_address(
             address_preimage, plan.host
@@ -1072,6 +1102,12 @@ class DokployTestingRouteTransport:
             "testing",
         ):
             raise ValueError("The desired testing runtime belongs to another lane.")
+        evented = (
+            execution.document_sha256 != route_document_digest(document_plan, backend)
+            and execution.document_sha256
+            == route_document_digest(document_plan, backend, evented=True)
+            and backend is not None
+        )
         if (
             execution.server_id,
             execution.route_id,
@@ -1083,7 +1119,7 @@ class DokployTestingRouteTransport:
             plan.route_id,
             plan.digest,
             backend,
-            route_document_digest(document_plan, backend),
+            route_document_digest(document_plan, backend, evented=evented),
         ):
             raise ValueError("The original route execution intent changed.")
         if writer_attempt.execution != execution or writer_attempt.key != execution_key:
@@ -1091,12 +1127,14 @@ class DokployTestingRouteTransport:
         frame = self.read()
         if (
             plan.unavailable_preimage is not None
+            and not same_copy
             and backend is not None
             and not self.unavailable_predecessor_matches(frame)
         ):
             raise TestingRouteWriteNotStarted("The predecessor changed before the forward write.")
         if (
             plan.unavailable_preimage is not None
+            and not same_copy
             and backend is not None
             and testing_route_static_sha256(frame["static_configuration"], plan.template)
             != plan.unavailable_preimage.static_sha256
@@ -1111,22 +1149,24 @@ class DokployTestingRouteTransport:
         owned = None if frame["owned_file"] is None else json.loads(frame["owned_file"])
         if frame["owned_file"] is not None and not isinstance(owned, dict):
             raise ValueError("Testing route file is not an owned document.")
-        content = route_document_content(document_plan, backend)
+        if evented and not frame["backend_workers"].get(backend):
+            raise ValueError("The current testing Odoo worker mode changed.")
+        content = route_document_content(document_plan, backend, evented=evented)
         intended = json.loads(content) if content is not None else None
         if address_inverse:
-            if owned not in (intended, route_document(plan, backend)):
+            if owned not in (intended, *route_document_variants(plan, backend)):
                 raise ValueError("An address inverse cannot replace another route's document.")
         elif backend is None and plan.unavailable_preimage is not None:
-            if frame["owned_file"] not in {
+            if frame["owned_file"] not in (
                 content,
-                route_document_content(plan, plan.new_backend),
-            }:
+                *route_content_variants(plan, plan.new_backend),
+            ):
                 raise ValueError("The inverse cannot overwrite a foreign testing route file.")
         else:
             admitted = (
                 address_preimage
                 if address_preimage is not None
-                and owned == route_document(address_preimage, address_preimage.new_backend)
+                and owned in route_document_variants(address_preimage, address_preimage.new_backend)
                 else plan
             )
             if admitted is address_preimage and possible_lane_routers(
@@ -1138,8 +1178,9 @@ class DokployTestingRouteTransport:
                 raise ValueError("Testing route no longer identifies its admitted previous copy.")
         if (backend is not None and owned == intended) or frame["owned_file"] == content:
             return "applied"
-        if plan.unavailable_preimage is None and (
-            plan.old_backend not in frame["old_endpoints"]
+        retained_backend = expected_backend if backend == expected_backend else plan.old_backend
+        if (same_copy or plan.unavailable_preimage is None) and (
+            retained_backend not in frame["old_endpoints"]
             or parse_runtime_identity_payload(frame.get("old_identity")) is None
         ):
             raise ValueError("Testing route no longer identifies its retained physical copy.")
@@ -1190,7 +1231,7 @@ class DokployTestingRouteTransport:
                 "preimage_content": plan.unavailable_preimage.file_content
                 if plan.unavailable_preimage
                 else None,
-                "retained_backend": plan.old_backend,
+                "retained_backend": retained_backend,
                 "desired_backend": backend,
                 "desired_compose_project": desired_compose_project,
                 "allowed_backends": [plan.old_backend, plan.new_backend],
