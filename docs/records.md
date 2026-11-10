@@ -1213,9 +1213,24 @@ Stable-lane health policy and monitoring-intent changes use
 `POST /v1/product-profiles/health-monitoring/apply`. The request identifies one
 exact product/context/instance lane and one health-check name, then supplies the
 desired `monitoring_intent`, `public_http` or `private_http` kind, enabled state,
-and runtime-identity requirement. Public checks cannot carry endpoint URLs;
-Launchplane preserves any existing public-check URL or derives it from lane-owned
-`health_url`/`base_url`. Private checks carry only a registered
+and runtime-identity requirement. Omitting `public_url` (or supplying null)
+preserves an existing public-check URL or derives it from lane-owned
+`health_url`/`base_url`. An explicit `public_url` selects a credential-free public
+HTTPS endpoint on port 443. Its hostname must match the lane's base/health host
+or its production tracked target's existing `public_hosts` intent. Origin
+domains, pending public-host effects and another lane's intent cannot qualify a
+business hostname. Selection does not create intent, ingress routes, DNS records
+or certificates. The ordinary public-only outbound policy still validates every
+resolved address and redirect; normal TLS and strict runtime identity remain in force.
+
+Only explicit selection returns `current_resolved_url` alongside the desired
+`resolved_url`. The current URL is the existing selected check URL or its lane
+fallback, also for a new check. The reviewed plan binds the complete profile and,
+when used, the complete tracked target; apply compares both in the existing
+atomic profile writer. Default terminal/workflow responses retain their old
+shape. Install a compatible sanitized caller before using endpoint selection:
+its review, preflight and readback must distinguish current from desired URLs.
+Private checks carry only a registered
 `private_endpoint_key`; apply validates that the record is active and belongs to
 the exact product/context/instance without returning or logging its internal URL.
 Public requests can supply `expected_dns_targets` for hosts already probed by
@@ -1225,7 +1240,7 @@ to its reviewed digest. Legacy callers omitting the field retain their existing
 response shape. Deploy compatible readers before enrolling expectations, and
 retain a reader-capable rollback while records contain the added evidence; this
 source change does not enroll real products or authorize production writes.
-The request cannot carry a replacement domain, provider target, proxy record,
+The request cannot carry domain ownership, a provider target, proxy record,
 certificate reference, or replacement product profile. Enabling strict public runtime
 identity requires an HTTPS host already owned by that lane. Dry-run returns a
 canonical plan bound to the complete current profile; apply requires the reviewed

@@ -6,6 +6,7 @@ from typing import cast
 from pydantic import ValidationError
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.product_health_monitoring import (
     ProductHealthMonitoringApplyRequest,
     ProductHealthMonitoringCheckKindError,
@@ -79,6 +80,131 @@ def _request(
 
 
 class ProductHealthMonitoringTests(unittest.TestCase):
+    # noinspection HttpUrlsUsage
+    def test_public_url_rejects_private_destinations_and_nonpublic_request_shapes(self) -> None:
+        for url in (
+            "",
+            "http://business.example.com/health",
+            "https://127.0.0.1/health",
+            "https://8.8.8.8/health",
+            "https://localhost/health",
+            "https://user:password@business.example.com/health",
+            "https://business.example.com:8443/health",
+            "https://business.example.com/health#token",
+        ):
+            with self.subTest(url=url), self.assertRaises(ValidationError):
+                ProductHealthMonitoringApplyRequest.model_validate(
+                    {
+                        **_request().model_dump(),
+                        "public_url": url,
+                    }
+                )
+        with self.assertRaises(ValidationError):
+            ProductHealthMonitoringApplyRequest.model_validate(
+                {
+                    **_request(
+                        check_kind="private_http", private_endpoint_key="private"
+                    ).model_dump(),
+                    "public_url": "https://business.example.com/health",
+                }
+            )
+
+    def test_public_url_requires_exact_settled_lane_public_host_intent(self) -> None:
+        payload = _profile().model_dump(mode="json")
+        payload["lanes"][0]["instance"] = "prod"
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        request = ProductHealthMonitoringApplyRequest.model_validate(
+            {
+                **_request().model_dump(),
+                "instance": "prod",
+                "public_url": "https://business.example.com/health",
+            }
+        )
+        target = DokployTargetRecord(
+            context="cm",
+            instance="prod",
+            updated_at=profile.updated_at,
+            public_hosts=("business.example.com",),
+        )
+        for authority in (
+            None,
+            target.model_copy(update={"context": "another-product"}),
+            target.model_copy(update={"instance": "testing"}),
+            target.model_copy(update={"public_hosts": (), "domains": target.public_hosts}),
+            DokployTargetRecord.model_validate(
+                {
+                    **target.model_dump(),
+                    "pending_public_host_effects": [
+                        {
+                            "host": "business.example.com",
+                            "provider_host": "business.example.com",
+                            "target_id": "fixture",
+                            "runtime_port": 80,
+                        }
+                    ],
+                }
+            ),
+        ):
+            with (
+                self.subTest(authority=authority),
+                self.assertRaises(ProductHealthMonitoringTargetError),
+            ):
+                build_product_health_monitoring_plan(
+                    profile=profile,
+                    request=request,
+                    public_target=authority,
+                )
+        before = build_product_health_monitoring_plan(
+            profile=profile, request=request, public_target=target
+        )
+        changed = build_product_health_monitoring_plan(
+            profile=profile,
+            request=request,
+            public_target=target.model_copy(update={"target_name": "replaced"}),
+        )
+        self.assertNotEqual(before.plan_sha256, changed.plan_sha256)
+
+    def test_business_endpoints_use_recorded_public_hosts_and_preserve_other_checks(self) -> None:
+        payload = _profile().model_dump(mode="json")
+        payload["lanes"][0]["instance"] = "prod"
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        target = DokployTargetRecord(
+            context="cm",
+            instance="prod",
+            updated_at=profile.updated_at,
+            public_hosts=("business.example.com", "www.business.example.com"),
+        )
+        for name, host in zip(("business-apex", "business-www"), target.public_hosts):
+            with self.subTest(host=host):
+                url = f"https://{host}/launchplane/health"
+                request = ProductHealthMonitoringApplyRequest.model_validate(
+                    {
+                        **_request(check_name=name).model_dump(),
+                        "instance": "prod",
+                        "public_url": url,
+                    }
+                )
+                plan = build_product_health_monitoring_plan(
+                    profile=profile,
+                    request=request,
+                    public_target=target,
+                )
+                self.assertEqual(plan.resolved_url, url)
+                self.assertEqual(plan.current_resolved_url, profile.lanes[0].health_url)
+                updated = updated_product_health_monitoring_profile(
+                    profile=profile,
+                    request=request,
+                    public_target=target,
+                    updated_at=profile.updated_at,
+                )
+                self.assertEqual(updated.lanes[0].health_monitoring.checks[-1].url, url)
+                expected = profile.model_dump(mode="json")
+                expected["lanes"][0]["health_monitoring"]["checks"].append(
+                    updated.lanes[0].health_monitoring.checks[-1].model_dump(mode="json")
+                )
+                expected["source"] = updated.source
+                self.assertEqual(updated.model_dump(mode="json"), expected)
+
     def test_no_website_conflict_is_rejected_in_plan_and_apply(self) -> None:
         payload = _profile().model_dump(mode="json")
         payload["public_website"] = "none"

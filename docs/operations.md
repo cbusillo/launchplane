@@ -1662,6 +1662,15 @@ name, and compare-and-writes only the selected check and lane intent. Whole
 profile writes cannot change existing health-monitoring authority, and
 onboarding updates preserve it.
 
+The bounded service request also supports optional public endpoint selection
+through `public_url`; see the [health-monitoring contract](records.md).
+Use a compatible caller that reviews both current and desired endpoints and
+binds the exact request. Existing production `public_hosts` intent can qualify
+a business name independently of origin route bindings. Missing intent or
+unsettled public-host effects refuse selection; a monitoring request never
+enrolls domain ownership or changes ingress. All other checks, profile settings,
+runtime identity requirements and scheduled cadence are preserved.
+
 When intent makes an open public or TLS incident ineligible, the monitor keeps
 the real probe observation and writes a separate skipped reconciliation
 observation. The incident resolves with `monitoring_intent_changed`, not a false

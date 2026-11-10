@@ -13513,6 +13513,19 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         try:
+            public_target = None
+            if control_plane_product_health_monitoring.requires_product_health_monitoring_public_target(
+                profile, health_monitoring_request
+            ):
+                try:
+                    public_target = database_store.read_dokploy_target_record(
+                        context_name=health_monitoring_request.context,
+                        instance_name=health_monitoring_request.instance,
+                    )
+                except FileNotFoundError as error:
+                    raise control_plane_product_health_monitoring.ProductHealthMonitoringTargetError(
+                        "Public endpoint selection requires existing lane public-host intent."
+                    ) from error
             if (
                 health_monitoring_request.check_kind == "private_http"
                 and health_monitoring_request.enabled
@@ -13532,6 +13545,7 @@ def create_launchplane_fastapi_app(
             plan = control_plane_product_health_monitoring.build_product_health_monitoring_plan(
                 profile=profile,
                 request=health_monitoring_request,
+                public_target=public_target,
             )
         except (
             control_plane_product_health_monitoring.ProductHealthMonitoringCheckKindError
@@ -13584,6 +13598,7 @@ def create_launchplane_fastapi_app(
                         profile=profile,
                         request=health_monitoring_request,
                         updated_at=utc_now_timestamp(),
+                        public_target=public_target,
                     )
                 except ValueError as error:
                     raise _launchplane_http_error(
@@ -13624,6 +13639,7 @@ def create_launchplane_fastapi_app(
                 expected_record=profile,
                 replacement_record=replacement_profile,
                 mutation=mutation,
+                expected_dokploy_targets=(public_target,) if public_target is not None else (),
             )
             if write_result.status == "replayed":
                 if write_result.idempotency_record is None:
