@@ -309,6 +309,19 @@ def verify_build_artifact(
         pull_request_number=pull_request_number,
         require_open_pull_request=require_open_pull_request,
     )
+    return _verify_odoo_build_manifest(
+        source_build, manifest_payload, repository, commit, context, image_repository
+    )
+
+
+def _verify_odoo_build_manifest(
+    source_build: ArtifactSourceBuild,
+    manifest_payload: dict[str, object],
+    repository: str,
+    commit: str,
+    context: str,
+    image_repository: str,
+) -> VerifiedBuildArtifact:
     try:
         manifest = ArtifactIdentityManifest.model_validate(manifest_payload)
     except ValidationError as error:
@@ -381,34 +394,34 @@ def verify_requested_build_artifact(
         )
     repository_path = _repository_path(repository)
     run = _object(
-        transport.get_json(f"/repos/{repository_path}/actions/runs/{selected[1]}"), "workflow run"
+        transport.get_json(
+            f"/repos/{repository_path}/actions/runs/{selected[1]}/attempts/{selected[2]}"
+        ),
+        "workflow run",
     )
-    if run.get("event") != "pull_request":
+    if run.get("event") not in {"pull_request", "push"}:
         raise BuildProvenanceError(
-            "The selected candidate must be a pull request build.", code="build_purpose_mismatch"
+            "The selected candidate must be a pull request or release build.",
+            code="build_purpose_mismatch",
         )
-    pulls = _list(run.get("pull_requests"))
-    if len(pulls) != 1:
+    if (run.get("id"), run.get("run_attempt")) != (int(selected[1]), int(selected[2])):
         raise BuildProvenanceError(
-            "The build needs one source pull request.", code="pull_request_number_missing"
+            "The selected build run or attempt changed.", code="manifest_commit_mismatch"
         )
-    number = _int(_object(pulls[0], "pull request").get("number"), "pull request number")
-    verified = verify_build_artifact(
+    commit = commit.strip().lower()
+    source_build, manifest_payload = _verified_build_run(
         transport=transport,
         repository=repository,
         repository_id=repository_id,
         commit=commit,
-        purpose="preview",
-        context=context,
-        image_repository=image_repository,
-        pull_request_number=number,
-        require_open_pull_request=True,
+        purpose="preview" if run["event"] == "pull_request" else "release",
+        pull_request_number=None,
+        check_current_head=False,
+        selected_run=run,
     )
-    if verified.manifest.artifact_id != artifact_id:
-        raise BuildProvenanceError(
-            "The selected build run or attempt changed.", code="manifest_commit_mismatch"
-        )
-    return verified
+    return _verify_odoo_build_manifest(
+        source_build, manifest_payload, repository, commit, context, image_repository
+    )
 
 
 class GenericWebBuildImage(BaseModel):
@@ -512,6 +525,7 @@ def _verified_build_run(
     pull_request_number: int | None,
     check_current_head: bool = True,
     require_open_pull_request: bool = False,
+    selected_run: dict[str, object] | None = None,
 ) -> tuple[ArtifactSourceBuild, dict[str, object]]:
     """The build run that proves this commit, and its uploaded manifest, unvalidated."""
     repository_path = _repository_path(repository)
@@ -519,7 +533,7 @@ def _verified_build_run(
         raise BuildProvenanceError(
             "The product needs its immutable repository id recorded.", code="repository_id_missing"
         )
-    if purpose == "preview" and pull_request_number is None:
+    if purpose == "preview" and selected_run is None and pull_request_number is None:
         raise BuildProvenanceError(
             "A preview artifact needs its pull request number.", code="pull_request_number_missing"
         )
@@ -538,6 +552,7 @@ def _verified_build_run(
         commit=commit,
         purpose=purpose,
         default_branch=default_branch,
+        selected_run=selected_run,
     )
     run_id = _int(run.get("id"), "run id")
     try:
@@ -627,15 +642,20 @@ def _select_build_run(
     commit: str,
     purpose: BuildPurpose,
     default_branch: str,
+    selected_run: dict[str, object] | None = None,
 ) -> dict[str, object]:
     event = "push" if purpose == "release" else "pull_request"
-    query = urlencode({"head_sha": commit, "event": event, "per_page": "100"})
-    payload = _object(
-        transport.get_json(f"/repos/{repository_path}/actions/runs?{query}"), "workflow runs"
-    )
+    if selected_run is None:
+        query = urlencode({"head_sha": commit, "event": event, "per_page": "100"})
+        payload = _object(
+            transport.get_json(f"/repos/{repository_path}/actions/runs?{query}"), "workflow runs"
+        )
+        candidates = [_object(item, "workflow run") for item in _list(payload.get("workflow_runs"))]
+    else:
+        candidates = [selected_run]
     runs = [
         run
-        for run in (_object(item, "workflow run") for item in _list(payload.get("workflow_runs")))
+        for run in candidates
         if run.get("path") == BUILD_WORKFLOW_PATH
         and str(run.get("head_sha") or "").lower() == commit
         and run.get("event") == event

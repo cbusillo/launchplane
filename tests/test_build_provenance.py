@@ -59,6 +59,8 @@ class FakeGitHub:
             return {"workflow_runs": [run for run in self.runs if f"event={run['event']}" in path]}
         if path in {f"/repos/{REPOSITORY}/actions/runs/{run['id']}" for run in self.runs}:
             return next(run for run in self.runs if path.endswith(f"/{run['id']}"))
+        if "/attempts/" in path:
+            return next(run for run in self.runs if f"/runs/{cast(int, run['id'])}/" in path)
         if path.startswith(f"/repos/{REPOSITORY}/commits?"):
             if "page=1" not in path:
                 return []
@@ -143,28 +145,88 @@ class BuildProvenanceTests(unittest.TestCase):
             image_repository=IMAGE_REPOSITORY,
             artifact_id="artifact-site-run-7-1",
         )
-        self.assertEqual(verified, _verify(github, purpose="preview", pull_request_number=9))
+        ordinary = _verify(github, purpose="preview", pull_request_number=9).manifest
+        assert ordinary.source_build is not None
+        self.assertEqual(
+            verified.manifest,
+            ordinary.model_copy(
+                update={
+                    "source_build": ordinary.source_build.model_copy(
+                        update={"pull_request_number": None}
+                    )
+                }
+            ),
+        )
         store = Mock()
         with self.assertRaises(BuildProvenanceError) as caught:
             record_verified_build_artifact(record_store=store, verified=verified)
         self.assertEqual(caught.exception.code, "build_purpose_mismatch")
         store.write_artifact_manifest.assert_not_called()
 
-    def test_requested_candidate_refuses_changed_head_closed_pr_wrong_product_and_attempt(
+    def test_frozen_candidate_survives_missing_association_and_closed_moved_pr(self) -> None:
+        run = _run(event="pull_request", head_branch="candidate")
+        github = FakeGitHub(runs=[run], pull_request_head=TIP)
+        github.pull_request_state = "closed"
+        original = None
+        for associations in ([{"number": 9}], [], [{"number": 10}, {"number": 11}]):
+            with self.subTest(associations=associations):
+                run["pull_requests"] = associations
+                verified = verify_requested_build_artifact(
+                    transport=github,
+                    repository=REPOSITORY,
+                    repository_id=REPOSITORY_ID,
+                    commit=COMMIT,
+                    context="site",
+                    image_repository=IMAGE_REPOSITORY,
+                    artifact_id="artifact-site-run-7-1",
+                )
+                assert verified.manifest.source_build is not None
+                self.assertIsNone(verified.manifest.source_build.pull_request_number)
+                self.assertEqual(verified.manifest.source_build.purpose, "preview")
+                if original is None:
+                    original = verified
+                self.assertEqual(verified, original)
+        for changes in (
+            {"pull_request_head": TIP, "pull_request_state": "open"},
+            {"pull_request_head": COMMIT, "pull_request_state": "closed"},
+            {
+                "pull_request_head": COMMIT,
+                "pull_request_state": "open",
+                "pull_request_repository_id": 202,
+            },
+        ):
+            with self.subTest(ordinary_preview=changes):
+                for field, value in changes.items():
+                    setattr(github, field, value)
+                with self.assertRaises(BuildProvenanceError) as caught:
+                    verify_build_artifact(
+                        transport=github,
+                        repository=REPOSITORY,
+                        repository_id=REPOSITORY_ID,
+                        commit=COMMIT,
+                        purpose="preview",
+                        context="site",
+                        image_repository=IMAGE_REPOSITORY,
+                        pull_request_number=9,
+                        require_open_pull_request=True,
+                    )
+                self.assertEqual(caught.exception.code, "pull_request_head_mismatch")
+
+    def test_requested_candidate_refuses_unverified_run_product_and_attempt(
         self,
     ) -> None:
         cases: tuple[dict[str, object], ...] = (
-            {"pull_request_head": "b" * 40},
-            {"pull_request_state": "closed"},
             {"artifact_id": "artifact-other-run-7-1"},
             {"artifact_id": "artifact-site-run-7-2"},
             {"repository_id": "202"},
             {"image_repository": "ghcr.io/other/product"},
             {"run": {"head_repository": {"id": 202}}},
             {"run": {"event": "workflow_dispatch"}},
-            {"run": {"event": "push"}},
-            {"pull_request_repository_id": 202},
-            {"run": {"pull_requests": []}},
+            {"run": {"path": ".github/workflows/untrusted.yml"}},
+            {"run": {"head_sha": TIP}},
+            {"run": {"repository": {"id": 202}}},
+            {"run": {"status": "in_progress"}},
+            {"run": {"conclusion": "failure"}},
         )
         for changes in cases:
             with self.subTest(changes=changes):
@@ -187,6 +249,30 @@ class BuildProvenanceTests(unittest.TestCase):
                         image_repository=str(changes.get("image_repository", IMAGE_REPOSITORY)),
                         artifact_id=str(changes.get("artifact_id", "artifact-site-run-7-1")),
                     )
+
+    def test_frozen_candidate_uses_original_run_attempt_despite_newer_builds(self) -> None:
+        original = _run(event="pull_request")
+        github = FakeGitHub(
+            runs=[{**original, "run_attempt": 2}, _run(run_id=8, event="pull_request")]
+        )
+        read = github.get_json
+        with patch.object(
+            github,
+            "get_json",
+            side_effect=lambda path: (
+                original if path.endswith("/runs/7/attempts/1") else read(path)
+            ),
+        ):
+            verified = verify_requested_build_artifact(
+                transport=github,
+                repository=REPOSITORY,
+                repository_id=REPOSITORY_ID,
+                commit=COMMIT,
+                context="site",
+                image_repository=IMAGE_REPOSITORY,
+                artifact_id="artifact-site-run-7-1",
+            )
+        self.assertEqual(verified.manifest.artifact_id, "artifact-site-run-7-1")
 
     def test_quota_deadline_honors_reset_and_retry_after(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)

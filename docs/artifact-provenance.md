@@ -44,7 +44,7 @@ repository. The build workflow path is the fixed contract path
 ## Verifying an artifact for a commit
 
 Input: product, commit SHA, purpose (`release` for ordinary testing and prod,
-`preview` for a PR preview or exact migrated native testing candidate, with the PR number).
+`preview` with the PR number for an ordinary PR preview).
 
 1. List the repository's workflow runs for `head_sha = commit` through the
    GitHub API, with Launchplane's own App installation token.
@@ -89,13 +89,20 @@ identity, and promotion and rollback read that.
   A `preview` artifact never enters it and cannot be promoted. A PR's workflow
   file comes from the PR itself and can build anything.
 - An exact requested canonical Build can supply a migrated native testing
-  rebuild before the PR merges. The service verifies the product repository,
-  successful run/attempt, open PR's current head, manifest and image repository;
+  rebuild. The service reads the selected run's original attempt directly and
+  applies the same repository, workflow, source, success, manifest and image checks;
   the offline pair must bind that exact product, context and image digest.
+  A `pull_request` run keeps preview purpose without a PR number: current PR
+  associations, state and head do not identify a frozen build. A `push` run
+  still needs the default branch and first-parent release checks. Newer runs
+  and attempts cannot substitute for the selected one. Ordinary previews keep
+  their current-head admission, including open-PR checks where required.
   Candidate provenance stays on the original testing operation and its normal
   private application plan. Before first application preparation the worker
   rechecks it; retained preparation and recovery use the original evidence even
   if the PR later changes. This supplies no release artifact or release tuple.
+  When an older admitted operation recorded a PR number, revalidation retains
+  that original attribution and compares every other manifest field exactly.
 
 ## Why a `release` run is trustworthy
 

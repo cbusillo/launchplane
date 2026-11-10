@@ -3994,33 +3994,15 @@ def verified_testing_rebuild_artifact(
         raise ValueError("Requested build selection requires an Odoo testing lane.")
     identity = product_repository_identity(record_store, profile)
     transport = _TestingRebuildBuildReads(resolve_build_provenance_transport(record_store, profile))
-    try:
-        return verify_requested_build_artifact(
-            transport=transport,
-            repository=profile.repository,
-            repository_id=identity.repository_id,
-            commit=source_git_ref,
-            context=lane.context,
-            image_repository=profile.image.repository,
-            artifact_id=artifact_id,
-        )
-    except BuildProvenanceError as error:
-        if error.code != "build_purpose_mismatch":
-            raise
-    verified = verify_build_artifact(
+    return verify_requested_build_artifact(
         transport=transport,
         repository=profile.repository,
         repository_id=identity.repository_id,
         commit=source_git_ref,
-        purpose="release",
         context=lane.context,
         image_repository=profile.image.repository,
+        artifact_id=artifact_id,
     )
-    if verified.manifest.artifact_id != artifact_id:
-        raise BuildProvenanceError(
-            "The selected build run or attempt changed.", code="manifest_commit_mismatch"
-        )
-    return verified
 
 
 def verified_preview_build_artifact(

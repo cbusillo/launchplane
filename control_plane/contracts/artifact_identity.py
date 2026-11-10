@@ -164,7 +164,7 @@ class ArtifactSourceBuild(BaseModel):
         expected_event = "push" if self.purpose == "release" else "pull_request"
         if self.event != expected_event:
             raise ValueError(f"a {self.purpose} artifact must come from a {expected_event} run")
-        if (self.purpose == "preview") != (self.pull_request_number is not None):
+        if self.purpose != "preview" and self.pull_request_number is not None:
             raise ValueError("only a preview artifact names its pull request")
         return self
 
