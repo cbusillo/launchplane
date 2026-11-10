@@ -16,6 +16,8 @@ from control_plane.build_provenance import (
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.clean_testing_snapshot import snapshot_storage_budget
 from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
+from control_plane.contracts.odoo_testing_source import MigratedOdooTestingSource
+from control_plane.contracts.product_profile_record import ProductLaneProfile
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementRequest,
@@ -48,6 +50,13 @@ from control_plane.testing_rebuild_service import (
     check_testing_rebuild_protection,
     TestingRebuildRefused,
     GenericWebTestingRebuildIntent,
+    NativeTestingRebuildIntent,
+)
+from control_plane.testing_storage_admission import (
+    TESTING_STORAGE_CAPACITY_UNAVAILABLE,
+    TestingStorageCapacityRefused,
+    read_testing_backings,
+    require_migrated_restore_capacity,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -337,6 +346,9 @@ def _inspect_execution(
                 TESTING_STORAGE_BUDGET_REQUIRED,
                 "Clean snapshots require reviewed testing storage headroom.",
             ) from error
+    if apply.migrated_source is not None:
+        assert isinstance(intent, NativeTestingRebuildIntent)
+        _require_migrated_restore_capacity(root, store, intent, lane, apply.migrated_source)
     try:
         candidate_credential_authority(store, lane.context)
     except NativeSourceAuthorizationDenied:
@@ -382,3 +394,35 @@ def _inspect_execution(
             "The selected testing restore source is not configured or available.",
         ) from error
     return inspection
+
+
+def _require_migrated_restore_capacity(
+    root: Path,
+    store: PostgresRecordStore,
+    intent: NativeTestingRebuildIntent,
+    lane: ProductLaneProfile,
+    migrated: MigratedOdooTestingSource,
+) -> None:
+    if lane.odoo_testing_drill_storage is None:
+        raise TestingRebuildRefused(
+            TESTING_STORAGE_BUDGET_REQUIRED,
+            "A migrated restore requires reviewed testing storage headroom.",
+        )
+    try:
+        roles = read_testing_backings(root, store.database_url, intent.server_id)
+    except NativeSourceAuthorizationDenied:
+        raise
+    except (NativeSourceUnavailable, ValueError, KeyError, click.ClickException) as error:
+        raise TestingRebuildRefused(
+            TESTING_STORAGE_CAPACITY_UNAVAILABLE,
+            "Testing storage headroom could not be measured before the migrated restore.",
+        ) from error
+    try:
+        require_migrated_restore_capacity(
+            roles,
+            lane.odoo_testing_drill_storage,
+            migrated,
+            clean_snapshot=intent.profile.preview.clean_testing_snapshot,
+        )
+    except TestingStorageCapacityRefused as error:
+        raise TestingRebuildRefused(error.code, str(error)) from error
