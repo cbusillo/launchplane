@@ -352,6 +352,91 @@ class ClientReleaseTests(unittest.TestCase):
             current.model_copy(update={"release_on_acceptance": mode})
         )
 
+    def test_standing_acceptance_publishes_odoo_candidate_before_gated_drill(self) -> None:
+        self.switch("director_standing")
+        with patch("control_plane.client_release.publish_release_decision") as publish:
+            self.assertEqual(self.advance(), ())
+            (accepted,) = self.store.list_release_review_decision_records(product=PRODUCT)
+            self.assertEqual(accepted.acceptance_source, "director_standing")
+            self.assertEqual(accepted.actor_github_id, profile().owner.github_id)
+            self.assertEqual(accepted.checklist.candidate.source_commit, HEAD)
+            self.assertEqual(accepted.release_start, "promote_with_rollback_drill")
+            publish.assert_called_once()
+            self.assertEqual(self.store.list_odoo_prod_promotion_operation_records(), ())
+        self.store.write_release_review_decision_record(
+            accepted.model_copy(
+                update={"release_issue_url": "https://github.com/example/site/issues/1"}
+            )
+        )
+        (backup_id,) = self.advance()
+        self.assertEqual(self.advance(), ())
+        self.finish(backup_id)
+        (promotion_id,) = self.advance()
+        promotion = self.store.read_odoo_prod_promotion_operation_record(promotion_id)
+        self.assertEqual(
+            promotion.request.expected_artifact_id, accepted.checklist.candidate.artifact_id
+        )
+        self.finish(promotion_id)
+        self.set_prod(accepted.checklist.candidate.artifact_id)
+        (rollback_id,) = self.advance()
+        rollback = self.store.read_odoo_prod_rollback_operation_record(rollback_id)
+        self.assertEqual(rollback.target.artifact_id, accepted.checklist.production.artifact_id)
+        self.finish(rollback_id)
+        self.set_prod(accepted.checklist.production.artifact_id)
+        (second_backup_id,) = self.advance()
+        self.finish(second_backup_id)
+        (repromotion_id,) = self.advance()
+        self.finish(repromotion_id)
+        self.set_prod(accepted.checklist.candidate.artifact_id)
+        self.assertEqual(self.advance(), ())
+        current = self.store.read_product_profile_record(PRODUCT)
+        run = read_client_release_run(store=self.store, profile=current, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.state, "passed")
+        self.assertEqual(release_start_for_acceptance(store=self.store, profile=current), "promote")
+
+    def test_new_testing_candidate_does_not_supersede_odoo_promotion_or_inverse(self) -> None:
+        self.switch("director_standing")
+        accepted = self.accept()
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        (promotion_id,) = self.advance()
+        testing = self.store.read_release_tuple_record(context_name=CONTEXT, channel_name="testing")
+        artifact = self.store.read_artifact_manifest(testing.artifact_id)
+        newer = artifact.model_copy(update={"artifact_id": "artifact-next"})
+        self.store.write_artifact_manifest(newer)
+        for promoted in (False, True):
+            with self.subTest(promoted=promoted):
+                if promoted:
+                    self.finish(promotion_id)
+                    self.set_prod(accepted.checklist.candidate.artifact_id)
+                self.store.write_release_tuple_record(
+                    testing.model_copy(
+                        update={"tuple_id": "tuple-next", "artifact_id": newer.artifact_id}
+                    )
+                )
+                with patch("control_plane.client_release.publish_release_decision") as publish:
+                    self.advance()
+                self.assertEqual(
+                    self.store.list_release_review_decision_records(product=PRODUCT), (accepted,)
+                )
+                publish.assert_not_called()
+                self.store.write_release_tuple_record(testing)
+
+    def test_failed_odoo_standing_release_keeps_native_failure_without_web_restart(self) -> None:
+        self.switch("director_standing")
+        accepted = self.accept()
+        (backup_id,) = self.advance()
+        self.finish(backup_id, "fail")
+        with patch(
+            "control_plane.client_release.qualified_generic_web_source_inventory"
+        ) as web_source:
+            self.assertEqual(self.advance(), ())
+        web_source.assert_not_called()
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=PRODUCT), (accepted,)
+        )
+
     def test_held_product_of_the_standing_client_still_starts_no_release(self) -> None:
         self.switch("held")
         current = self.store.read_product_profile_record(PRODUCT)

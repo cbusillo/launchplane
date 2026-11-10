@@ -142,58 +142,63 @@ class ProductProductionUseHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.read_product_profile_record(_PRODUCT), standing)
 
     async def test_standing_acceptance_requires_signed_in_admin_and_reviewed_profile(self) -> None:
-        with TemporaryDirectory() as directory:
-            store = _store(Path(directory))
-            self.addCleanup(store.close)
-            stored = store.read_product_profile_record(_PRODUCT)
-            store.write_product_profile_record(
-                stored.model_copy(
-                    update={
-                        "owner": ProductOwnerProfile(
-                            github_login="example-client", github_id="1234"
-                        ),
+        for driver in ("generic-web", "odoo"):
+            with self.subTest(driver=driver):
+                with TemporaryDirectory() as directory:
+                    store = _store(Path(directory))
+                    self.addCleanup(store.close)
+                    stored = store.read_product_profile_record(_PRODUCT)
+                    stored = stored.model_copy(update={"driver_id": driver})
+                    store.write_product_profile_record(
+                        stored.model_copy(
+                            update={
+                                "owner": ProductOwnerProfile(
+                                    github_login="example-client", github_id="1234"
+                                ),
+                            }
+                        )
+                    )
+                    payload: dict[str, object] = {
+                        "production_use": _OLD,
+                        "release_on_acceptance": "director_standing",
+                        "reason": "The recorded Client is the Director.",
                     }
-                )
-            )
-            payload: dict[str, object] = {
-                "production_use": _OLD,
-                "release_on_acceptance": "director_standing",
-                "reason": "The recorded Client is the Director.",
-            }
-            dry = await _post(_app(store), payload)
-            self.assertEqual(dry.status_code, 202, dry.text)
-            apply = {
-                **payload,
-                "mode": "apply",
-                "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
-            }
-            denied = await _post(_app(store), apply, idempotency_key="machine-standing")
-            self.assertEqual(denied.status_code, 403)
-            self.assertEqual(
-                store.read_product_profile_record(_PRODUCT).release_on_acceptance, "held"
-            )
-            sessions = HumanSessionManager(
-                config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
-            )
-            session = sessions.issue(_github_human_identity())
-            app = create_launchplane_fastapi_app(
-                verifier=_RejectingVerifier(),
-                authz_policy=_github_human_product_config_policy(
-                    action="product_profile.write", product=_PRODUCT, context="launchplane"
-                ),
-                record_store_factory=lambda: store,
-                human_session_manager=sessions,
-            )
-            headers = {
-                **_browser_mutation_headers(sessions, session),
-                "Idempotency-Key": "human-standing",
-            }
-            accepted = await _asgi_request(app, "POST", _ROUTE, headers=headers, payload=apply)
-            self.assertEqual(accepted.status_code, 202, accepted.text)
-            self.assertEqual(
-                store.read_product_profile_record(_PRODUCT).release_on_acceptance,
-                "director_standing",
-            )
+                    dry = await _post(_app(store), payload)
+                    self.assertEqual(dry.status_code, 202, dry.text)
+                    apply = {
+                        **payload,
+                        "mode": "apply",
+                        "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+                    }
+                    denied = await _post(_app(store), apply, idempotency_key="machine-standing")
+                    self.assertEqual(denied.status_code, 403)
+                    self.assertEqual(
+                        store.read_product_profile_record(_PRODUCT).release_on_acceptance, "held"
+                    )
+                    sessions = HumanSessionManager(
+                        config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+                    )
+                    session = sessions.issue(_github_human_identity())
+                    app = create_launchplane_fastapi_app(
+                        verifier=_RejectingVerifier(),
+                        authz_policy=_github_human_product_config_policy(
+                            action="product_profile.write", product=_PRODUCT, context="launchplane"
+                        ),
+                        record_store_factory=lambda: store,
+                        human_session_manager=sessions,
+                    )
+                    headers = {
+                        **_browser_mutation_headers(sessions, session),
+                        "Idempotency-Key": "human-standing",
+                    }
+                    accepted = await _asgi_request(
+                        app, "POST", _ROUTE, headers=headers, payload=apply
+                    )
+                    self.assertEqual(accepted.status_code, 202, accepted.text)
+                    self.assertEqual(
+                        store.read_product_profile_record(_PRODUCT).release_on_acceptance,
+                        "director_standing",
+                    )
 
     async def test_standing_acceptance_without_client_is_refused(
         self,

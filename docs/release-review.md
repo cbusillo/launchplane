@@ -679,7 +679,7 @@ or an existing grant is not that path.
 
 Each product profile records `release_on_acceptance`: `held` (the default for
 every product), `promote`, `promote_with_rollback_drill` (Odoo or generic web), or
-`director_standing` (generic web). An admin with
+`director_standing` (Odoo or generic web). An admin with
 `product_profile.write` changes it in the product's Client settings, through
 `POST /v1/product-profiles/{product}/production-use` with the optional
 `release_on_acceptance` field: dry run, Apply bound to the reviewed plan digest,
@@ -699,7 +699,7 @@ Release panel queues:
    the durable provider-operation runner, with a target fence and heartbeat;
    its promotion record names the deployment and automatic rollback outcome.
 
-For generic web, a signed-in admin can record `director_standing` through the
+For Odoo or generic web, a signed-in admin can record `director_standing` through the
 same reviewed Client setting. This explicitly records that the named Client is
 the Director and that the Director's standing acceptance starts releases.
 Admin permission never implies that a Client is the Director. The attestation
@@ -1354,6 +1354,12 @@ this comparison can run. Missing production records do not prove that no live
 site exists, so the service does not silently interpret missing evidence as a
 first release. Bootstrap a non-live lane explicitly, then request review before
 live activation. The CM baseline must be verified from deployed service records.
+
+Keep release acceptance held while preparing the baseline through the existing
+[operational paths](operations.md). Then use the reviewed Client setting above;
+source delivery does not activate it. Odoo retains its native stopped-run and
+recovery behavior; same-candidate redeploy restart qualification remains specific
+to generic web.
 
 Release decisions are persisted in `launchplane_release_review_decisions`, with
 file storage reserved for tests and rehearsal. Deployments must migrate the
