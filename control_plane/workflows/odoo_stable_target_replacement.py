@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from control_plane.odoo_first_empty_inputs import (
+    QualifiedFirstEmptyInputs,
+    qualify_first_empty_storage,
+)
+
 import base64
 import re
 import time
@@ -948,6 +953,7 @@ def _assert_prelaunch_rebuild_policy_allows_request(
     lane: ProductLaneProfile,
     target_name: str,
     domain_hosts: tuple[str, ...],
+    first_empty: QualifiedFirstEmptyInputs | None = None,
 ) -> str:
     if request.data_source_mode == "existing":
         return ""
@@ -961,7 +967,17 @@ def _assert_prelaunch_rebuild_policy_allows_request(
             "Odoo prelaunch rebuild data source mode mismatch: "
             f"request={request.data_source_mode!r} policy={policy.data_source_mode!r}."
         )
-    if not lane.odoo_data_policy.allows_rebuild_source(request.data_source_mode):
+    if first_empty is not None:
+        first_empty.validate(request.product, lane.context, lane.instance)
+        if (
+            first_empty.intent != "replacement"
+            or request.data_source_mode != "empty"
+            or lane not in first_empty.authority.profile.lanes
+        ):
+            raise click.ClickException("First-empty qualification does not match this rebuild.")
+    if first_empty is None and not lane.odoo_data_policy.allows_rebuild_source(
+        request.data_source_mode
+    ):
         raise click.ClickException(
             "Odoo lane data policy does not allow prelaunch rebuild data source "
             f"{request.data_source_mode!r} for {request.product} {lane.context}/{lane.instance}."
@@ -1563,6 +1579,31 @@ def build_odoo_stable_target_replacement_plan(
         block("target_not_compose", "Odoo stable replacement currently requires a compose target.")
     approval_issue_url = ""
     destructive_backup_required = _replacement_backup_required(profile, lane, request)
+    first_empty: QualifiedFirstEmptyInputs | None = None
+    if (
+        isinstance(record_store, PostgresRecordStore)
+        and lane.instance == "prod"
+        and lane.odoo_data_policy.data_authority == "unknown"
+        and request.data_source_mode == "empty"
+    ):
+        try:
+            qualified: QualifiedFirstEmptyInputs = qualify_first_empty_storage(
+                record_store,
+                root=control_plane_root,
+                product=profile.product,
+                context=lane.context,
+                intent="replacement",
+            )
+            if qualified.authority.profile != profile:
+                raise ValueError("Original product profile changed during planning.")
+            first_empty = qualified
+            destructive_backup_required = False
+        except (ValueError, FileNotFoundError, click.ClickException):
+            first_empty = None
+            block(
+                "prelaunch_rebuild_policy_refused",
+                "Current original storage or bootstrap authority is unverified.",
+            )
     try:
         generation = read_current_testing_generation(
             record_store,
@@ -1684,6 +1725,7 @@ def build_odoo_stable_target_replacement_plan(
                     lane=lane,
                     target_name=current_target.target_name,
                     domain_hosts=current_target.domain_hosts,
+                    first_empty=first_empty,
                 )
             )
         except click.ClickException as error:
@@ -2081,6 +2123,37 @@ def execute_odoo_stable_target_replacement_apply(
 
     profile = record_store.read_product_profile_record(request.product)
     lane = _read_lane(profile=profile, instance=request.instance)
+    first_empty: QualifiedFirstEmptyInputs | None = None
+    if (
+        request.instance == "prod"
+        and request.data_source_mode == "empty"
+        and lane.odoo_data_policy.data_authority == "unknown"
+        and not plan.destructive_backup_required
+    ):
+        if (
+            not isinstance(record_store, PostgresRecordStore)
+            or provider_effect_checkpoint is None
+            or not operation_id
+            or not operation_lease_owner
+        ):
+            raise click.ClickException(
+                "First-empty replacement requires the original service operation."
+            )
+        try:
+            qualified: QualifiedFirstEmptyInputs = qualify_first_empty_storage(
+                record_store,
+                root=control_plane_root,
+                product=profile.product,
+                context=lane.context,
+                intent="replacement",
+            )
+            if qualified.authority.profile != profile:
+                raise ValueError("Original product profile changed after planning.")
+            first_empty = qualified
+        except (ValueError, FileNotFoundError) as error:
+            raise click.ClickException(
+                "Current original storage or bootstrap authority is unverified."
+            ) from error
     if _requires_two_slot_release(
         lane,
         _read_optional(
@@ -2257,7 +2330,30 @@ def execute_odoo_stable_target_replacement_apply(
     verification_record_id = ""
     captured_proof: dict[str, str] = {}
 
-    def check_backup_proof() -> None:
+    pending_first_empty_deployment: DeploymentRecord | None = None
+
+    def check_backup_proof(
+        *, staged_environment: str | None = None, staged_compose: str | None = None
+    ) -> None:
+        if first_empty is not None:
+            assert isinstance(record_store, PostgresRecordStore)
+            try:
+                qualify_first_empty_storage(
+                    record_store,
+                    root=control_plane_root,
+                    product=profile.product,
+                    context=plan.context,
+                    intent="replacement",
+                    previous=first_empty,
+                    pending_deployment=pending_first_empty_deployment,
+                    staged_environment=staged_environment,
+                    staged_compose=staged_compose,
+                )
+            except (ValueError, FileNotFoundError) as qualification_error:
+                raise click.ClickException(
+                    "Original empty storage or authority changed before effect."
+                ) from qualification_error
+            return
         if (
             generation is not None
             and not generation.completed_at
@@ -2740,22 +2836,23 @@ def execute_odoo_stable_target_replacement_apply(
                     ),
                     desired=desired_build,
                 )
-        record_store.write_deployment_record(
-            build_deployment_record(
-                request=ship_request,
-                record_id=deployment_record_id,
-                deployment_id="control-plane-dokploy",
-                deployment_status="pending",
-                started_at=started_at,
-                finished_at="",
-                resolved_target=resolved_target,
-                runtime_source=runtime_source,
-                runtime_identity=runtime_identity,
-                destination_health=HealthcheckEvidence(status="pending")
-                if request.verify_health
-                else HealthcheckEvidence(status="skipped"),
-            )
+        pending_deployment = build_deployment_record(
+            request=ship_request,
+            record_id=deployment_record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="pending",
+            started_at=started_at,
+            finished_at="",
+            resolved_target=resolved_target,
+            runtime_source=runtime_source,
+            runtime_identity=runtime_identity,
+            destination_health=HealthcheckEvidence(status="pending")
+            if request.verify_health
+            else HealthcheckEvidence(),
         )
+        record_store.write_deployment_record(pending_deployment)
+        if first_empty is not None:
+            pending_first_empty_deployment = pending_deployment
         if plan.destructive_backup_required:
             with _failure_stage(deploy_blocked_code("backup_restore_proof_required")):
                 backup_record_id = "replacement-" + uuid4().hex
@@ -2984,6 +3081,10 @@ def execute_odoo_stable_target_replacement_apply(
             target_type="compose",
             target_id=target_id_record.target_id,
         )
+        if first_empty is not None:
+            if provider_effect_checkpoint is not None:
+                provider_effect_checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+            check_backup_proof(staged_environment=prepared_env_text, staged_compose=compose_file)
         runtime_source["provider_deploy_started_at"] = utc_now_timestamp()
         dokploy_api.trigger_deployment(
             host=host,

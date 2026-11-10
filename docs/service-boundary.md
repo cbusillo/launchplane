@@ -176,8 +176,13 @@ remaining domain and storage removal is tracked in #2437.
     and operation attempts within the original bound checkpoint. A later worker
     re-claim does not invalidate an earlier observed attempt. The probe item's
     `attempt` is that captured native reservation attempt. Older checkpoint
-    worker attempts remain unknown. Candidate preparation/private-readiness items
-    describe receipt availability in that checkpoint. `predecessor_snapshot`
+    worker attempts remain unknown. Candidate preparation describes receipt
+    availability. Private readiness also returns its retained successful verdict
+    as `state=pass`, identity agreement and its own observation time. A retained
+    private-readiness failure returns `state=fail` with its first failed observation time
+    and unknown identity agreement. Its attempt
+    and `verified` stay unknown; neither is borrowed from the public probe.
+    These are historical receipt facts, not current health. `predecessor_snapshot`
     reports the original plan's recorded identity, stopped or absent state,
     never current provider absence. Route receipts report their retained
     reservation state, not the actual route. Their optional `not_dispatched`
@@ -189,6 +194,56 @@ remaining domain and storage removal is tracked in #2437.
     merely planned publication and does not prove a forward adoption happened.
     Rollback/publication/retirement flags cover persisted intent only. A
     generic-web intent leaves native checkpoint/receipt sources unsupported.
+
+    `include_native_execution_binding=true` separately selects the closed
+    `NativeTestingExecutionBinding` private representation in
+    `native_execution_binding`. It uses the same operation lookup and stored
+    full-record authority: the action that starts the operation on its stored
+    product/context/instance. An `operations.read`-only caller receives 403 for
+    this private representation before additional records are read. Its existing
+    public-safe views remain available. No identity or grant is added, and a
+    refusal is not permission to switch callers or request a new grant.
+    It includes the public-safe `native_evidence` internally. The normal
+    `native_evidence` and default responses gain no private fields. Selecting
+    both views reuses one read of the original records.
+
+    This private package is for a local evidence file readable only by the invoking user through the
+    maintained caller, never shared output. It contains the original operation
+    scope, reservation ID, intent and checkpoint digests, retained registered
+    execution-server ID and typed candidate/route selectors. Candidate reads
+    require original/intent/checkpoint binding, then allocation namespace,
+    original serving target, server, resources and application identity agreement.
+    Route-intent reads require the bound original effect receipt; the operation,
+    server, desired copy/backend and route ID must agree. Route digest agreement
+    uses the original bound publication or retained unavailable-route plan.
+    Without that route plan, digest agreement remains unknown and the route item
+    is unverified; the retained original selector facts are still available.
+    A missing execution intent on an existing legacy receipt is `not_retained`.
+    Missing rows, storage/decode failures and mismatched bindings remain distinct.
+
+    Route selectors describe intended backends. `observed_backend_matches` and
+    `backend_observed_at` describe only a matching retained checkpoint route
+    observation, never present physical state. An inverse observation does not
+    establish an earlier forward observation. Candidate creation and effect
+    receipt update times are labeled separately from backend observation times.
+    The package omits raw intents, provider dictionaries, custody paths and secrets.
+
+    `failure_reference` projects only validated markers from the bound
+    checkpoint's existing preparation/private-readiness failure evidence.
+    Those markers can describe an earlier restore/build failure; their time and
+    attempt remain unknown. The private-readiness observation time is not their
+    command-failure time. It never imports adjacent log text.
+    The native records do not retain the provider-terminal account, submitted
+    program or executing trace; these are explicitly `not_retained`. A result-read
+    trace or current package version is no substitute. These gaps limit causal
+    attribution and the documented exact private failure-file read, not every
+    effect-free read of an otherwise qualified target. A separately scoped next
+    reader must resolve its actual execution account/host safely using existing
+    authority. No file accessor is provided or invoked here: the native failure
+    JSON stays on its execution host under the
+    [private failure evidence contract](host-program-package.md#private-copy-failure-evidence).
+    This retained-only GET performs no host, provider, guest or executor IO,
+    acquires no effect authority and changes no custody or recovery eligibility.
 
     `terminal_probe` uses the separately retained candidate probe in the
     existing checkpoint, so an inverse and terminal predecessor observation
@@ -2222,6 +2277,62 @@ confirmation, and source label. This permits a different apply reason without
 changing the reviewed runtime or secret content. Idempotency replay is checked
 before the matching-dry-run marker so an already completed apply remains
 replayable.
+
+### First-empty Odoo production inputs
+
+The existing `POST /v1/product-config/apply` accepts a standalone
+`odoo_first_empty: "runtime_credentials"` intent for
+an owned Odoo `prod` lane. It uses the Director agent's existing product-config
+plan/apply authority, product-profile read and exact prod operations read.
+No route, profile write grant or testing recipient is added. The intent requires product, context, instance and reason. Run `mode: "dry-run"`
+first, then submit the same intent with `mode: "apply"`, the returned
+`result.odoo_first_empty.plan_sha256` as `reviewed_plan_sha256`, and an
+`Idempotency-Key`. No other config or policy operation can accompany the intent.
+
+The service resolves the whole current profile, original compose target and
+registered server, runtime storage settings, and secret selection metadata.
+It reads provider deployment history and executes a fixed, read-only storage
+observation through the existing managed-server transport. The original target
+must have no configured source/environment/mounts or automatic deployment;
+original project files, data, aliases, active or retained workloads, ambiguous
+ownership, shared storage, recorded use/custody, authoritative data, Live and
+production history refuse qualification. Missing desired records or absence of
+a workload alone never prove empty storage. The supported empty path positively
+checks the selected local volume backing paths, project directory and complete
+local Docker inventory; unsupported or incomplete observations remain unknown.
+No caller-supplied positive fact is accepted. The remote observation is a
+point-in-time read, not an external storage lock.
+
+There is no `data_policy` intent or stored empty/resettable classification.
+The existing prelaunch rebuild policy writer can record empty-rebuild intent on
+an unknown prod lane without changing data authority. The stable replacement
+planner requires fresh original empty storage and explicit prelaunch bootstrap
+authority, together with the existing enabled policy, confirmation, target and
+domain proof. Its executor requires the original service operation and rechecks
+whole profile/target/runtime/binding authority and physical storage before the
+first provider write and again against its exact staged inputs before workload
+dispatch. Only the operation's exact pending record is admitted; foreign history,
+data arrival or drift refuses. Failed qualification retains ordinary replacement
+proof requirements. Ordinary capture/restore, Live, held-state, bootstrap and
+release protections remain. The observation grants no later rebuild exception.
+
+`runtime_credentials` requires one or more generated entries as described in
+[Secrets](secrets.md#first-empty-odoo-runtime-credentials). Dry-run never generates.
+On an eligible apply the service generates and encrypts absent purposes and
+publishes versions, exact-instance bindings, audit and the original-key receipt
+in the existing atomic authority transaction. Profile, target, provider,
+runtime and binding expectations are compared at publication. Existing versions,
+bindings and non-secret settings survive unchanged. Completed replay returns
+its original receipt before remote reads or generation. A changed review must
+be inspected again; uncertain effects must reconcile the original key rather
+than substitute a new key. The optional `odoo_first_empty` result is absent for
+ordinary config callers.
+
+This preparation does not sync runtime, configure a provider, create a workload,
+create a person account, capture/restore data or release a product. Both installed
+service and compatible supported caller must be qualified before operational use.
+A dry-run performs remote reads, so a worker assigned no provider/host operation
+supplies a request packet instead of running it against a real target.
 
 ### Odoo business-hours policy
 

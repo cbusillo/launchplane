@@ -1132,20 +1132,44 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
         self.assertEqual(observed.status, "fail")
         self.assertEqual(observed.failure_code, "invalid_url")
 
-    async def test_additional_public_checks_require_a_coverage_decision(self) -> None:
+    async def test_additional_public_checks_keep_their_complete_executing_policy(self) -> None:
         payload = self.seed_split()
         profile = self.store.read_product_profile_record(payload["product"])
         lane = profile.lanes[0]
         for url in ("https://app.example.test/checkout", "https://outside.example.test/healthz"):
-            extra = ProductLaneHealthCheck(name="checkout", kind="public_http", url=url)
+            extra = ProductLaneHealthCheck(
+                name="checkout",
+                url=url,
+                require_runtime_identity=True,
+                recovery_observation_threshold=3,
+                expected_dns_targets=(
+                    PublicDnsExpectedTarget(
+                        public_name=urlsplit(url).hostname or "", addresses=("93.184.216.34",)
+                    ),
+                ),
+            )
             configured = lane_with_checks(lane, *lane.health_monitoring.checks, extra)
             changed = profile.model_copy(update={"lanes": (configured,)})
             self.store.write_product_profile_record(changed)
             review = (await self.post("/v1/route-bindings/reconcile", payload)).json()["review"]
-            self.assertEqual(review["status"], "blocked")
-            self.assertIn(
-                "split_ingress_monitoring_policy_conflict", {f["code"] for f in review["findings"]}
+            self.assertEqual(review["status"], "ready", review)
+            proposed = dict(review["proposed_record"])
+            proposed.pop("record_sha256")
+            binding = EnvironmentRouteBindingRecord.model_validate(proposed)
+            effective = split_ingress_monitoring_lane(changed, configured, binding)
+            self.assertIn(extra, effective.health_monitoring.checks)
+            with patch.object(self.store, "read_route_binding_record", return_value=binding):
+                targets = discover_public_ingress_monitor_targets(self.store, profiles=(changed,))
+            target = next(target for target in targets if target.check_name == extra.name)
+            self.assertEqual(target.health_url, extra.url)
+            self.assertEqual(target.expected_dns_targets, extra.expected_dns_targets)
+            self.assertEqual(
+                target.recovery_observation_threshold, extra.recovery_observation_threshold
             )
+            self.assertTrue(target.require_runtime_identity)
+            self.assertFalse(target.advisory)
+            self.assertFalse(target.resolution_failure_code)
+            self.assertEqual(target.allowed_https_hosts, ())
             disabled = extra.model_copy(update={"enabled": False})
             configured = lane_with_checks(configured, *lane.health_monitoring.checks, disabled)
             self.store.write_product_profile_record(

@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
@@ -22,6 +23,8 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.public_dns import PublicDnsExpectedTarget
 from control_plane.contracts.runtime_dependency_health import RuntimeDependencyHealthPolicy
+from control_plane.outbound_http import public_url_error
+from control_plane.contracts.public_hosts import normalize_public_hosts
 
 ProductHealthMonitoringMode = Literal["dry-run", "apply"]
 ProductHealthMonitoringOperation = Literal["create", "update", "unchanged"]
@@ -51,6 +54,7 @@ class ProductHealthMonitoringApplyRequest(BaseModel):
     enabled: bool = True
     require_runtime_identity: bool = False
     private_endpoint_key: str = ""
+    public_url: str | None = None
     expected_dns_targets: tuple[PublicDnsExpectedTarget, ...] | None = Field(
         default=None, max_length=16
     )
@@ -68,6 +72,21 @@ class ProductHealthMonitoringApplyRequest(BaseModel):
         self.private_endpoint_key = self.private_endpoint_key.strip()
         self.reason = self.reason.strip()
         self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
+        if self.public_url is not None:
+            public_url = self.public_url.strip()
+            self.public_url = public_url
+            parsed = urlsplit(public_url)
+            if (
+                self.check_kind != "public_http"
+                or public_url_error(public_url)
+                or parsed.scheme != "https"
+                or parsed.port not in {None, 443}
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "Public endpoint selection requires a public HTTPS URL on port 443."
+                )
+            normalize_public_hosts([parsed.hostname or ""])
         if self.expected_dns_targets is not None and self.check_kind != "public_http":
             raise ValueError("DNS expectations are only supported on public HTTP checks")
         if not self.product:
@@ -126,6 +145,11 @@ class ProductHealthMonitoringPlan(BaseModel):
     current_private_endpoint_key: str | None = None
     private_endpoint_key: str = ""
     resolved_url: str
+    current_resolved_url: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     current_expected_dns_targets: tuple[PublicDnsExpectedTarget, ...] = Field(
         default=(),
         exclude_if=lambda value: not value,
@@ -191,6 +215,7 @@ def build_product_health_monitoring_plan(
     *,
     profile: LaunchplaneProductProfileRecord,
     request: ProductHealthMonitoringApplyRequest,
+    public_target: DokployTargetRecord | None = None,
 ) -> ProductHealthMonitoringPlan:
     lane = _target_lane(profile=profile, request=request)
     existing_check = _matching_check(lane=lane, check_name=request.check_name)
@@ -215,10 +240,15 @@ def build_product_health_monitoring_plan(
         check=candidate_check,
         resolved_url=resolved_url,
         validate_dns_scope=request.expected_dns_targets is not None,
+        validate_public_scope=request.public_url is not None,
+        public_target=public_target,
     )
     # Dry-run must reject the same full-profile conflicts as apply.
     updated_product_health_monitoring_profile(
-        profile=profile, request=request, updated_at=profile.updated_at
+        profile=profile,
+        request=request,
+        updated_at=profile.updated_at,
+        public_target=public_target,
     )
     changed = (
         existing_check is None
@@ -253,6 +283,10 @@ def build_product_health_monitoring_plan(
         "source_label": PRODUCT_HEALTH_MONITORING_SOURCE,
         "reason": request.reason,
     }
+    if public_target is not None:
+        plan_evidence["public_target_sha256"] = _canonical_sha256(
+            public_target.model_dump(mode="json")
+        )
     return ProductHealthMonitoringPlan(
         mode=request.mode,
         product=profile.product,
@@ -277,6 +311,11 @@ def build_product_health_monitoring_plan(
         ),
         private_endpoint_key=candidate_check.private_endpoint_key,
         resolved_url=resolved_url,
+        current_resolved_url=(
+            (existing_check.url if existing_check else "") or lane.health_url or lane.base_url
+        )
+        if request.public_url is not None
+        else None,
         current_expected_dns_targets=(
             existing_check.expected_dns_targets if existing_check else ()
         ),
@@ -294,6 +333,7 @@ def updated_product_health_monitoring_profile(
     profile: LaunchplaneProductProfileRecord,
     request: ProductHealthMonitoringApplyRequest,
     updated_at: str,
+    public_target: DokployTargetRecord | None = None,
 ) -> LaunchplaneProductProfileRecord:
     lane = _target_lane(profile=profile, request=request)
     existing_check = _matching_check(lane=lane, check_name=request.check_name)
@@ -318,6 +358,8 @@ def updated_product_health_monitoring_profile(
         check=candidate_check,
         resolved_url=resolved_url,
         validate_dns_scope=request.expected_dns_targets is not None,
+        validate_public_scope=request.public_url is not None,
+        public_target=public_target,
     )
     updated_lane = lane.model_copy(update={"health_monitoring": candidate_policy})
     updated_lanes = tuple(
@@ -394,12 +436,14 @@ def _candidate_check(
             enabled=request.enabled,
             private_endpoint_key=request.private_endpoint_key,
             require_runtime_identity=request.require_runtime_identity,
+            url=request.public_url or "",
             expected_dns_targets=request.expected_dns_targets or (),
         )
     else:
         candidate = existing_check.model_copy(
             update={
                 "enabled": request.enabled,
+                "url": request.public_url if request.public_url is not None else existing_check.url,
                 "private_endpoint_key": (
                     request.private_endpoint_key or existing_check.private_endpoint_key
                     if request.check_kind == "private_http"
@@ -455,7 +499,11 @@ def _validate_resolved_target(
     check: ProductLaneHealthCheck,
     resolved_url: str,
     validate_dns_scope: bool,
+    validate_public_scope: bool,
+    public_target: DokployTargetRecord | None,
 ) -> None:
+    if validate_public_scope:
+        _validate_public_host_authority(lane, resolved_url, public_target)
     if not check.enabled:
         return
     if check.kind == "private_http":
@@ -482,10 +530,41 @@ def _validate_resolved_target(
         raise ProductHealthMonitoringTargetError(
             "Strict public runtime-identity monitoring requires HTTPS."
         )
-    lane_hosts = {host for host in (_url_host(lane.base_url), _url_host(lane.health_url)) if host}
-    if parsed_url.hostname.lower() not in lane_hosts:
+    _validate_public_host_authority(lane, resolved_url, public_target)
+
+
+def requires_product_health_monitoring_public_target(
+    profile: LaunchplaneProductProfileRecord, request: ProductHealthMonitoringApplyRequest
+) -> bool:
+    if request.check_kind != "public_http":
+        return False
+    lane = _target_lane(profile=profile, request=request)
+    existing = _matching_check(lane=lane, check_name=request.check_name)
+    url = (
+        request.public_url if request.public_url is not None else (existing.url if existing else "")
+    )
+    return bool(
+        url
+        and (request.public_url is not None or request.require_runtime_identity)
+        and _url_host(url) not in {_url_host(lane.base_url), _url_host(lane.health_url)}
+    )
+
+
+def _validate_public_host_authority(
+    lane: ProductLaneProfile, url: str, public_target: DokployTargetRecord | None
+) -> None:
+    host = _url_host(url)
+    if host in {value for value in (_url_host(lane.base_url), _url_host(lane.health_url)) if value}:
+        return
+    if (
+        public_target is None
+        or (public_target.context, public_target.instance) != (lane.context, lane.instance)
+        or lane.instance != "prod"
+        or host not in public_target.public_hosts
+        or public_target.pending_public_host_effects
+    ):
         raise ProductHealthMonitoringTargetError(
-            "Strict public runtime-identity monitoring must use a lane-owned host."
+            "Public HTTP monitoring must use a lane-owned host."
         )
 
 
