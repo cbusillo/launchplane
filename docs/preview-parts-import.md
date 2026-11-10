@@ -44,6 +44,8 @@ stopped, rolled back or never committed.
 Successful import writes a bounded original-operation witness in the preview's
 Odoo database. The importer may commit during its run: timeout, exception, missing
 witness or empty readback therefore remains unknown, never absent or retry-safe.
+A validated pre-import refusal at configuration, entrypoint or grants proves no
+import effect and completes without retaining an uncertain-writer fence.
 The original reservation fences refresh/idle and another import. Existing guarded
 destruction may discard isolated resources only with the same custody checks and
 independently verified original-container cancellation.

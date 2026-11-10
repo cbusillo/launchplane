@@ -3,6 +3,7 @@ from contextlib import AbstractContextManager
 from collections.abc import Callable
 import json
 import click
+from pydantic import BaseModel
 from pathlib import Path
 from typing import cast
 
@@ -187,6 +188,16 @@ class PreviewMaintenanceAdapter:
             }
         )
 
+    def response(self, receipt: BaseModel, *, recovered: bool = False) -> dict[str, object]:
+        return provider_operation_response_payload(
+            trace_id=self.trace_id,
+            records={
+                "preview_id": self.request.preview_id,
+                "generation_id": self.request.generation_id,
+            },
+            result={"receipt": receipt.model_dump(mode="json"), "recovered": recovered},
+        )
+
 
 @dataclass
 class PreviewFixtureAdapter(PreviewMaintenanceAdapter):
@@ -277,18 +288,6 @@ class PreviewFixtureAdapter(PreviewMaintenanceAdapter):
         receipt = self.invoke("dry-run")
         return receipt, fixture_plan_sha256(receipt)
 
-    def response(
-        self, receipt: PreviewFixtureReceipt, *, recovered: bool = False
-    ) -> dict[str, object]:
-        return provider_operation_response_payload(
-            trace_id=self.trace_id,
-            records={
-                "preview_id": self.request.preview_id,
-                "generation_id": self.request.generation_id,
-            },
-            result={"receipt": receipt.model_dump(mode="json"), "recovered": recovered},
-        )
-
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
@@ -378,7 +377,30 @@ def run_fixture_schedule(
     script = fixture_schedule_script(
         binding, fixture=fixture, mode=mode, expected_fixture_sha256=expected_fixture_sha256
     )
-    schedule_app_name = fixture_schedule_app_name(script)
+    return run_preview_maintenance_schedule(
+        host=host,
+        token=token,
+        binding=binding,
+        script=script,
+        action="preview-fixture",
+        timeout_seconds=240,
+        before_provider_mutation=before_provider_mutation,
+        provider_mutation_guard=provider_mutation_guard,
+    )
+
+
+def run_preview_maintenance_schedule(
+    *,
+    host: str,
+    token: str,
+    binding: PreviewFixtureBinding,
+    script: str,
+    action: str,
+    timeout_seconds: int,
+    before_provider_mutation: Callable[[str], None] | None = None,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+) -> dict[str, str]:
+    schedule_app_name = action + "-" + canonical_json_sha256(script)
     schedule_name = "Launchplane " + schedule_app_name
     return post_deploy.run_manual_data_schedule(
         host=host,
@@ -399,14 +421,14 @@ def run_fixture_schedule(
             "appName": schedule_app_name,
             "shellType": "bash",
             "scheduleType": binding.schedule_type,
-            "command": "control-plane preview fixture",
+            "command": "control-plane " + action.replace("-", " "),
             "script": script,
             "serverId": binding.server_id,
             "userId": binding.lookup_id if binding.schedule_type == "dokploy-server" else None,
             "enabled": False,
             "timezone": "UTC",
         },
-        resolved_schedule_execution_timeout_seconds=240,
+        resolved_schedule_execution_timeout_seconds=timeout_seconds,
         before_provider_mutation=before_provider_mutation,
         provider_mutation_guard=provider_mutation_guard,
     )

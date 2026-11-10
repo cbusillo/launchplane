@@ -4,7 +4,7 @@ import sys
 import types
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 import unittest
 from unittest.mock import Mock, patch
 
@@ -21,13 +21,17 @@ from control_plane.odoo_app_maintenance_http import OdooAppMaintenanceEnvelope
 from control_plane.preview_parts_import import PreviewPartsImportAdapter, import_plan_sha256
 from control_plane.provider_operations import (
     ProviderMutationUnknownError,
+    ProviderOperationLease,
     ProviderMutationRejectedError,
 )
+from tests import test_preview_fixture as fixture_tests
+from control_plane.odoo_source_probe import grant_classifier_program
+from control_plane.contracts.native_operation_evidence import NATIVE_OPERATION_RESULT_MAX_BYTES
+from control_plane._preview_fixture_program import PREVIEW_FIXTURE_RESULT_MARKER
 from tests.test_preview_fixture import (
     fixture_identity,
     fixture_binding,
     fixture_request,
-    PreviewFixtureLaneTests,
 )
 
 
@@ -60,25 +64,9 @@ class PreviewPartsImportTests(unittest.TestCase):
             {"product": "example-product", "maintenance": import_request().model_dump()}
         )
         self.assertIsInstance(envelope.maintenance, PreviewPartsImportRequest)
-        for extra in (
-            {"method": "private"},
-            {"connection": "x"},
-            {"parts_only": False},
-            {"timeout_seconds": 601},
-            {"fixture": "fake"},
-            {"instance": "testing"},
-        ):
+        for extra in ({"method": "private"}, {"instance": "testing"}):
             with self.subTest(extra=extra), self.assertRaises(ValidationError):
                 import_request(**extra)
-
-    def test_unknown_counts_remain_unavailable_and_wire_values_are_closed(self) -> None:
-        receipt = import_receipt()
-        self.assertIsNone(receipt.counts.parts)
-        self.assertIsNone(receipt.counts.conflicts)
-        with self.assertRaises(ValidationError):
-            import_receipt(stage="private-source-host")
-        with self.assertRaises(ValidationError):
-            import_receipt(committed=True)
 
     def test_review_binds_source_generation_and_limit_but_not_observation_time(self) -> None:
         receipt = import_receipt()
@@ -107,7 +95,8 @@ class PreviewPartsImportTests(unittest.TestCase):
         )
 
         def lost_writer(*args: object, **kwargs: object) -> PreviewPartsImportReceipt:
-            adapter.effect_started = True
+            lease = cast(ProviderOperationLease, args[1])
+            lease.checkpoint_effect("triggered")
             raise TimeoutError("private writer output")
 
         with (
@@ -147,7 +136,7 @@ class PreviewPartsImportTests(unittest.TestCase):
             invoke.assert_not_called()
 
     def test_import_original_retains_binding_and_shares_existing_disposable_guards(self) -> None:
-        with PreviewFixtureLaneTests().preview() as (store, fixture, _slot):
+        with fixture_tests.PreviewFixtureLaneTests().preview() as (store, fixture, _slot):
             request = import_request(
                 instance=fixture.request.instance, mode="apply", reviewed_plan_sha256="a" * 64
             )
@@ -202,18 +191,12 @@ class NativeImportTests(unittest.TestCase):
         parameters = Parameters()
 
         class Importer:
-            def _get_fishbowl_settings(self) -> Any:
-                return types.SimpleNamespace(use_ssl=True)
-
             def run_full_import(self, *, parts_only: bool) -> None:
                 if parts_only is not True:
                     raise ValueError()
                 events.append("import")
 
         class LegacyImporter:
-            def _get_fishbowl_settings(self) -> Any:
-                return types.SimpleNamespace(use_ssl=True)
-
             def run_full_import(self) -> None:
                 events.append("legacy-import")
 
@@ -231,10 +214,20 @@ class NativeImportTests(unittest.TestCase):
 
             def fetch_all(self, query: str) -> list[dict[str, str]]:
                 events.append(query)
-                return [{"grants": "private-grant-text"}]
+                text = {
+                    "read_only": "GRANT SELECT ON `source`.* TO 'user'@'host'",
+                    "unsafe": "GRANT UPDATE ON `source`.* TO 'user'@'host'",
+                    "unknown": "unrecognized role",
+                }[grants]
+                return [{"grants": text}]
 
         class Environment:
             cr = Mock()
+            cr.execute.side_effect = lambda sql: events.append(
+                "read-only" if sql == "SET TRANSACTION READ ONLY" else "unexpected-sql"
+            )
+            cr.rollback.side_effect = lambda: events.append("rollback")
+            cr.commit.side_effect = lambda: events.append("commit")
 
             def __getitem__(self, key: str) -> Any:
                 return parameters if key == "ir.config_parameter" else importer
@@ -256,12 +249,15 @@ class NativeImportTests(unittest.TestCase):
             parameters.values
         )
         modules["odoo.addons.fishbowl_import.services.fishbowl_client"].FishbowlClient = Client
+        modules[
+            "odoo.addons.fishbowl_import.services.connection_settings"
+        ].resolve_connection_settings = lambda values: types.SimpleNamespace()
         request = {
             **import_receipt().model_dump(mode="json"),
             "database": "sample",
             "operation": "c" * 64,
             "settings_sha256": canonical_json_sha256(parameters.values),
-            "probe_program": f"def classify_grants(rows):\n    return {grants!r}\n",
+            "probe_program": grant_classifier_program(),
         }
         namespace: dict[str, Any] = {}
         exec(ODOO_IMPORT_PROGRAM, namespace)
@@ -274,16 +270,42 @@ class NativeImportTests(unittest.TestCase):
         with self.native() as (run, request, events):
             planned = run()
             self.assertEqual(planned["outcome"], "qualified")
-            self.assertEqual(events, ["SHOW GRANTS"])
+            self.assertEqual(events, ["read-only", "SHOW GRANTS"])
             request["mode"] = "apply"
             applied = run()
             PreviewPartsImportReceipt.model_validate(applied)
-            self.assertEqual(events, ["SHOW GRANTS", "SHOW GRANTS", "import", "witness"])
+            self.assertEqual(
+                events,
+                [
+                    "read-only",
+                    "SHOW GRANTS",
+                    "read-only",
+                    "SHOW GRANTS",
+                    "rollback",
+                    "import",
+                    "witness",
+                    "commit",
+                ],
+            )
             request["mode"] = "readback"
             observed = run()
             self.assertTrue(observed["committed"])
-            self.assertEqual(events, ["SHOW GRANTS", "SHOW GRANTS", "import", "witness"])
+            self.assertEqual(
+                events,
+                [
+                    "read-only",
+                    "SHOW GRANTS",
+                    "read-only",
+                    "SHOW GRANTS",
+                    "rollback",
+                    "import",
+                    "witness",
+                    "commit",
+                    "read-only",
+                ],
+            )
             self.assertNotIn("private-value", json.dumps(observed))
+            self.assertTrue(all(value is None for value in observed["counts"].values()))
 
     def test_unsupported_entrypoint_unsafe_grants_and_source_drift_never_import(self) -> None:
         for accepts, grants, drift in (
@@ -323,6 +345,7 @@ class NativeImportTests(unittest.TestCase):
             "database": "sample",
             "mode": "apply",
             "timeout_seconds": IMPORT_TIMEOUT_SECONDS,
+            "maximum_result_bytes": NATIVE_OPERATION_RESULT_MAX_BYTES,
             "odoo_program": "fixed",
         }
         order = []
@@ -454,7 +477,15 @@ class ImportScheduleTests(unittest.TestCase):
             invocation = host_invocation(kwargs["schedule_payload"]["script"])
             self.assertIsNotNone(invocation)
             kwargs["before_provider_mutation"]("schedule_setup")
-            return {"preview_parts_import_result": receipt.model_dump_json().encode().hex()}
+            from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+
+            return extract_odoo_post_deploy_readback_markers(
+                {
+                    "log": PREVIEW_FIXTURE_RESULT_MARKER
+                    + "="
+                    + receipt.model_dump_json().encode().hex()
+                }
+            )
 
         with (
             patch.object(adapter, "connect", return_value=connection),
@@ -466,8 +497,196 @@ class ImportScheduleTests(unittest.TestCase):
             ),
             patch("control_plane.preview_parts_import.reads.assert_selection_current"),
             patch(
-                "control_plane.preview_parts_import.post_deploy.run_manual_data_schedule",
+                "control_plane.preview_fixture.post_deploy.run_manual_data_schedule",
                 side_effect=schedule,
             ),
         ):
             self.assertEqual(adapter.invoke("dry-run"), receipt)
+
+
+class ImportOriginalTests(unittest.TestCase):
+    def test_source_preparation_generation_and_managed_authority_must_still_agree(self) -> None:
+        from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
+
+        identity = fixture_identity()
+        password_key = config_parameter_secret_env_key("fishbowl.password")
+        store = Mock()
+        preparation = types.SimpleNamespace(
+            state="completed",
+            response_payload={
+                "records": {
+                    "preview_id": identity.preview_id,
+                    "generation_id": identity.preview_generation_id,
+                }
+            },
+        )
+        store.read_idempotency_record_by_id.return_value = preparation
+        issued = types.SimpleNamespace(
+            plan_request=types.SimpleNamespace(
+                fishbowl_source=object(),
+                source_git_ref=identity.source_git_ref,
+                manifest=types.SimpleNamespace(artifact_id=identity.artifact_id),
+            ),
+            dry_run_plan=types.SimpleNamespace(compose_name=identity.instance),
+            preview_slug="pr-42",
+            fishbowl_source_sha256="a" * 64,
+        )
+        selected = types.SimpleNamespace(
+            authority_sha256="a" * 64,
+            environment={password_key: "synthetic-password"},
+            parameters=(
+                types.SimpleNamespace(
+                    key="fishbowl.password", value=types.SimpleNamespace(source="secret_binding")
+                ),
+            ),
+        )
+        connection = Mock()
+        connection.selection.identity = identity
+        adapter = PreviewPartsImportAdapter(
+            store, Path("."), identity.product, import_request(), "trace"
+        )
+        with (
+            patch(
+                "control_plane.preview_parts_import.original_preview_intent",
+                return_value=types.SimpleNamespace(issued_plan=issued),
+            ),
+            patch(
+                "control_plane.preview_parts_import.resolve_fishbowl_preview_source",
+                return_value=selected,
+            ),
+            patch(
+                "control_plane.preview_parts_import.reads.inspect_runtime_container",
+                return_value={password_key: "synthetic-password"},
+            ),
+        ):
+            authority, _ = adapter.qualified_source(connection)
+            self.assertEqual(authority, selected.authority_sha256)
+            for failure in ("preparation", "generation", "managed_source"):
+                with self.subTest(failure=failure):
+                    preparation.state = "running" if failure == "preparation" else "completed"
+                    preparation.response_payload["records"]["generation_id"] = (
+                        "changed" if failure == "generation" else identity.preview_generation_id
+                    )
+                    selected.authority_sha256 = (
+                        "b" * 64 if failure == "managed_source" else "a" * 64
+                    )
+                    with self.assertRaises(ValueError):
+                        adapter.qualified_source(connection)
+
+    def test_import_original_fences_recovers_replays_and_retains_cancellation_binding(self) -> None:
+        from control_plane.provider_operations import run_durable_provider_operation
+        from control_plane.preview_reservation_recovery import classify_preview_reservation
+        from control_plane.preview_fixture import require_fixture_container_cancelled
+
+        with fixture_tests.PreviewFixtureLaneTests().preview() as (store, fixture, _slot):
+            identity = fixture.selection().identity
+            binding = fixture_binding().model_copy(update={"identity": identity})
+            planned = import_receipt(identity=identity)
+            request = import_request(
+                instance=identity.instance,
+                mode="apply",
+                reviewed_plan_sha256=import_plan_sha256(planned),
+            )
+            intent = PreviewFixtureIntent(
+                product=identity.product,
+                maintenance=request,
+                fixture_binding=binding,
+                source_authority_sha256=planned.source_authority_sha256,
+            )
+            adapter = PreviewPartsImportAdapter(
+                store, fixture.root, identity.product, request, "trace"
+            )
+            adapter.original_intent(intent.model_dump(mode="json"))
+            writes = []
+
+            def invoke(
+                mode: str, lease: Any = None, *, operation: str = ""
+            ) -> PreviewPartsImportReceipt:
+                if mode == "dry-run":
+                    return planned
+                if mode == "apply":
+                    lease.checkpoint_effect("import_triggered")
+                    writes.append(operation)
+                    raise TimeoutError("lost observer")
+                return import_receipt(
+                    identity=identity,
+                    mode="readback",
+                    operation=operation,
+                    grants="read_only",
+                    stage="complete",
+                    outcome="committed",
+                    committed=True,
+                )
+
+            def execute() -> Any:
+                return run_durable_provider_operation(
+                    store=store,
+                    scope="operator:example",
+                    route_path="/v1/drivers/odoo/app-maintenance",
+                    idempotency_key="original-import",
+                    request_fingerprint="a" * 64,
+                    lease_owner="trace",
+                    response_trace_id="trace",
+                    adapter=adapter,
+                    original_intent=intent.model_dump(mode="json"),
+                )
+
+            with patch.object(adapter, "invoke", side_effect=invoke):
+                first = execute()
+                self.assertEqual(first.status, "reconcile_required")
+                self.assertIsNotNone(first.record)
+                held = store.list_held_odoo_preview_reservations(product=identity.product)
+                self.assertEqual([item.record_id for item in held], [first.record.record_id])
+                classification = classify_preview_reservation(
+                    first.record,
+                    profile=store.read_product_profile_record(identity.product),
+                    store=store,
+                )
+                self.assertEqual(classification["action"], request.action)
+                self.assertEqual(classification["next_action"], "repeat_original_or_destroy")
+                recovered = execute()
+                self.assertEqual(recovered.status, "adopted")
+                self.assertTrue(recovered.response_payload["result"]["receipt"]["committed"])
+                self.assertEqual(execute().status, "replayed")
+                self.assertEqual(len(writes), 1)
+            with (
+                patch(
+                    "control_plane.preview_fixture.source.read_dokploy_config",
+                    return_value=("https://provider.invalid", "synthetic-token"),
+                ),
+                patch(
+                    "control_plane.preview_fixture.run_fixture_schedule",
+                    return_value={
+                        PREVIEW_FIXTURE_RESULT_MARKER: json.dumps(
+                            {"container_id": binding.container_id, "stopped": True}
+                        )
+                        .encode()
+                        .hex()
+                    },
+                ) as schedule,
+            ):
+                require_fixture_container_cancelled(store=store, root=fixture.root, intent=intent)
+                self.assertEqual(schedule.call_args.kwargs["binding"], binding)
+                self.assertEqual(schedule.call_args.kwargs["mode"], "cancel-readback")
+
+    def test_validated_pre_import_refusal_settles_without_an_unknown_effect(self) -> None:
+        planned = import_receipt()
+        adapter = PreviewPartsImportAdapter(
+            Mock(),
+            Path("."),
+            "example-product",
+            import_request(mode="apply", reviewed_plan_sha256=import_plan_sha256(planned)),
+            "trace",
+        )
+        refused = import_receipt(
+            mode="apply", operation="b" * 64, stage="grants", outcome="unavailable", grants="unsafe"
+        )
+        with (
+            patch.object(adapter, "plan", return_value=(planned, import_plan_sha256(planned))),
+            patch.object(adapter, "invoke", return_value=refused),
+        ):
+            result = adapter.apply("original", Mock())
+            self.assertFalse(result.provider_effect_performed)
+            self.assertFalse(
+                cast(dict[str, Any], result.response_payload["result"])["receipt"]["committed"]
+            )

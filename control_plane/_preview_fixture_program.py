@@ -2,8 +2,31 @@ from control_plane.copy_readback_diagnostics import readback_predicate_library
 
 PREVIEW_FIXTURE_RESULT_MARKER = "preview_fixture_result"
 
+PREVIEW_PROCESS_LIBRARY = r"""
+def bounded_child_output(child, *, timeout_seconds, maximum_bytes):
+    output = bytearray()
+    deadline = time.monotonic() + timeout_seconds
+    with selectors.DefaultSelector() as selector:
+        selector.register(child.stdout, selectors.EVENT_READ)
+        while selector.get_map():
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Maintenance observation timed out')
+            for key, _ in selector.select(min(1, max(0, deadline-time.monotonic()))):
+                chunk = os.read(key.fd, 8192)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                output.extend(chunk)
+                if len(output) > maximum_bytes:
+                    raise ValueError('Maintenance output exceeds bound')
+    if child.wait(timeout=max(0.01, deadline-time.monotonic())) != 0:
+        raise ValueError('Maintenance command failed')
+    return output
+"""
+
 PREVIEW_CONTAINER_LIBRARY = (
-    readback_predicate_library()
+    PREVIEW_PROCESS_LIBRARY
+    + readback_predicate_library()
     + "RESULT_MARKER = "
     + repr(PREVIEW_FIXTURE_RESULT_MARKER)
     + "\n"
@@ -60,24 +83,7 @@ def run_fixture(spec):
     try:
         child.stdin.write(json.dumps(request).encode())
         child.stdin.close()
-        selector = selectors.DefaultSelector()
-        selector.register(child.stdout, selectors.EVENT_READ)
-        output = bytearray()
-        deadline = time.monotonic() + 180
-        while selector.get_map():
-            if time.monotonic() >= deadline:
-                raise ValueError('Fixture observation timed out')
-            for key, _ in selector.select(min(1, max(0, deadline - time.monotonic()))):
-                chunk = os.read(key.fd, 8192)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                output.extend(chunk)
-                if len(output) > 32768:
-                    raise ValueError('Fixture output exceeds bound')
-        selector.close()
-        if child.wait(timeout=max(1, deadline - time.monotonic())) != 0:
-            raise ValueError('Fixture command failed')
+        output = bounded_child_output(child, timeout_seconds=180, maximum_bytes=32768)
         readback_predicate = ReadbackPredicate.FIXTURE_RECEIPT
         receipt = json.loads(output)
         if (not isinstance(receipt, dict) or set(receipt) != {'identity','fixture','mode','fixture_sha256','committed','verified','records'}

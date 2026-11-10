@@ -41,6 +41,10 @@ def main() -> int:
             parser.error("Use private payload/evidence files outside the repository.")
     payload = json.loads(args.payload_file.read_text())
     importing = payload["maintenance"].get("action") == "preview-parts-import"
+    if importing and args.mode == "readback":
+        parser.error(
+            "Repeat the original apply request, saved review and key to recover an import."
+        )
     request_type = PreviewPartsImportRequest if importing else PreviewFixtureRequest
     receipt_type = PreviewPartsImportReceipt if importing else PreviewFixtureReceipt
     draft = request_type.model_validate(payload["maintenance"])
@@ -75,7 +79,7 @@ def main() -> int:
             path=ODOO_APP_MAINTENANCE_ROUTE,
             settings=settings,
             body={"product": payload["product"], "maintenance": draft.model_dump(mode="json")},
-            timeout=720,
+            timeout=1500 if importing else 600,
             idempotency_key=args.idempotency_key,
         )
         receipt = receipt_type.model_validate(response["result"]["receipt"])
@@ -90,7 +94,7 @@ def main() -> int:
             )
     except urllib.error.HTTPError as error:
         transport["emit_http_error_payload"](
-            operation="preview-fixture", request={"mode": args.mode}, exc=error
+            operation=draft.action, request={"mode": args.mode}, exc=error
         )
         return 1
     except (KeyError, TypeError, ValueError, OSError, urllib.error.URLError):
@@ -98,7 +102,9 @@ def main() -> int:
             json.dumps(
                 {
                     "status": "unverified",
-                    "message": "Read back the original preview maintenance operation; preserve its review and key.",
+                    "message": "Repeat the original apply request, saved review and key to recover an import."
+                    if importing
+                    else "Read back the original preview maintenance operation; preserve its review and key.",
                 }
             )
         )

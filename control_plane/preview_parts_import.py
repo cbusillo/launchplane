@@ -4,16 +4,22 @@ import hmac
 
 from control_plane import odoo_runtime_reads as reads
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.native_operation_evidence import NATIVE_OPERATION_RESULT_MAX_BYTES
 from control_plane.contracts.preview_fixture import PreviewFixtureIntent
 from control_plane.contracts.preview_parts_import import (
     IMPORT_TIMEOUT_SECONDS,
     PreviewPartsImportReceipt,
 )
-from control_plane.dokploy import post_deploy, source
+from control_plane.dokploy import post_deploy
 from control_plane.host_package import host_schedule, host_package
 from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
 from control_plane.odoo_preview_import_source import resolve_fishbowl_preview_source
-from control_plane.preview_fixture import PreviewMaintenanceAdapter
+from control_plane.preview_fixture import (
+    PreviewMaintenanceAdapter,
+    PREVIEW_FIXTURE_RESULT_MARKER,
+    FixtureEffectLease,
+    run_preview_maintenance_schedule,
+)
 from control_plane.preview_reservation_recovery import original_preview_intent
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
@@ -21,7 +27,6 @@ from control_plane.provider_operations import (
     ProviderMutationUnknownError,
     ProviderObservation,
     ProviderOperationLease,
-    provider_operation_response_payload,
 )
 
 
@@ -39,7 +44,6 @@ def import_plan_sha256(receipt: PreviewPartsImportReceipt) -> str:
 @dataclass
 class PreviewPartsImportAdapter(PreviewMaintenanceAdapter):
     source_authority_sha256: str = ""
-    effect_started: bool = False
 
     def qualified_source(self, connection: reads.OdooRuntimeConnection) -> tuple[str, str]:
         profile = self.store.read_product_profile_record(self.product)
@@ -143,11 +147,11 @@ class PreviewPartsImportAdapter(PreviewMaintenanceAdapter):
             "source_authority_sha256": authority,
             "settings_sha256": settings,
             "timeout_seconds": IMPORT_TIMEOUT_SECONDS,
+            "maximum_result_bytes": NATIVE_OPERATION_RESULT_MAX_BYTES,
             "odoo_program": host_package().programs["odoo_parts_import"],
             "probe_program": host_package().programs["import_grants_probe"],
         }
         script = host_schedule("preview_parts_import", spec)
-        app = "preview-parts-import-" + canonical_json_sha256(script)
 
         def checkpoint(phase: str) -> None:
             current = self.connect(mutation=mode == "apply")
@@ -159,39 +163,18 @@ class PreviewPartsImportAdapter(PreviewMaintenanceAdapter):
             reads.assert_selection_current(self.store, connection.selection)
             if lease is not None and phase == post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER:
                 lease.checkpoint_effect(phase)
-                self.effect_started = True
 
-        evidence = post_deploy.run_manual_data_schedule(
+        evidence = run_preview_maintenance_schedule(
             host=connection.host,
             token=connection.token,
-            target_definition=source.DokployTargetDefinition(
-                context=binding.identity.context,
-                instance=binding.identity.instance,
-                target_id=binding.target_id,
-                target_name=binding.target_name,
-            ),
-            schedule_lookup_id=binding.lookup_id,
-            schedule_type=binding.schedule_type,
-            schedule_name="Launchplane " + app,
-            schedule_app_name=app,
-            schedule_payload={
-                "name": "Launchplane " + app,
-                "cronExpression": post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
-                "appName": app,
-                "shellType": "bash",
-                "scheduleType": binding.schedule_type,
-                "command": "control-plane preview parts import",
-                "script": script,
-                "serverId": binding.server_id,
-                "userId": binding.lookup_id if binding.schedule_type == "dokploy-server" else None,
-                "enabled": False,
-                "timezone": "UTC",
-            },
-            resolved_schedule_execution_timeout_seconds=IMPORT_TIMEOUT_SECONDS + 90,
+            binding=binding,
+            script=script,
+            action="preview-parts-import",
+            timeout_seconds=IMPORT_TIMEOUT_SECONDS + 90,
             before_provider_mutation=checkpoint,
         )
-        encoded = evidence.get("preview_parts_import_result", "")
-        if not encoded or len(encoded) > 32768:
+        encoded = evidence.get(PREVIEW_FIXTURE_RESULT_MARKER, "")
+        if not encoded or len(encoded) > 2 * NATIVE_OPERATION_RESULT_MAX_BYTES:
             raise ValueError("Import receipt unavailable.")
         receipt = PreviewPartsImportReceipt.model_validate_json(bytes.fromhex(encoded))
         if (
@@ -208,18 +191,6 @@ class PreviewPartsImportAdapter(PreviewMaintenanceAdapter):
         receipt = self.invoke("dry-run")
         return receipt, import_plan_sha256(receipt)
 
-    def response(
-        self, receipt: PreviewPartsImportReceipt, *, recovered: bool = False
-    ) -> dict[str, object]:
-        return provider_operation_response_payload(
-            trace_id=self.trace_id,
-            records={
-                "preview_id": self.request.preview_id,
-                "generation_id": self.request.generation_id,
-            },
-            result={"receipt": receipt.model_dump(mode="json"), "recovered": recovered},
-        )
-
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
@@ -232,17 +203,25 @@ class PreviewPartsImportAdapter(PreviewMaintenanceAdapter):
             raise ProviderMutationRejectedError(
                 ValueError("Import preflight unavailable.")
             ) from error
-        self.effect_started = False
+        effect = FixtureEffectLease(lease)
         try:
-            receipt = self.invoke("apply", lease, operation=operation)
+            receipt = self.invoke("apply", effect, operation=operation)
         except Exception as error:
-            if not self.effect_started:
+            if not effect.started:
                 raise ProviderMutationRejectedError(
                     ValueError("Import dispatch did not begin.")
                 ) from error
             raise ProviderMutationUnknownError(
                 "Import outcome is unknown; reconcile the original key."
             ) from error
+        if receipt.outcome == "unavailable" and receipt.stage in {
+            "configuration",
+            "entrypoint",
+            "grants",
+        }:
+            return ProviderMutationOutcome(
+                202, self.response(receipt), provider_effect_performed=False
+            )
         if not receipt.committed:
             raise ProviderMutationUnknownError(
                 "Import completion is unverified; preserve its original."

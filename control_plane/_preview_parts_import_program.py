@@ -1,6 +1,8 @@
-from pathlib import Path
-
-from control_plane._preview_fixture_program import PREVIEW_CONTAINER_LIBRARY
+from control_plane._preview_fixture_program import (
+    PREVIEW_CONTAINER_LIBRARY,
+    PREVIEW_PROCESS_LIBRARY,
+)
+from control_plane.odoo_source_probe import grant_classifier_program
 
 ODOO_IMPORT_PROGRAM = r"""
 import contextlib, hashlib, inspect, json, os, time
@@ -28,14 +30,12 @@ def execute_import(env, request):
         receipt['outcome'] = 'unknown'
         return receipt
     importer = env['fishbowl.importer']
-    from odoo.addons.fishbowl_import.services.connection_settings import PARAMETER_KEYS
+    from odoo.addons.fishbowl_import.services.connection_settings import PARAMETER_KEYS, resolve_connection_settings
     raw = {key:parameters.get_str(key) or '' for key in PARAMETER_KEYS}
     observed = hashlib.sha256(json.dumps(raw, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     if observed != request['settings_sha256']:
         return receipt
-    settings = importer._get_fishbowl_settings()
-    if not settings.use_ssl:
-        return receipt
+    settings = resolve_connection_settings(raw)
     receipt['stage'] = 'entrypoint'
     if 'parts_only' not in inspect.signature(importer.run_full_import).parameters:
         return receipt
@@ -66,7 +66,9 @@ def execute_import(env, request):
     return receipt
 """
 
-CONTAINER_IMPORT_PROGRAM = r"""
+CONTAINER_IMPORT_PROGRAM = (
+    PREVIEW_PROCESS_LIBRARY
+    + r"""
 import json, os, selectors, signal, subprocess, sys, tempfile, time
 request=json.loads(sys.stdin.read(262145))
 observed=json.loads(os.environ['LAUNCHPLANE_RUNTIME_IDENTITY_JSON'])
@@ -96,25 +98,9 @@ try:
         input_file.seek(0)
         child=subprocess.Popen(runner._odoo_shell_command(),stdin=input_file,stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,env=runner.os_env,start_new_session=True)
-    output=bytearray()
-    deadline=time.monotonic()+request['timeout_seconds']
-    with selectors.DefaultSelector() as selector:
-        selector.register(child.stdout,selectors.EVENT_READ)
-        while selector.get_map():
-            if time.monotonic()>=deadline:
-                raise TimeoutError('Native import writer exceeded deadline')
-            for key,_ in selector.select(min(1,max(0,deadline-time.monotonic()))):
-                chunk=os.read(key.fd,8192)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                output.extend(chunk)
-                if len(output)>65536:
-                    raise ValueError('Native output exceeds bound')
-    if child.wait(timeout=max(0.01,deadline-time.monotonic())):
-        raise ValueError('Native import unavailable')
+    output=bounded_child_output(child, timeout_seconds=request['timeout_seconds'], maximum_bytes=4*request["maximum_result_bytes"])
     receipts=[line.partition(b'=')[2] for line in output.splitlines() if line.startswith(b'preview_parts_import=')]
-    if len(receipts)!=1 or len(receipts[0])>32768:
+    if len(receipts)!=1 or len(receipts[0])>2*request["maximum_result_bytes"]:
         raise ValueError('Native receipt unavailable')
     print(bytes.fromhex(receipts[0].decode()).decode(),flush=True)
 finally:
@@ -128,6 +114,7 @@ finally:
     if applying:
         runner.release_data_workflow_lock()
 """
+)
 
 
 IMPORT_RECEIPT_VALIDATOR = r"""
@@ -143,6 +130,7 @@ def validate_receipt(receipt, spec):
         or receipt['outcome'] not in {'qualified','unavailable','committed','unknown'}
         or type(receipt['committed']) is not bool
         or receipt['committed'] != (receipt['outcome']=='committed')
+        or receipt['outcome']=='qualified' and (spec['mode']!='dry-run' or receipt['stage']!='qualified' or receipt['grants']!='read_only')
         or receipt['committed'] and (not spec['operation'] or receipt['stage']!='complete' or receipt['grants']!='read_only')
         or receipt['timeout_seconds']!=spec['timeout_seconds']
         or type(receipt['elapsed_seconds']) not in (int,float)
@@ -178,27 +166,11 @@ child=subprocess.Popen(['docker','exec','-i',spec['container_id'],'python3','-c'
 try:
     child.stdin.write(json.dumps(request).encode())
     child.stdin.close()
-    output=bytearray()
-    deadline=time.monotonic()+spec['timeout_seconds']+30
-    with selectors.DefaultSelector() as selector:
-        selector.register(child.stdout,selectors.EVENT_READ)
-        while selector.get_map():
-            if time.monotonic()>=deadline:
-                raise TimeoutError('Import observation timed out')
-            for key,_ in selector.select(min(1,max(0,deadline-time.monotonic()))):
-                chunk=os.read(key.fd,8192)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                output.extend(chunk)
-                if len(output)>16384:
-                    raise ValueError('Import output exceeds bound')
-    if child.wait(timeout=max(0.01,deadline-time.monotonic())):
-        raise ValueError('Import observation unavailable')
+    output=bounded_child_output(child, timeout_seconds=spec['timeout_seconds']+30, maximum_bytes=spec["maximum_result_bytes"])
     receipt=json.loads(output)
     validate_receipt(receipt,spec)
     checked_container(spec,require_running=True)
-    print('preview_parts_import_result='+json.dumps(receipt,separators=(',',':')).encode().hex(),flush=True)
+    print(RESULT_MARKER+'='+json.dumps(receipt,separators=(',',':')).encode().hex(),flush=True)
 finally:
     if child.poll() is None:
         child.kill()
@@ -212,5 +184,5 @@ def parts_import_programs() -> dict[str, str]:
     return {
         "preview_parts_import": parts_import_host_program(),
         "odoo_parts_import": ODOO_IMPORT_PROGRAM,
-        "import_grants_probe": Path(__file__).with_name("odoo_source_probe.py").read_text(),
+        "import_grants_probe": grant_classifier_program(),
     }
