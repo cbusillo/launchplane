@@ -4561,6 +4561,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self, phase: Literal["deploying", "restoring"]
     ) -> None:
         from control_plane.copy_readback_diagnostics import ReadbackPredicate
+        from control_plane.operation_status_read import operation_status_read_view
         from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
         from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
 
@@ -4619,6 +4620,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
                     [
                         f"readback_failed_predicate={ReadbackPredicate.ATTACHMENTS}",
                         "readback_failure_kind=refused",
+                        "copy_failure_stage=attachments",
+                        "copy_failure_kind=command_failed",
+                        "copy_failure_exit_status=7",
+                        "copy_failure_evidence_id=" + "e" * 32,
+                        "copy_failure_evidence_id=../../private",
                         "private attachment detail",
                     ],
                 ],
@@ -4654,6 +4660,22 @@ class NativeTestingWorkerTests(unittest.TestCase):
         if phase == "restoring":
             diagnostic = f"{ReadbackPredicate.ATTACHMENTS}_refused"
             self.assertIn(diagnostic, checkpoint.preparation_failure_evidence)
+            for marker in (
+                "copy_failure_stage=attachments",
+                "copy_failure_kind=command_failed",
+                "copy_failure_exit_status=7",
+                "copy_failure_evidence_id=" + "e" * 32,
+            ):
+                self.assertIn(marker, checkpoint.preparation_failure_evidence)
+                self.assertIn(marker, result.runtime_source["copy_failure"])
+            payload = operation_status_read_view(
+                self.operation.model_copy(
+                    update={"result": result, "error_code": result.error_code}
+                ),
+                poll_url="fixture",
+            )
+            self.assertIn(result.runtime_source["copy_failure"], str(payload["error_description"]))
+            self.assertNotIn("private", json.dumps(payload))
         retained = self.store.read_testing_candidate(candidate.namespace)
         assert retained is not None and retained.application is not None
         self.assertEqual(retained, abandoned)

@@ -827,24 +827,22 @@ class TestingProviderDenied(Exception):
     pass
 
 
-def command(arguments, *, stdin=None, stdout=None, diagnose_failure=False):
+def command(arguments, *, stdin=None, stdout=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
         stderr=subprocess.PIPE, check=False, pass_fds=inherited_lock_descriptors)
     if result.returncode:
         if arguments[0]=='docker' and docker_daemon_authorization_denied(result.stderr):
-            raise TestingProviderDenied('The testing runtime refused this identity')
-        identity = emit_copy_command_failure(result, spec) if diagnose_failure else ''
-        if arguments[0]=='docker' and ('readback_failed_predicate='+ReadbackPredicate.ATTACHMENTS).encode() in (result.stdout or b'').splitlines():
+            error = TestingProviderDenied('The testing runtime refused this identity')
+        elif arguments[0]=='docker' and ('readback_failed_predicate='+ReadbackPredicate.ATTACHMENTS).encode() in (result.stdout or b'').splitlines():
             error = CopyReadbackRefused(ReadbackPredicate.ATTACHMENTS)
         else:
             error = RuntimeError("Fresh testing copy command did not pass")
-        setattr(error, COPY_FAILURE_EVIDENCE_MARKER, identity)
-        raise error
+        raise copy_command_failure(error, result, spec)
     return result.stdout or b""
 
 
-def docker(*arguments, stdin=None, diagnose_failure=False):
-    return command(["docker", *arguments], stdin=stdin, diagnose_failure=diagnose_failure)
+def docker(*arguments, stdin=None):
+    return command(["docker", *arguments], stdin=stdin)
 
 
 def one_inspection(identifier):
@@ -969,7 +967,7 @@ def move_staged_filestore_into_volume(runner, staged, destination):
 
 
 def restore_main():
-    global inspection_predicate, inspection_only
+    global inspection_predicate, inspection_only, copy_failure_stage, spec
     inspection_predicate = ReadbackPredicate.INPUT
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     inspection_only = bool(spec.get('inspection_only'))
@@ -1169,6 +1167,7 @@ def restore_main():
     docker("exec", runner, "python3", "-c", "import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert all(callable(getattr(R,name,None)) for name in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name'))")
     staging = None
     try:
+        copy_failure_stage = CopyFailureStage.SOURCE_TRANSFER
         dump_path = "/tmp/" + namespace + "-" + uuid.uuid4().hex + "-database.dump"
         if not resume and gen.get('source_mode','ssh')=='container-export':
             capture=spec.get('native_capture')
@@ -1223,6 +1222,7 @@ def restore_main():
             move_staged_filestore_into_volume(runner, filestore, data_backing / "filestore" / database)
             docker("cp", str(dump), runner + ":" + dump_path)
             docker("exec", "-u", "root", runner, "chmod", "644", dump_path)
+        copy_failure_stage = CopyFailureStage.HOST_PREPARATION
         uid = docker("exec", runner, "id", "-u").decode().strip()
         gid = docker("exec", runner, "id", "-g").decode().strip()
         if not uid.isdigit() or not gid.isdigit():
@@ -1237,20 +1237,25 @@ def restore_main():
             if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
                 raise RuntimeError("Invalid workflow environment key")
             arguments.extend(["-e", key + "=" + value])
+        copy_failure_stage = CopyFailureStage.RESTORE
         output = docker(*arguments, runner, "python3", "-", dump_path, database, spec["readback_spec"],
             base64.b64encode(spec["readback_program"].encode()).decode(), "resume" if resume else "fresh",
-            spec["copy_binding_sha256"], gen.get("source_mode", "ssh"), stdin=spec["runner"].encode(), diagnose_failure=True).decode()
+            spec["copy_binding_sha256"], gen.get("source_mode", "ssh"), stdin=spec["runner"].encode()).decode()
         markers = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
         if any(markers.get(key) != "true" for key in ("testing_copy_sanitized", "testing_copy_pre_registry_sanitized", "odoo_module_update_completed", "odoo_module_update_modules_configured")):
             raise RuntimeError("Testing copy lacks sanitization or module update proof")
+        copy_failure_stage = CopyFailureStage.WEBSITE_SETTINGS
         docker(*arguments, runner, "python3", "-", database, gen["instance"],
             stdin=spec["website_settings_program"].encode())
+        copy_failure_stage = CopyFailureStage.INTEGRATION_READBACK
         readback = docker("exec", "-i", runner, "python3", "-", database, spec["readback_spec"], stdin=spec["readback_program"].encode()).decode()
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
         if spec.get('native_capture') is not None:
+            copy_failure_stage = CopyFailureStage.CLEANUP
             docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':spec['native_capture'],'mode':'cleanup'}).encode()).decode(),stdin=spec['native_files_program'].encode())
         if gen.get('clean_snapshot_enabled'):
+            copy_failure_stage = CopyFailureStage.SNAPSHOT
             snapshot = capture_clean_snapshot(spec, containers, clones.get('snapshot'))
             print('clean_testing_snapshot_completed=true')
             print('clean_snapshot_database_sha256=' + snapshot['database_sha256'])
@@ -1259,6 +1264,7 @@ def restore_main():
         for line in output.splitlines():
             if re.fullmatch(r"(?:website_bootstrap_[a-z_]+|odoo_[a-z_]+)=(?:true|false|[0-9]+)", line):
                 print(line)
+        copy_failure_stage = CopyFailureStage.RUNTIME_START
         marker = spec["web_gate_path"]
         docker("exec", runner, "python3", "-c",
             "import hashlib,os;from pathlib import Path;Path(" + repr(marker) + ").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+'\\n'+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
@@ -1305,20 +1311,23 @@ inspection_predicate = ReadbackPredicate.NATIVE_READ
 inspection_only = False
 try:
     main()
-except TestingProviderDenied:
+except TestingProviderDenied as error:
     if len(sys.argv)>2:
         print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
         sys.exit(1)
+    emit_copy_failure(error)
     print('odoo_restore_completed=false')
     print('testing_copy_sanitized=false')
     sys.exit(1)
 except Exception as error:
+    error = copy_failure_cause(error)
     if len(sys.argv)>2:
         frame = copy_readback_failure_frame(error, inspection_predicate)
         if not inspection_only and not isinstance(error, CopyReadbackRefused):
             frame = {key:value for key,value in frame.items() if key in {'type',COPY_FAILURE_EVIDENCE_MARKER}}
         print(sys.argv[2]+json.dumps(frame),flush=True)
         sys.exit(1)
+    emit_copy_failure(error)
     if isinstance(error, CopyReadbackRefused):
         print('readback_failed_predicate='+error.predicate)
         print('readback_failure_kind=refused')
