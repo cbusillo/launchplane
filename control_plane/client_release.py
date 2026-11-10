@@ -303,8 +303,9 @@ def release_start_for_acceptance(
 ) -> AcceptanceReleaseStart:
     """How a Client's acceptance recorded now runs; "" when it starts nothing.
 
-    An Odoo or generic-web product with a prod lane, not prelaunch and not held, starts a
-    release. A product drills once: after a release's drill passed, later ones
+    An eligible Odoo or generic-web product with a prod lane starts a release.
+    Odoo's first live release is explicit in its checklist. A product drills once:
+    after a release's drill passed, later ones
     only promote.
     """
 
@@ -313,6 +314,7 @@ def release_start_for_acceptance(
         mode == "held"
         or profile.driver_id not in {"odoo", "generic-web"}
         or profile.production_use == "prelaunch"
+        and profile.driver_id != "odoo"
         or not _prod_context(profile)
     ):
         return ""
@@ -512,6 +514,7 @@ def _covering_decision(
         not profile.is_active
         or profile.driver_id not in {"odoo", "generic-web"}
         or profile.production_use == "prelaunch"
+        and profile.driver_id != "odoo"
         or not profile.owner.github_id
     ):
         return None
@@ -530,6 +533,8 @@ def _covering_decision(
     if not latest:
         return None
     decision = latest[0]
+    if profile.production_use == "prelaunch" and not decision.checklist.first_live_origin:
+        return None
     if (
         (decision_record_id and decision.record_id != decision_record_id)
         or not decision.release_start
@@ -1049,6 +1054,10 @@ def _release_run_blocked_reason(
             return ""
     except (FileNotFoundError, ValueError):
         return "The current release's lane records are unavailable. An admin must reconcile them before this release can advance."
+    if all(view.status == "pass" for view in views):
+        if production != decision.checklist.candidate:
+            return "The accepted candidate is no longer in production; first live configuration cannot finish."
+        return ""
     try:
         candidate = (
             (
@@ -1158,11 +1167,20 @@ def _read_client_release_continuation(
         return None
     views = read_client_release_step_views(store=store, profile=profile, decision=decision)
     statuses = [view.status for view in views]
+    from control_plane.odoo_website_indexing import first_live_inverse_started
+
+    indexing_stopped = bool(decision.checklist.first_live_origin) and first_live_inverse_started(
+        store, decision
+    )
     state: ClientReleaseRunState
-    if any(status in _STOPPED_STATUSES for status in statuses):
+    if indexing_stopped or any(status in _STOPPED_STATUSES for status in statuses):
         state = "stopped"
     elif all(status == "pass" for status in statuses):
-        state = "passed"
+        state = (
+            "waiting"
+            if decision.checklist.first_live_origin and profile.production_use == "prelaunch"
+            else "passed"
+        )
     elif any(status in {"pending", "running"} for status in statuses):
         state = "running"
     else:
@@ -1179,6 +1197,8 @@ def _read_client_release_continuation(
         if state in {"waiting", "running"}
         else ""
     )
+    if indexing_stopped:
+        blocked_reason = "First live configuration entered its inverse. Reconcile the original operation before reviewing another release."
     window = None
     if not blocked_reason and native_continuation is None and state in {"waiting", "running"}:
         window = release_window(
@@ -1777,6 +1797,19 @@ def _advance(
             backup_record_id,
             authorized_at,
         )
+    if (
+        decision.checklist.first_live_origin
+        and profile.production_use == "prelaunch"
+        and not admission_paused
+    ):
+        from control_plane.odoo_website_indexing import complete_first_live
+
+        with store.odoo_synchronous_lane_reservation(
+            product=profile.product, context=context, instance="prod"
+        ) as owner:
+            if owner is not None:
+                return ""
+            complete_first_live(store, control_plane_root, profile, decision)
     return ""
 
 

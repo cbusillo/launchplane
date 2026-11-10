@@ -471,6 +471,8 @@ def schedule_failure_kind(reason: str) -> str:
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
+    if key == "website_indexing_production_use":
+        return value in {"prelaunch", "live"}
     if key == CAPABILITY_FAILURE_SITES_MARKER:
         sites = value.split(",")
         return 0 < len(sites) <= NATIVE_PROGRAM_SOURCE_SITE_LIMIT and all(
@@ -837,7 +839,7 @@ def run_compose_post_deploy_update(
     apply_website_settings = target_definition.instance.strip().lower() not in {
         "prod",
         "production",
-    }
+    } or bool(resolved_workflow_environment_overrides.get("LAUNCHPLANE_WEBSITE_INDEXING_JSON"))
     encoded_payload = resolved_workflow_environment_overrides.get(
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
     )
@@ -849,7 +851,9 @@ def run_compose_post_deploy_update(
         except ValueError as error:
             raise click.ClickException("Odoo post-deploy override payload is invalid.") from error
         apply_website_settings = (
-            apply_website_settings or override_payload.website_settings is not None
+            apply_website_settings
+            or override_payload.website_settings is not None
+            or override_payload.website_indexing is not None
         )
         require_company_email = bool(
             override_payload.website_bootstrap and override_payload.website_bootstrap.company_email

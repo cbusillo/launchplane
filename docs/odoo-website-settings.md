@@ -140,3 +140,68 @@ product's analytics issue owns those checks and the real Measurement ID.
 
 Interrupted recreation and inventory readback follow the
 [startup recovery contract](odoo-two-slot-releases.md#interrupted-startup-recovery).
+
+## Prelaunch crawler protection
+
+`production_use` on the product profile is the authority for native crawler
+protection. The generated consumer comes from the committed devkit receiver.
+Its optional `website_indexing` sibling contains exactly `website_id`,
+`public_origin` and `production_use` (`prelaunch` or `live`), on `instance: prod`.
+Combined website settings must select the same website and origin. The receiver
+adds or removes only its managed noindex element in native `custom_code_head`,
+preserving other head content, robots rules and the canonical domain. A tag
+proves neither search-result nor sitemap removal; crawlers must be able to fetch it.
+
+For configuration without maintenance, use the authenticated service route
+`POST /v1/drivers/odoo/post-deploy`:
+
+```json
+{
+  "product": "example-odoo",
+  "post_deploy": {
+    "context": "example",
+    "instance": "prod",
+    "website_indexing": {
+      "mode": "dry-run",
+      "public_origin": "https://example.test"
+    }
+  }
+}
+```
+
+The service derives the state. Optional `website_id` binds a known native site;
+otherwise exactly one website must match the recorded public origin. The plan
+includes the resolved selector, state, before/after SHA-256, managed-element
+state and current binding digest. Review it, then send the result unchanged as
+`website_indexing.reviewed_plan`, set `mode: apply`, supply `post_deploy.reason`
+and retain one original `Idempotency-Key`. `mode: readback` obtains a fresh
+native plan without writing. Plans/readback require `product_config.plan`;
+apply requires `product_config.apply`. Terminal-agent identities cannot use it.
+The producer advertises the service API; installing a catalog command is a
+separate consumer change. Do not substitute direct database or provider calls.
+
+This branch executes only the generated indexing receiver under the existing
+Odoo lane reservation, host execution lock and durable provider-operation fence.
+It runs no module updates, broad maintenance, restore or deployment. Missing,
+ambiguous, stale or mismatched product, route, target, runtime, database UUID,
+website or reviewed head evidence refuses the effect. A separate route digest
+does not waive topology's `stale_route_authority` warning. Apply locks the
+native website row, checks the reviewed baseline, reads back in the transaction,
+commits, then returns its receipt. A lost receipt is unknown, not success.
+Preserve the original request and key for durable reconciliation; never create
+a replacement key to bypass uncertain effects.
+
+An accepted first-live Odoo release keeps prelaunch protection through forward,
+failed and rollback maintenance. After every required release step passes on
+the exact accepted candidate, its configuration continuation removes the managed
+element and compare-and-writes `production_use: live`. If that state write loses
+authority, it restores protection only against its reviewed native after-image
+while the product is still prelaunch. Its inverse uses durable operation records
+and leaves the release stopped; uncertainty requires reconciliation of the
+original operation. It cannot turn an inverse into a later forward replay.
+Release holds, Client binding, signed-in acceptance, backup/drill gates and deploy
+drain remain in force. Applying prelaunch protection does not lift a release hold.
+
+Target delivery requires a qualified compatible receiver/runtime, current route
+evidence and authorized reviewed plan/apply/readback for each exact product and
+hostname. Source deployment alone activates no target setting.

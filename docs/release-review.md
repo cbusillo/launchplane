@@ -686,9 +686,12 @@ every product), `promote`, `promote_with_rollback_drill` (Odoo or generic web), 
 audit record, and profile read-back. A held profile serializes exactly as it did
 before the switch existed.
 
-When the product's recorded Client accepts a release of an Odoo or generic-web product that is
-not `prelaunch` and not held, the decision stores `release_start`, fixed at that
-moment. Recording it starts nothing by itself. Launchplane's Odoo stable worker
+When the product's recorded Client accepts an eligible Odoo or generic-web
+release that is not held, the decision stores `release_start`, fixed at that
+moment. A prelaunch Odoo checklist additionally binds `first_live_origin` and
+tells the Client that acceptance establishes live use after success. Old
+acceptances without that binding cannot start a prelaunch release. Generic-web
+prelaunch behavior is unchanged. Recording it starts nothing by itself. Launchplane's Odoo stable worker
 checks about every 30 seconds and queues the same operations the admin's
 Release panel queues:
 
@@ -698,6 +701,14 @@ Release panel queues:
    and takes its logical backup. Generic web runs its existing promotion through
    the durable provider-operation runner, with a target fence and heartbeat;
    its promotion record names the deployment and automatic rollback outcome.
+
+For a first-live Odoo release, all backup, promotion and rollback-drill steps
+must pass before the indexing-only continuation removes its managed noindex
+element and records `production_use: live`. Failed and rolled-back releases
+retain prelaunch protection. The release waits for configuration completion;
+an inverse is stopped. See [native indexing](odoo-website-settings.md#prelaunch-crawler-protection).
+Enabling a real release mode or accepting a first-live candidate remains a
+separately authorized production action.
 
 For Odoo or generic web, a signed-in admin can record `director_standing` through the
 same reviewed Client setting. This explicitly records that the named Client is
