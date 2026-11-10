@@ -27,7 +27,7 @@ jobs:
       PLAN_SHA256: ${{ inputs.plan_sha256 }}
     steps:
       - name: Download reviewed authorization plan
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: generic-web-preview-authz-plan
           path: .
