@@ -2770,7 +2770,12 @@ def read_public_testing_health(
     http_status = None
     try:
         with build_opener(NoRedirect()).open(Request(url, method="GET"), timeout=5) as response:
-            http_status = response.status
+            observed_status = getattr(response, "status", None)
+            http_status = (
+                observed_status
+                if type(observed_status) is int and 100 <= observed_status <= 599
+                else None
+            )
             if response.geturl() != url:
                 return TestingPublicHealthEvidence(
                     status="pending", urls=(url,), http_status=http_status, failure_kind="redirect"
