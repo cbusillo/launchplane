@@ -26921,8 +26921,15 @@ def create_launchplane_fastapi_app(
             and setup_request.mode in {"apply", "readback"}
             and director_agent_identity(identity)
             and lane_owner
+            and (
+                first_production_setup
+                or setup_request.mode == "readback"
+                or setup_request.retained_compose_setup is not None
+                or setup_request.expected_compose_recovery_sha256
+            )
         ):
             from control_plane.dokploy_compose_allocation import ComposeAllocationAdapter
+            from control_plane.dokploy_inventory import InventoryUnavailable
 
             compose_adapter = ComposeAllocationAdapter(
                 resolved_control_plane_root,
@@ -26983,6 +26990,17 @@ def create_launchplane_fastapi_app(
                     in_progress_message="Original target setup is running.",
                     reconcile_message="Target creation may have partial effects. Preserve the original request and key; inspect readback before recovery.",
                 )
+            except BridgeNetworkCapacityRefused as error:
+                raise _launchplane_http_error(
+                    status_code=409, trace_id=trace_id, code=error.code, message=str(error)
+                ) from None
+            except (OSError, InventoryUnavailable) as error:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="dokploy_target_evidence_unavailable",
+                    message="Original placement could not be read; preserve the operation.",
+                ) from error
             except (ValueError, FileNotFoundError, click.ClickException) as error:
                 raise _launchplane_http_error(
                     status_code=400,

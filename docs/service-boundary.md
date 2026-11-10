@@ -2595,11 +2595,16 @@ substituted for the requested one.
 
 For this path, send the unchanged setup fields and original `Idempotency-Key`
 to the same endpoint with `mode=readback`. This performs no mutation. A
-recoverable acknowledged placement returns `recovery_sha256`; continuation
+recoverable acknowledged or positively observed placement returns `recovery_sha256`; continuation
 uses `mode=apply`, the same key and fields, exact normal confirmation, and
 `expected_compose_recovery_sha256`. Current ownership, no-live-product,
-hostname and empty-placement checks run again. An uncertain create without
-positive identity evidence remains held. Do not use the general `adopt` path
+hostname and placement checks run again. An acknowledged Compose may finish
+recording its target without another create; a committed target may finish its
+interrupted receipt without another provider write. Lost replies may be
+positively resolved from complete current inventory and exact parent placement;
+a lost project reply also requires its creation time after the dispatch checkpoint.
+Readback reports `recoverable: false` with instructions when that evidence is
+unavailable. Absence alone never proves an interrupted request had no effect. Do not use the general `adopt` path
 or a different project/key to get around that result.
 
 Older failed setup attempts may have no durable reservation. Readback reports
@@ -2608,18 +2613,22 @@ Older failed setup attempts may have no durable reservation. Readback reports
 apply trace, original private request and its canonical JSON SHA-256, complete
 before/after inventory pages and observation timestamps, exact new project and
 environment IDs, and the recorded custody evidence. This is explicitly supplied
-historical evidence, not a claim that the service retained an old reservation.
+historical evidence attested by the authenticated custodian, not a claim that the
+service retained an old reservation or can independently authenticate its absent
+historical caller/key/trace. The custodian must review the retained originals;
+self-consistent submitted copies alone cannot establish historical provenance.
 The pages must prove only one new project containing one empty production
 environment, with all older resources unchanged. Current provider identity,
 default-environment metadata, creation times within that observation window and
 empty placement must agree. Review those original receipts and the returned
 digest before continuation. The same caller and original key are required;
-changed payloads, names alone, an old project, populated placement and incomplete
-evidence cannot qualify. Recovery records its new checkpoint at the current time
+changed payloads, names alone, a project already present in the submitted before
+inventory, populated placement and incomplete evidence cannot qualify. Recovery records its new checkpoint at the current time
 and preserves the supplied original evidence. It only creates the missing empty
 Compose target; it does not deploy, configure ingress, grant access or release.
-This native service contract does not imply an installed catalog command; callers
-must use a supported authenticated service client that preserves all fields.
+This is the authenticated native HTTP POST contract for the existing service
+endpoint. It does not imply an installed catalog recovery command; do not use a
+CLI that drops the retained evidence or the recovery digest.
 
 A failed reconcile/prune route attempt, a tracked-record write failure after
 route attempts, or a failed domain step after `create-compose` creation/adoption, returns HTTP 502 `dokploy_domain_partial_outcome`, rather than

@@ -81,6 +81,8 @@ class ComposeAllocationAdapter:
             raise ValueError(
                 "Retained evidence requires the original request, not another recovery."
             )
+        if evidence.original_request.get("operation", "create-compose") != "create-compose":
+            raise ValueError("Retained evidence must describe Compose creation.")
         original = DokployTargetSetupEnvelope.model_validate(
             {**evidence.original_request, "mode": "readback", "operation": "create-compose"}
         )
@@ -123,6 +125,133 @@ class ComposeAllocationAdapter:
                     "isDefault": True,
                 },
             }
+        }
+
+    def resolved_phase(self, row: LaunchplaneIdempotencyRecord) -> dict[str, Any]:
+        """Positively observe a lost creation response; absence never permits replay."""
+        phase = (
+            json.loads(row.provider_effect_phase)
+            if row.provider_effect_phase
+            else self.retained_phase()
+        )
+        pending = phase.get("pending")
+        if not pending:
+            return phase
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        projects = read_dokploy_project_membership(host=host, token=token)
+        matches = [p for p in projects if p.name == self.request.project_name]
+        if len(matches) != 1:
+            raise ValueError(
+                "Original project outcome remains unknown; retain custody and read back after provider settlement."
+            )
+        project = matches[0]
+        if pending == PROJECT_CREATE_PATH:
+            raw = api.as_json_object(
+                api.dokploy_request(
+                    host=host,
+                    token=token,
+                    path="/api/project.one",
+                    query={"projectId": project.project_id},
+                )
+            )
+            if not raw or raw.get("projectId") != project.project_id:
+                raise ValueError("Original project identity is unavailable.")
+            created = datetime.fromisoformat(str(raw.get("createdAt", "")))
+            if created.utcoffset() is None or created < datetime.fromisoformat(
+                row.provider_effect_started_at
+            ):
+                raise ValueError("Observed project predates the original creation.")
+            defaults = [e for e in project.environments if e.name == "production"]
+            if len(defaults) != 1:
+                raise ValueError("Original default environment is unavailable.")
+            environment = api.as_json_object(
+                api.dokploy_request(
+                    host=host,
+                    token=token,
+                    path="/api/environment.one",
+                    query={"environmentId": defaults[0].environment_id},
+                )
+            )
+            if (
+                not environment
+                or environment.get("projectId") != project.project_id
+                or environment.get("isDefault") is not True
+            ):
+                raise ValueError("Original default environment identity changed.")
+            phase["project"] = {
+                "projectId": project.project_id,
+                "environment": {
+                    key: environment[key]
+                    for key in ("environmentId", "projectId", "name", "isDefault")
+                },
+            }
+        else:
+            if phase.get("project", {}).get("projectId") != project.project_id:
+                raise ValueError("Original project identity changed.")
+            environments = [
+                e for e in project.environments if e.name == self.request.environment_name
+            ]
+            if len(environments) != 1:
+                raise ValueError("Original environment outcome remains unknown; retain custody.")
+            environment_id = environments[0].environment_id
+            if pending == ENVIRONMENT_CREATE_PATH:
+                phase["environment"] = {"environmentId": environment_id}
+            elif pending == COMPOSE_CREATE_PATH:
+                expected = phase.get("environment", phase["project"].get("environment", {})).get(
+                    "environmentId"
+                )
+                targets = [t for t in environments[0].targets if t.category == "compose"]
+                if expected != environment_id or len(targets) != 1:
+                    raise ValueError("Original Compose outcome remains unknown; retain custody.")
+                phase["compose"] = {"composeId": targets[0].target_id}
+            else:
+                raise ValueError("Unknown provider creation phase.")
+        phase.pop("pending")
+        return phase
+
+    def adopted_result(self, phase: dict[str, Any]) -> dict[str, object]:
+        from control_plane.contracts.deploy_target import ProviderTargetRecord
+        from control_plane.dokploy_target_setup_http import dokploy_target_setup_result_payload
+        from control_plane.workflows.dokploy_target_adoption import DokployTargetAdoptionResult
+
+        compose_id = phase["compose"]["composeId"]
+        target = self.store.read_dokploy_target_record(
+            context_name=self.request.context, instance_name=self.request.instance
+        )
+        target_id = self.store.read_dokploy_target_id_record(
+            context_name=self.request.context, instance_name=self.request.instance
+        )
+        provider = self.store.read_provider_target_record(
+            context_name=self.request.context, instance_name=self.request.instance
+        )
+        if (
+            target_id.target_id != compose_id
+            or target.target_type != "compose"
+            or target.target_name != self.request.target_name
+            or target.project_name != self.request.project_name
+            or target.domains != self.request.domains
+            or target.healthcheck_path != self.request.healthcheck_path
+            or provider.to_deployed_target_reference()
+            != ProviderTargetRecord.from_dokploy_records(
+                target_record=target, target_id_record=target_id
+            ).to_deployed_target_reference()
+        ):
+            raise ValueError("Original created target binding differs.")
+        return {
+            "mode": "apply",
+            "operation": self.request.operation,
+            "context": self.request.context,
+            "instance": self.request.instance,
+            "applied": True,
+            "route_domain_ids": [],
+            "setup": dokploy_target_setup_result_payload(
+                DokployTargetAdoptionResult(
+                    applied=True,
+                    target_record=target,
+                    target_id_record=target_id,
+                    provider_target_record=provider,
+                )
+            ),
         }
 
     def recovery_digest(self, phase: dict[str, Any]) -> str:
@@ -195,8 +324,31 @@ class ComposeAllocationAdapter:
         project_id = _extract_provider_id(project, "projectId", "project")
         if len(matches) != 1 or matches[0].project_id != project_id:
             raise ValueError("Original project is absent, ambiguous or changed.")
-        if any(environment.targets for environment in matches[0].environments):
-            raise ValueError("Original placement is no longer empty; retain custody.")
+        compose_id = phase.get("compose", {}).get("composeId")
+        compose_environment_id: api.JsonValue = None
+        for environment in matches[0].environments:
+            for target in environment.targets:
+                if target.target_id != compose_id or target.category != "compose":
+                    raise ValueError(
+                        "Original placement contains an unrecorded target; retain custody."
+                    )
+        if compose_id:
+            from control_plane.dokploy.target_source_setup import require_empty_compose_source
+
+            raw = api.as_json_object(
+                api.dokploy_request(
+                    host=host, token=token, path="/api/compose.one", query={"composeId": compose_id}
+                )
+            )
+            if (
+                not raw
+                or raw.get("serverId") != self.request.server_id
+                or raw.get("name") != self.request.target_name
+                or raw.get("env", "")
+            ):
+                raise ValueError("Original Compose identity or empty state differs.")
+            require_empty_compose_source(raw, compose_id)
+            compose_environment_id = raw.get("environmentId")
         known = project.get("environment", {})
         known_id = known.get("environmentId")
         environment = phase.get("environment", {})
@@ -204,6 +356,15 @@ class ComposeAllocationAdapter:
             known_id = _extract_provider_id(environment, "environmentId", "environment")
         if known_id and not any(e.environment_id == known_id for e in matches[0].environments):
             raise ValueError("Original environment is absent or changed.")
+        if compose_id and (
+            compose_environment_id != known_id
+            or not any(
+                e.environment_id == known_id
+                and any(t.target_id == compose_id and t.category == "compose" for t in e.targets)
+                for e in matches[0].environments
+            )
+        ):
+            raise ValueError("Original Compose is not in its recorded environment.")
         if phase.get("pending") not in {None, ENVIRONMENT_CREATE_PATH}:
             raise ValueError("Uncertain provider creation requires observation; never replay it.")
         if phase.get("pending") == ENVIRONMENT_CREATE_PATH and (
@@ -231,11 +392,6 @@ class ComposeAllocationAdapter:
                 "recoverable": False,
                 "instructions": "Preserve the original request, key, trace and placement. No durable original exists; do not replay apply.",
             }
-        phase = (
-            json.loads(row.provider_effect_phase)
-            if row.provider_effect_phase
-            else self.retained_phase()
-        )
         result: dict[str, Any] = {
             "allocation_state": row.state,
             "recoverable": False,
@@ -243,15 +399,28 @@ class ComposeAllocationAdapter:
         }
         if row.state == "completed":
             return result
-        self.checkpoint()
-        result["recovery_sha256"] = self.recovery_digest(phase)
-        result["recoverable"] = row.state == "reconcile_required" and bool(phase.get("project"))
+        try:
+            phase = self.resolved_phase(row)
+            try:
+                self.adopted_result(phase)
+            except (KeyError, ValueError, FileNotFoundError):
+                result["recovery_sha256"] = self.recovery_digest(phase)
+            else:
+                result["adoption_recorded"] = True
+                result["recovery_sha256"] = request_fingerprint(
+                    {"intent": self.intent(), "phase": phase}
+                )
+            result["recoverable"] = row.state == "reconcile_required" and bool(phase.get("project"))
+        except ValueError as error:
+            result["instructions"] = str(error)
         return result
 
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        del provider_operation_key, provider_effect_phase, reconciliation_key
+        del provider_operation_key, provider_effect_phase
+        if reconciliation_key != self.reconciliation_key():
+            return ProviderObservation("unknown")
         try:
             observed = self.readback()
         except (ValueError, OSError, InventoryUnavailable, click.ClickException):
@@ -261,6 +430,17 @@ class ComposeAllocationAdapter:
             and self.request.expected_compose_recovery_sha256
             and observed.get("recovery_sha256") == self.request.expected_compose_recovery_sha256
         ):
+            if observed.get("adoption_recorded"):
+                row = self.original()
+                assert row is not None
+                return ProviderObservation(
+                    "present",
+                    response_payload=provider_operation_response_payload(
+                        trace_id=self.trace,
+                        records={},
+                        result=self.adopted_result(self.resolved_phase(row)),
+                    ),
+                )
             return ProviderObservation("absent", retry_safe=True, preserve_effect_checkpoint=True)
         return ProviderObservation("unknown")
 
@@ -271,14 +451,23 @@ class ComposeAllocationAdapter:
         from control_plane.dokploy_target_setup_http import mutate_dokploy_payload_for_target_setup
 
         row = self.original()
-        phase = json.loads(row.provider_effect_phase) if row and row.provider_effect_phase else {}
-        retained = self.retained_phase()
-        if not phase and retained:
-            if self.request.expected_compose_recovery_sha256 != self.recovery_digest(retained):
-                raise ProviderMutationRejectedError(
-                    ValueError("Review original-operation readback before continuation.")
-                )
-            phase = retained
+        try:
+            phase = self.resolved_phase(row) if row and row.provider_effect_phase else {}
+            retained = self.retained_phase()
+            if not phase and retained:
+                if self.request.expected_compose_recovery_sha256 != self.recovery_digest(retained):
+                    raise ProviderMutationRejectedError(
+                        ValueError("Review original-operation readback before continuation.")
+                    )
+                phase = retained
+        except ProviderMutationRejectedError:
+            raise
+        except (ValueError, OSError, InventoryUnavailable, click.ClickException) as error:
+            if row and row.provider_effect_phase:
+                raise ProviderMutationUnknownError(
+                    "Original partial effect still needs observation."
+                ) from error
+            raise ProviderMutationRejectedError(error) from error
         started = bool(phase)
         try:
             with self.store.testing_replacement_execution_lock(self.target_key()) as check:
@@ -292,8 +481,9 @@ class ComposeAllocationAdapter:
                     and self.request.expected_compose_recovery_sha256 != self.recovery_digest(phase)
                 ):
                     raise ValueError("Reviewed original placement changed before continuation.")
-                if retained and row is not None and not row.provider_effect_phase:
-                    # This is a new recovery checkpoint, not a fabricated historical reservation.
+                if phase:
+                    # Positively observed identities are durable before continuing.
+                    # For retained originals this is a current recovery checkpoint.
                     lease.checkpoint_effect(json.dumps(phase))
 
                 def mutate(
@@ -317,19 +507,19 @@ class ComposeAllocationAdapter:
                     started = True
                     response = mutate_dokploy_payload_for_target_setup(host, token, path, payload)
                     value = _extract_provider_id(response, identifier, field)
-                    retained: api.JsonObject = {identifier: value}
+                    acknowledged: api.JsonObject = {identifier: value}
                     if path == PROJECT_CREATE_PATH and "environment" in response:
                         environment = api.as_json_object(response["environment"])
                         if environment is None:
                             raise ValueError(
                                 "Created default environment is malformed; retain custody."
                             )
-                        retained["environment"] = {
+                        acknowledged["environment"] = {
                             key: environment[key]
                             for key in ("environmentId", "projectId", "name", "isDefault")
                             if key in environment
                         }
-                    phase[field] = retained
+                    phase[field] = acknowledged
                     phase.pop("pending", None)
                     lease.checkpoint_effect(json.dumps(phase))
                     return response

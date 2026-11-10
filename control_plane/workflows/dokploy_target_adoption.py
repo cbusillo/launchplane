@@ -649,6 +649,7 @@ def create_dokploy_application_target(
         )
 
     created_project_id = normalized_project_id
+    created_environment_id = normalized_environment_id
     if not created_project_id and not normalized_environment_id:
         project_payload: JsonObject = {"name": normalized_project_name}
         if project_description.strip():
@@ -656,7 +657,9 @@ def create_dokploy_application_target(
         created_project = mutate_provider(host, token, PROJECT_CREATE_PATH, project_payload)
         created_project_id = _extract_provider_id(created_project, "projectId", "project")
 
-    created_environment_id = normalized_environment_id
+        created_environment_id = project_created_environment(
+            created_project, created_project_id, normalized_environment_name
+        )
     if not created_environment_id:
         environment_payload: JsonObject = {
             "name": normalized_environment_name,
@@ -1141,7 +1144,15 @@ def planned_application_provider_requests(
         }
         if environment_description.strip():
             environment_payload["description"] = environment_description.strip()
-        requests.append({"path": ENVIRONMENT_CREATE_PATH, "payload": environment_payload})
+        environment_request: dict[str, object] = {
+            "path": ENVIRONMENT_CREATE_PATH,
+            "payload": environment_payload,
+        }
+        if not project_id:
+            environment_request["condition"] = (
+                "project.create did not return the requested default environment"
+            )
+        requests.append(environment_request)
     application_payload: dict[str, object] = {
         "name": target_name,
         "environmentId": environment_id or "<created-environment-id>",
@@ -1184,7 +1195,15 @@ def _planned_compose_provider_requests(
         }
         if environment_description.strip():
             environment_payload["description"] = environment_description.strip()
-        requests.append({"path": ENVIRONMENT_CREATE_PATH, "payload": environment_payload})
+        environment_request: dict[str, object] = {
+            "path": ENVIRONMENT_CREATE_PATH,
+            "payload": environment_payload,
+        }
+        if not project_id:
+            environment_request["condition"] = (
+                "project.create did not return the requested default environment"
+            )
+        requests.append(environment_request)
     compose_payload: dict[str, object] = {
         "name": target_name,
         "appName": app_name.strip() or target_name,
