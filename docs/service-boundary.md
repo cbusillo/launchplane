@@ -179,7 +179,7 @@ remaining domain and storage removal is tracked in #2437.
     worker attempts remain unknown. Candidate preparation describes receipt
     availability. Private readiness also returns its retained successful verdict
     as `state=pass`, identity agreement and its own observation time. A retained
-    private-readiness failure returns `state=fail` with its recorded failure time
+    private-readiness failure returns `state=fail` with its first failed observation time
     and unknown identity agreement. Its attempt
     and `verified` stay unknown; neither is borrowed from the public probe.
     These are historical receipt facts, not current health. `predecessor_snapshot`
@@ -198,12 +198,16 @@ remaining domain and storage removal is tracked in #2437.
     `include_native_execution_binding=true` separately selects the closed
     `NativeTestingExecutionBinding` private representation in
     `native_execution_binding`. It uses the same operation lookup and stored
-    scope authorization as both existing views, with no new identity or grant.
+    full-record authority: the action that starts the operation on its stored
+    product/context/instance. An `operations.read`-only caller receives 403 for
+    this private representation before additional records are read. Its existing
+    public-safe views remain available. No identity or grant is added, and a
+    refusal is not permission to switch callers or request a new grant.
     It includes the public-safe `native_evidence` internally. The normal
     `native_evidence` and default responses gain no private fields. Selecting
     both views reuses one read of the original records.
 
-    This private package is for an owner-only local evidence file through the
+    This private package is for a local evidence file readable only by the invoking user through the
     maintained caller, never shared output. It contains the original operation
     scope, reservation ID, intent and checkpoint digests, retained registered
     execution-server ID and typed candidate/route selectors. Candidate reads
@@ -225,8 +229,10 @@ remaining domain and storage removal is tracked in #2437.
     The package omits raw intents, provider dictionaries, custody paths and secrets.
 
     `failure_reference` projects only validated markers from the bound
-    checkpoint's existing preparation/private-readiness failure evidence, with
-    the private failure time when retained. It never imports adjacent log text.
+    checkpoint's existing preparation/private-readiness failure evidence.
+    Those markers can describe an earlier restore/build failure; their time and
+    attempt remain unknown. The private-readiness observation time is not their
+    command-failure time. It never imports adjacent log text.
     The native records do not retain the provider-terminal account, submitted
     program or executing trace; these are explicitly `not_retained`. A result-read
     trace or current package version is no substitute. These gaps limit causal

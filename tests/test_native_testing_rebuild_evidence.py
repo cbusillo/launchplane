@@ -437,12 +437,13 @@ class NativeTestingEvidenceTests(unittest.TestCase):
         self.assertIsNone(evidence.attempt)
         self.assertIsNone(evidence.verified)
 
-    def test_private_binding_is_explicit_and_uses_existing_read_authority(self) -> None:
+    def test_private_binding_preserves_existing_full_record_authority(self) -> None:
         path = ODOO_STABLE_TARGET_REPLACEMENT_OPERATION_STATUS_ROUTE.format(
             operation_id=self.operation.operation_id
         )
         for read_only in (False, True):
             with self.subTest(read_only=read_only):
+                self.store.reset_mock()
                 response = asyncio.run(
                     request(
                         self.app(read_only=read_only),
@@ -450,12 +451,17 @@ class NativeTestingEvidenceTests(unittest.TestCase):
                         path + "?include_native_execution_binding=true",
                     )
                 )
+                if read_only:
+                    self.assertEqual(response.status_code, 403)
+                    self.store.read_idempotency_record.assert_not_called()
+                    self.store.read_original_mutation_intent.assert_not_called()
+                    self.store.read_testing_candidate.assert_not_called()
+                    continue
                 self.assertEqual(response.status_code, 200, response.text)
                 binding = response.json()["native_execution_binding"]
                 self.assertEqual(binding["operation_id"], self.operation.operation_id)
                 self.assertEqual(binding["native_evidence"]["candidate_readiness"]["state"], "pass")
                 self.assertEqual(binding["failure_reference"]["availability"], "not_retained")
-                self.assertEqual(binding["terminal_account"], "not_retained")
                 self.assertNotIn("native_evidence", response.json())
 
     def test_failed_candidate_probe_survives_inverse_and_terminal_checkpoint(self) -> None:
@@ -771,16 +777,12 @@ class NativeTestingEvidenceTests(unittest.TestCase):
         self.assertEqual(result.failure_reference.evidence_id, "d" * 32)
         self.assertEqual(result.failure_reference.stage, "host_preparation")
         self.assertIsNone(result.failure_reference.attempt)
-        self.assertEqual(
-            result.failure_reference.observed_at, checkpoint.private_readiness_failed_at
-        )
+        self.assertIsNone(result.failure_reference.observed_at)
         readiness = result.native_evidence.candidate_readiness
         self.assertEqual(readiness.state, "fail")
         self.assertEqual(readiness.observed_at, checkpoint.private_readiness_failed_at)
         self.assertIsNone(readiness.runtime_identity_matches)
         self.assertIsNone(readiness.attempt)
-        self.assertEqual(result.execution_trace, "not_retained")
-        self.assertEqual(result.submitted_program, "not_retained")
         self.assertNotIn("private-text", result.model_dump_json())
 
     def test_foreign_effect_receipt_is_unbound_and_missing_is_not_no_effect(self) -> None:

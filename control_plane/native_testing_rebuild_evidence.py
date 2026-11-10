@@ -375,7 +375,6 @@ def _failure_read(checkpoint: TestingRebuildRecord) -> NativeFailureRead:
             "stage": markers.get("copy_failure_stage"),
             "kind": markers.get("copy_failure_kind"),
             "exit_status": markers.get("copy_failure_exit_status"),
-            "observed_at": checkpoint.private_readiness_failed_at,
         }
     )
 
@@ -500,9 +499,10 @@ def _route_read(
 ) -> NativeRouteRead:
     if receipt is None:
         return NativeRouteRead(**_private_status(evidence))
-    original, retained = _read(
-        evidence.source, partial(store.read_original_mutation_intent, receipt)
+    read_intent: Callable[[], dict[str, Any]] = partial(
+        store.read_original_mutation_intent, receipt
     )
+    original, retained = _read(evidence.source, read_intent)
     if original is None:
         return NativeRouteRead(**_private_status(retained))
     if "route_execution" not in original:

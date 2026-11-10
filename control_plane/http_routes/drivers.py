@@ -568,6 +568,13 @@ def register_operation_status_read_routes(
                 "for the requested product/context."
             ),
         )
+        if include_native_execution_binding and not full_record:
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Private execution binding requires the existing full-record authority for this operation.",
+            )
         recovery_diagnostics: list[str] = []
         recovery = testing_replacement_recovery_read(
             cast(TestingRecoveryStore, record_store),
