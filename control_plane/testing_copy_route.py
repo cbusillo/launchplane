@@ -1,15 +1,21 @@
 from collections.abc import Callable
 import json
 from pathlib import Path
+from typing import Any
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
+from control_plane.contracts.testing_publication import TestingPublicationRecord
 from control_plane.dokploy import api, source
 from control_plane.dokploy.native_copy_stream import (
     NativeSourceUnavailable,
     require_registered_remote_server,
 )
-from control_plane.dokploy.testing_route import observe_testing_route, route_document
+from control_plane.dokploy.testing_route import (
+    TestingLaneRoute,
+    observe_testing_route,
+    route_document,
+)
 from control_plane.dokploy.testing_route_execution import (
     TestingRouteExecutionIntent,
     TestingRouteWriterAttempt,
@@ -23,20 +29,13 @@ from control_plane.testing_serving_copy import published_testing_copy
 COPY_ROUTE_EFFECT = "worker:odoo-stable-deploy:testing-route"
 
 
-def publish_testing_copy_route(
+def _read_copy_route(
     *,
     root: Path,
     store: PostgresRecordStore,
     identity: RuntimeIdentity,
-    checkpoint: Callable[[str], None],
-    operation_id: str,
-    lease_owner: str,
-) -> None:
-    if not operation_id or not lease_owner:
-        raise ValueError("Testing route maintenance requires its durable service operation lease.")
-    publication = published_testing_copy(store, product=identity.product, context=identity.context)
-    if publication is None or identity.instance != "testing":
-        raise ValueError("Route maintenance requires its applied native testing publication.")
+    publication: TestingPublicationRecord,
+) -> tuple[TestingLaneRoute, DokployTestingRouteTransport, dict[str, Any], int]:
     plan = effective_testing_route(store, publication)
     candidate = publication.plan.candidate
     host, token = source.read_dokploy_config(
@@ -67,6 +66,63 @@ def publish_testing_copy_route(
     workers = frame["backend_workers"].get(plan.new_backend)
     if type(workers) is not int:
         raise ValueError("The current testing Odoo worker mode is unavailable.")
+    return plan, transport, frame, workers
+
+
+def _route_current(plan: TestingLaneRoute, frame: dict[str, Any], workers: int) -> bool:
+    if frame["backend_workers"].get(plan.new_backend) != workers:
+        raise ValueError("The current testing Odoo worker mode changed.")
+    owned = json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None
+    if observe_testing_route(plan, frame["raw"], owned) != plan.new_backend:
+        raise ValueError("The current testing route selected another copy.")
+    return owned == route_document(plan, plan.new_backend, evented=bool(workers))
+
+
+def testing_copy_route_current(
+    *, root: Path | None, store: PostgresRecordStore, product: str, context: str
+) -> bool | None:
+    """Read native route drift; None leaves legacy testing delivery unchanged."""
+    publication = published_testing_copy(store, product=product, context=context)
+    if publication is None:
+        return None
+    inventory = store.read_environment_inventory(context_name=context, instance_name="testing")
+    identity = inventory.runtime_identity
+    if (
+        root is None
+        or identity is None
+        or (
+            identity.product,
+            identity.context,
+            identity.instance,
+        )
+        != (product, context, "testing")
+    ):
+        raise ValueError("The current native testing runtime identity is unavailable.")
+    plan, _transport, frame, workers = _read_copy_route(
+        root=root, store=store, identity=identity, publication=publication
+    )
+    if published_testing_copy(store, product=product, context=context) != publication:
+        raise ValueError("The maintained testing publication changed.")
+    return _route_current(plan, frame, workers)
+
+
+def publish_testing_copy_route(
+    *,
+    root: Path,
+    store: PostgresRecordStore,
+    identity: RuntimeIdentity,
+    checkpoint: Callable[[str], None],
+    operation_id: str,
+    lease_owner: str,
+) -> None:
+    if not operation_id or not lease_owner:
+        raise ValueError("Testing route maintenance requires its durable service operation lease.")
+    publication = published_testing_copy(store, product=identity.product, context=identity.context)
+    if publication is None or identity.instance != "testing":
+        raise ValueError("Route maintenance requires its applied native testing publication.")
+    plan, transport, _frame, workers = _read_copy_route(
+        root=root, store=store, identity=identity, publication=publication
+    )
 
     def guard() -> None:
         if (
@@ -77,13 +133,7 @@ def publish_testing_copy_route(
         checkpoint("testing_route_maintenance")
 
     def present() -> bool:
-        current = transport.read()
-        if current["backend_workers"].get(plan.new_backend) != workers:
-            raise ValueError("The current testing Odoo worker mode changed.")
-        owned = json.loads(current["owned_file"]) if current["owned_file"] is not None else None
-        if observe_testing_route(plan, current["raw"], owned) != plan.new_backend:
-            raise ValueError("The current testing route selected another copy.")
-        return owned == route_document(plan, plan.new_backend, evented=bool(workers))
+        return _route_current(plan, transport.read(), workers)
 
     prior = store.read_idempotency_record(
         scope=REBUILD_SCOPE, route_path=COPY_ROUTE_EFFECT, idempotency_key=operation_id
