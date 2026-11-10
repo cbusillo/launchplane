@@ -76,3 +76,29 @@ class OdooWebsiteSettingsIntent(BaseModel):
 
     artifact_id: str = Field(min_length=1)
     settings: OdooWebsiteSettings
+
+
+class OdooWebsiteIndexing(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    website_id: int = Field(ge=1, strict=True)
+    public_origin: str
+    production_use: Literal["prelaunch", "live"]
+
+    @model_validator(mode="after")
+    def validate_origin(self) -> OdooWebsiteIndexing:
+        origin = urlsplit(self.public_origin)
+        if (
+            origin.scheme != "https"
+            or not origin.hostname
+            or origin.username is not None
+            or origin.password is not None
+            or origin.path not in {"", "/"}
+            or origin.query
+            or origin.fragment
+            or any(character.isspace() for character in self.public_origin)
+            or origin.port is not None
+            and not 0 < origin.port <= 65535
+        ):
+            raise ValueError("Website indexing requires an exact public HTTPS origin.")
+        return self

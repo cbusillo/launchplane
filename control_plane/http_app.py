@@ -7196,6 +7196,88 @@ def create_launchplane_fastapi_app(
 
         authorization_product = product_profile.product
         isolation_mode = post_deploy_request.post_deploy.connection_isolation
+        indexing_request = post_deploy_request.post_deploy.website_indexing
+        if indexing_request is not None:
+            from control_plane.odoo_website_indexing import (
+                WebsiteIndexingAdapter,
+                WebsiteIndexingExecution,
+            )
+
+            if isinstance(
+                identity, TerminalAgentIdentity
+            ) or not resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="product_config.apply"
+                if indexing_request.mode == "apply"
+                else "product_config.plan",
+                product=authorization_product,
+                context=post_deploy_request.post_deploy.context,
+                target=AuthorizationTarget(scope="instance", instances=("prod",)),
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Website indexing configuration is not authorized.",
+                )
+            if indexing_request.mode == "apply" and not idempotency_key.strip():
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="idempotency_key_required",
+                    message="Website indexing requires its original Idempotency-Key.",
+                )
+            key, fingerprint, _ = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path=_ODOO_POST_DEPLOY_ROUTE,
+                idempotency_key=idempotency_key,
+                trace_id=trace_id,
+                check_replay=False,
+            )
+            execution = WebsiteIndexingExecution(
+                store=record_store,
+                root=resolved_control_plane_root,
+                product=authorization_product,
+                context=post_deploy_request.post_deploy.context,
+                request=indexing_request,
+            )
+            try:
+                with synchronous_odoo_lane(
+                    record_store=record_store,
+                    trace_id=trace_id,
+                    product=authorization_product,
+                    context=post_deploy_request.post_deploy.context,
+                    instance="prod",
+                ):
+                    if indexing_request.mode != "apply":
+                        return accepted_evidence_response(
+                            trace_id=trace_id,
+                            records={},
+                            result=await asyncio.to_thread(execution.observe),
+                        )
+                    assert indexing_request.reviewed_plan is not None
+                    return await run_provider_mutation(
+                        record_store=record_store,
+                        identity=identity,
+                        route_path=_ODOO_POST_DEPLOY_ROUTE,
+                        idempotency_key=key,
+                        request_fingerprint=fingerprint,
+                        trace_id=trace_id,
+                        adapter=WebsiteIndexingAdapter(
+                            execution, indexing_request.reviewed_plan, trace_id
+                        ),
+                        in_progress_message="The original website indexing operation is running.",
+                        reconcile_message="Website indexing outcome is unknown. Keep the original request and key for readback.",
+                    )
+            except (ValueError, FileNotFoundError, RuntimeError, click.ClickException) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="website_indexing_unverified",
+                    message="Website indexing binding or native evidence is incomplete; retain the original request and key.",
+                ) from error
         director_isolation_apply = director_agent_identity(identity) and isolation_mode == "apply"
 
         def maintenance_authorized() -> bool:

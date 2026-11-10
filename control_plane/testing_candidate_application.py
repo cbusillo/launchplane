@@ -738,8 +738,12 @@ def abandon_candidate_application(
     namespace: str,
     lease: ProviderOperationLease,
     guard: Callable[[], None],
+    cause: str = "",
 ) -> TestingCandidateAllocation:
-    """Retain failed-copy custody; never cancel unknown jobs, stop a copy or delete storage."""
+    """Retain failed-copy custody; never cancel unknown jobs, stop a copy or delete storage.
+
+    ``cause`` is a bounded marker receipt recorded with the custody evidence.
+    """
     lease.assert_current()
     guard()
     record = store.read_testing_candidate(namespace)
@@ -752,7 +756,9 @@ def abandon_candidate_application(
     lease.assert_current()
     guard()
     require_candidate_target_custody(store, record)
-    updated_app = app.model_copy(update={"phase": "abandoned", "abandonment_evidence": evidence})
+    updated_app = app.model_copy(
+        update={"phase": "abandoned", "abandonment_evidence": evidence + cause}
+    )
     updated = TestingCandidateAllocation.model_validate(
         {**record.model_dump(), "application": updated_app.model_dump()}
     )

@@ -291,6 +291,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {response.release_run ? <ReleaseRunProgress run={response.release_run} refreshFailed={refreshFailed} /> : null}
       {checklist && !noNewRelease ? <>
+        {checklist.first_live_origin ? <p>Accepting this release puts {checklist.first_live_origin} into live use. After the release succeeds, Launchplane removes its prelaunch search protection.</p> : null}
         {checklist.website_settings ? <section data-website-settings aria-label="Website settings in this release">
           <h3>Website settings</h3>
           <p>Accepting this release applies these settings to {checklist.website_settings.settings.public_origin}.</p>
