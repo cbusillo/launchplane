@@ -1121,8 +1121,8 @@ def restore_main():
                     filestore_existing_bytes=existing,
                     data_staging_bytes=remaining_migrated_staging(data_backing,identity,migrated),
                     probe_clones=False):
-                # Only an untouched receiver proves no delivery write can be in flight.
-                if existing or os.path.lexists(data_backing/('.lp-native-'+identity)):
+                delivery_may_be_writing=existing or os.path.lexists(data_backing/('.lp-native-'+identity))
+                if delivery_may_be_writing:
                     raise RuntimeError('Testing storage capacity is insufficient during migrated delivery')
                 raise CopyReadbackRefused(ReadbackPredicate.STORAGE_CAPACITY)
         capture=spec.get('native_capture')

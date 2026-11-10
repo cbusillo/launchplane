@@ -967,7 +967,6 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             status, output = self.run_program()
         self.assertNotEqual(status, 0, output)
         frame = json.loads(output.strip().removeprefix("fixture:"))
-        # A started delivery may still be writing; keep observing instead of ending.
         self.assertEqual(frame["predicate"], ReadbackPredicate.BACKING_STORAGE)
         self.assertNotEqual(frame.get("kind"), "refused")
 

@@ -1971,13 +1971,14 @@ class NativeTestingRebuildExecution(TestingRebuildProvider):
                 and current.application.restore_workflow_started is False
                 and not current.application.restore_schedule_id
             ):
-                # No restore was dispatched, so there is no restore job to observe.
-                # Only a host capacity refusal is determinate; anything else retries.
-                if not (
-                    isinstance(error, NativeProgramFailed)
+                untouched_receiver_capacity_refusal = (
+                    error
+                    if isinstance(error, NativeProgramFailed)
                     and error.predicate == ReadbackPredicate.STORAGE_CAPACITY
                     and not error.unavailable
-                ):
+                    else None
+                )
+                if untouched_receiver_capacity_refusal is None:
                     raise
                 self.allocation = abandon_candidate_application(
                     root=self.root,
@@ -1991,7 +1992,7 @@ class NativeTestingRebuildExecution(TestingRebuildProvider):
                             COPY_FAILURE_KIND_MARKER: "refused",
                         }
                     )
-                    + f":readback_failed_predicate={error.predicate}",
+                    + f":readback_failed_predicate={untouched_receiver_capacity_refusal.predicate}",
                 )
                 assert self.allocation.application is not None
                 raise TestingRebuildPreparationFailure(
