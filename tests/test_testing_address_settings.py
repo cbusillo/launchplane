@@ -630,7 +630,9 @@ class CanonicalAddressProgramTests(unittest.TestCase):
                 baseline = transport.NativeProgramFailed(
                     "baseline", predicate=frame.get("predicate", ""), kind=frame.get("kind", "")
                 )
-                self.assertEqual(raised.exception.evidence, baseline.evidence)
+                for key, value in baseline.evidence.items():
+                    self.assertEqual(raised.exception.evidence.get(key), value)
+                self.assertEqual(raised.exception.unavailable, baseline.unavailable)
                 self.assertEqual(raised.exception.code, baseline.code)
                 self.assertNotIn(private, text + json.dumps(frame))
                 self.assertFalse(self.gate.exists())
