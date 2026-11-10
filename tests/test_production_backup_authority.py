@@ -15,7 +15,11 @@ from control_plane.contracts.production_backup_authority import (
     ProxmoxGuestBackupDestinationReference,
     ProxmoxStorageBackupDestinationReference,
 )
-from control_plane.drivers.registry import build_driver_context_view
+from control_plane.drivers.registry import (
+    build_driver_context_view,
+    effective_driver_actions,
+    read_driver_descriptor,
+)
 from control_plane.product_operational_readiness_service import (
     ProductOperationalReadinessStore,
     build_product_operational_readiness_service_result,
@@ -445,6 +449,82 @@ class ProductionBackupAuthorityStorageTests(unittest.TestCase):
 
 
 class ProductionBackupAuthorityProjectionTests(unittest.TestCase):
+    def test_preparation_uses_guard_selectors_despite_different_http_actions(self) -> None:
+        for driver in ("odoo", "generic-web"):
+            actions = tuple(
+                action
+                for action in effective_driver_actions(read_driver_descriptor(driver))
+                if action.production_backup_action
+            )
+            selectors = {action.production_backup_action for action in actions}
+            irrelevant_actions = {action.authz_action for action in actions} - selectors
+            for policy_action in selectors | irrelevant_actions:
+                with (
+                    self.subTest(driver=driver, policy_action=policy_action),
+                    TemporaryDirectory() as directory,
+                ):
+                    store = PostgresRecordStore(
+                        database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite3'}"
+                    )
+                    self.addCleanup(store.close)
+                    store.ensure_schema()
+                    profile = _profile().model_copy(update={"driver_id": driver})
+                    store.write_product_profile_record(profile)
+                    for target in (_source_target(), _destination_target()):
+                        store.write_production_backup_target_record(target)
+                    policy = _policy().model_dump(mode="json")
+                    policy.update(
+                        promotion_action=policy_action, policy_id="", record_id="", policy_digest=""
+                    )
+                    store.write_production_backup_policy_record(
+                        ProductionBackupPolicyRecord.model_validate(policy)
+                    )
+                    config = build_product_environment_config_status(
+                        record_store=store,
+                        product=profile.product,
+                        environment="prod",
+                        action_allowed=lambda *_: True,
+                    )
+                    view = build_driver_context_view(
+                        record_store=store,
+                        context_name=profile.lanes[0].context,
+                        instance_name="prod",
+                        action_allowed=lambda *_: True,
+                    )
+                    for authorities in (
+                        config.production_backup_authorities,
+                        view.drivers[0].production_backup_authorities,
+                    ):
+                        by_action = {item.promotion_action: item for item in authorities}
+                        self.assertEqual(set(by_action), selectors)
+                        for selector, authority in by_action.items():
+                            self.assertEqual(
+                                authority.state, "ready" if policy_action == selector else "missing"
+                            )
+                        self.assertEqual(len(authorities), len(by_action))
+                    for action in actions:
+                        readiness = build_product_operational_readiness_service_result(
+                            record_store=cast(ProductOperationalReadinessStore, store),
+                            profile=profile,
+                            lane=profile.lanes[0],
+                            identity=_identity(),
+                            requested_action=action.authz_action,
+                            requested_artifact_id="",
+                            expected_current_artifact_id="",
+                            generated_at="2026-09-03T00:00:00Z",
+                        )
+                        dimension = next(
+                            item
+                            for item in readiness.dimensions
+                            if item.dimension == "production_backup_policy"
+                        )
+                        self.assertEqual(
+                            dimension.state,
+                            "ready"
+                            if policy_action == action.production_backup_action
+                            else "missing",
+                        )
+
     def test_product_config_driver_and_readiness_project_bounded_authority(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             database_path = Path(temporary_directory) / "launchplane.sqlite3"

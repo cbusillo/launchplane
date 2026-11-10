@@ -1124,9 +1124,11 @@ def _production_backup_authority_read_models(
     if descriptor is None:
         return ()
     promotion_actions = tuple(
-        action
-        for action in effective_driver_actions(descriptor)
-        if action.requires_production_backup_policy and action.authz_action
+        dict.fromkeys(
+            action.production_backup_action
+            for action in effective_driver_actions(descriptor)
+            if action.production_backup_action
+        )
     )
     if not promotion_actions or not action_allowed(
         "production_backup_authority.read",
@@ -1141,7 +1143,7 @@ def _production_backup_authority_read_models(
     except TypeError:
         return tuple(
             ProductionBackupAuthorityStatus(
-                promotion_action=action.authz_action,
+                promotion_action=action,
                 state="invalid",
                 ready=False,
                 summary="Production backup authority storage is unavailable.",
@@ -1157,7 +1159,7 @@ def _production_backup_authority_read_models(
                 product=profile.product,
                 context=lane.context,
                 instance=lane.instance,
-                promotion_action=action.authz_action,
+                promotion_action=action,
                 generated_at=generated_at,
             )
         )

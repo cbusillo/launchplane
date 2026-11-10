@@ -7,6 +7,8 @@ from typing import Any
 from unittest.mock import patch
 
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.contracts.production_backup_authority import ODOO_PROMOTION_BACKUP_ACTION
+from control_plane.drivers.registry import effective_driver_actions, read_driver_descriptor
 from control_plane.production_backup_authority import ProductionBackupAuthorityWriteEnvelope
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
@@ -128,11 +130,16 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
             headers=_browser_mutation_headers(self.sessions, self.session),
         )
 
+    def proposal_state(self, operation_id: str) -> dict[str, object]:
+        return {
+            "proposal": self.store.read_privileged_operation_record(operation_id),
+            "events": self.store.list_privileged_operation_event_records(operation_id=operation_id),
+            "policies": self.store.list_production_backup_policy_records(),
+            "targets": self.store.list_production_backup_target_records(),
+        }
+
     async def assert_stale_proposal(self, operation_id: str) -> None:
-        before = self.store.read_privileged_operation_record(operation_id)
-        events = self.store.list_privileged_operation_event_records(operation_id=operation_id)
-        policies = self.store.list_production_backup_policy_records()
-        targets = self.store.list_production_backup_target_records()
+        before = self.proposal_state(operation_id)
         response = await self.read_proposals()
         self.assertEqual(response.status_code, 200, response.text)
         proposal = next(
@@ -141,16 +148,11 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(proposal["can_approve"])
         self.assertTrue(proposal["can_decline"])
         self.assertTrue(proposal["approval_unavailable_reason"])
-        self.assertEqual(self.store.read_privileged_operation_record(operation_id), before)
-        self.assertEqual(
-            self.store.list_privileged_operation_event_records(operation_id=operation_id), events
-        )
-        self.assertEqual(self.store.list_production_backup_policy_records(), policies)
-        self.assertEqual(self.store.list_production_backup_target_records(), targets)
+        self.assertEqual(self.proposal_state(operation_id), before)
         refused = await self.decide(operation_id)
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(refused.json()["error"]["code"], "backup_proposal_conflict")
-        self.assertEqual(self.store.read_privileged_operation_record(operation_id), before)
+        self.assertEqual(self.proposal_state(operation_id), before)
         self.assertEqual((await self.decide(operation_id, "decline")).status_code, 200)
         historical = await self.read_proposals()
         declined = next(
@@ -468,21 +470,78 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(foreign.status_code, 403, foreign.text)
 
     async def test_wrong_promotion_action_is_never_reviewable(self) -> None:
-        self.payload["request"]["authority"]["policy"]["promotion_action"] = (
-            "unknown_promotion.execute"
+        cases = [("generic-web", "unknown_promotion.execute")]
+        for driver in ("generic-web", "odoo"):
+            actions = effective_driver_actions(read_driver_descriptor(driver))
+            selectors = {action.production_backup_action for action in actions}
+            cases.extend(
+                (driver, action.authz_action)
+                for action in actions
+                if action.production_backup_action and action.authz_action not in selectors
+            )
+        for driver, action in cases:
+            with self.subTest(driver=driver, action=action):
+                self.payload["source_event_id"] = f"proposal:{driver}:{action}"
+                self.store.write_product_profile_record(
+                    _profile().model_copy(update={"driver_id": driver})
+                )
+                policy = self.payload["request"]["authority"]["policy"]
+                policy.update(promotion_action=action, policy_id="", record_id="", policy_digest="")
+                response = await http_request(
+                    self.app,
+                    "POST",
+                    "/v1/agent/privileged-operations/plans",
+                    headers=self.agent_headers,
+                    payload=self.payload,
+                )
+                self.assertEqual(response.status_code, 503, response.text)
+                self.assertEqual(self.store.list_privileged_operation_records(), ())
+
+    async def test_odoo_policy_consumed_by_guards_can_be_approved_and_applied(self) -> None:
+        self.store.write_product_profile_record(_profile().model_copy(update={"driver_id": "odoo"}))
+        policy = self.payload["request"]["authority"]["policy"]
+        policy.update(
+            promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+            policy_id="",
+            record_id="",
+            policy_digest="",
         )
-        self.payload["request"]["authority"]["policy"]["policy_id"] = ""
-        self.payload["request"]["authority"]["policy"]["record_id"] = ""
-        self.payload["request"]["authority"]["policy"]["policy_digest"] = ""
-        response = await http_request(
-            self.app,
-            "POST",
-            "/v1/agent/privileged-operations/plans",
-            headers=self.agent_headers,
-            payload=self.payload,
+        operation_id = await self.propose()
+        self.assertEqual((await self.decide(operation_id)).status_code, 200)
+        result = execute_approved_privileged_operations_once(record_store=self.store)
+        self.assertEqual(result[0].status, "executed", result)
+        self.assertEqual(
+            self.store.list_production_backup_policy_records()[0].promotion_action,
+            ODOO_PROMOTION_BACKUP_ACTION,
         )
-        self.assertEqual(response.status_code, 503, response.text)
-        self.assertEqual(self.store.list_privileged_operation_records(), ())
+        proposal = (await self.read_proposals()).json()["proposals"][0]
+        self.assertIsNone(proposal["approval_unavailable_reason"])
+
+    async def test_irrelevant_applied_policy_is_reported_without_rewriting_history(self) -> None:
+        self.store.write_product_profile_record(_profile().model_copy(update={"driver_id": "odoo"}))
+        policy = self.payload["request"]["authority"]["policy"]
+        policy.update(
+            promotion_action=next(
+                action.authz_action
+                for action in effective_driver_actions(read_driver_descriptor("odoo"))
+                if action.production_backup_action
+                and action.authz_action != action.production_backup_action
+            ),
+            policy_id="",
+            record_id="",
+            policy_digest="",
+        )
+        with patch("control_plane.privileged_operation_registry.require_backup_policy_promotion"):
+            operation_id = await self.propose()
+            self.assertEqual((await self.decide(operation_id)).status_code, 200)
+            result = execute_approved_privileged_operations_once(record_store=self.store)
+            self.assertEqual(result[0].status, "executed", result)
+        before = self.proposal_state(operation_id)
+        proposal = (await self.read_proposals()).json()["proposals"][0]
+        self.assertEqual(proposal["status"], "executed")
+        self.assertFalse(proposal["can_approve"])
+        self.assertTrue(proposal["approval_unavailable_reason"])
+        self.assertEqual(self.proposal_state(operation_id), before)
 
     async def test_worker_rechecks_human_authority_before_any_write(self) -> None:
         from unittest.mock import patch

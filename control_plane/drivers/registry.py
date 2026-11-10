@@ -28,6 +28,8 @@ from control_plane.contracts.driver_descriptor import (
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.production_backup_authority import (
+    GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+    ODOO_PROMOTION_BACKUP_ACTION,
     ProductionBackupAuthorityStatus,
     production_backup_authority_status,
 )
@@ -270,7 +272,7 @@ def _action(
     writes_records: tuple[str, ...] = (),
     alternate_authz_actions: tuple[str, ...] = (),
     readiness_requirements: tuple[DriverActionReadinessRequirement, ...] = (),
-    requires_production_backup_policy: bool = False,
+    production_backup_action: str = "",
 ) -> DriverActionDescriptor:
     return DriverActionDescriptor(
         action_id=action_id,
@@ -285,7 +287,7 @@ def _action(
         operator_visible=operator_visible,
         writes_records=writes_records,
         readiness_requirements=readiness_requirements,
-        requires_production_backup_policy=requires_production_backup_policy,
+        production_backup_action=production_backup_action,
     )
 
 
@@ -370,7 +372,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/generic-web/prod-promotion",
             authz_action="generic_web_prod_promotion.execute",
             writes_records=("deployment", "promotion", "inventory"),
-            requires_production_backup_policy=True,
+            production_backup_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
         ),
         _action(
             "prod_promotion_workflow",
@@ -381,7 +383,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/generic-web/prod-promotion-workflow",
             authz_action="generic_web_prod_promotion.dispatch",
             writes_records=(),
-            requires_production_backup_policy=True,
+            production_backup_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
         ),
         _action(
             "prod_rollback_plan",
@@ -653,7 +655,7 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/prod-promotion-run",
             authz_action="odoo_prod_promotion_run.execute",
             writes_records=("backup_gate", "deployment", "promotion", "inventory", "release_tuple"),
-            requires_production_backup_policy=True,
+            production_backup_action=ODOO_PROMOTION_BACKUP_ACTION,
         ),
         _action(
             "prod_backup_gate",
@@ -759,7 +761,7 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/prod-promotion",
             authz_action="odoo_prod_promotion.execute",
             writes_records=("deployment", "promotion", "inventory", "release_tuple"),
-            requires_production_backup_policy=True,
+            production_backup_action=ODOO_PROMOTION_BACKUP_ACTION,
         ),
         _action(
             "prod_rollback",
@@ -1358,9 +1360,11 @@ def _production_backup_authorities(
     if not instance_name:
         return ()
     promotion_actions = tuple(
-        action
-        for action in effective_driver_actions(descriptor)
-        if action.requires_production_backup_policy and action.authz_action
+        dict.fromkeys(
+            action.production_backup_action
+            for action in effective_driver_actions(descriptor)
+            if action.production_backup_action
+        )
     )
     if (
         not promotion_actions
@@ -1379,7 +1383,7 @@ def _production_backup_authorities(
     except TypeError:
         return tuple(
             ProductionBackupAuthorityStatus(
-                promotion_action=action.authz_action,
+                promotion_action=action,
                 state="invalid",
                 ready=False,
                 summary="Production backup authority storage is unavailable.",
@@ -1395,7 +1399,7 @@ def _production_backup_authorities(
                 product=profile.product,
                 context=context_name,
                 instance=instance_name,
-                promotion_action=action.authz_action,
+                promotion_action=action,
                 generated_at=generated_at,
             )
         )

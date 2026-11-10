@@ -20,6 +20,7 @@ from control_plane.authz_candidate_preparation import (
     ordinary_agent_delivery_policy_managed_set_id,
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
@@ -636,6 +637,28 @@ def plan_managed_merge_train_policy_import(
     )
 
 
+def require_backup_policy_promotion(
+    record_store: object, request: BackupPolicyProposalInput
+) -> None:
+    policy = request.authority.policy
+    from control_plane.drivers.registry import read_driver_descriptor, effective_driver_actions
+
+    read_profile = getattr(record_store, "read_product_profile_record", None)
+    if not callable(read_profile):
+        raise ValueError("Product profile storage is required.")
+    profile = cast(Callable[[str], LaunchplaneProductProfileRecord], read_profile)(policy.product)
+    if not any(
+        lane.context == policy.context
+        and lane.instance == policy.instance
+        and lane.instance == "prod"
+        for lane in profile.lanes
+    ):
+        raise ValueError("Backup proposal does not name this product's production lane.")
+    actions = effective_driver_actions(read_driver_descriptor(profile.driver_id))
+    if not any(action.production_backup_action == policy.promotion_action for action in actions):
+        raise ValueError("Backup proposal does not protect the current production promotion.")
+
+
 def plan_backup_policy_proposal(
     record_store: object, request: PrivilegedOperationRequest
 ) -> BackupPolicyHumanEvidence:
@@ -648,27 +671,8 @@ def plan_backup_policy_proposal(
     if not isinstance(request, BackupPolicyProposalInput):
         raise PrivilegedOperationPlannerError("Backup planner received an invalid request.")
     try:
-        from control_plane.drivers.registry import read_driver_descriptor, effective_driver_actions
-
-        read_profile = getattr(record_store, "read_product_profile_record", None)
-        if not callable(read_profile):
-            raise ValueError("Product profile storage is required.")
-        profile = read_profile(request.authority.policy.product)
+        require_backup_policy_promotion(record_store, request)
         policy = request.authority.policy
-        if not any(
-            lane.context == policy.context
-            and lane.instance == policy.instance
-            and lane.instance == "prod"
-            for lane in profile.lanes
-        ):
-            raise ValueError("Backup proposal does not name this product's production lane.")
-        actions = effective_driver_actions(read_driver_descriptor(profile.driver_id))
-        if not any(
-            action.requires_production_backup_policy
-            and action.authz_action == policy.promotion_action
-            for action in actions
-        ):
-            raise ValueError("Backup proposal does not protect the current production promotion.")
         authority_store = require_production_backup_authority_store(record_store)
         refusal = lane_bound_target_revision_refusal(
             policy_records=authority_store.list_production_backup_policy_records(),
