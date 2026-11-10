@@ -46,6 +46,35 @@
     },
     "operations": [
       {
+        "idempotency": "optional",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry_run",
+          "apply"
+        ],
+        "operation_id": "apply_product_onboarding",
+        "path": "/v1/product-onboarding/apply",
+        "purpose": "Review advanced manifests without effects using product read scope; protected apply retains its existing authority and accepts a current-record-bound reviewed digest.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "f5f944ab93bf26af8e41bf6c3a4295bd1f11abe498c68127a8bd7aa588ae323a",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "apply",
         "identity_dependencies": [
           "read_write_identity"
@@ -1446,8 +1475,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "fb9556cbbd046f5c80ceb4e34493e7fe04a41e0c"
+    "source_commit_sha": "172c2451373106bc0f52460f03b4ff94ead9ebab"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "2a7dc9eca35bb7e74ef941a0a06a4c04549a1865941614c34f45cda24cbef382"
+  "semantic_digest_sha256": "0f571abf72d62cb45d3520acedf0d1f333f654b9e203455ac10dd8eb7492a51a"
 }

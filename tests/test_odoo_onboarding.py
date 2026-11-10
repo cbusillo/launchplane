@@ -1,9 +1,21 @@
-from typing import Any
+from copy import deepcopy
+from typing import Any, cast
+from unittest.mock import patch
 
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+
+from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
+from control_plane.contracts.product_profile_record import product_profile_record_sha256
 from control_plane.odoo_onboarding import OdooOnboardingIntent
+from control_plane.service_auth import LaunchplaneAuthzPolicy, LocalOperatorPolicyRule
+from control_plane.workflows.product_onboarding import build_product_profile_record
+from tests.http_app_test_support import _local_operator_bearer_config
 from tests.support.auth import scoped_agent_transport
 from tests.support.http import request
 from tests.test_director_testing_target_creation import _DirectorTestingSetupFixture
+from tests.test_product_onboarding import _manifest_payload
+from tests.test_odoo_cutover_lane_authority import lane_authority
 
 
 class NativeOdooOnboardingTests(_DirectorTestingSetupFixture):
@@ -86,3 +98,310 @@ class NativeOdooOnboardingTests(_DirectorTestingSetupFixture):
             {record.product for record in self.store.list_product_profile_records()},
             {self.profile.product, owner.product},
         )
+
+
+class AdvancedManifestPlanningTests(_DirectorTestingSetupFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        payload = {
+            **_manifest_payload(),
+            "driver_id": "odoo",
+            "provider_targets": [],
+            "runtime_environments": [],
+            "secret_bindings": [],
+            "updated_at": "",
+        }
+        lanes = cast(list[dict[str, Any]], payload["lanes"])
+        lanes[1]["odoo_data_policy"] = {}
+        lanes[1]["odoo_prelaunch_rebuild"] = {}
+        self.manifest = ProductOnboardingManifest.model_validate(payload)
+        self.existing = build_product_profile_record(
+            manifest=self.manifest, updated_at="2026-01-01T00:00:00Z"
+        )
+        self.existing.lanes[1].odoo_cutover = lane_authority()
+        self.store.write_product_profile_record(self.existing)
+        desired = deepcopy(payload)
+        cast(list[dict[str, Any]], desired["lanes"])[1]["odoo_data_policy"] = {
+            "data_authority": "resettable",
+            "allowed_rebuild_sources": ["empty"],
+            "requires_runtime_identity": True,
+        }
+        self.review = {"product": "launchplane", "mode": "dry_run", "manifest": desired}
+
+    async def records(self, *, key: str = "", **changes: Any) -> Any:
+        return await request(
+            self.app,
+            "POST",
+            "/v1/product-onboarding/apply",
+            payload={**self.review, **changes},
+            headers={"Authorization": "Bearer local-operator-token", "Idempotency-Key": key},
+        )
+
+    async def test_existing_product_policy_can_be_reviewed_without_writes(self) -> None:
+        def reject_writes(
+            _connection: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            self.assertNotIn(
+                statement.lstrip().split()[0].upper(),
+                {"INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER"},
+                statement,
+            )
+
+        event.listen(Engine, "before_cursor_execute", reject_writes)
+        try:
+            with (
+                patch.object(
+                    self.store,
+                    "write_product_authority_bundle",
+                    side_effect=AssertionError("plan wrote authority"),
+                ),
+                patch.object(
+                    self.store,
+                    "read_secret_version",
+                    side_effect=AssertionError("plan read credentials"),
+                ),
+                patch.object(
+                    self.store,
+                    "read_secret_record",
+                    side_effect=AssertionError("plan read credentials"),
+                ),
+                patch(
+                    "control_plane.workflows.product_onboarding.utc_now_timestamp",
+                    side_effect=("2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"),
+                ),
+            ):
+                planned = await self.records(key="plan-does-not-persist")
+                repeated = await self.records(key="plan-does-not-persist")
+        finally:
+            event.remove(Engine, "before_cursor_execute", reject_writes)
+        self.provider.assert_not_called()
+        self.assertEqual(
+            self.store.read_product_profile_record(self.existing.product), self.existing
+        )
+        self.assertEqual(planned.status_code, 202, planned.text)
+        result = planned.json()["result"]
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["plan_sha256"], repeated.json()["result"]["plan_sha256"])
+        self.assertEqual(
+            result["current_profile_sha256"], product_profile_record_sha256(self.existing)
+        )
+        self.assertEqual(result["changed_profile_fields"], ["lanes"])
+        self.assertEqual(
+            result["lane_changes"],
+            [
+                {
+                    "context": self.existing.lanes[1].context,
+                    "instance": "prod",
+                    "fields": ["odoo_data_policy"],
+                }
+            ],
+        )
+        self.assertNotIn(lane_authority().database_uuid, planned.text)
+        self.assertNotIn(lane_authority().prepared_origin, planned.text)
+
+    def use_policy(self, *, product: str, actions: tuple[str, ...]) -> None:
+        self.app = self.make_app(
+            _local_operator_bearer_config(),
+            LaunchplaneAuthzPolicy(
+                local_operators=(
+                    LocalOperatorPolicyRule(
+                        subjects=("local-owner-agent",),
+                        token_labels=("local-owner-read",),
+                        products=(product,),
+                        contexts=("launchplane",),
+                        actions=actions,
+                    ),
+                )
+            ),
+        )
+
+    async def test_full_manifest_review_is_stable_and_exposes_only_change_metadata(self) -> None:
+        manifest: dict[str, Any] = {**_manifest_payload(), "updated_at": ""}
+        with (
+            patch(
+                "control_plane.workflows.product_onboarding.utc_now_timestamp",
+                side_effect=("2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"),
+            ),
+            patch.object(
+                self.store,
+                "write_product_authority_bundle",
+                side_effect=AssertionError("plan wrote authority"),
+            ),
+            patch.object(
+                self.store, "read_secret_version", side_effect=AssertionError("credential read")
+            ),
+        ):
+            first = await self.records(manifest=manifest)
+            second = await self.records(manifest=manifest)
+        self.assertEqual(first.status_code, 202, first.text)
+        result = first.json()["result"]
+        self.assertEqual(result["plan_sha256"], second.json()["result"]["plan_sha256"])
+        self.assertIn("target_id", result["provider_target_changes"][0]["fields"])
+        self.assertEqual(result["runtime_environment_changes"][0]["changed_key_count"], 1)
+        self.assertEqual(result["secret_binding_changes"][0]["status"], "disabled")
+        self.assertNotIn("PUBLIC_BASE_URL", first.text)
+        self.assertNotIn("SMTP_PASSWORD", first.text)
+        self.assertNotIn("app-prod-123", first.text)
+        self.use_policy(product="launchplane", actions=("product_onboarding.apply",))
+        applied = await self.records(
+            manifest=manifest, mode="apply", reviewed_plan_sha256=result["plan_sha256"]
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        current_plan = await self.records(manifest=manifest)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.existing.lanes[1].context, instance_name="prod"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"domains": ("changed.example.invalid",)})
+        )
+        stale = await self.records(
+            manifest=manifest,
+            mode="apply",
+            reviewed_plan_sha256=current_plan.json()["result"]["plan_sha256"],
+        )
+        self.assertEqual(stale.status_code, 409, stale.text)
+        removed = deepcopy(manifest)
+        for section in ("lanes", "provider_targets", "runtime_environments"):
+            removed[section] = [
+                row
+                for row in cast(list[dict[str, Any]], removed[section])
+                if row["instance"] != "testing"
+            ]
+        removed["expected_config"] = {}
+        removal = await self.records(manifest=removed)
+        self.assertEqual(removal.status_code, 202, removal.text)
+        self.assertEqual(
+            removal.json()["result"]["removed_lanes"],
+            [{"context": self.existing.lanes[0].context, "instance": "testing"}],
+        )
+        self.assertIn("domains", removal.json()["result"]["provider_target_changes"][0]["fields"])
+        self.provider.assert_not_called()
+
+    async def test_planning_preserves_reader_scope_and_apply_refusal(self) -> None:
+        self.use_policy(product=self.existing.product, actions=("product_profile.read",))
+        with scoped_agent_transport():
+            planned = await self.records()
+            self.assertEqual(planned.status_code, 202, planned.text)
+            refused = await self.records(
+                mode="apply", reviewed_plan_sha256=planned.json()["result"]["plan_sha256"]
+            )
+            self.assertEqual(refused.status_code, 403, refused.text)
+            other_manifest = {
+                **cast(dict[str, Any], self.review["manifest"]),
+                "product": "other-product",
+            }
+            other = await self.records(manifest=other_manifest)
+            self.assertEqual(other.status_code, 403, other.text)
+            global_manifest = {
+                **cast(dict[str, Any], self.review["manifest"]),
+                "runtime_environments": [{"scope": "global", "env": {"EXAMPLE_SETTING": "probe"}}],
+            }
+            global_plan = await self.records(manifest=global_manifest)
+            self.assertEqual(global_plan.status_code, 403, global_plan.text)
+            foreign_target = self.production_provider.model_copy(
+                update={"context": "other-private-context", "target_id": "foreign-target"}
+            )
+            self.store.write_provider_target_record(foreign_target)
+            guessed = deepcopy(cast(dict[str, Any], self.review["manifest"]))
+            guessed["provider_targets"] = [
+                {
+                    "context": self.existing.lanes[1].context,
+                    "instance": "prod",
+                    "target_id": foreign_target.target_id,
+                    "target_type": self.production.target_type,
+                }
+            ]
+            hidden = await self.records(manifest=guessed)
+            self.assertEqual(hidden.status_code, 400, hidden.text)
+            self.assertNotIn(foreign_target.context, hidden.text)
+            foreign_owner = self.profile.model_copy(
+                update={
+                    "product": "other-product",
+                    "lanes": (
+                        self.profile.lanes[0].model_copy(
+                            update={"context": self.existing.lanes[1].context}
+                        ),
+                    ),
+                }
+            )
+            self.store.write_product_profile_record(foreign_owner)
+            other_context = await self.records()
+            self.assertEqual(other_context.status_code, 403, other_context.text)
+        self.assertEqual((await self.records(manifest=global_manifest)).status_code, 202)
+        self.assertEqual((await self.records(product=self.existing.product)).status_code, 400)
+        self.assertEqual((await self.records(mode="apply")).status_code, 403)
+        self.assertEqual(
+            self.store.read_product_profile_record(self.existing.product), self.existing
+        )
+
+    async def test_review_binds_desired_and_current_records_and_keeps_original_replay(self) -> None:
+        planned = await self.records()
+        digest = planned.json()["result"]["plan_sha256"]
+        self.use_policy(product="launchplane", actions=("product_onboarding.apply",))
+        changed = {
+            **cast(dict[str, Any], self.review["manifest"]),
+            "display_name": "Changed desired",
+        }
+        mismatch = await self.records(
+            mode="apply", manifest=changed, reviewed_plan_sha256=digest, key="reviewed-change"
+        )
+        self.assertEqual(mismatch.status_code, 409, mismatch.text)
+        current = self.existing.model_copy(update={"display_name": "Concurrent name"})
+        self.store.write_product_profile_record(current)
+        stale = await self.records(mode="apply", reviewed_plan_sha256=digest, key="reviewed-change")
+        self.assertEqual(stale.status_code, 409, stale.text)
+        refreshed = await self.records()
+        refreshed_digest = refreshed.json()["result"]["plan_sha256"]
+        self.assertNotEqual(refreshed_digest, digest)
+        applied = await self.records(
+            mode="apply", reviewed_plan_sha256=refreshed_digest, key="reviewed-change"
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        replay = await self.records(
+            mode="apply", reviewed_plan_sha256=refreshed_digest, key="reviewed-change"
+        )
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        stored = self.store.read_product_profile_record(self.existing.product)
+        desired_profile = build_product_profile_record(
+            manifest=ProductOnboardingManifest.model_validate(self.review["manifest"]),
+            existing_profile=current,
+            updated_at=stored.updated_at,
+        )
+        self.assertEqual(stored, desired_profile)
+        self.assertEqual(stored.lanes[1].odoo_cutover, self.existing.lanes[1].odoo_cutover)
+        self.assertEqual(stored.release_on_acceptance, self.existing.release_on_acceptance)
+        self.provider.assert_not_called()
+
+    async def test_commit_race_keeps_current_authority_and_writes_no_receipt(self) -> None:
+        planned = await self.records()
+        self.use_policy(product="launchplane", actions=("product_onboarding.apply",))
+        write_bundle = self.store.write_product_authority_bundle
+        concurrent = self.existing.model_copy(update={"display_name": "Concurrent edit"})
+
+        def race(bundle: Any) -> None:
+            self.store.write_product_profile_record(concurrent)
+            write_bundle(bundle)
+
+        with patch.object(self.store, "write_product_authority_bundle", side_effect=race):
+            refused = await self.records(
+                mode="apply",
+                reviewed_plan_sha256=planned.json()["result"]["plan_sha256"],
+                key="racing-change",
+            )
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "product_profile_changed")
+        self.assertEqual(self.store.read_product_profile_record(self.existing.product), concurrent)
+        refreshed = await self.records()
+        applied = await self.records(
+            mode="apply",
+            reviewed_plan_sha256=refreshed.json()["result"]["plan_sha256"],
+            key="racing-change",
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertFalse(applied.json().get("replayed", False))
