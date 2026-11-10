@@ -1006,7 +1006,10 @@ class FreshTestingHostProgramTests(unittest.TestCase):
 
         def consume(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
             program = kwargs.get("input")
-            if program != self.spec["native_files_program"].encode():
+            if (
+                not isinstance(program, bytes)
+                or program != self.spec["native_files_program"].encode()
+            ):
                 return original(arguments, **kwargs)
             receiver = json.loads(base64.b64decode(arguments[-1]))
             modes.append(receiver["mode"])
