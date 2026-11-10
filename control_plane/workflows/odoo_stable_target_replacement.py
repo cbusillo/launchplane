@@ -2046,6 +2046,8 @@ def execute_odoo_stable_target_replacement_apply(
     release_website_settings: OdooWebsiteSettingsIntent | None = None,
     restore_release_website_settings: bool = False,
     release_operation: bool = False,
+    operation_id: str = "",
+    operation_lease_owner: str = "",
 ) -> OdooStableTargetReplacementApplyResult:
     with _failure_stage("plan_build_failed"):
         plan = build_odoo_stable_target_replacement_plan(
@@ -2103,7 +2105,12 @@ def execute_odoo_stable_target_replacement_apply(
         else None
     )
     if published_copy is not None:
-        if request.data_source_mode != "existing" or provider_effect_checkpoint is None:
+        if (
+            request.data_source_mode != "existing"
+            or provider_effect_checkpoint is None
+            or not operation_id
+            or not operation_lease_owner
+        ):
             raise OdooTargetReplacementStageError(
                 "strategy_unsupported",
                 "Use the service worker and native rebuild action for this testing copy.",
@@ -3280,6 +3287,32 @@ def execute_odoo_stable_target_replacement_apply(
             )
 
     runtime_source["post_deploy_finished_at"] = utc_now_timestamp()
+    if published_copy is not None:
+        from control_plane.testing_copy_route import publish_testing_copy_route
+
+        assert isinstance(record_store, PostgresRecordStore)
+        assert provider_effect_checkpoint is not None
+        try:
+            publish_testing_copy_route(
+                root=control_plane_root,
+                store=record_store,
+                identity=runtime_identity,
+                checkpoint=provider_effect_checkpoint,
+                operation_id=operation_id,
+                lease_owner=operation_lease_owner,
+            )
+        except ValueError:
+            _write_failed_deployment(
+                record_store=record_store,
+                ship_request=ship_request,
+                deployment_record_id=deployment_record_id,
+                started_at=started_at,
+                resolved_target=resolved_target,
+                runtime_source=runtime_source,
+                runtime_identity=runtime_identity,
+                post_deploy_update=post_deploy_evidence,
+            )
+            raise
     runtime_source["readiness_started_at"] = utc_now_timestamp()
     verification = verify_odoo_stable_readiness(
         base_url=base_url,

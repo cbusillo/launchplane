@@ -195,10 +195,15 @@ class TestingRouteTests(unittest.TestCase):
         )
 
     def apply(
-        self, plan: TestingLaneRoute, backend: str, *, retire_old: bool = False
+        self,
+        plan: TestingLaneRoute,
+        backend: str,
+        *,
+        retire_old: bool = False,
+        evented: bool = False,
     ) -> dict[str, Any]:
         raw = deepcopy(self.raw)
-        document = route_document(plan, backend)["http"]
+        document = route_document(plan, backend, evented=evented)["http"]
         for section in ("routers", "services", "middlewares"):
             for name, value in document.get(section, {}).items():
                 raw[section][name + "@file"] = {**value, "status": "enabled"}
@@ -556,6 +561,52 @@ class TestingRouteTests(unittest.TestCase):
         # The public connection policy survives removal of its Docker producer.
         self.assertTrue(new_document["http"]["middlewares"])
 
+    def test_rebuild_and_address_accept_only_the_same_copy_evented_overlay(self) -> None:
+        from control_plane.dokploy.testing_route import amend_testing_route_address
+
+        plan = self.plan()
+        document = route_document(plan, self.new, evented=True)
+        raw = self.apply(plan, self.new, retire_old=True, evented=True)
+        with self.assertRaisesRegex(ValueError, "admitted serving copy"):
+            compile_testing_route(
+                product=plan.product,
+                context=plan.context,
+                host=plan.host,
+                old_backend=self.old,
+                new_backend=self.new,
+                raw=raw,
+                public_entrypoints=plan.public_entrypoints,
+                owned_document=document,
+                recorded_template=plan.template,
+            )
+        rebuilt = compile_testing_route(
+            product=plan.product,
+            context=plan.context,
+            host=plan.host,
+            old_backend=self.new,
+            new_backend="http://lp-testing-" + "b" * 32 + ":8069",
+            raw=raw,
+            public_entrypoints=plan.public_entrypoints,
+            owned_document=document,
+            recorded_template=plan.template,
+        )
+        self.assertEqual(observe_testing_route(rebuilt, raw, document), self.new)
+        address = amend_testing_route_address(plan, "later.example.invalid")
+        self.assertEqual(
+            observe_testing_route(
+                address,
+                self.apply(address, self.new, evented=True),
+                route_document(address, self.new, evented=True),
+            ),
+            self.new,
+        )
+        service = plan.route_id + "-websocket"
+        raw["services"][service + "@file"]["loadBalancer"]["servers"][0]["url"] = (
+            "http://another-copy:8072"
+        )
+        with self.assertRaisesRegex(ValueError, "another copy or listener"):
+            observe_testing_route(plan, raw, document)
+
     def test_second_rebuild_uses_recorded_same_host_and_route_without_legacy_container(
         self,
     ) -> None:
@@ -587,6 +638,22 @@ class TestingRouteTests(unittest.TestCase):
                 owned_document=document,
                 recorded_template=first.template,
             )
+
+    def test_threaded_transition_waits_only_for_the_exact_previous_overlay(self) -> None:
+        plan = self.plan()
+        raw = self.apply(plan, self.new, evented=True)
+        document = route_document(plan, self.new)
+        with self.assertRaises(TestingRoutePending):
+            observe_testing_route(plan, raw, document)
+        self.assertEqual(
+            observe_testing_route(plan, self.apply(plan, self.new), document), self.new
+        )
+        router = raw["routers"][
+            next(name for name in raw["routers"] if name.endswith("-websocket@file"))
+        ]
+        router["rule"] += " || PathPrefix(`/` )"
+        with self.assertRaisesRegex(ValueError, "admitted lane route"):
+            observe_testing_route(plan, raw, document)
 
     def test_written_but_unapplied_or_partly_applied_group_stays_pending(self) -> None:
         plan = self.plan()

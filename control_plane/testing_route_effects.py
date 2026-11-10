@@ -310,6 +310,48 @@ class TestingRouteEffects:
     recovery_guard: Callable[[], None]
     inverse: bool
 
+    def run(self, *, scope: str, route_path: str, key: str) -> dict[str, Any]:
+        parent = self
+        execution = self.controller.execution
+
+        class RouteEffect:
+            def target_key(self) -> str:
+                return "testing-route:" + execution.route_id
+
+            def reconciliation_key(self) -> str:
+                return execution.document_sha256
+
+            def observe(
+                self,
+                provider_operation_key: str,
+                provider_effect_phase: str,
+                reconciliation_key: str,
+            ) -> ProviderObservation:
+                prior = parent.controller.store.read_idempotency_record(
+                    scope=scope, route_path=route_path, idempotency_key=key
+                )
+                if prior is None or reconciliation_key != execution.document_sha256:
+                    return ProviderObservation("unknown")
+                return parent.observe(provider_effect_phase, prior.attempt)
+
+            def apply(
+                self, provider_operation_key: str, lease: ProviderOperationLease
+            ) -> ProviderMutationOutcome:
+                return parent.apply(lease)
+
+        result = run_durable_provider_operation(
+            store=self.controller.store,
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=key,
+            request_fingerprint=canonical_json_sha256(execution.model_dump(mode="json")),
+            lease_owner=self.controller.lease_owner(),
+            response_trace_id=execution.operation_id,
+            adapter=RouteEffect(),
+            original_intent={"route_execution": execution.model_dump(mode="json")},
+        )
+        return self.controller.completed(result)
+
     def writer_key(self, attempt_number: int) -> str:
         return self.controller.execution.key(attempt=attempt_number)
 
