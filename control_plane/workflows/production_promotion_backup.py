@@ -21,6 +21,8 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.odoo_cutover import OdooCutoverRecord
 from control_plane.contracts.production_backup_authority import (
     ProxmoxGuestBackupDestinationReference,
+    ODOO_PROMOTION_BACKUP_ACTION as ODOO_PROMOTION_BACKUP_ACTION,
+    GENERIC_WEB_PROMOTION_BACKUP_ACTION as GENERIC_WEB_PROMOTION_BACKUP_ACTION,
 )
 from control_plane.contracts.promotion_record import (
     BackupGateEvidence,
@@ -32,10 +34,6 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_backup_gate import resolve_production_backup_binding
-
-
-ODOO_PROMOTION_BACKUP_ACTION = "odoo_prod_promotion_run.execute"
-GENERIC_WEB_PROMOTION_BACKUP_ACTION = "generic_web_prod_promotion.execute"
 
 
 class ProductionBackupNotAdmissible(GenericWebPromotionAdmissionRefused):

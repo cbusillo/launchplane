@@ -184,7 +184,7 @@ def build_product_operational_readiness(
         action_dimension,
         _authorization_dimension(inputs, action_dimension=action_dimension),
     ]
-    if inputs.action is not None and inputs.action.requires_production_backup_policy:
+    if inputs.action is not None and inputs.action.production_backup_action:
         dimensions.append(_production_backup_policy_dimension(inputs))
     if action_dimension.state == "ready" and inputs.action is not None:
         dimension_builders = {
@@ -259,7 +259,7 @@ def _action_projection(
         action is not None
         and action.scope == "instance"
         and inputs.requested_action in (action.authz_action, *action.alternate_authz_actions)
-        and (action.readiness_requirements or action.requires_production_backup_policy)
+        and (action.readiness_requirements or action.production_backup_action)
     )
     projection = ProductOperationalReadinessAction(
         requested_action=inputs.requested_action,
@@ -272,7 +272,7 @@ def _action_projection(
         supported=supported,
         readiness_requirements=(action.readiness_requirements if supported and action else ()),
         requires_production_backup_policy=(
-            action.requires_production_backup_policy if action is not None else False
+            bool(action.production_backup_action) if action is not None else False
         ),
     )
     if supported:

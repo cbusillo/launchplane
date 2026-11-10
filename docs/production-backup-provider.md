@@ -288,6 +288,9 @@ requires both its logical `backup_record_id` and
 Both Odoo routes use the policy action `odoo_prod_promotion_run.execute`;
 generic-web uses `generic_web_prod_promotion.execute`. These are server-owned
 policy selectors, independent of the action authorizing each HTTP entrypoint.
+Driver metadata exposes that selector as `production_backup_action` for policy
+preparation, environment status and operational readiness. Generic-web workflow
+dispatch uses the generic-web execution selector, not its dispatch permission.
 The generic-web `backup_required` field only accepts `true`, and its
 `backup_record_id` must identify the completed shared capture. Supplying a
 legacy backup record or a caller-authored evidence map cannot satisfy this gate.
@@ -433,6 +436,17 @@ A stale or unavailable plan disables approval and explains why on the card;
 decline and historical records keep their existing rules. Reads write no
 decision, authority or lifecycle event. The decision and worker still recheck
 independently; this adds no proposal-age expiry.
+
+Preparation checks that the policy selector belongs to a current production
+promotion's backup guard, not merely an advertised authorization action. Review
+also checks that relationship for historical proposals. An applied policy for
+another selector remains an applied historical record, with its decision and
+values unchanged; its card warns that it does not establish current protection.
+Status and readiness resolve only the selectors the guards consume.
+
+Approvals and policies do not migrate between selectors. The exact policy
+consumed by the guard must be applied before dependent credential binding or
+capture; policy application alone does not establish release readiness.
 
 **Approve** and **Decline** send only the proposal ID, decision and stable source
 event to `/v1/production-backup-authority/proposals/{operation_id}/decision`.
