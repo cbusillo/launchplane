@@ -17,7 +17,7 @@ name: Reusable Odoo Website Bootstrap Override
         required: true
         type: string
       website_bootstrap_payload:
-        description: Website bootstrap JSON object with local Odoo route paths.
+        description: Website bootstrap JSON object with local Odoo route paths, or null to withdraw.
         required: true
         type: string
 
@@ -72,8 +72,8 @@ jobs:
               exit 1
               ;;
           esac
-          if ! jq -e 'type == "object"' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD" >/dev/null; then
-            echo 'website_bootstrap_payload must be a JSON object.' >&2
+          if ! jq -e 'type == "object" or type == "null"' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD" >/dev/null; then
+            echo 'website_bootstrap_payload must be a JSON object or null.' >&2
             exit 1
           fi
           if ! jq -e '
@@ -168,7 +168,8 @@ jobs:
               ),
               instance: .override.instance,
               website_bootstrap: {
-                key_count: (.override.website_bootstrap | keys | length),
+                included: (.override.website_bootstrap != null),
+                key_count: ((.override.website_bootstrap // {}) | keys | length),
                 route_count: (.override.website_bootstrap.routes // [] | length),
                 homepage_configured: (
                   (.override.website_bootstrap.homepage_url // "") != ""
@@ -224,9 +225,10 @@ jobs:
             echo 'Launchplane Odoo website-bootstrap override was not accepted.' >&2
             exit 1
           fi
-          if [ "$(jq -r '.result.website_bootstrap // false' \
-            odoo-website-bootstrap-override.json)" != "true" ]; then
-            echo 'Launchplane did not persist website-bootstrap intent.' >&2
+          expected_bootstrap="$(jq -r '. != null' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD")"
+          if ! jq -e --argjson expected "$expected_bootstrap" \
+            '.result.website_bootstrap == $expected' odoo-website-bootstrap-override.json >/dev/null; then
+            echo 'Launchplane returned different website-bootstrap presence.' >&2
             exit 1
           fi
 

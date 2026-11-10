@@ -3308,7 +3308,9 @@ without writing an override or idempotency record. Stable website plans use
 the website-intent reader's context/instance-scoped `operations.read` authority; apply keeps its
 write identity and authorization. Exact-preview plans and writes retain their
 original-reservation custody requirements. Recording intent does not apply it
-to the running Odoo database. Odoo preview apply inputs and
+to the running Odoo database. Stable requests accept explicit
+`website_bootstrap: null` under the [stable record withdrawal contract](records.md#odoo-instance-override-record).
+Odoo preview apply inputs and
 preview apply are also owned by native FastAPI. They preserve preview-context
 authorization, runtime-environment dependency classification, and the
 `odoo_preview_runtime_config_incomplete` details envelope for apply requests

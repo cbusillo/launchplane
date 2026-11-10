@@ -20,7 +20,7 @@ name: Odoo Website Bootstrap Override
           - testing
           - prod
       website_bootstrap_payload:
-        description: Website bootstrap JSON object rendered from tenant bootstrap settings; homepage and route URLs must be local Odoo route paths.
+        description: Website bootstrap JSON object with local Odoo route paths, or null to withdraw.
         required: true
         type: string
 
@@ -30,7 +30,7 @@ permissions:
 
 jobs:
   write:
-    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-website-bootstrap-override.yml@b62941a9219f69a2575c1bce1a8d7fcb8c605f3c # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-website-bootstrap-override.yml@4ec880938c1bdb507cace2f8ebcb92dd2f3f4f24 # main
     permissions:
       contents: read
       id-token: write

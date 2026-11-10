@@ -182,8 +182,8 @@ class OdooWebsiteBootstrapOverrideRequest(BaseModel):
         if not self.instance:
             raise ValueError("Odoo website-bootstrap override requires instance.")
         if not self.preview_original_reservation_id:
-            if self.website_bootstrap is None or self.reviewed_plan_sha256 or self.inherit_template:
-                raise ValueError("Stable website-bootstrap writes require bootstrap intent.")
+            if self.reviewed_plan_sha256 or self.inherit_template:
+                raise ValueError("Stable website-bootstrap writes cannot use preview controls.")
         elif self.mode == "apply" and (
             len(self.reviewed_plan_sha256) != 64
             or any(c not in "0123456789abcdef" for c in self.reviewed_plan_sha256)
@@ -362,16 +362,17 @@ def write_odoo_website_bootstrap_override_result(
         expected_product_profile=expected_product_profile,
     )
     result: dict[str, object] = {
-        "context": override_record.context,
-        "instance": override_record.instance,
-        "website_bootstrap": override_record.website_bootstrap is not None,
+        "context": request.override.context,
+        "instance": request.override.instance,
+        "website_bootstrap": override_record is not None
+        and override_record.website_bootstrap is not None,
     }
     if request.override.mode == "dry-run":
         result.update(
             mode="dry-run",
             applied=False,
             planned_website_bootstrap=override_record.website_bootstrap.model_dump(mode="json")
-            if override_record.website_bootstrap is not None
+            if override_record is not None and override_record.website_bootstrap is not None
             else None,
         )
     return result
@@ -447,22 +448,26 @@ def write_odoo_website_bootstrap_override_record(
     record_store: OdooInstanceOverrideStore,
     request: OdooWebsiteBootstrapOverrideRequest,
     expected_product_profile: LaunchplaneProductProfileRecord | None = None,
-) -> OdooInstanceOverrideRecord:
+) -> OdooInstanceOverrideRecord | None:
     try:
         existing_record = record_store.read_odoo_instance_override_record(
             context_name=request.context, instance_name=request.instance
         )
     except FileNotFoundError:
         existing_record = None
-    apply_on = tuple(
-        dict.fromkeys(
-            (
-                *(existing_record.apply_on if existing_record is not None else ()),
-                "deploy",
-                "promotion",
+    if existing_record is None and request.website_bootstrap is None:
+        return None
+    apply_on = existing_record.apply_on if existing_record is not None else ()
+    if request.website_bootstrap is not None:
+        apply_on = tuple(
+            dict.fromkeys(
+                (
+                    *apply_on,
+                    "deploy",
+                    "promotion",
+                )
             )
         )
-    )
     record = OdooInstanceOverrideRecord(
         context=request.context,
         instance=request.instance,
