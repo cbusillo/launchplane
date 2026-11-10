@@ -1091,6 +1091,37 @@
         ]
       },
       {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "release_failed_testing_candidate",
+        "path": "/v1/products/{product}/testing-rebuild/{operation_id}/candidate-release",
+        "purpose": "Inspect, release or read back a failed native testing candidate's private containers and volumes, with the bytes a dry run would free; the operation record, failure receipts and evidence stay.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "47c85986a25b2cff872b963de902f18704e0c2071c890525db504124d395a962",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_identity"
@@ -1506,8 +1537,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "43ef5139fc62d827ce92abd9f80f5d3d825d33be"
+    "source_commit_sha": "d1a1204caad1f6eedd52181cf28da819230af58b"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "8704fb9f25f6756decef5310a317145fae06ece24d191f6be2fb3ac2d2ee36cd"
+  "semantic_digest_sha256": "4abb7ff7ea0ad585a09633913a2b716cba1d08eeedff4b2421ab24c2f55bda23"
 }

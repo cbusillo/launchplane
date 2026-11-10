@@ -35,6 +35,7 @@ from control_plane.dokploy import compose, post_deploy
 from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.integration_readback import INTEGRATION_FAMILIES
 from control_plane.live_target_runtime import declared_runtime_keys
+from control_plane.testing_storage_admission import migrated_storage_budget
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
 from control_plane.odoo_instance_overrides import build_post_deploy_environment
 from control_plane.odoo_testing_native_source import (
@@ -271,17 +272,7 @@ def candidate_runtime_inputs(
             raise CandidateRuntimeInputsChanged(
                 "The migrated copy needs the lane's existing testing storage headroom."
             )
-        snapshot_budget = lane.odoo_testing_drill_storage.model_copy(
-            update={
-                "database_bytes": max(
-                    lane.odoo_testing_drill_storage.database_bytes, migrated_source.database.size
-                ),
-                "filestore_bytes": max(
-                    lane.odoo_testing_drill_storage.filestore_bytes,
-                    migrated_source.filestore_expanded_bytes,
-                ),
-            }
-        )
+        snapshot_budget = migrated_storage_budget(lane.odoo_testing_drill_storage, migrated_source)
     artifact = (
         admitted_artifact
         if admitted_artifact is not None
