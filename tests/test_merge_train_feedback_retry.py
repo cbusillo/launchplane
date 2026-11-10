@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
@@ -20,6 +20,7 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
 import control_plane.merge_train_scheduler as merge_train_scheduler
 from control_plane.merge_train_scheduler import MergeTrainScheduledTargetResult
 from control_plane.merge_train_controller_run_once import MergeTrainControllerRunOnceResult
+from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_pr_feedback import (
     MergeTrainPrFeedbackEnvelope,
     build_merge_train_pr_feedback_record,
@@ -68,6 +69,144 @@ def _record(
 
 
 class MergeTrainFeedbackRetryTests(TestCase):
+    def test_queue_feedback_retries_failed_delivery_and_reuses_unchanged_delivered_record(
+        self,
+    ) -> None:
+        request = MergeTrainPrFeedbackEnvelope(
+            repository="cbusillo/alpha",
+            pull_request_number=7,
+            event="waiting",
+            message="The current source head needs engineering review.",
+        )
+        comment = {
+            "action": "created",
+            "comment_id": 123,
+            "comment_url": "https://github.com/cbusillo/alpha/pull/7#issuecomment-123",
+        }
+        start = datetime.fromisoformat(_TIME)
+        for kind in ("transient", "permanent", "quota"):
+            failure = (
+                _failure(URLError("fixture outage"))
+                if kind == "transient"
+                else click.ClickException("permanent refusal")
+            )
+            with (
+                self.subTest(kind=kind),
+                TemporaryDirectory() as directory,
+                patch(
+                    "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                    side_effect=[comment, comment]
+                    if kind == "quota"
+                    else [failure, comment, comment],
+                ) as deliver,
+            ):
+                store = FilesystemRecordStore(Path(directory))
+                results = []
+                calls = []
+                for index, seconds in enumerate((0, 10, 60, 120, 180, 240)):
+                    defer_until = (
+                        (start + timedelta(seconds=60 if index == 0 else 120)).isoformat()
+                        if kind == "quota" and index in (0, 2)
+                        else ""
+                    )
+                    results.append(
+                        write_merge_train_pr_feedback_record(
+                            store=store,
+                            request=request
+                            if index < 5
+                            else request.model_copy(
+                                update={"message": "Changed source needs review."}
+                            ),
+                            policy_key="test",
+                            policy_sha256="digest",
+                            token="fixture",
+                            recorded_at=(start + timedelta(seconds=seconds)).isoformat(),
+                            response_trace_id=f"trace-{index}",
+                            defer_until=defer_until,
+                        )
+                    )
+                    calls.append(deliver.call_count)
+                self.assertEqual(results[0].delivery_status, "failed")
+                self.assertEqual(calls[1], calls[0])
+                self.assertEqual({r.feedback_id for r in results[:5]}, {results[0].feedback_id})
+                if kind == "permanent":
+                    self.assertEqual(calls[4], 1)
+                    self.assertEqual(results[4].delivery_status, "failed")
+                else:
+                    self.assertEqual(results[4].delivery_status, "delivered")
+                    self.assertGreater(results[4].delivery_attempts, results[0].delivery_attempts)
+                if kind == "quota":
+                    self.assertEqual(calls[2], 0)
+                self.assertNotEqual(results[5].feedback_id, results[0].feedback_id)
+                self.assertEqual(
+                    len(store.list_merge_train_pr_feedback_records(repository=request.repository)),
+                    2,
+                )
+
+    def test_held_older_feedback_does_not_shorten_current_provider_backoff(self) -> None:
+        policy = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        )
+        response: dict[str, object] = {
+            "result": {
+                "repository": "cbusillo/alpha",
+                "base_branch": "main",
+                "controller_action": "idle",
+                "dry_run_result": {
+                    "queue": [
+                        {
+                            "number": number,
+                            "eligible": False,
+                            "ready_handoff": {"comment_id": number, "head_sha": "a" * 40},
+                            "ineligible_reasons": ["Source needs engineering review"],
+                        }
+                        for number in (7, 8, 9)
+                    ]
+                },
+            }
+        }
+        headers = Message()
+        headers["Retry-After"] = "120"
+        quota = HTTPError("https://example.test/comment", 429, "quota", headers, None)
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            held = write_merge_train_pr_feedback_record(
+                store=store,
+                request=MergeTrainPrFeedbackEnvelope.model_validate(
+                    build_feedback_payloads(response=response)[1]
+                ),
+                policy_key="test",
+                policy_sha256="digest",
+                token="fixture",
+                recorded_at="2026-10-01T06:01:00Z",
+                response_trace_id="old-deferral",
+                defer_until="2026-10-01T06:02:00Z",
+            )
+            with patch(
+                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                side_effect=_failure(quota),
+            ) as deliver:
+                merge_train_scheduler._deliver_controller_feedback(
+                    record_store=store,
+                    policy_record=policy,
+                    repository_policy=policy.policy.policies[0],
+                    token="fixture",
+                    trace_id="pass",
+                    response=response,
+                    now=lambda: "2026-10-01T06:03:00Z",
+                )
+            self.assertEqual(deliver.call_count, 1)
+            first, second, third = (
+                store.list_merge_train_pr_feedback_records(pr_number=n, limit=1)[0]
+                for n in (7, 8, 9)
+            )
+            self.assertEqual(second.feedback_id, held.feedback_id)
+            self.assertGreater(
+                datetime.fromisoformat(first.provider_retry_at),
+                datetime.fromisoformat(held.provider_retry_at),
+            )
+            self.assertEqual(third.provider_retry_at, first.provider_retry_at)
+
     def setUp(self) -> None:
         planning = patch(
             "control_plane.merge_train_pr_feedback.reconcile_completed_change",
