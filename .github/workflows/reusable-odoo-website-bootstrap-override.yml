@@ -20,10 +20,6 @@ name: Reusable Odoo Website Bootstrap Override
         description: Website bootstrap JSON object with local Odoo route paths, or null to withdraw.
         required: true
         type: string
-      mode:
-        description: Plan without effects, or persist the intent.
-        default: apply
-        type: string
 
 permissions:
   contents: read
@@ -45,7 +41,6 @@ jobs:
       CONTEXT_NAME: ${{ inputs.context }}
       INSTANCE: ${{ inputs.instance }}
       WEBSITE_BOOTSTRAP_PAYLOAD: ${{ inputs.website_bootstrap_payload }}
-      MODE: ${{ inputs.mode }}
     steps:
       - name: Validate runtime inputs
         shell: bash
@@ -77,10 +72,6 @@ jobs:
               exit 1
               ;;
           esac
-          if [[ "$MODE" != dry-run && "$MODE" != apply ]]; then
-            echo 'mode must be dry-run or apply.' >&2
-            exit 1
-          fi
           if ! jq -e 'type == "object" or type == "null"' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD" >/dev/null; then
             echo 'website_bootstrap_payload must be a JSON object or null.' >&2
             exit 1
@@ -141,7 +132,6 @@ jobs:
             --arg product "$PRODUCT" \
             --arg context "$CONTEXT_NAME" \
             --arg instance "$INSTANCE" \
-            --arg mode "$MODE" \
             --argjson website_bootstrap "$website_bootstrap" \
             '{
               schema_version: 1,
@@ -151,7 +141,6 @@ jobs:
                 product: $product,
                 context: $context,
                 instance: $instance,
-                mode: $mode,
                 website_bootstrap: $website_bootstrap,
                 source_label: "github-actions:odoo-website-bootstrap-override"
               }
@@ -178,7 +167,6 @@ jobs:
                 (.override.context | length) > 0
               ),
               instance: .override.instance,
-              mode: .override.mode,
               website_bootstrap: {
                 included: (.override.website_bootstrap != null),
                 key_count: ((.override.website_bootstrap // {}) | keys | length),
@@ -242,11 +230,6 @@ jobs:
             '.result.website_bootstrap == $expected' odoo-website-bootstrap-override.json >/dev/null; then
             echo 'Launchplane returned different website-bootstrap presence.' >&2
             exit 1
-          fi
-          if [ "$MODE" = dry-run ]; then
-            jq -e --argjson expected "$expected_bootstrap" \
-              '.result.applied == false and ((.result.planned_website_bootstrap != null) == $expected)' \
-              odoo-website-bootstrap-override.json >/dev/null
           fi
 
       - name: Upload override result

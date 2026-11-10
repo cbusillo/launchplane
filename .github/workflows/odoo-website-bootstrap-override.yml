@@ -23,13 +23,6 @@ name: Odoo Website Bootstrap Override
         description: Website bootstrap JSON object with local Odoo route paths, or null to withdraw.
         required: true
         type: string
-      mode:
-        description: Plan without effects, or persist the intent.
-        default: apply
-        type: choice
-        options:
-          - dry-run
-          - apply
 
 permissions:
   contents: read
@@ -46,5 +39,3 @@ jobs:
       context: ${{ inputs.context }}
       instance: ${{ inputs.instance }}
       website_bootstrap_payload: ${{ inputs.website_bootstrap_payload }}
-      # noinspection UndefinedParamsPresent
-      mode: ${{ inputs.mode }}

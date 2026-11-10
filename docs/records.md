@@ -2675,9 +2675,9 @@ run` is the foreground loop intended for an external process supervisor, and
   immutable reusable worker. The worker persists through the service route,
   records only redacted request-shape evidence, and checks that the returned
   `result.website_bootstrap` matches the requested presence. Both the dispatch
-  and reusable worker accept `website_bootstrap_payload: "null"` for withdrawal
-  and an explicit `mode` of `dry-run` or `apply`; the existing default is apply.
-  Dry-run must report `applied=false` and the planned presence. The actual
+  and reusable worker accept `website_bootstrap_payload: "null"` for withdrawal.
+  The workflow retains apply-only behavior; plan through the service route below
+  with the existing scoped read authority. The actual
   provider and Odoo database are never changed by this record write.
 - To withdraw stable bootstrap, first read the current intent, then send this
   envelope to `POST /v1/drivers/odoo/website-bootstrap-override`:
@@ -2708,6 +2708,8 @@ run` is the foreground loop intended for an external process supervisor, and
   config parameters, addon settings and unrelated website settings remain.
   Positive writes retain deploy/promotion phase additions. Null on a preview
   still requires its original-bound preparation and preserves its template.
+  Withdrawing an absent stable override succeeds without creating one; its
+  independent GET remains 404. Omission of the required field is not withdrawal.
 - Stable bootstrap normalizes the persisted `website_bootstrap.canonical_url`
   to the Launchplane-resolved origin base URL before post-deploy renders
   the payload, so local tenant bootstrap defaults do not become stable lane URL

@@ -897,6 +897,11 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             },
         }
         self.assertEqual(post(stable_null).status_code, 202)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_odoo_instance_override_record(
+                context_name=self.profile.preview.context,
+                instance_name=self.profile.preview.template_instance,
+            )
         stable_intent: dict[str, object] = {
             **stable_null,
             "override": {

@@ -9,7 +9,7 @@ from tests.support.workflows import load_workflow
 
 
 class WebsiteBootstrapOperatorWorkflowTests(unittest.TestCase):
-    def test_existing_worker_plans_and_applies_explicit_withdrawal(self) -> None:
+    def test_existing_worker_applies_and_verifies_requested_bootstrap_presence(self) -> None:
         worker = load_workflow(".github/workflows/reusable-odoo-website-bootstrap-override.yml")
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -18,14 +18,13 @@ class WebsiteBootstrapOperatorWorkflowTests(unittest.TestCase):
                 "PRODUCT": "example-product",
                 "CONTEXT_NAME": "example",
                 "INSTANCE": "testing",
-                "WEBSITE_BOOTSTRAP_PAYLOAD": "null",
                 "GITHUB_OUTPUT": str(root / "outputs"),
                 "GITHUB_RUN_ID": "1",
                 "GITHUB_RUN_ATTEMPT": "1",
                 "STATUS_CODE": "202",
             }
-            for mode in ("dry-run", "apply"):
-                env["MODE"] = mode
+            for bootstrap in (None, {"name": "Example", "homepage_url": "/example"}):
+                env["WEBSITE_BOOTSTRAP_PAYLOAD"] = json.dumps(bootstrap)
                 for name in (
                     "Validate runtime inputs",
                     "Write website bootstrap override payload",
@@ -40,14 +39,9 @@ class WebsiteBootstrapOperatorWorkflowTests(unittest.TestCase):
                 request = json.loads(
                     (root / ".launchplane/odoo-website-bootstrap-override-payload.json").read_text()
                 )
-                self.assertIsNone(request["override"]["website_bootstrap"])
-                self.assertEqual(request["override"]["mode"], mode)
+                self.assertEqual(request["override"]["website_bootstrap"], bootstrap)
                 response_path = root / "odoo-website-bootstrap-override.json"
-                result = {
-                    "website_bootstrap": False,
-                    "applied": False,
-                    "planned_website_bootstrap": None,
-                }
+                result = {"website_bootstrap": bootstrap is not None}
                 response_path.write_text(json.dumps({"status": "accepted", "result": result}))
                 verify = worker.step_named("write", "Verify website bootstrap override response")
                 assert verify is not None
@@ -55,7 +49,7 @@ class WebsiteBootstrapOperatorWorkflowTests(unittest.TestCase):
                     ["bash", "-c", verify.run], cwd=root, env=env, capture_output=True, text=True
                 )
                 self.assertEqual(accepted.returncode, 0, accepted.stderr)
-                result["website_bootstrap"] = True
+                result["website_bootstrap"] = not result["website_bootstrap"]
                 response_path.write_text(json.dumps({"status": "accepted", "result": result}))
                 rejected = subprocess.run(
                     ["bash", "-c", verify.run], cwd=root, env=env, capture_output=True, text=True

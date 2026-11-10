@@ -6551,6 +6551,20 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                         )
                     else:
                         store = self._store_with_tenant_profile(root / "state")
+                    initial_override = None
+                    if (
+                        post is _post_odoo_website_bootstrap_override
+                        and cast(dict[str, object], payload["override"])["website_bootstrap"]
+                        is None
+                    ):
+                        initial_override = OdooInstanceOverrideRecord(
+                            context="cm",
+                            instance="testing",
+                            apply_on=("manual",),
+                            website_bootstrap=OdooWebsiteBootstrapPayload(name="To withdraw"),
+                            updated_at="2026-05-10T20:00:00Z",
+                        )
+                        store.write_odoo_instance_override_record(initial_override)
                     app = create_launchplane_fastapi_app(
                         verifier=_StubVerifier(self._identity()),
                         authz_policy=LaunchplaneAuthzPolicy(),
@@ -6597,10 +6611,18 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         response.status_code, 403 if changed == "historical" else 409, response.text
                     )
-                    with self.assertRaises(FileNotFoundError):
-                        store.read_odoo_instance_override_record(
-                            context_name="cm", instance_name="testing"
+                    if initial_override is not None:
+                        self.assertEqual(
+                            store.read_odoo_instance_override_record(
+                                context_name="cm", instance_name="testing"
+                            ),
+                            initial_override,
                         )
+                    else:
+                        with self.assertRaises(FileNotFoundError):
+                            store.read_odoo_instance_override_record(
+                                context_name="cm", instance_name="testing"
+                            )
 
     async def test_director_records_override_intent_without_runtime_authority(self) -> None:
         for transport, director, instance, production_use, grant, expected in (
@@ -6690,6 +6712,18 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                         cast(dict[str, object], payload["override"])["instance"] = instance
                         response = await post(app, payload, authorization="Bearer override-token")
                         self.assertEqual(response.status_code, expected)
+                        if expected == 202 and post is _post_odoo_website_bootstrap_override:
+                            bootstrap = cast(dict[str, object], payload["override"])[
+                                "website_bootstrap"
+                            ]
+                            self.assertEqual(
+                                store.read_odoo_instance_override_record(
+                                    context_name="cm", instance_name=instance
+                                ).website_bootstrap,
+                                OdooWebsiteBootstrapPayload.model_validate(bootstrap)
+                                if bootstrap is not None
+                                else None,
+                            )
                     runtime = await _post_odoo_post_deploy(
                         app,
                         {
@@ -7349,6 +7383,15 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(workflow=workflow), TemporaryDirectory() as directory:
                 root = Path(directory)
                 store = self._store_with_tenant_profile(root / "state")
+                if (
+                    post is _post_odoo_website_bootstrap_override
+                    and cast(dict[str, object], payload["override"])["website_bootstrap"] is None
+                ):
+                    store.write_odoo_instance_override_record(
+                        OdooInstanceOverrideRecord(
+                            context="cm", instance="testing", updated_at="2026-05-10T20:00:00Z"
+                        )
+                    )
                 app = create_launchplane_fastapi_app(
                     verifier=_StubVerifier(self._tenant_identity(workflow_name=workflow)),
                     authz_policy=self._tenant_policy(action=action, workflow_name=workflow),

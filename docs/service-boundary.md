@@ -3309,10 +3309,8 @@ the website-intent reader's context/instance-scoped `operations.read` authority;
 write identity and authorization. Exact-preview plans and writes retain their
 original-reservation custody requirements. Recording intent does not apply it
 to the running Odoo database. Stable requests accept explicit
-`website_bootstrap: null` to withdraw only bootstrap intent. Withdrawal retains
-the existing record's phases, config parameters, addon settings and unrelated
-website settings; positive bootstrap writes still add deploy/promotion phases.
-The field remains required, so omission is not withdrawal. Odoo preview apply inputs and
+`website_bootstrap: null` under the [stable record withdrawal contract](records.md#odoo-instance-override-record).
+Odoo preview apply inputs and
 preview apply are also owned by native FastAPI. They preserve preview-context
 authorization, runtime-environment dependency classification, and the
 `odoo_preview_runtime_config_incomplete` details envelope for apply requests
