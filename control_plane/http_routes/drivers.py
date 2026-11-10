@@ -63,6 +63,7 @@ from control_plane.odoo_target_replacement_apply_http import (
 from control_plane.operation_status_read import (
     OPERATION_STATUS_READ_ACTION,
     OPERATION_STATUS_READ_PRODUCT,
+    TESTING_REBUILD_OBSERVATION_PENDING,
     operation_result_read_view,
     operation_status_read_view,
 )
@@ -587,7 +588,10 @@ def register_operation_status_read_routes(
         )
         if full_record:
             status_view = odoo_stable_target_replacement_operation_status_payload(operation)
-            if operation.error_code == "candidate_preparation_failed":
+            if operation.error_code in {
+                "candidate_preparation_failed",
+                TESTING_REBUILD_OBSERVATION_PENDING,
+            }:
                 status_view["error_description"] = operation_status_read_view(
                     operation, poll_url=str(status_view["poll_url"])
                 )["error_description"]

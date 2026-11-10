@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 import click
 from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PARAMETER
-from control_plane.contracts.odoo_website_settings import OdooWebsiteSettings
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettings, OdooWebsiteIndexing
 
 from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
@@ -320,6 +320,7 @@ def render_post_deploy_payload(
     clear_undeclared_shopify: bool = True,
     record_store: object | None = None,
     selected_website_settings: OdooWebsiteSettings | None = None,
+    selected_website_indexing: OdooWebsiteIndexing | None = None,
     preview_import_source: "FishbowlPreviewSource | None" = None,
 ) -> OdooPostDeployPayload:
     store_keys = shopify_record_store_keys(record)
@@ -428,6 +429,7 @@ def render_post_deploy_payload(
         addon_settings=tuple(addon_settings),
         website_bootstrap=website_bootstrap,
         website_settings=website_settings,
+        website_indexing=selected_website_indexing,
     )
 
 
@@ -519,6 +521,7 @@ def build_post_deploy_environment(
     clear_undeclared_shopify: bool = True,
     record_store: object | None = None,
     selected_website_settings: OdooWebsiteSettings | None = None,
+    selected_website_indexing: OdooWebsiteIndexing | None = None,
     preview_import_source: "FishbowlPreviewSource | None" = None,
 ) -> PostDeployOverrideEnvironment:
     payload = render_post_deploy_payload(
@@ -528,6 +531,7 @@ def build_post_deploy_environment(
         clear_undeclared_shopify=clear_undeclared_shopify,
         record_store=record_store,
         selected_website_settings=selected_website_settings,
+        selected_website_indexing=selected_website_indexing,
         preview_import_source=preview_import_source,
     )
     inline_environment: dict[str, str] = {

@@ -110,6 +110,15 @@ class OperationSpec:
 OPERATION_SPECS = (
     OperationSpec(
         "POST",
+        "/v1/drivers/odoo/post-deploy",
+        "Configure native website indexing only when website_indexing is present, using recorded production_use, exact runtime/route binding and reviewed native baseline. Other requests retain normal post-deploy maintenance behavior.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("website_indexing.reviewed_plan",),
+    ),
+    OperationSpec(
+        "POST",
         "/v1/product-onboarding/apply",
         "Review advanced manifests without effects using product read scope; protected apply retains its existing authority and accepts a current-record-bound reviewed digest.",
         ("service_api",),
