@@ -260,15 +260,15 @@ def execute_testing_rebuild(
             store.save(replacement)
             record = replacement
 
-        def serving_candidate(observation: TestingRouteReadback) -> None:
+        def serving_candidate(candidate_observation: TestingRouteReadback) -> None:
             nonlocal record
             try:
-                _serving(observation, plan, plan.new, clock())
+                _serving(candidate_observation, plan, plan.new, clock())
             except (TestingRebuildObservationUnavailable, TestingRebuildHealthFailure) as error:
-                assert isinstance(observation, TestingRouteObservation)
-                health = observation.public_health
+                assert isinstance(candidate_observation, TestingRouteObservation)
+                health = candidate_observation.public_health
                 probe = TestingCandidateProbe(
-                    observed_at=observation.observed_at,
+                    observed_at=candidate_observation.observed_at,
                     state=health.status if health else None,
                     verified=health.verified if health else None,
                     runtime_identity_matches=health.observed_runtime_identity
@@ -288,7 +288,7 @@ def execute_testing_rebuild(
                     record = record.model_copy(update={"candidate_probe": probe})
                     raise
                 try:
-                    save(route=observation, candidate_probe=probe)
+                    save(route=candidate_observation, candidate_probe=probe)
                 except (OSError, SQLAlchemyError, ValueError):
                     raise error from None
                 raise

@@ -175,6 +175,7 @@ from control_plane.testing_serving_copy import published_testing_copy
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
 from control_plane.workflows.testing_rebuild import (
     TestingRebuildPreparationFailure,
+    TestingRebuildProvider,
     TestingRebuildObservationUnavailable,
     TestingRebuildRouteFailure,
     execute_testing_rebuild,
@@ -833,7 +834,7 @@ class NativeTestingRebuildAdapter:
             )
 
 
-class NativeTestingRebuildExecution:
+class NativeTestingRebuildExecution(TestingRebuildProvider):
     def __init__(
         self,
         adapter: NativeTestingRebuildAdapter,
