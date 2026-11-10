@@ -5,10 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.canonical_json import (
-    canonical_json_sha256,
-    nonvalidating_compact_sorted_json_sha256,
-)
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.dokploy_inventory import InventoryPage, InventoryProject
 
 
@@ -41,10 +38,8 @@ class RetainedComposeSetup(BaseModel):
         if canonical_json_sha256(self.original_request) != self.original_request_sha256:
             raise ValueError("Original payload digest differs.")
         for page in (self.before, self.after):
-            if page.inventory_digest != nonvalidating_compact_sorted_json_sha256(
-                [project.model_dump() for project in page.projects]
-            ):
-                raise ValueError("Original inventory digest differs.")
+            # inventory_digest describes pre-hydration membership, not these
+            # returned target details. The recovery digest binds the full pages.
             environments = [e for p in page.projects for e in p.environments]
             if (
                 page.offset

@@ -752,16 +752,41 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
 
         def page(projects: list[dict[str, Any]]) -> dict[str, Any]:
             return {
-                "inventory_digest": canonical_json_sha256(projects),
+                # The producer's opaque membership token is not a checksum of hydrated pages.
+                "inventory_digest": canonical_json_sha256([p["project_id"] for p in projects]),
                 "total_projects": len(projects),
                 "total_environments": len(projects),
-                "total_targets": 0,
+                "total_targets": sum(
+                    len(e["targets"]) for p in projects for e in p["environments"]
+                ),
                 "offset": 0,
                 "limit": 100,
                 "next_offset": None,
                 "projects": projects,
             }
 
+        historical = {
+            "project_id": "historical-project",
+            "name": "Historical",
+            "environments": [
+                {
+                    "environment_id": "historical-environment",
+                    "name": "production",
+                    "targets": [
+                        {
+                            "target_id": "historical-target",
+                            "category": "compose",
+                            "name": "Hydrated target name",
+                            "placement": {
+                                "kind": "server",
+                                "server_id": "historical-server",
+                                "server_name": "Hydrated server name",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
         evidence = {
             "original_key": SETUP_KEY,
             "original_scope": idempotency_scope(
@@ -773,8 +798,8 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
             "original_trace_id": "launchplane_req_" + "1" * 32,
             "original_request": dict(self.payload),
             "original_request_sha256": canonical_json_sha256(self.payload),
-            "before": page([]),
-            "after": page([project]),
+            "before": page([historical]),
+            "after": page([historical, project]),
             "before_at": "2026-11-09T00:00:00Z",
             "after_at": "2026-11-09T00:00:02Z",
             "project_id": "recovered-project",
