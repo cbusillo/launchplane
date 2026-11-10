@@ -514,7 +514,6 @@ class TestingCandidateReleaseAdapter:
         if reconciliation_key != self.reconciliation_key():
             return ProviderObservation("unknown")
         if self.release.retention is None:
-            # Pre-convergence receipts can prove original absence, never dispatch a less-bound effect.
             try:
                 observed = host_release(
                     self.root, self.release.server_id, self.release.resources, "dry-run"

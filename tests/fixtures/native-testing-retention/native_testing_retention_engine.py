@@ -1,5 +1,3 @@
-"""Task-owned real-engine fixture; runs only inside the locked disposable QEMU guest."""
-
 import base64
 import hashlib
 import json
@@ -232,7 +230,6 @@ try:
     )
     gate.unlink()
     PROOF["completed_copy_gate_refused_before_detachment"] = True
-    # Starting web deliberately invalidates the reviewed process-start snapshot.
     custody = host(
         "lifecycle",
         {
@@ -314,7 +311,6 @@ try:
     )
     (OUT / "proof.json").write_text(json.dumps(PROOF, indent=2))
 finally:
-    # Only this invocation's fabricated project is eligible for fixture teardown.
     if (ROOT / "compose.json").exists():
         compose("down")
     for name in VOLUMES.values():
