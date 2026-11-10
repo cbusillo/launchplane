@@ -639,6 +639,22 @@ class TestingRouteTests(unittest.TestCase):
                 recorded_template=first.template,
             )
 
+    def test_threaded_transition_waits_only_for_the_exact_previous_overlay(self) -> None:
+        plan = self.plan()
+        raw = self.apply(plan, self.new, evented=True)
+        document = route_document(plan, self.new)
+        with self.assertRaises(TestingRoutePending):
+            observe_testing_route(plan, raw, document)
+        self.assertEqual(
+            observe_testing_route(plan, self.apply(plan, self.new), document), self.new
+        )
+        router = raw["routers"][
+            next(name for name in raw["routers"] if name.endswith("-websocket@file"))
+        ]
+        router["rule"] += " || PathPrefix(`/` )"
+        with self.assertRaisesRegex(ValueError, "admitted lane route"):
+            observe_testing_route(plan, raw, document)
+
     def test_written_but_unapplied_or_partly_applied_group_stays_pending(self) -> None:
         plan = self.plan()
         document = route_document(plan, self.new)

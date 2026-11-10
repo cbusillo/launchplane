@@ -1342,6 +1342,17 @@ def observe_testing_route(
         owned_document
         and plan.route_id + "-websocket" in owned_document.get("http", {}).get("services", {})
     )
+    if not evented and any(
+        name + "-websocket@file" in matches for name in plan.template["http"]["routers"]
+    ):
+        backend = applied_service_backend(raw, plan.route_id, "file")
+        if (
+            backend is not None
+            and backend in {plan.old_backend, plan.new_backend}
+            and owned_document == route_document(plan, backend)
+        ):
+            observe_testing_route(plan, raw, route_document(plan, backend, evented=True))
+            raise TestingRoutePending("The prior evented overlay has not finished reloading.")
     owned = route_document(plan, plan.new_backend, evented=evented)["http"]["routers"]
     names = {name + "@file" for name in owned}
     for name, router in matches.items():
