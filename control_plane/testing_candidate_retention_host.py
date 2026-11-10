@@ -1,4 +1,6 @@
 import inspect
+from control_plane.dokploy.testing_retained_copy import failed_testing_web_wait
+from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
@@ -17,8 +19,12 @@ NATIVE_TESTING_RETENTION_INSPECTION = (
     + inspect.getsource(retained_volume_docker_command)
     + inspect.getsource(retained_volume_identity)
     + inspect.getsource(retained_volume_engine_identity)
+    + inspect.getsource(failed_testing_web_wait)
     + CLEAN_TESTING_SNAPSHOT_LIBRARY
     + STORAGE_MAINTENANCE_LIBRARY
+    + "\nWEB_GATE_PATH="
+    + repr(INTEGRATION_READBACK_PASSED_PATH)
+    + "\n"
     + r"""
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 prefix=sys.argv[2]
@@ -61,7 +67,7 @@ def inspect_candidate():
     for container in all_containers.values():
         labels=container.get('Config',{}).get('Labels') or {}
         if labels.get('com.docker.compose.project')==spec['project']:
-            if labels.get('com.docker.compose.service')=='web' and container.get('State',{}).get('Running') is not False:
+            if labels.get('com.docker.compose.service')=='web' and container.get('State',{}).get('Running') is not False and not failed_testing_web_wait(container,spec,lambda identifier:docker('top',identifier,'-eo','comm').splitlines()[1:]):
                 use_reason='candidate_web_active_or_unknown'
             if container.get('HostConfig',{}).get('PortBindings'):
                 use_reason='candidate_published_ports'
@@ -94,7 +100,7 @@ def inspect_candidate():
                 raise ValueError('container mounts unavailable')
             referenced=referenced or any(mount.get('Name')==name for mount in mounts)
         if role=='ODOO_DATA_VOLUME':
-            gate=path/'.launchplane_integration_readback_passed'
+            gate=path/Path(WEB_GATE_PATH).relative_to('/volumes/data')
             gate_unknown=gate.exists() or gate.is_symlink()
         result.append({'role':role,'name':name,'status':'observed','reason':use_reason or ('source_inputs_preserved' if sources else 'container_reference' if referenced else ''),
             'identity':identity,'engine_identity':retained_volume_engine_identity(engine_id),
@@ -103,7 +109,7 @@ def inspect_candidate():
             'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
             'monotonic_deadline':time.monotonic()+300})
     for row in result:
-        if row['status']=='observed' and not row['empty'] and gate_unknown and not row['reason']:
+        if row['status']=='observed' and not row['empty'] and gate_unknown and row['reason'] in ('','container_reference'):
             row['reason']='completed_or_unknown_web_gate'
     capacity=[]
     capacity_refusal='receiver_generation_unavailable'

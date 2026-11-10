@@ -430,7 +430,15 @@ OPERATION_SPECS = (
         ("service_api",),
         ("dry-run", "apply", "readback"),
         "apply",
-        ("reviewed_plan_sha256", "exact_original_and_resource_custody"),
+        (
+            "retirement_record_id",
+            "minimum_age_seconds",
+            "product",
+            "context",
+            "operation_id",
+            "candidates",
+            "reviewed_plan_sha256",
+        ),
     ),
     OperationSpec(
         "GET",

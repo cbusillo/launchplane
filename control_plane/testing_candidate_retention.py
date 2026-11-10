@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import click
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
@@ -29,6 +31,7 @@ from control_plane.odoo_testing_native_source import (
     verify_native_capture_files,
 )
 from control_plane.provider_operations import (
+    ProviderEvidenceLease,
     ProviderMutationUnknownError,
     ProviderMutationOutcome,
     ProviderOperationLease,
@@ -127,11 +130,24 @@ def candidate_authority(
         )
     )
     snapshot: list[object] = [
-        profile.model_dump(mode="json"),
+        {
+            "product": profile.product,
+            "driver": profile.driver_id,
+            "lane": [
+                lane.model_dump(mode="json")
+                for lane in profile.lanes
+                if (lane.context, lane.instance) == (request.context, "testing")
+            ],
+        },
         operation.model_dump(mode="json"),
         candidate.model_dump(mode="json"),
     ]
-    snapshot.extend(row.model_dump(mode="json") for row in targets)
+    snapshot.extend(
+        row.model_dump(mode="json", exclude={"updated_at"})
+        for row in targets
+        if row.target_id == candidate.compose_id
+        or (row.context, row.instance) == (request.context, "testing")
+    )
     for target in store.list_provider_target_records():
         if target.target_id == candidate.compose_id:
             snapshot.append(target.model_dump(mode="json"))
@@ -213,6 +229,8 @@ def inspect_candidate_resources(
         candidate_compose_project_matches,
     )
     from control_plane.odoo_testing_restore import generation_binding
+    from control_plane.dokploy.compose import _odoo_web_command
+    from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
     if (
         not isinstance(project, str)
@@ -241,6 +259,16 @@ def inspect_candidate_resources(
             "generation": generation.model_dump(mode="json") if generation else None,
             "database_name": environment.get("ODOO_DB_NAME", ""),
             "copy_binding_sha256": generation_binding(generation) if generation else "",
+            "identity": app.plan.runtime_identity.model_dump(mode="json") if app else None,
+            "failed_candidate": {
+                "resources": candidate_resources(candidate).model_dump(mode="json"),
+                "web_command": [
+                    "/bin/sh",
+                    "-lc",
+                    _odoo_web_command(hold_until_integration_readback=True).replace("$$", "$"),
+                ],
+                "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
+            },
         },
         receive=frames.append,
         timeout_seconds=90,
@@ -301,6 +329,8 @@ def candidate_lifecycle_custody(
     project: str,
 ) -> dict[str, Any]:
     from control_plane.dokploy.testing_retained_copy import retained_copy_operation
+    from control_plane.dokploy.compose import _odoo_web_command
+    from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
     app = candidate.application
     if app is None or app.phase != "abandoned":
@@ -314,6 +344,12 @@ def candidate_lifecycle_custody(
         "failed_candidate": {
             "resources": candidate_resources(candidate).model_dump(mode="json"),
             "image": app.plan.image_reference,
+            "web_command": [
+                "/bin/sh",
+                "-lc",
+                _odoo_web_command(hold_until_integration_readback=True).replace("$$", "$"),
+            ],
+            "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
         },
     }
     host, token = source.read_dokploy_config(
@@ -523,7 +559,8 @@ def build_native_testing_sweep(
             if not resources:
                 reasons = (*reasons, "physical_inventory_unknown")
             if lifecycle and any(
-                item.status == "held" and item.reason != "source_inputs_preserved"
+                item.status not in {"eligible", "absent"}
+                and item.reason != "source_inputs_preserved"
                 for item in resources
             ):
                 lifecycle = {}
@@ -561,7 +598,7 @@ def build_native_testing_sweep(
                 "source_proof": source_proof,
                 "lifecycle": lifecycle,
             }
-        except (ValueError, FileNotFoundError, OSError, ProviderMutationUnknownError):
+        except (ValueError, OSError, click.ClickException, ProviderMutationUnknownError):
             item = NativeTestingSweepCandidate(
                 namespace=candidate.namespace,
                 operation_id=candidate.operation_id,
@@ -632,7 +669,7 @@ class NativeTestingSweepAdapter:
                 observed, _ = inspect_candidate_resources(self.root, self.store, receiver)
                 capacity = tuple(project_capacity(receiver.server_id, observed))
                 refusal = observed["capacity_refusal"]
-        except (ValueError, OSError, ProviderMutationUnknownError):
+        except (ValueError, OSError, click.ClickException, ProviderMutationUnknownError):
             refusal = "receiver_backing_readback_unknown"
         return self.plan.model_copy(
             update={
@@ -705,6 +742,21 @@ class NativeTestingSweepAdapter:
     def apply(
         self, provider_operation_key: str, lease: "ProviderOperationLease"
     ) -> "ProviderMutationOutcome":
+        from control_plane.provider_operations import ProviderMutationRejectedError
+
+        self._effect_started = False
+        try:
+            return self._apply(provider_operation_key, lease)
+        except (ValueError, OSError, click.ClickException) as error:
+            if self._effect_started:
+                raise ProviderMutationUnknownError(
+                    "Candidate cleanup may be partial; read back its original request and key."
+                ) from error
+            raise ProviderMutationRejectedError(error) from error
+
+    def _apply(
+        self, provider_operation_key: str, lease: "ProviderOperationLease"
+    ) -> "ProviderMutationOutcome":
         from control_plane.provider_operations import (
             ProviderMutationOutcome,
             ProviderMutationRejectedError,
@@ -721,7 +773,10 @@ class NativeTestingSweepAdapter:
             if not candidate.selected or candidate.status != "eligible":
                 candidates.append(candidate)
                 continue
-            with self.store.testing_candidate_retention_guard(candidate.operation_id) as check:
+            with (
+                self.store.testing_candidate_retention_guard(candidate.operation_id) as check,
+                ExitStack() as effect_guards,
+            ):
                 original = TestingCandidateAllocation.model_validate(
                     self.private[candidate.namespace]["allocation"]
                 )
@@ -729,7 +784,6 @@ class NativeTestingSweepAdapter:
 
                 def original_guard() -> None:
                     check()
-                    lease.assert_current()
                     current = self.store.read_testing_candidate(candidate.namespace)
                     from control_plane.contracts.retained_volume_sweep import (
                         RETAINED_VOLUME_SWEEP_ROUTE,
@@ -754,6 +808,14 @@ class NativeTestingSweepAdapter:
                     )
                     if current != original or reasons or ownership != candidate.ownership_sha256:
                         raise ValueError("Candidate ownership or current references changed.")
+
+                if isinstance(lease, ProviderEvidenceLease):
+                    effect_guards.enter_context(
+                        self.store.provider_evidence_guard(
+                            lease.evidence_reservation,
+                            effect_admission_checkpoint=original_guard,
+                        )
+                    )
 
                 if lifecycle:
 
@@ -798,11 +860,36 @@ class NativeTestingSweepAdapter:
                                 raise ValueError("Candidate has a foreign provider reference.")
 
                     lifecycle_guard()
+                    self._effect_started = True
                     lease.checkpoint_effect("failed_candidate_lifecycle")
+                    complete = True
                     for phase in ("stop", "remove"):
-                        CandidateRetentionLifecycle(
+                        complete = CandidateRetentionLifecycle(
                             self.store, self.root, lifecycle, phase, lifecycle_guard
                         ).execute(provider_operation_key, trace_id=self.plan.trace_id, mutate=True)
+                        if not complete:
+                            break
+                    if not complete:
+                        candidates.append(
+                            candidate.model_copy(
+                                update={
+                                    "status": "held",
+                                    "reasons": ("candidate_lifecycle_incomplete",),
+                                    "resources": tuple(
+                                        item.model_copy(
+                                            update={
+                                                "status": "held",
+                                                "reason": "candidate_lifecycle_incomplete",
+                                            }
+                                        )
+                                        if item.status == "eligible"
+                                        else item
+                                        for item in candidate.resources
+                                    ),
+                                }
+                            )
+                        )
+                        continue
                     performed = True
                 bindings = {
                     row["binding"]["volume_identity_sha256"]: row
@@ -862,6 +949,7 @@ class NativeTestingSweepAdapter:
                         )
 
                     guard()
+                    self._effect_started = True
                     observation: dict[str, object] = {}
                     status, reason = _host_result(
                         self.root,

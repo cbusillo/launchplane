@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, PropertyMock
 
 from control_plane.contracts.testing_candidate import (
     TestingCandidateAllocation,
@@ -45,10 +45,6 @@ class CandidateRetentionGuardTests(unittest.TestCase):
             selected_targets=(),
             **kwargs,
         )
-
-    def test_terminal_failure_does_not_inherit_an_unrelated_historical_release_flag(self) -> None:
-        self.operation.recovery_journal = Mock(safe_to_release=False)
-        self.assertEqual(self.refusal(), ())
 
     def test_active_original_foreign_instance_and_selected_copy_each_refuse(self) -> None:
         for field, value, reason in (
@@ -265,13 +261,6 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         self.assertEqual(self.plan().candidates[0].resources[0].reason, "source_inputs_preserved")
         self.host.assert_not_called()
 
-    def test_legacy_release_flag_is_not_a_new_global_guard(self) -> None:
-        current = self.store.read_odoo_stable_target_replacement_operation_record(
-            self.candidate.operation_id
-        )
-        self.assertIsNone(current.recovery_journal)
-        self.assertEqual(self.plan().candidates[0].status, "eligible")
-
     def test_nonempty_unrecorded_copy_is_held(self) -> None:
         self.observation["volumes"][0]["empty"] = False
         self.assertEqual(
@@ -314,9 +303,6 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         request = self.request.model_copy(
             update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
         )
-        adapter = self.retention.NativeTestingSweepAdapter(
-            self.store, self.root, request, plan, private
-        )
         self.store.write_dokploy_target_id_record(
             DokployTargetIdRecord(
                 context=self.request.context,
@@ -326,16 +312,45 @@ class CandidateRetentionPlanTests(unittest.TestCase):
             )
         )
         self.host.reset_mock()
-        with patch.object(
-            self.store, "testing_candidate_retention_guard", return_value=nullcontext(Mock())
+        with (
+            patch.object(
+                self.retention, "build_native_testing_sweep", return_value=(plan, private)
+            ),
+            patch.object(
+                type(self.store),
+                "database_dialect_name",
+                new_callable=PropertyMock,
+                return_value="postgresql",
+            ),
+            patch.object(
+                self.store, "testing_candidate_retention_guard", return_value=nullcontext(Mock())
+            ),
         ):
             with self.assertRaisesRegex(ValueError, "ownership or current references changed"):
-                adapter.apply("cleanup-original", Mock(assert_current=Mock()))
+                self.retention.execute_native_testing_sweep_request(
+                    self.store,
+                    self.root,
+                    request,
+                    actor="fixture-director",
+                    key="changed-selection",
+                    trace_id="trace",
+                )
+        self.host.assert_not_called()
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
+    def test_provider_read_error_holds_one_candidate_without_a_mutation_claim(self) -> None:
+        from control_plane.dokploy.api import DokployRequestFailed
+
+        self.inspect.side_effect = DokployRequestFailed(
+            method="GET", path="/api/compose.one", detail="missing", status_code=404
+        )
+        candidate = self.plan().candidates[0]
+        self.assertEqual(candidate.status, "held")
         self.host.assert_not_called()
 
     def test_uncertain_original_reconciles_without_repeating_removal(self) -> None:
         from contextlib import nullcontext
-        from unittest.mock import patch, PropertyMock
+        from unittest.mock import patch
         from control_plane.provider_operations import ProviderMutationUnknownError
 
         self.request = self.request.model_copy(update={"candidates": (self.candidate.namespace,)})

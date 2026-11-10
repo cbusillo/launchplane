@@ -56,6 +56,11 @@ class CandidateRetentionLifecycle:
     ) -> ProviderObservation:
         if reconciliation_key != self.reconciliation_key():
             return ProviderObservation("unknown")
+        if not provider_effect_phase:
+            return ProviderObservation(
+                "present",
+                response_payload={"availability": "incomplete", "reason": "never_started"},
+            )
         result = self.read("removal-readback" if self.phase == "remove" else "read")
         complete = result.get("availability") == "absent" or (
             self.phase == "stop" and result.get("stopped") is True
@@ -92,6 +97,14 @@ class CandidateRetentionLifecycle:
                         payload={"composeId": self.custody["target"]},
                     )
                 except Exception as error:
+                    if isinstance(
+                        error, api.DokployRequestFailed
+                    ) and api._is_definite_trigger_rejection(error):
+                        return ProviderMutationOutcome(
+                            200,
+                            {"availability": "incomplete", "reason": "stop_refused"},
+                            provider_effect_performed=False,
+                        )
                     raise ProviderMutationUnknownError(
                         "Original candidate stop needs readback."
                     ) from error
@@ -114,6 +127,8 @@ class CandidateRetentionLifecycle:
                 dispatch_guard=dispatch,
             )
             performed = True
+            if result.get("availability") == "incomplete":
+                return ProviderMutationOutcome(200, result)
             if result.get("availability") != "absent":
                 raise ProviderMutationUnknownError("Original candidate removal is unverified.")
             result = self.read("removal-readback")
@@ -142,4 +157,4 @@ class CandidateRetentionLifecycle:
         )
         if result.status not in {"completed", "adopted", "replayed"}:
             raise ProviderMutationUnknownError("Read back the original candidate lifecycle effect.")
-        return True
+        return result.response_payload.get("availability") != "incomplete"

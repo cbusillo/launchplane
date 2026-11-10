@@ -1081,8 +1081,13 @@
           "503"
         ],
         "reviewed_evidence": [
-          "reviewed_plan_sha256",
-          "exact_original_and_resource_custody"
+          "retirement_record_id",
+          "minimum_age_seconds",
+          "product",
+          "context",
+          "operation_id",
+          "candidates",
+          "reviewed_plan_sha256"
         ],
         "schema_fingerprint_sha256": "6b5331e1c7c7ab516659373ae45d55cd60305c6507450cffbbc15255ba728052",
         "supported_surfaces": [
@@ -1505,8 +1510,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "ebd2f7cb9b9e0aa222970c685ca6e5e1c525b8e7"
+    "source_commit_sha": "9209c07956806f10b19af450710a75ebfee91115"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "02946c8dc38e0356575b9b69dd5d607520bb4a361d17021d9c264fd2664bcfa6"
+  "semantic_digest_sha256": "277ac6e03ff1fd69560b3e39ab658867c24f67dc0958d8e2dc66c4d565b8b471"
 }

@@ -23,6 +23,7 @@ class NativeTestingRetentionPostgresTests(unittest.TestCase):
                     check()
                     with second._session_factory() as session:
                         session.execute(text("SET LOCAL lock_timeout = '250ms'"))
+                        second._lock_product_authority_bundle_write(session)
                         with self.assertRaises(OperationalError) as blocked:
                             session.execute(
                                 update(LaunchplaneOdooStableTargetReplacementOperationRow)

@@ -66,6 +66,26 @@ class CandidateRetentionLifecycleTests(unittest.TestCase):
                 adapter.execute("selected-original", trace_id="trace", mutate=True)
             remove.assert_not_called()
 
+    def test_definite_stop_refusal_completes_without_holding_the_target_or_replaying(self) -> None:
+        from control_plane.dokploy.api import DokployRequestFailed
+
+        adapter = CandidateRetentionLifecycle(
+            self.store, self.root, self.custody, "stop", self.guard
+        )
+        with (
+            patch.object(adapter, "read", return_value={"stopped": False}),
+            patch(
+                "control_plane.testing_candidate_retention_lifecycle.api.dokploy_request",
+                side_effect=DokployRequestFailed(
+                    method="POST", path="/api/compose.stop", status_code=400, detail="refused"
+                ),
+            ) as stop,
+        ):
+            self.assertFalse(adapter.execute("refused-original", trace_id="trace", mutate=True))
+            self.assertFalse(adapter.execute("refused-original", trace_id="readback", mutate=False))
+            self.assertEqual(stop.call_count, 1)
+            self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
     def test_container_removal_uses_dispatch_guard_and_original_absence_readback(self) -> None:
         adapter = CandidateRetentionLifecycle(
             self.store, self.root, self.custody, "remove", self.guard

@@ -13164,8 +13164,7 @@ class PostgresRecordStore(HumanSessionStore):
         with self.testing_replacement_execution_lock(operation_id) as executor_check:
             if executor_check is None:
                 raise ValueError("The candidate original still has an executor.")
-            with self.serialize_disposable_testing_resources() as authority_check:
-                session = self._disposable_authority_context.session
+            with self._session_factory() as session:
                 row = session.get(
                     LaunchplaneOdooStableTargetReplacementOperationRow,
                     operation_id,
@@ -13176,7 +13175,7 @@ class PostgresRecordStore(HumanSessionStore):
 
                 def checkpoint() -> None:
                     executor_check()
-                    authority_check()
+                    session.execute(text("SELECT 1"))
 
                 yield checkpoint
 

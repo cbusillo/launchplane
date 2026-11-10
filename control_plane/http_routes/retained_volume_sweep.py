@@ -99,12 +99,18 @@ def register_retained_volume_sweep_route(
                     )
                 )
                 return await asyncio.shield(native_task)
-            except ValueError:
+            except (ValueError, FileNotFoundError):
                 refuse(
                     "native_testing_sweep_refused",
                     "Native candidate ownership, reviewed evidence or request is unqualified.",
                 )
             except Exception:
+                if payload.mode == "dry-run":
+                    refuse(
+                        "native_testing_inspection_unavailable",
+                        "Native candidate inspection is incomplete; no cleanup was dispatched.",
+                        503,
+                    )
                 refuse(
                     "mutation_reconciliation_required",
                     "Preserve the original native cleanup request and key; read back its evidence.",

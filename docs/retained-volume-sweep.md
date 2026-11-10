@@ -82,8 +82,9 @@ cannot reuse the key. An interrupted request only reads its existing receipts;
 it never repeats deletion. No supported catalog command is claimed until its
 caller has adopted this optional request contract.
 
-Apply holds the candidate executor exclusion, original row lock and existing
-product-configuration lock. Immediately before each effect it rechecks candidate
+Apply holds the candidate executor exclusion and original row lock. The existing
+product-configuration lock covers the effect admission checkpoint; it is not held
+through remote inspection or effects. Immediately before each effect it rechecks candidate
 ownership, current references, provider activity, exact physical identity and
 source evidence. Nonempty failed copies require independently verified preserved
 source artifacts or an originally empty build; staged `.lp-native-*` source
@@ -94,12 +95,19 @@ provider targets and source input pairs remain recorded and unchanged.
 Mounted volumes remain held unless the candidate's existing terminal abandonment,
 preserved source and exact native container custody qualify detachment. A stopped
 container alone is insufficient. The lifecycle snapshot binds the original IDs,
-images, configuration, mount identities and process starts. Active web processes,
-execs, published ports, foreign writable mounts and changed snapshots refuse.
+images, configuration, mount identities and process starts. A web container still
+waiting for integration readback qualifies only with the exact original command,
+runtime identity, data mount, absent gate and observed shell/sleep processes.
+Serving or unknown web processes, execs, published ports, foreign writable mounts
+and changed snapshots refuse. A candidate with no web container still requires
+positive runtime identity on its remaining script runner.
 For a qualified abandoned candidate, the operation uses the existing native
 Compose stop followed by exact non-force container removal and absence readback.
 Each phase has its own original-bound durable provider receipt. A timeout only
-reconciles that phase; it never replays stop or removal blindly. The compose
+reconciles that phase; it never replays stop or removal blindly. A definite stop
+refusal or completed but incomplete container removal returns a terminal held
+result and releases its reservation. A fresh plan is required for another attempt.
+The compose
 target, deployment history and schedules remain as evidence.
 
 Only after detachment readback does the existing host sweep remove positively
@@ -121,3 +129,12 @@ Physical results report `before_bytes`, `after_bytes` and the signed observed
 free-space change on the same backing. These observations include concurrent
 filesystem activity; logical volume size is never reported as freed space.
 Unknown backing readback remains explicit.
+
+Manual native qualification uses the tracked exporter and workloads in
+`tests/fixtures/native-testing-retention/` through the catalog locked heavy-run
+entrypoint. The protocol fixture proves filesystem/subprocess behavior against
+a fabricated Docker protocol. The engine fixture needs the retained qualified
+QEMU runtime and immutable tiny nested image; it proves fabricated Compose
+container detachment and volume lifecycle, never real product eligibility.
+The exporter freezes the current host programs and shared test library into a
+fresh input directory; retained input bundles are not rewritten.
