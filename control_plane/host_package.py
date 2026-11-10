@@ -47,6 +47,7 @@ def host_package() -> HostPackage:
     from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
     from control_plane.testing_activation import PORT_INSPECTION_PROGRAM
     from control_plane._preview_fixture_program import PREVIEW_FIXTURE_PROGRAM
+    from control_plane._preview_parts_import_program import parts_import_programs
 
     programs = {
         "activation": (
@@ -73,6 +74,7 @@ def host_package() -> HostPackage:
         "readback": INTEGRATION_READBACK_PROGRAM,
         "website_settings": WEBSITE_SETTINGS_PROGRAM,
         "preview_fixture": PREVIEW_FIXTURE_PROGRAM,
+        **parts_import_programs(),
     }
     actions = {
         name: name
@@ -87,6 +89,7 @@ def host_package() -> HostPackage:
             "preflight",
             "preview_snapshot",
             "preview_fixture",
+            "preview_parts_import",
         )
     }
     return build_package(programs, actions, include_installer=True)

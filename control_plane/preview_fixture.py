@@ -19,6 +19,7 @@ from control_plane.contracts.preview_fixture import (
     PreviewFixtureIntent,
     PreviewFixtureReceipt,
     PreviewFixtureRequest,
+    PreviewPartsImportRequest,
 )
 from control_plane.disposable_lanes import (
     DisposableLaneStore,
@@ -72,11 +73,11 @@ def fixture_plan_sha256(receipt: PreviewFixtureReceipt) -> str:
 
 
 @dataclass
-class PreviewFixtureAdapter:
+class PreviewMaintenanceAdapter:
     store: PostgresRecordStore
     root: Path
     product: str
-    request: PreviewFixtureRequest
+    request: PreviewFixtureRequest | PreviewPartsImportRequest
     trace_id: str
     binding: PreviewFixtureBinding | None = None
     failure_reason: str | None = None
@@ -186,6 +187,9 @@ class PreviewFixtureAdapter:
             }
         )
 
+
+@dataclass
+class PreviewFixtureAdapter(PreviewMaintenanceAdapter):
     def original_intent(self, retained: dict[str, object] | None = None) -> dict[str, object]:
         if retained:
             intent = PreviewFixtureIntent.model_validate(retained)
@@ -244,7 +248,9 @@ class PreviewFixtureAdapter:
                 token=connection.token,
                 binding=binding,
                 mode=mode,
-                fixture=self.request.fixture,
+                fixture=self.request.fixture
+                if isinstance(self.request, PreviewFixtureRequest)
+                else "",
                 before_provider_mutation=checkpoint,
                 expected_fixture_sha256=expected_fixture_sha256,
             )
@@ -259,6 +265,7 @@ class PreviewFixtureAdapter:
         receipt = PreviewFixtureReceipt.model_validate(json.loads(bytes.fromhex(encoded)))
         if (
             receipt.identity != selection.identity
+            or not isinstance(self.request, PreviewFixtureRequest)
             or receipt.fixture != self.request.fixture
             or receipt.mode != mode
         ):
@@ -470,7 +477,9 @@ def require_fixture_container_cancelled(
         token=token,
         binding=binding,
         mode="cancel" if cancel else "cancel-readback",
-        fixture=intent.maintenance.fixture,
+        fixture=intent.maintenance.fixture
+        if isinstance(intent.maintenance, PreviewFixtureRequest)
+        else "",
         before_provider_mutation=before_provider_mutation,
         provider_mutation_guard=provider_mutation_guard,
     )

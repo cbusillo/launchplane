@@ -7420,9 +7420,14 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
-        from control_plane.contracts.preview_fixture import PreviewFixtureRequest
+        from control_plane.contracts.preview_fixture import (
+            PreviewFixtureRequest,
+            PreviewPartsImportRequest,
+        )
 
-        if isinstance(maintenance_request.maintenance, PreviewFixtureRequest):
+        if isinstance(
+            maintenance_request.maintenance, (PreviewFixtureRequest, PreviewPartsImportRequest)
+        ):
             from control_plane.preview_fixture import PreviewFixtureAdapter
             from control_plane.contracts.preview_execution import preview_execution_lock_name
             from control_plane.http_routes.support import run_in_worker_thread
@@ -7442,7 +7447,7 @@ def create_launchplane_fastapi_app(
                     status_code=403,
                     trace_id=trace_id,
                     code="authorization_denied",
-                    message="The caller cannot apply a fixture to this product preview.",
+                    message="The caller cannot maintain this product preview.",
                 )
             fixture_store = require_provider_operation_store(
                 record_store=record_store, trace_id=trace_id
@@ -7453,9 +7458,16 @@ def create_launchplane_fastapi_app(
                     status_code=400,
                     trace_id=trace_id,
                     code="idempotency_key_required",
-                    message="Fixture apply requires a bounded Idempotency-Key.",
+                    message="Preview maintenance apply requires a bounded Idempotency-Key.",
                 )
-            adapter = PreviewFixtureAdapter(
+            from control_plane.preview_parts_import import PreviewPartsImportAdapter
+
+            adapter_type = (
+                PreviewPartsImportAdapter
+                if isinstance(fixture, PreviewPartsImportRequest)
+                else PreviewFixtureAdapter
+            )
+            adapter = adapter_type(
                 fixture_store,
                 resolved_control_plane_root,
                 maintenance_request.product,
@@ -7515,8 +7527,8 @@ def create_launchplane_fastapi_app(
                         result=result,
                         trace_id=trace_id,
                         route_path=_ODOO_APP_MAINTENANCE_ROUTE,
-                        in_progress_message="The original fixture operation is running.",
-                        reconcile_message="Read back the original fixture operation before retrying.",
+                        in_progress_message="The original preview maintenance operation is running.",
+                        reconcile_message="Read back the original preview maintenance operation before retrying.",
                     )
 
             try:
@@ -7529,9 +7541,11 @@ def create_launchplane_fastapi_app(
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
-                    code="preview_fixture_unavailable",
+                    code="preview_import_unavailable"
+                    if isinstance(fixture, PreviewPartsImportRequest)
+                    else "preview_fixture_unavailable",
                     reason=adapter.failure_reason,
-                    message="The fixture or its preview evidence is unavailable; inspect the original operation.",
+                    message="Preview maintenance evidence is unavailable; inspect the original operation.",
                 ) from error
         try:
             product_profile = resolve_odoo_app_maintenance_product_route(

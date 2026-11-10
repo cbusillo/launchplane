@@ -109,6 +109,15 @@ class OperationSpec:
 
 OPERATION_SPECS = (
     OperationSpec(
+        "POST",
+        "/v1/drivers/odoo/app-maintenance",
+        "Run stable maintenance, image-owned preview fixtures, or fixed exact-preview Fishbowl parts import with configured-account grants preflight and durable original recovery.",
+        ("agent_helper", "service_api"),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
+    OperationSpec(
         "GET",
         "/v1/products/{product}/testing-rebuild/{operation_id}/migrated-source",
         "Read the original migrated testing pair upload state without publishing bytes or changing a receipt.",

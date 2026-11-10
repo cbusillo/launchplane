@@ -2,7 +2,7 @@ from control_plane.copy_readback_diagnostics import readback_predicate_library
 
 PREVIEW_FIXTURE_RESULT_MARKER = "preview_fixture_result"
 
-PREVIEW_FIXTURE_PROGRAM = (
+PREVIEW_CONTAINER_LIBRARY = (
     readback_predicate_library()
     + "RESULT_MARKER = "
     + repr(PREVIEW_FIXTURE_RESULT_MARKER)
@@ -38,7 +38,12 @@ def checked_container(spec, *, require_running):
     if not spec['database'] or environment.get('ODOO_DB_NAME') != spec['database']:
         raise ValueError('Preview database changed')
     return web
+"""
+)
 
+PREVIEW_FIXTURE_PROGRAM = (
+    PREVIEW_CONTAINER_LIBRARY
+    + r"""
 def run_fixture(spec):
     global readback_predicate
     checked_container(spec, require_running=True)

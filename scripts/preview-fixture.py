@@ -5,15 +5,18 @@ from pathlib import Path
 import runpy
 import urllib.error
 
-from control_plane.contracts.preview_fixture import PreviewFixtureRequest, PreviewFixtureReceipt
+from control_plane.contracts.preview_fixture import (
+    PreviewFixtureRequest,
+    PreviewFixtureReceipt,
+    PreviewPartsImportRequest,
+)
 from control_plane.odoo_app_maintenance_http import ODOO_APP_MAINTENANCE_ROUTE
+from control_plane.contracts.preview_parts_import import PreviewPartsImportReceipt
 
 
 # noinspection DuplicatedCode
 def fixture_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Apply an image-owned fixture to an exact preview."
-    )
+    parser = argparse.ArgumentParser(description="Run bounded maintenance on an exact preview.")
     parser.add_argument("mode", choices=("dry-run", "apply", "readback"))
     parser.add_argument("--operator-helper", type=Path, required=True)
     parser.add_argument("--payload-file", type=Path, required=True)
@@ -37,7 +40,10 @@ def main() -> int:
         if path.is_symlink() or path.resolve().is_relative_to(root):
             parser.error("Use private payload/evidence files outside the repository.")
     payload = json.loads(args.payload_file.read_text())
-    draft = PreviewFixtureRequest.model_validate(payload["maintenance"])
+    importing = payload["maintenance"].get("action") == "preview-parts-import"
+    request_type = PreviewPartsImportRequest if importing else PreviewFixtureRequest
+    receipt_type = PreviewPartsImportReceipt if importing else PreviewFixtureReceipt
+    draft = request_type.model_validate(payload["maintenance"])
     intent = {
         "product": payload["product"],
         "maintenance": draft.model_dump(exclude={"mode", "reviewed_plan_sha256"}),
@@ -52,7 +58,7 @@ def main() -> int:
         if saved["intent"] != intent:
             parser.error("The saved dry run belongs to another request.")
         digest = saved["response"]["result"]["plan_sha256"]
-    draft = PreviewFixtureRequest.model_validate(
+    draft = request_type.model_validate(
         {**draft.model_dump(), "mode": args.mode, "reviewed_plan_sha256": digest}
     )
     helper = args.operator_helper.resolve(strict=True)
@@ -69,16 +75,19 @@ def main() -> int:
             path=ODOO_APP_MAINTENANCE_ROUTE,
             settings=settings,
             body={"product": payload["product"], "maintenance": draft.model_dump(mode="json")},
-            timeout=600,
+            timeout=720,
             idempotency_key=args.idempotency_key,
         )
-        receipt = PreviewFixtureReceipt.model_validate(response["result"]["receipt"])
+        receipt = receipt_type.model_validate(response["result"]["receipt"])
         if (
             response["status"] != "accepted"
-            or receipt.fixture != draft.fixture
+            or isinstance(receipt, PreviewFixtureReceipt)
+            and (not isinstance(draft, PreviewFixtureRequest) or receipt.fixture != draft.fixture)
             or receipt.identity.preview_generation_id != draft.generation_id
         ):
-            raise ValueError("The returned receipt does not match this fixture request.")
+            raise ValueError(
+                "The returned receipt does not match this preview maintenance request."
+            )
     except urllib.error.HTTPError as error:
         transport["emit_http_error_payload"](
             operation="preview-fixture", request={"mode": args.mode}, exc=error
@@ -89,7 +98,7 @@ def main() -> int:
             json.dumps(
                 {
                     "status": "unverified",
-                    "message": "Read back the original fixture operation; preserve its review and key.",
+                    "message": "Read back the original preview maintenance operation; preserve its review and key.",
                 }
             )
         )

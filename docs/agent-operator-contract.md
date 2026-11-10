@@ -10,6 +10,10 @@ the producer artifact and its quality gate. External skills are consumers; they
 do not become runtime authority and must not block ordinary Launchplane feature
 delivery.
 
+The maintenance operation includes the [exact-preview parts-import contract](preview-parts-import.md),
+using the installed catalog transport and repository helper. Import readback
+is original-key recovery; standalone readback remains fixture-only.
+
 ## Generate And Check
 
 Generate the canonical OpenAPI document, UI bindings, and agent/admin
