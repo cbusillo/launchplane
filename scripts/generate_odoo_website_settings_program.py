@@ -63,13 +63,7 @@ def render(*, commit: str, source: str) -> str:
 import base64
 import os
 payload = json.loads(base64.b64decode(os.environ["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"])) if os.environ.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64") else None
-indexing = json.loads(os.environ["LAUNCHPLANE_WEBSITE_INDEXING_JSON"]) if os.environ.get("LAUNCHPLANE_WEBSITE_INDEXING_JSON") else None
-if indexing is not None:
-    websites = env["website"].sudo().search([])
-    matching = [website for website in websites if str(website.domain or "").rstrip("/") == indexing["public_origin"].rstrip("/")]
-    if len(matching) != 1:
-        raise RuntimeError("Website indexing requires one native origin binding.")
-    payload = {**(payload or {}), "instance": "prod", "website_indexing": {**indexing, "website_id": matching[0].id}}
+indexing = payload.get("website_indexing") if payload else None
 digest = apply_website_settings(env, payload, instance=__INSTANCE__)
 env.cr.commit()
 if digest:
@@ -98,7 +92,8 @@ with tempfile.TemporaryDirectory(prefix="launchplane-website-settings-") as conf
 import contextlib
 import io
 request = json.loads(__REQUEST__)
-if not request.get("database_uuid") or read_string_parameter(env["ir.config_parameter"].sudo(), "database.uuid") != request["database_uuid"]:
+database_uuid = read_string_parameter(env["ir.config_parameter"].sudo(), "database.uuid")
+if not database_uuid or (request.get("database_uuid") and database_uuid != request["database_uuid"]):
     raise RuntimeError("Website indexing database UUID differs from the runtime binding.")
 if request["indexing"].get("website_id") is None:
     websites = env["website"].sudo().search([])
@@ -124,7 +119,7 @@ if request["mode"] == "apply":
     env.cr.commit()
 else:
     env.cr.rollback()
-print("website_indexing_result=" + json.dumps({**plan, "committed": request["mode"] == "apply"}, sort_keys=True))
+print("website_indexing_result=" + json.dumps({**plan, "database_uuid": database_uuid, "committed": request["mode"] == "apply"}, sort_keys=True))
 """
     )
     indexing_wrapper = wrapper.replace(repr(native), repr(indexing_native)).replace(

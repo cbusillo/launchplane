@@ -839,7 +839,7 @@ def run_compose_post_deploy_update(
     apply_website_settings = target_definition.instance.strip().lower() not in {
         "prod",
         "production",
-    } or bool(resolved_workflow_environment_overrides.get("LAUNCHPLANE_WEBSITE_INDEXING_JSON"))
+    }
     encoded_payload = resolved_workflow_environment_overrides.get(
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
     )

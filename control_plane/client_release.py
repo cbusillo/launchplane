@@ -1167,7 +1167,12 @@ def _read_client_release_continuation(
         return None
     views = read_client_release_step_views(store=store, profile=profile, decision=decision)
     statuses = [view.status for view in views]
-    from control_plane.odoo_website_indexing import first_live_inverse_started
+    from control_plane.odoo_website_indexing import (
+        FIRST_LIVE_SCOPE,
+        FIRST_LIVE_ROUTE,
+        first_live_inverse_started,
+        first_live_state_completed,
+    )
 
     indexing_stopped = bool(decision.checklist.first_live_origin) and first_live_inverse_started(
         store, decision
@@ -1178,7 +1183,8 @@ def _read_client_release_continuation(
     elif all(status == "pass" for status in statuses):
         state = (
             "waiting"
-            if decision.checklist.first_live_origin and profile.production_use == "prelaunch"
+            if decision.checklist.first_live_origin
+            and not first_live_state_completed(store, decision)
             else "passed"
         )
     elif any(status in {"pending", "running"} for status in statuses):
@@ -1199,6 +1205,19 @@ def _read_client_release_continuation(
     )
     if indexing_stopped:
         blocked_reason = "First live configuration entered its inverse. Reconcile the original operation before reviewing another release."
+    elif (
+        decision.checklist.first_live_origin
+        and state == "waiting"
+        and all(status == "pass" for status in statuses)
+    ):
+        indexing = store.read_idempotency_record(
+            scope=FIRST_LIVE_SCOPE, route_path=FIRST_LIVE_ROUTE, idempotency_key=decision.record_id
+        )
+        blocked_reason = (
+            "First live configuration needs reconciliation of its original operation before completion."
+            if indexing is not None
+            else "The accepted release is waiting for verified first live configuration."
+        )
     window = None
     if not blocked_reason and native_continuation is None and state in {"waiting", "running"}:
         window = release_window(
@@ -1674,6 +1693,40 @@ def advance_client_releases(
                 )
                 continue
         covered = _covering_decision(store, profile.product)
+        if profile.driver_id == "odoo" and profile.production_use == "prelaunch":
+            from control_plane.odoo_website_indexing import (
+                FIRST_LIVE_SCOPE,
+                FIRST_LIVE_ROUTE,
+                first_live_state_completed,
+                first_live_inverse_started,
+                first_live_inverse_pending,
+            )
+
+            # Only an existing native effect may enter inverse recovery under a hold.
+            # No new forward operation or release step is admitted here.
+            for decision in store.list_release_review_decision_records(product=profile.product):
+                if (
+                    not decision.checklist.first_live_origin
+                    or first_live_state_completed(store, decision)
+                    or (
+                        first_live_inverse_started(store, decision)
+                        and not first_live_inverse_pending(store, decision)
+                    )
+                ):
+                    continue
+                original = store.read_idempotency_record(
+                    scope=FIRST_LIVE_SCOPE,
+                    route_path=FIRST_LIVE_ROUTE,
+                    idempotency_key=decision.record_id,
+                )
+                if original is None or not original.provider_effect_phase:
+                    continue
+                views = read_client_release_step_views(
+                    store=store, profile=profile, decision=decision
+                )
+                if views and all(view.status == "pass" for view in views):
+                    covered = (profile, decision)
+                    break
         if covered is None:
             continue
         try:
@@ -1802,14 +1855,22 @@ def _advance(
         and profile.production_use == "prelaunch"
         and not admission_paused
     ):
-        from control_plane.odoo_website_indexing import complete_first_live
+        from control_plane.odoo_website_indexing import complete_first_live, WebsiteIndexingUnknown
+
+        if backoff is not None and backoff.should_defer(
+            f"first-live:{profile.product}", decision.record_id
+        ):
+            return ""
 
         with store.odoo_synchronous_lane_reservation(
             product=profile.product, context=context, instance="prod"
         ) as owner:
             if owner is not None:
                 return ""
-            complete_first_live(store, control_plane_root, profile, decision)
+            try:
+                complete_first_live(store, control_plane_root, profile, decision)
+            except (WebsiteIndexingUnknown, ValueError) as error:
+                raise ClientReleaseNotReady(str(error)) from error
     return ""
 
 

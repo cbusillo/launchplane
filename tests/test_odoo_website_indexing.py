@@ -1,11 +1,16 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from control_plane.provider_operations import ProviderOperationLease
 from collections.abc import Callable
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, create_autospec
 
-from control_plane.odoo_website_indexing import WebsiteIndexingExecution, WebsiteIndexingRequest
+from control_plane.odoo_website_indexing import (
+    WebsiteIndexingAdapter,
+    WebsiteIndexingExecution,
+    WebsiteIndexingRequest,
+)
 from tests.test_product_topology_read_model import (
     _TopologyStore as TopologyStore,
     _route_binding as route_binding,
@@ -71,7 +76,8 @@ class IndexingStore(TopologyStore):
         self.profile = product_profile(driver_id="odoo").model_copy(
             update={"production_use": "prelaunch"}
         )
-        self.target = provider_target()
+        self.profile.image.repository = "ghcr.io/example/odoo"
+        self.target = provider_target().model_copy(update={"provider_evidence": {}})
         self.database_url = "sqlite://"
 
     def read_product_profile_record(self, product: str) -> Any:
@@ -85,13 +91,38 @@ class IndexingStore(TopologyStore):
     def read_provider_target_record(self, **_kwargs: Any) -> Any:
         return self.target
 
+    def read_dokploy_target_record(self, **_kwargs: Any) -> Any:
+        from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+
+        return DokployTargetRecord(
+            context="example-context",
+            instance="prod",
+            target_name="example-site-prod",
+            public_hosts=("example.test",),
+            updated_at=self.target.updated_at,
+        )
+
     @staticmethod
-    def read_dokploy_target_record(**_kwargs: Any) -> Any:
-        return SimpleNamespace(public_hosts=("example.test",))
+    def read_dokploy_target_id_record(**_kwargs: Any) -> Any:
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
+        return DokployTargetIdRecord(
+            context="example-context",
+            instance="prod",
+            target_id="provider-target-private-123",
+            updated_at="2026-07-14T10:25:00Z",
+        )
 
     @staticmethod
     def read_release_tuple_record(**_kwargs: Any) -> Any:
         return SimpleNamespace(artifact_id="artifact-1")
+
+    @staticmethod
+    def read_artifact_manifest(_artifact_id: str) -> Any:
+        return SimpleNamespace(
+            image=SimpleNamespace(repository="ghcr.io/example/odoo", digest="sha256:" + "1" * 64),
+            source_commit="refs/heads/main",
+        )
 
 
 class WebsiteIndexingBindingTests(unittest.TestCase):
@@ -101,6 +132,7 @@ class WebsiteIndexingBindingTests(unittest.TestCase):
             image_reference="ghcr.io/example/odoo@sha256:" + "1" * 64
         ).model_copy(update={"database_uuid": "synthetic-database"})
         self.payload = {
+            "composeId": self.store.target.target_id,
             "appName": "example-prod",
             "serverId": "synthetic-server",
             "env": "ODOO_DB_NAME=example\nLAUNCHPLANE_RUNTIME_IDENTITY_JSON="
@@ -151,6 +183,7 @@ class WebsiteIndexingBindingTests(unittest.TestCase):
                 "managed_noindex_before": False,
                 "managed_noindex_after": True,
                 "committed": request["mode"] == "apply",
+                "database_uuid": "synthetic-database",
             },
         }
 
@@ -211,6 +244,129 @@ class WebsiteIndexingBindingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "route authority"):
             self.execution.observe(reviewed=plan, before_mutation=checkpoint)
         checkpoint.assert_not_called()
+        self.assertEqual(self.writes, 0)
+
+    def test_refreshed_authority_preserves_reviewed_identity_but_stale_authority_refuses(
+        self,
+    ) -> None:
+        plan = self.execution.observe()
+        route = self.store.route_binding
+        assert route is not None
+        now = datetime.now(timezone.utc)
+        self.store.route_binding = route.model_copy(
+            update={
+                "source": route.source.model_copy(
+                    update={
+                        "refreshed_at": now.isoformat(),
+                        "stale_after": (now + timedelta(minutes=20)).isoformat(),
+                    }
+                )
+            }
+        )
+        self.store.profile = self.store.profile.model_copy(
+            update={"updated_at": now.isoformat(), "display_name": "New name"}
+        )
+        self.store.target = self.store.target.model_copy(update={"updated_at": now.isoformat()})
+        self.assertEqual(self.execution.observe()["binding_sha256"], plan["binding_sha256"])
+        adapter = WebsiteIndexingAdapter(self.execution, plan, "synthetic")
+        before = adapter.observe("original", "website-indexing", adapter.reconciliation_key())
+        self.assertEqual(before.outcome, "absent")
+        self.assertTrue(before.retry_safe)
+        original_native = self.native_result
+
+        def after(**kwargs: Any) -> dict[str, Any]:
+            result = original_native(**kwargs)
+            result["native"].update(
+                before_sha256="b" * 64, changed=False, managed_noindex_before=True
+            )
+            return result
+
+        self.native.side_effect = after
+        self.assertEqual(
+            adapter.observe("original", "website-indexing", adapter.reconciliation_key()).outcome,
+            "present",
+        )
+        self.store.route_binding = route.model_copy(
+            update={
+                "source": route.source.model_copy(
+                    update={"stale_after": (now - timedelta(seconds=1)).isoformat()}
+                )
+            }
+        )
+        self.assertEqual(
+            adapter.observe("original", "website-indexing", adapter.reconciliation_key()).outcome,
+            "unknown",
+        )
+        self.assertEqual(self.writes, 0)
+
+    def test_native_database_uuid_binds_ordinary_runtime_without_injected_uuid(self) -> None:
+        runtime = self.runtime.model_copy(update={"database_uuid": ""})
+        self.payload["env"] = (
+            "ODOO_DB_NAME=example\nLAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + runtime.model_dump_json()
+        )
+        plan = self.execution.observe()
+        self.assertEqual(plan["database_uuid"], "synthetic-database")
+        self.execution.observe(reviewed=plan)
+        self.assertEqual(
+            self.native.call_args.kwargs["request"]["database_uuid"], plan["database_uuid"]
+        )
+
+    def test_changed_target_id_refuses_before_native_execution(self) -> None:
+        self.store.target = self.store.target.model_copy(update={"target_id": "foreign-target"})
+        with self.assertRaisesRegex(ValueError, "target records differ"):
+            self.execution.observe()
+        self.native.assert_not_called()
+
+    def test_wrong_artifact_image_refuses_before_native_execution(self) -> None:
+        self.payload["env"] = self.payload["env"].replace(
+            "sha256:" + "1" * 64, "sha256:" + "2" * 64
+        )
+        with self.assertRaisesRegex(ValueError, "artifact authority"):
+            self.execution.observe()
+        self.native.assert_not_called()
+
+    def test_interrupted_native_result_reconciles_before_after_or_unknown_without_writes(
+        self,
+    ) -> None:
+        from control_plane.odoo_website_indexing import WebsiteIndexingUnknown
+
+        plan = self.execution.observe()
+        adapter = WebsiteIndexingAdapter(self.execution, plan, "synthetic")
+        for outcome in ("refused", "committed", "diverged"):
+            with self.subTest(outcome=outcome):
+
+                def interrupted(
+                    *,
+                    request: Any,
+                    before_mutation: Callable[[], None] | None = None,
+                    **kwargs: Any,
+                ) -> dict[str, Any]:
+                    if request["mode"] == "apply":
+                        assert before_mutation is not None
+                        before_mutation()
+                        return {"status": "refused" if outcome == "refused" else "unknown"}
+                    result = self.native_result(request=request, **kwargs)
+                    if outcome != "refused":
+                        result["native"].update(
+                            before_sha256=("b" if outcome == "committed" else "c") * 64,
+                            changed=outcome != "committed",
+                            managed_noindex_before=outcome == "committed",
+                        )
+                    return result
+
+                self.native.side_effect = interrupted
+                lease = create_autospec(ProviderOperationLease, instance=True)
+                with self.assertRaises(WebsiteIndexingUnknown):
+                    adapter.apply("original", lease)
+                lease.checkpoint_effect.assert_called_once()
+                observed = adapter.observe(
+                    "original", "website-indexing", adapter.reconciliation_key()
+                )
+                self.assertEqual(
+                    observed.outcome,
+                    {"refused": "absent", "committed": "present", "diverged": "unknown"}[outcome],
+                )
+                self.assertEqual(observed.retry_safe, outcome == "refused")
         self.assertEqual(self.writes, 0)
 
 
@@ -278,6 +434,7 @@ class WebsiteIndexingRouteTests(unittest.IsolatedAsyncioTestCase):
         actions[:] = ["product_config.plan", "product_config.apply"]
         plan: dict[str, Any] = {
             "binding_sha256": "f" * 64,
+            "database_uuid": "synthetic-database",
             "native": {
                 "website_id": 7,
                 "public_origin": "https://example.test",

@@ -166,7 +166,9 @@ class ClientReleaseFixture(unittest.TestCase):
             (
                 "control_plane.client_release.current_release_review",
                 lambda **kwargs: build_release_review(
-                    store=self.store, profile=kwargs["profile"], read=self.review_read
+                    store=cast(Any, self.store),
+                    profile=kwargs["profile"],
+                    read=self.review_read,
                 ),
             ),
             (
@@ -186,7 +188,7 @@ class ClientReleaseFixture(unittest.TestCase):
             replacement_patch.start()
             self.addCleanup(replacement_patch.stop)
 
-    def _admission(self, **kwargs: object) -> OdooProdPromotionRunAdmission:
+    def _admission(self, **_kwargs: object) -> OdooProdPromotionRunAdmission:
         testing = self.store.read_release_tuple_record(context_name=CONTEXT, channel_name="testing")
         return OdooProdPromotionRunAdmission(
             inputs_result=OdooProdPromotionInputsResult(
@@ -584,10 +586,30 @@ class ClientReleaseTests(ClientReleaseFixture):
                 )
             )
             settings = OdooWebsiteSettings.model_validate(payload["website_settings"])
+            self.assertEqual(
+                payload["website_indexing"],
+                {
+                    "website_id": settings.website_id,
+                    "public_origin": settings.public_origin,
+                    "production_use": "live",
+                },
+            )
             applied.append(settings)
-            return _module_update_evidence(website_settings_sha256=settings.digest)
+            return _module_update_evidence(
+                website_settings_sha256=settings.digest, website_indexing_production_use="live"
+            )
 
         with (
+            patch(
+                "control_plane.odoo_website_indexing.WebsiteIndexingExecution.observe",
+                return_value={
+                    "native": {
+                        "website_id": settings.settings.website_id,
+                        "public_origin": settings.settings.public_origin,
+                        "production_use": "live",
+                    }
+                },
+            ),
             patch(
                 "control_plane.workflows.odoo_post_deploy._resolve_compose_target_definition",
                 return_value=DokployTargetDefinition(
@@ -815,7 +837,10 @@ class ClientReleaseTests(ClientReleaseFixture):
         self.assertEqual(self.advance(), ())
         self.switch("promote")
         current = self.store.read_product_profile_record(PRODUCT)
-        for update in ({"driver_id": "unsupported"},):
+        for update in (
+            {"driver_id": "unsupported"},
+            {"driver_id": "generic-web", "production_use": "prelaunch"},
+        ):
             with self.subTest(update=update):
                 self.assertEqual(
                     release_start_for_acceptance(

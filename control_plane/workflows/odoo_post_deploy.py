@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-import json
 from typing import Literal, Protocol, cast
 
 import click
@@ -374,7 +373,55 @@ def execute_odoo_post_deploy(
             record_store, request.context, rendering_record
         )
 
+    indexing_state = ""
+    selected_indexing = None
     try:
+        if request.instance == "prod" and release_operation:
+            from control_plane.odoo_website_indexing import (
+                WebsiteIndexingExecution,
+                production_origin,
+            )
+            from control_plane.contracts.odoo_website_settings import OdooWebsiteIndexing
+
+            profiles = [
+                profile
+                for profile in getattr(record_store, "list_product_profile_records")()
+                if profile.is_active
+                and profile.driver_id == "odoo"
+                and any(
+                    lane.context == request.context and lane.instance == "prod"
+                    for lane in profile.lanes
+                )
+            ]
+            if len(profiles) != 1:
+                raise click.ClickException("Release indexing requires one active product owner.")
+            profile = profiles[0]
+            try:
+                native_plan = WebsiteIndexingExecution(
+                    record_store,
+                    control_plane_root,
+                    profile.product,
+                    request.context,
+                    WebsiteIndexingRequest(
+                        mode="dry-run", public_origin=production_origin(record_store, profile)
+                    ),
+                    expected_artifact_id=artifact_id,
+                ).observe()
+            except (ValueError, RuntimeError, FileNotFoundError) as error:
+                raise click.ClickException(
+                    "Release indexing binding is unverified: " + str(error)
+                ) from error
+            selected_indexing = OdooWebsiteIndexing.model_validate(
+                {
+                    key: native_plan["native"][key]
+                    for key in ("website_id", "public_origin", "production_use")
+                }
+            )
+            indexing_state = selected_indexing.production_use
+            if rendering_record is None:
+                rendering_record = OdooInstanceOverrideRecord(
+                    context=request.context, instance="prod", updated_at=utc_now_timestamp()
+                )
         accepted_settings: OdooWebsiteSettingsIntent | None = None
         if rendering_record is not None:
             if control_plane_odoo_instance_overrides.odoo_instance_is_production(request.instance):
@@ -463,6 +510,7 @@ def execute_odoo_post_deploy(
                     record_store=record_store,
                     workflow_intent=workflow_intent,
                     protected_shopify_store_keys=protected_shopify_store_keys,
+                    selected_website_indexing=selected_indexing,
                     selected_website_settings=rendering_record.website_settings.settings
                     if rendering_record.website_settings is not None
                     else None,
@@ -492,30 +540,6 @@ def execute_odoo_post_deploy(
             required_container_environment_keys=required_workflow_environment_keys,
             error_message=str(error),
         )
-
-    indexing_state = ""
-    if request.instance == "prod" and release_operation:
-        from control_plane.odoo_website_indexing import indexing_binding, production_origin
-
-        profiles = [
-            profile
-            for profile in getattr(record_store, "list_product_profile_records")()
-            if profile.driver_id == "odoo"
-            and any(
-                lane.context == request.context and lane.instance == "prod"
-                for lane in profile.lanes
-            )
-        ]
-        if len(profiles) != 1:
-            raise ValueError("Release indexing requires one product owner.")
-        profile = profiles[0]
-        if profile.production_use == "prelaunch":
-            origin = production_origin(record_store, profile)
-            indexing_binding(record_store, profile.product, request.context, origin)
-            indexing_state = profile.production_use
-            workflow_environment_overrides["LAUNCHPLANE_WEBSITE_INDEXING_JSON"] = json.dumps(
-                {"public_origin": origin, "production_use": indexing_state}, sort_keys=True
-            )
 
     provider_effect_started = False
 

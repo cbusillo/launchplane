@@ -188,17 +188,26 @@ website or reviewed head evidence refuses the effect. A separate route digest
 does not waive topology's `stale_route_authority` warning. Apply locks the
 native website row, checks the reviewed baseline, reads back in the transaction,
 commits, then returns its receipt. A lost receipt is unknown, not success.
+Reconciliation checks stable target identity and fresh route authority separately.
+The exact native after-image proves completion; the unchanged reviewed before-image
+permits the original operation to retry. Any other image remains unknown.
 Preserve the original request and key for durable reconciliation; never create
 a replacement key to bypass uncertain effects.
 
 An accepted first-live Odoo release keeps prelaunch protection through forward,
 failed and rollback maintenance. After every required release step passes on
 the exact accepted candidate, its configuration continuation removes the managed
-element and compare-and-writes `production_use: live`. If that state write loses
+element and atomically records its one-time completion with the compare-and-write
+of `production_use: live`. It rechecks the native after-image first, and a completed
+decision never overwrites a later classification. Unrelated profile edits retry
+the compare-and-write against the current record. If that state write loses
 authority, it restores protection only against its reviewed native after-image
 while the product is still prelaunch. Its inverse uses durable operation records
 and leaves the release stopped; uncertainty requires reconciliation of the
 original operation. It cannot turn an inverse into a later forward replay.
+Release maintenance renders either recorded state through the same native payload,
+including when rollback restores a prelaunch database to a Live product. Current
+route and runtime proof remains required; a stale route cannot authorize the write.
 Release holds, Client binding, signed-in acceptance, backup/drill gates and deploy
 drain remain in force. Applying prelaunch protection does not lift a release hold.
 

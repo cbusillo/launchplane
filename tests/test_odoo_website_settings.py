@@ -612,6 +612,18 @@ class WebsiteSettingsTests(unittest.TestCase):
     def test_release_renderer_uses_accepted_snapshot_and_rollback_clears_forward_settings(
         self,
     ) -> None:
+        self.enterContext(
+            patch(
+                "control_plane.odoo_website_indexing.WebsiteIndexingExecution.observe",
+                return_value={
+                    "native": {
+                        "website_id": intent().settings.website_id,
+                        "public_origin": intent().settings.public_origin,
+                        "production_use": "live",
+                    }
+                },
+            )
+        )
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
             seed(store)
@@ -634,9 +646,10 @@ class WebsiteSettingsTests(unittest.TestCase):
                 )
                 captured.append(payload)
                 return _module_update_evidence(
+                    website_indexing_production_use="live",
                     website_settings_sha256=OdooWebsiteSettings.model_validate(
                         payload["website_settings"]
-                    ).digest
+                    ).digest,
                 )
 
             target = DokployTargetDefinition(
@@ -710,7 +723,9 @@ class WebsiteSettingsTests(unittest.TestCase):
                     ),
                     patch(
                         "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
-                        return_value=_module_update_evidence(website_settings_sha256=digest),
+                        return_value=_module_update_evidence(
+                            website_settings_sha256=digest, website_indexing_production_use="live"
+                        ),
                     ),
                 ):
                     failed = execute_odoo_post_deploy(

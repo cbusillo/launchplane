@@ -86,11 +86,11 @@ program_node = next(
     and any(isinstance(target, ast.Name) and target.id == "program" for target in node.targets)
 )
 assert isinstance(program_node, ast.Assign)
-assert isinstance(program_node.value, ast.Call) and isinstance(
-    program_node.value.func, ast.Attribute
-)
-assert isinstance(program_node, ast.Assign)
-NATIVE = ast.literal_eval(program_node.value.func.value)
+program_call = program_node.value
+assert isinstance(program_call, ast.Call)
+program_function = program_call.func
+assert isinstance(program_function, ast.Attribute)
+NATIVE = ast.literal_eval(program_function.value)
 
 
 def execute(
@@ -103,11 +103,13 @@ def execute(
             "public_origin": "https://indexing.example.test",
             "production_use": state,
         },
-        "database_uuid": database_uuid,
+        "database_uuid": reviewed["database_uuid"] if reviewed else database_uuid,
     }
     if reviewed:
         request["reviewed_native"] = {
-            key: value for key, value in reviewed.items() if key != "committed"
+            key: value
+            for key, value in reviewed.items()
+            if key not in {"committed", "database_uuid"}
         }
     output = io.StringIO()
     with registry.cursor() as native_cursor:
@@ -163,14 +165,16 @@ with (RESULTS / "web.log").open("w") as log:
                 time.sleep(1)
         else:
             raise RuntimeError("Synthetic HTTP server did not start")
-        assert count(baseline) == 0
+        counts = [count(baseline)]
+        assert counts[-1] == 0
         robots = page(path="/robots.txt")
         canonical = html.fromstring(baseline).xpath('//link[@rel="canonical"]/@href')
         assert "Disallow: /\n" not in robots
         plan = execute("prelaunch")
         assert not plan["committed"] and count(page()) == 0
         protected = execute("prelaunch", plan)
-        assert protected["committed"] and count(page()) == 1
+        counts.append(count(page()))
+        assert protected["committed"] and counts[-1] == 1
         assert page(path="/robots.txt") == robots
         assert html.fromstring(page()).xpath('//link[@rel="canonical"]/@href') == canonical
         assert "window.synthetic" in page() and count(page("unrelated.example.test")) == 0
@@ -181,12 +185,22 @@ with (RESULTS / "web.log").open("w") as log:
             pass
         else:
             raise AssertionError("Planted write failure did not refuse")
+        counts.append(count(page()))
+        assert counts[-1] == 1
+        try:
+            execute("live", {**live, "database_uuid": "foreign-database"})
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Foreign native database was not refused")
         assert count(page()) == 1
         execute("live", live)
-        assert count(page()) == 0
+        counts.append(count(page()))
+        assert counts[-1] == 0
         inverse = execute("prelaunch")
         restored = execute("prelaunch", inverse)
-        assert count(page()) == 1 and restored["after_sha256"] == protected["after_sha256"]
+        counts.append(count(page()))
+        assert counts[-1] == 1 and restored["after_sha256"] == protected["after_sha256"]
         stale = execute("live")
         with registry.cursor() as cursor:
             env = api.Environment(cursor, 1, {})
@@ -204,9 +218,10 @@ with (RESULTS / "web.log").open("w") as log:
             env = api.Environment(cursor, 1, {})
             assert env["website"].browse(other_id).custom_code_head == original
         proof = {
-            "prelaunch_live_inverse_noindex": [0, 1, 0, 1],
+            "prelaunch_failed_live_inverse_noindex": counts,
             "failed_write_preserved": True,
             "stale_baseline_refused": True,
+            "foreign_database_refused": True,
             "unrelated_website_preserved": True,
             "robots_preserved": True,
             "protected_sha256": protected["after_sha256"],
