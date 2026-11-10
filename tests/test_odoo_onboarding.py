@@ -220,6 +220,68 @@ class AdvancedManifestPlanningTests(_DirectorTestingSetupFixture):
             ),
         )
 
+    async def test_full_manifest_review_is_stable_and_exposes_only_change_metadata(self) -> None:
+        manifest: dict[str, Any] = {**_manifest_payload(), "updated_at": ""}
+        with (
+            patch(
+                "control_plane.workflows.product_onboarding.utc_now_timestamp",
+                side_effect=("2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"),
+            ),
+            patch.object(
+                self.store,
+                "write_product_authority_bundle",
+                side_effect=AssertionError("plan wrote authority"),
+            ),
+            patch.object(
+                self.store, "read_secret_version", side_effect=AssertionError("credential read")
+            ),
+        ):
+            first = await self.records(manifest=manifest)
+            second = await self.records(manifest=manifest)
+        self.assertEqual(first.status_code, 202, first.text)
+        result = first.json()["result"]
+        self.assertEqual(result["plan_sha256"], second.json()["result"]["plan_sha256"])
+        self.assertIn("target_id", result["provider_target_changes"][0]["fields"])
+        self.assertEqual(result["runtime_environment_changes"][0]["changed_key_count"], 1)
+        self.assertEqual(result["secret_binding_changes"][0]["status"], "disabled")
+        self.assertNotIn("PUBLIC_BASE_URL", first.text)
+        self.assertNotIn("SMTP_PASSWORD", first.text)
+        self.assertNotIn("app-prod-123", first.text)
+        self.use_policy(product="launchplane", actions=("product_onboarding.apply",))
+        applied = await self.records(
+            manifest=manifest, mode="apply", reviewed_plan_sha256=result["plan_sha256"]
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        current_plan = await self.records(manifest=manifest)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.existing.lanes[1].context, instance_name="prod"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"domains": ("changed.example.invalid",)})
+        )
+        stale = await self.records(
+            manifest=manifest,
+            mode="apply",
+            reviewed_plan_sha256=current_plan.json()["result"]["plan_sha256"],
+        )
+        self.assertEqual(stale.status_code, 409, stale.text)
+        removed = deepcopy(manifest)
+        for section in ("lanes", "provider_targets", "runtime_environments"):
+            removed[section] = [
+                row
+                for row in cast(list[dict[str, Any]], removed[section])
+                if row["instance"] != "testing"
+            ]
+        removed["expected_config"] = {}
+        removal = await self.records(manifest=removed)
+        self.assertEqual(removal.status_code, 202, removal.text)
+        self.assertEqual(
+            removal.json()["result"]["removed_lanes"],
+            [{"context": self.existing.lanes[0].context, "instance": "testing"}],
+        )
+        self.assertIn("domains", removal.json()["result"]["provider_target_changes"][0]["fields"])
+        self.provider.assert_not_called()
+
     async def test_planning_preserves_reader_scope_and_apply_refusal(self) -> None:
         self.use_policy(product=self.existing.product, actions=("product_profile.read",))
         with scoped_agent_transport():
@@ -235,6 +297,28 @@ class AdvancedManifestPlanningTests(_DirectorTestingSetupFixture):
             }
             other = await self.records(manifest=other_manifest)
             self.assertEqual(other.status_code, 403, other.text)
+            global_manifest = {
+                **cast(dict[str, Any], self.review["manifest"]),
+                "runtime_environments": [{"scope": "global", "env": {"EXAMPLE_SETTING": "probe"}}],
+            }
+            global_plan = await self.records(manifest=global_manifest)
+            self.assertEqual(global_plan.status_code, 403, global_plan.text)
+            foreign_target = self.production_provider.model_copy(
+                update={"context": "other-private-context", "target_id": "foreign-target"}
+            )
+            self.store.write_provider_target_record(foreign_target)
+            guessed = deepcopy(cast(dict[str, Any], self.review["manifest"]))
+            guessed["provider_targets"] = [
+                {
+                    "context": self.existing.lanes[1].context,
+                    "instance": "prod",
+                    "target_id": foreign_target.target_id,
+                    "target_type": self.production.target_type,
+                }
+            ]
+            hidden = await self.records(manifest=guessed)
+            self.assertEqual(hidden.status_code, 400, hidden.text)
+            self.assertNotIn(foreign_target.context, hidden.text)
             foreign_owner = self.profile.model_copy(
                 update={
                     "product": "other-product",
@@ -248,6 +332,7 @@ class AdvancedManifestPlanningTests(_DirectorTestingSetupFixture):
             self.store.write_product_profile_record(foreign_owner)
             other_context = await self.records()
             self.assertEqual(other_context.status_code, 403, other_context.text)
+        self.assertEqual((await self.records(manifest=global_manifest)).status_code, 202)
         self.assertEqual((await self.records(product=self.existing.product)).status_code, 400)
         self.assertEqual((await self.records(mode="apply")).status_code, 403)
         self.assertEqual(

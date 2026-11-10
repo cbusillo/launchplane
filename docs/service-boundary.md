@@ -2499,24 +2499,32 @@ Advanced manifests also accept `mode: dry_run` on this same route, with outer
 `product: launchplane` and the actual product in `manifest.product`. The
 authenticated Director agent may plan; other callers require the existing
 `product_profile.read` permission for the manifest product and cannot use its
-contexts to read another product's records. Browser requests retain the existing
+contexts to read another product's records. This includes existing scoped
+terminal readers; their apply refusal remains unchanged. Browser requests retain the existing
 CSRF checks. Planning does not require `product_onboarding.apply`.
+Global runtime settings are outside a product-scoped reader's contexts; the
+existing Director agent read identity can plan them without an apply grant.
 
-The response reports `applied: false`, proposed record counts, changed profile
-and lane field names, `current_profile_sha256`, `desired_profile_sha256` and
+The response reports `applied: false`, proposed record counts, changed profile,
+lane and provider-target field names, removed lane routes, runtime changed-key
+counts and proposed binding statuses/retirements, `current_profile_sha256`, `desired_profile_sha256` and
 `plan_sha256`. The plan binds the validated manifest and the existing authority
 bundle's current-record expectations and desired records. Generated desired
-timestamps are excluded from its digest; current expected revisions are retained.
+timestamps (including new binding creation times) are excluded from its digest;
+current expected revisions and existing target snapshots are retained.
 The desired profile digest excludes its generated `updated_at`; the current
 profile digest is the ordinary full-record digest. Values, secret identifiers,
-runtime settings and provider payloads are not returned. No records, idempotency
+runtime keys/settings and provider payloads are not returned. Review these bounded
+summaries together with the exact private manifest. Scoped planners receive
+generic errors when another product's state prevents a plan. No records, idempotency
 receipts, jobs, credentials or provider effects are written by planning.
 
 An authorized advanced apply may supply `reviewed_plan_sha256`; changed inputs
 or current records then return `product_onboarding_plan_mismatch` before writing.
 Existing unreviewed advanced apply remains compatible. Apply still requires its
 original authorization and atomic CAS checks; an unchanged completed key still
-replays its original receipt. A plan confers no apply authority and does not
+replays its original receipt, including its original response shape; old receipts
+do not gain the new plan fields. A plan confers no apply authority and does not
 establish data safety, isolation, storage emptiness or release readiness.
 
 The record route also accepts a signed-in admin through the shared

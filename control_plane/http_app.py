@@ -18047,10 +18047,10 @@ def create_launchplane_fastapi_app(
             owners = product_context_owner_map(
                 database_store.list_product_profile_records(), config_scopes=True
             )
-            contexts = {lane.context for lane in manifest.lanes}
+            contexts = {manifest.product, *(lane.context for lane in manifest.lanes)}
             if manifest.preview.context:
                 contexts.add(manifest.preview.context)
-            if any(
+            if any(record.scope == "global" for record in manifest.runtime_environments) or any(
                 owners.get(context.strip().lower(), frozenset()) - {manifest.product}
                 for context in contexts
             ):
@@ -18058,7 +18058,7 @@ def create_launchplane_fastapi_app(
                     status_code=403,
                     trace_id=trace_id,
                     code="authorization_denied",
-                    message="Manifest planning cannot read another product's contexts.",
+                    message="Manifest planning is limited to the caller's product contexts.",
                 )
         (
             normalized_idempotency_key,
@@ -18285,6 +18285,25 @@ def create_launchplane_fastapi_app(
                     message=str(error),
                 ) from error
         assert onboarding_manifest is not None
+        manifest_target_routes = {
+            (manifest_target.context, manifest_target.instance)
+            for manifest_target in onboarding_manifest.provider_targets
+        }
+        current_onboarding_targets = (
+            tuple(
+                sorted(
+                    (
+                        manifest_target
+                        for manifest_target in database_store.list_dokploy_target_records()
+                        if (manifest_target.context, manifest_target.instance)
+                        in manifest_target_routes
+                    ),
+                    key=lambda manifest_target: (manifest_target.context, manifest_target.instance),
+                )
+            )
+            if onboarding_request.manifest is not None
+            else ()
+        )
         try:
             onboarding_result, authority_bundle = plan_product_onboarding_authority_bundle(
                 record_store=database_store,
@@ -18298,7 +18317,9 @@ def create_launchplane_fastapi_app(
                 status_code=409,
                 trace_id=trace_id,
                 code="product_profile_changed",
-                message=str(error),
+                message="Current onboarding records changed."
+                if manifest_plan and not director_agent_identity(identity)
+                else str(error),
             ) from error
         except ValueError as error:
             replay_response = replay_committed_onboarding()
@@ -18308,7 +18329,9 @@ def create_launchplane_fastapi_app(
                 status_code=400,
                 trace_id=trace_id,
                 code="invalid_product_onboarding_manifest",
-                message=str(error),
+                message="Manifest cannot be planned against current records."
+                if manifest_plan and not director_agent_identity(identity)
+                else str(error),
             ) from error
         if adopted_onboarding_target is not None:
             authority_bundle = authority_bundle.model_copy(
@@ -18324,6 +18347,7 @@ def create_launchplane_fastapi_app(
                 authority_bundle=authority_bundle
                 if onboarding_request.manifest is not None
                 else None,
+                current_targets=current_onboarding_targets,
             )
         )
         if onboarding_request.manifest is not None:

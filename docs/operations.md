@@ -2765,8 +2765,10 @@ and retain the exact request and returned current/desired digests privately.
 The service returns proposed field changes and `applied: false` without saving
 configuration, scheduling work, reading credential values or calling a provider.
 The authenticated Director agent or an existing product-scoped reader can plan
-without an apply grant. Review the changed fields against the intended delta;
-unrelated changes need corrected inputs and a new plan.
+without an apply grant. Review changed and removed lanes, provider field names,
+runtime changed-key counts and binding statuses against the exact private
+manifest; key names and values remain private. Unrelated changes need corrected
+inputs and a new plan.
 
 Planning grants no permission to apply the policy it describes. A separately
 authorized advanced apply on the same service route can bind the reviewed
