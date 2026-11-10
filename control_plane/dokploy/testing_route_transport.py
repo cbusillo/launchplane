@@ -31,6 +31,13 @@ from control_plane.dokploy.testing_route_execution import (
 )
 from control_plane.testing_application_capabilities import retained_application_inventory_header
 from control_plane.docker_errors import docker_daemon_authorization_denied
+from control_plane.copy_readback_diagnostics import (
+    CopyReadbackRefused,
+    copy_failure_diagnostics_library,
+    copy_failure_summary,
+    copy_failure_receipt,
+    readback_predicate_library,
+)
 from control_plane.dokploy.native_copy_stream import (
     _read_remote,
     NativeSourceUnavailable,
@@ -115,6 +122,9 @@ def testing_route_host_program() -> str:
         + inspect.getsource(qualify_testing_address_tcp_routes)
         + inspect.getsource(qualify_testing_address_recipients)
         + "\n"
+        + readback_predicate_library()
+        + copy_failure_diagnostics_library()
+        + inspect.getsource(CopyReadbackRefused)
         + inspect.getsource(docker_daemon_authorization_denied)
         + "\n"
         + inspect.getsource(read_stored_docker_service)
@@ -169,7 +179,7 @@ def docker(*arguments, stdin=None):
     if result.returncode:
         if docker_daemon_authorization_denied(result.stderr):
             raise PermissionError('The managed testing route operation was refused')
-        raise RuntimeError('The managed testing route operation did not complete')
+        raise copy_command_failure(RuntimeError('The managed testing route operation did not complete'), result, payload, containers=globals().get('copy_failure_containers'))
     return result.stdout
 
 def read_service_ids() -> list[str]:
@@ -431,7 +441,7 @@ def fenced_call(proxy_id, spec, custody, mode, document=b''):
     return docker('exec','-i',proxy_id,'sh','-c',FENCED_WRITER,'_',DIRECTORY,spec['route_id']+'.yml',custody['filesystem'],mode,generation,revision,key,expected,desired,prior_generation,lock_identity,custody['process_epoch'],prior_lock_identity,spec.get('retired_boot_id',''),stdin=document).decode()
 
 def main(spec):
-    global WRITE_STARTED
+    global WRITE_STARTED, copy_failure_containers
     if not re.fullmatch(r'lp-testing-route-[a-f0-9]{32}',spec['route_id']) or not re.fullmatch(r'[a-zA-Z0-9.-]+',spec['host']):
         raise RuntimeError('Testing route identity is invalid')
     public_aliases=spec.get('aliases',[])
@@ -441,6 +451,7 @@ def main(spec):
     containers=json.loads(docker('inspect',*identifiers)) if identifiers else []
     if not isinstance(containers,list) or any(not isinstance(item,dict) for item in containers) or len(set(identifiers))!=len(identifiers) or len(containers)!=len(identifiers) or {item.get('Id') for item in containers}!=set(identifiers):
         raise RuntimeError('Managed container inventory is incomplete')
+    copy_failure_containers=containers
     recipient_sha256=''
     recipients=None if spec.get('address_inverse') else spec.get('address_recipients')
     if recipients is not None:
@@ -713,6 +724,9 @@ if __name__=='__main__':
                 sites.append(trace.tb_lineno)
             trace=trace.tb_next
         frame={'type':kind,'sites':sites[-SOURCE_SITE_LIMIT:]}
+        markers=copy_failure_frame_markers(error)
+        if markers:
+            frame.update(predicate=ReadbackPredicate.NATIVE_READ,kind='unavailable',**markers)
         if isinstance(error,RetainedTaskSpecMismatch):
             frame['container_fields']=error.container_fields
         print(sys.argv[2]+json.dumps(frame),flush=True)
@@ -789,7 +803,10 @@ class DokployTestingRouteTransport:
                     "allocate_lock_v2",
                 }:
                     raise ValueError("A route writer receipt cannot qualify an observation.")
-                raise TestingRouteWriteNotStarted("The original route writer was not started.")
+                cause = copy_failure_summary(copy_failure_receipt(frame))
+                raise TestingRouteWriteNotStarted(
+                    "The original route writer was not started." + (" " + cause if cause else "")
+                )
             frames.append(frame)
 
         _read_remote(

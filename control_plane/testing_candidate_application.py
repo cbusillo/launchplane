@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from control_plane.copy_readback_diagnostics import (
-    copy_failure_marker_is_safe,
+    copy_failure_receipt,
     readback_marker_is_safe,
 )
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
@@ -48,7 +48,7 @@ class CandidatePrivateReadinessFailed(CandidateObservationUnavailable):
     def __init__(self, message: str, *, native_failure: NativeProgramFailed | None = None) -> None:
         super().__init__(message)
         self.evidence = native_failure.evidence if native_failure is not None else {}
-        self.code = native_failure.code if native_failure is not None else ""
+        self.code = native_failure.diagnostic_code if native_failure is not None else ""
 
 
 def candidate_private_readiness(
@@ -644,9 +644,7 @@ def candidate_restore_terminal(
             "readback_failed_predicate", predicate
         ) and readback_marker_is_safe("readback_failure_kind", kind):
             evidence += f":{predicate}_{kind}"
-        for key, value in sorted(markers.items()):
-            if copy_failure_marker_is_safe(key, value):
-                evidence += f":{key}={value}"
+        evidence += copy_failure_receipt(markers)
     return evidence + ":" + status
 
 
