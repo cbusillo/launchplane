@@ -867,6 +867,13 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         readback = await self.post(mode="readback", retained_compose_setup=evidence)
         self.assertEqual(readback.status_code, 202, readback.text)
         digest = readback.json()["result"]["recovery_sha256"]
+        provider_reads = self.provider_read.call_count
+        dry = await self.post(
+            mode="dry-run", retained_compose_setup=evidence, expected_compose_recovery_sha256=digest
+        )
+        self.assertEqual(dry.status_code, 400, dry.text)
+        self.assertEqual(self.provider_read.call_count, provider_reads)
+        self.provider.assert_not_called()
         completed = await self.post(
             retained_compose_setup=evidence, expected_compose_recovery_sha256=digest
         )
@@ -1115,7 +1122,9 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
             first_production_target_lock_name("staged-site")
         ) as held:
             self.assertIsNotNone(held)
+            dry = await self.post(mode="dry-run")
             result = await self.post()
+        self.assertEqual(dry.status_code, 202, dry.text)
         self.assertIn(result.status_code, (400, 409), result.text)
         self.assert_nothing_staged()
 

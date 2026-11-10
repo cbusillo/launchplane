@@ -26948,6 +26948,13 @@ def create_launchplane_fastapi_app(
             )
             try:
                 if setup_request.mode == "dry-run":
+                    if (
+                        setup_request.retained_compose_setup is not None
+                        or setup_request.expected_compose_recovery_sha256
+                    ):
+                        raise ValueError(
+                            "Review original-operation recovery through mode=readback."
+                        )
                     compose_adapter.checkpoint()
                     compose_adapter.placement({})
                 else:
@@ -27154,7 +27161,7 @@ def create_launchplane_fastapi_app(
                     database_store, setup_request, product=lane_owner
                 )
                 return
-            if not disposable_rebuild_setup or setup_request.mode != "apply":
+            if not disposable_rebuild_setup or setup_request.mode not in {"dry-run", "apply"}:
                 return
             operation = database_store.read_odoo_stable_target_replacement_operation_record(
                 setup_request.replaces_operation_id
@@ -27215,7 +27222,7 @@ def create_launchplane_fastapi_app(
                 first_testing_replacement_lock_name(database_store, setup_request)
                 if first_testing_setup
                 else first_production_target_lock_name(setup_request.context)
-                if first_production_setup
+                if first_production_setup and setup_request.mode == "apply"
                 else None
             )
             lock = (

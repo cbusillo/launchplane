@@ -2571,7 +2571,9 @@ environment confirms it is empty and belongs only to the product's context;
 new placement checks for an already present project. Testing creation checks
 retained allocation custody. Refusals use the apply path's error code and
 reason, without creating provider resources or target records. Confirmation,
-reason, idempotency and reviewed recovery evidence remain apply inputs, and
+reason and idempotency remain apply inputs. Original-operation recovery is
+reviewed through `mode=readback`; recovery inputs in a creation dry-run are
+refused with that instruction. As before,
 concurrent changes or provider writes can still cause later refusals.
 The manual `Dokploy Target Setup` workflow is the supported shared and production caller;
 product repos must not store live target IDs or provider fixtures as setup
@@ -2726,7 +2728,7 @@ server-side envelope property that validates apply. Existing machine response
 shapes and confirmations remain unchanged. No other setup operation is admitted
 by this browser path.
 
-Besides `dokploy_target.setup` (or `dokploy_target.plan` for dry-run), checked on
+Besides `dokploy_target.setup`, checked on
 product and context `launchplane`, the route accepts the lane-scoped
 `dokploy_target.lane_setup` action for `create-compose` and the narrow
 `complete-compose-source` operation. It is checked on
