@@ -317,7 +317,12 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             patch(
                 "subprocess.Popen",
                 side_effect=lambda arguments, **kwargs: popen(
-                    [sys.executable, "-c", "raise SystemExit(1)"], **kwargs
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys;sys.stderr.write('x'*20000+'private dump failure');sys.exit(1)",
+                    ],
+                    **kwargs,
                 ),
             ),
             patch.object(self, "command", side_effect=snapshot_command),
@@ -327,6 +332,23 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertNotIn(["docker", "start", "web"], self.calls)
         self.assertFalse((snapshot.parent / self.spec["copy_binding_sha256"]).exists())
         self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"production attachment")
+
+        from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+
+        markers = extract_odoo_post_deploy_readback_markers({"logs": output})
+        self.assertEqual(markers[COPY_FAILURE_STAGE_MARKER], CopyFailureStage.SNAPSHOT)
+        self.assertEqual(markers["copy_failure_kind"], "command_failed")
+        evidence = json.loads(
+            (
+                self.root
+                / COPY_FAILURE_STATE_DIRECTORY
+                / (markers[COPY_FAILURE_EVIDENCE_MARKER] + ".json")
+            ).read_text()
+        )
+        self.assertTrue(base64.b64decode(evidence["stderr"]).endswith(b"private dump failure"))
+        self.assertTrue(evidence["stderr_truncated"])
+        self.assertIsNone(evidence["stderr_bytes"])
+        self.assertNotIn("private dump failure", output)
 
     def test_attachment_refusal_reaches_schedule_readback_without_private_output(self) -> None:
         original = self.command
@@ -368,6 +390,37 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertNotIn("private", output)
         self.assertNotIn(["docker", "start", "web"], self.calls)
 
+    def test_scheduled_host_command_failure_retains_its_cause_outside_readback(self) -> None:
+        self.website_settings_pass = False
+        original = self.command
+
+        def fail_cleanup(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if command[-3:-1] == ["rm", "-f"] and command[-1].endswith("-database.dump"):
+                return subprocess.CompletedProcess(
+                    command, 9, stdout=b"", stderr=b"private cleanup failure"
+                )
+            return original(command, **kwargs)
+
+        with patch.object(self, "command", side_effect=fail_cleanup):
+            status, output = self.run_program()
+        from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+
+        self.assertNotEqual(status, 0)
+        markers = extract_odoo_post_deploy_readback_markers({"logs": output})
+        self.assertEqual(markers[COPY_FAILURE_STAGE_MARKER], CopyFailureStage.WEBSITE_SETTINGS)
+        self.assertEqual(markers["copy_failure_kind"], "command_failed")
+        self.assertEqual(markers[COPY_FAILURE_EXIT_MARKER], "1")
+        path = (
+            self.root
+            / COPY_FAILURE_STATE_DIRECTORY
+            / (markers[COPY_FAILURE_EVIDENCE_MARKER] + ".json")
+        )
+        evidence = json.loads(path.read_text())
+        self.assertEqual(base64.b64decode(evidence["stderr"]), b"private website failure")
+        self.assertNotIn("private website failure", output)
+        self.assertNotIn("private cleanup failure", output)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+
     def test_recovered_retirement_error_does_not_replace_the_runner_failure(self) -> None:
         self.spec["generation"]["clean_snapshot_enabled"] = True
         original = self.command
@@ -394,6 +447,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         evidence = extract_odoo_post_deploy_readback_markers({"logs": output})
         self.assertEqual(evidence[COPY_FAILURE_STAGE_MARKER], CopyFailureStage.MODULE_UPDATE)
         self.assertEqual(evidence[COPY_FAILURE_EXIT_MARKER], str(runner_exit))
+        self.assertEqual(len(list((self.root / COPY_FAILURE_STATE_DIRECTORY).iterdir())), 1)
         self.assertNotIn("private", output)
         self.assertNotIn(["docker", "start", "web"], self.calls)
 
@@ -536,6 +590,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     {
                         "Type": "volume",
                         "Name": self.gen.namespace + "-" + suffix,
+                        "Source": str(
+                            self.volumes[self.gen.namespace + "-" + suffix]["Mountpoint"]
+                        ),
                         "Destination": ODOO_DATABASE_DATA_DIRECTORY
                         if service == "database"
                         else "/volumes/" + suffix,
@@ -1420,6 +1477,12 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 self.assertNotEqual(status, 0)
                 self.assertNotIn(["docker", "start", "web"], self.calls)
                 self.assertNotIn("private-error-value", output)
+                if fault == "sanitization":
+                    self.assertIn(
+                        f"{COPY_FAILURE_STAGE_MARKER}={CopyFailureStage.RESTORE}",
+                        output.splitlines(),
+                    )
+                    self.assertIn("copy_failure_kind=unavailable", output.splitlines())
                 if fault == "existing":
                     self.assertFalse(any(call[0] == "ssh" for call in self.calls))
 

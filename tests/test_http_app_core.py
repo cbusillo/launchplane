@@ -1831,6 +1831,95 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_restore_cause_survives_read_and_execute_views_without_free_text(
+        self,
+    ) -> None:
+        from control_plane.contracts.odoo_stable_target_replacement import (
+            OdooStableTargetReplacementApplyResult,
+        )
+
+        original = _running_odoo_target_replacement_record()
+        markers = (
+            "copy_failure_stage=website_settings copy_failure_kind=command_failed copy_failure_exit_status=7 copy_failure_evidence_id="
+            + "e" * 32
+        )
+        result = OdooStableTargetReplacementApplyResult(
+            product=original.product,
+            context=original.context,
+            instance="testing",
+            strategy="replace-and-cutover",
+            deploy_status="fail",
+            error_code="candidate_preparation_failed",
+            error_message="private raw stderr",
+            runtime_source={
+                "copy_failure": markers
+                + " password=private-value copy_failure_evidence_id=../../private"
+            },
+        )
+        operation = type(original).model_validate(
+            {
+                **original.model_dump(),
+                "status": "fail",
+                "phase": "failed",
+                "finished_at": original.updated_at,
+                "error_code": result.error_code,
+                "error_message": "private original error",
+                "result": result,
+            }
+        )
+        with TemporaryDirectory() as temporary:
+            store = FilesystemRecordStore(state_dir=Path(temporary) / "state")
+            store.write_odoo_stable_target_replacement_operation_record(operation)
+            for action, products in (
+                ("operations.read", ("launchplane",)),
+                ("odoo_target_replacement_apply.execute", (operation.product,)),
+            ):
+                app = create_launchplane_fastapi_app(
+                    control_plane_root_path=Path(temporary),
+                    verifier=_StubVerifier(_odoo_operation_status_identity()),
+                    authz_policy=_odoo_operation_status_policy(
+                        action=action,
+                        products=products,
+                        contexts=(operation.context,),
+                        instances=("testing",),
+                        schema_version=2,
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                response = await _asgi_get(
+                    app,
+                    f"/v1/drivers/odoo/target-replacement/operations/{operation.operation_id}",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                description = response.json()["operation"]["error_description"]
+                for marker in markers.split():
+                    self.assertIn(marker, description)
+                self.assertEqual(
+                    dict(part.split("=", 1) for part in description.split() if "=" in part),
+                    dict(part.split("=", 1) for part in markers.split()),
+                )
+                self.assertNotIn("private", description)
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+                operation,
+            )
+
+        from control_plane.operation_status_read import operation_status_read_view
+
+        unavailable = operation_status_read_view(
+            operation.model_copy(
+                update={
+                    "result": result.model_copy(
+                        update={"runtime_source": {"copy_failure": "private raw error"}}
+                    )
+                }
+            ),
+            poll_url="fixture",
+        )
+        self.assertTrue(unavailable["error_description"])
+        self.assertNotIn("private", str(unavailable["error_description"]))
+
     async def test_read_only_recovery_classifies_legacy_journal_and_preserves_fence(self) -> None:
         from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests
 
