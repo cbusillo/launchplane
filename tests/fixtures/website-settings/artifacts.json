@@ -8,9 +8,9 @@
   },
   "consumer": {
     "repository": "cbusillo/odoo-devkit",
-    "revision": "f135a08016f2c87d438c0f2897bb3f6c55508169",
+    "revision": "57014bfa9cd4e0f773e81c1b01fa1b45d302ea2b",
     "source_path": "docker/scripts/odoo_website_settings.py",
     "artifact_path": "consumer.txt",
-    "git_blob": "937233d33efd3c55112f8794dc29ac629a9cfbfc"
+    "git_blob": "fcb77ec584de97d8f616dd3eba41fa26598a72de"
   }
 }

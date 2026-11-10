@@ -10,7 +10,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooWebsiteBootstrapPayload,
 )
 from control_plane.contracts.runtime_environment_record import ScalarValue
-from control_plane.contracts.odoo_website_settings import OdooWebsiteSettings
+from control_plane.contracts.odoo_website_settings import OdooWebsiteIndexing, OdooWebsiteSettings
 
 ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
 
@@ -120,6 +120,7 @@ class OdooPostDeployPayload(BaseModel):
     addon_settings: tuple[OdooPostDeployAddonSetting, ...] = ()
     website_bootstrap: OdooWebsiteBootstrapPayload | None = None
     website_settings: OdooWebsiteSettings | None = None
+    website_indexing: OdooWebsiteIndexing | None = None
 
     @model_validator(mode="after")
     def _validate_payload(self) -> "OdooPostDeployPayload":
@@ -129,6 +130,15 @@ class OdooPostDeployPayload(BaseModel):
             raise ValueError("Odoo post-deploy payload requires context")
         if not self.instance:
             raise ValueError("Odoo post-deploy payload requires instance")
+        if self.website_indexing is not None:
+            if self.instance != "prod" or self.workflow_intent != "deploy":
+                raise ValueError("Website indexing requires production configuration.")
+            if self.website_settings is not None and (
+                self.website_settings.website_id != self.website_indexing.website_id
+                or self.website_settings.public_origin.rstrip("/")
+                != self.website_indexing.public_origin.rstrip("/")
+            ):
+                raise ValueError("Website settings and indexing must select the same website.")
         if self.workflow_intent == "restore" and self.website_bootstrap is not None:
             raise ValueError("restore Odoo post-deploy payloads must not include website_bootstrap")
         return self
@@ -146,8 +156,10 @@ class OdooPostDeployPayload(BaseModel):
 
     @property
     def override_count(self) -> int:
-        website_count = int(self.website_bootstrap is not None) + int(
-            self.website_settings is not None
+        website_count = (
+            int(self.website_bootstrap is not None)
+            + int(self.website_settings is not None)
+            + int(self.website_indexing is not None)
         )
         return len(self.config_parameters) + len(self.addon_settings) + website_count
 
@@ -165,6 +177,8 @@ class OdooPostDeployPayload(BaseModel):
         }
         if self.website_settings is not None:
             payload["website_settings"] = self.website_settings.model_dump(mode="json")
+        if self.website_indexing is not None:
+            payload["website_indexing"] = self.website_indexing.model_dump(mode="json")
         if self.website_bootstrap is not None:
             payload["website_bootstrap"] = self.website_bootstrap.model_dump(mode="json")
         return payload

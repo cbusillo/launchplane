@@ -70,6 +70,11 @@ class ReleaseChecklist(BaseModel):
     items: tuple[ReleaseReviewItem, ...]
     untracked_commits: tuple[str, ...] = ()
     additional_changes: tuple[str, ...] = ()
+    first_live_origin: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     website_settings: OdooWebsiteSettingsIntent | None = Field(
         default=None,
         exclude_if=lambda value: value is None,

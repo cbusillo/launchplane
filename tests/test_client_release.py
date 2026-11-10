@@ -149,7 +149,154 @@ def _backup_binding(store: object, request: object) -> object:
     )
 
 
-class ClientReleaseTests(unittest.TestCase):
+class ClientReleaseFixture(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.store = PostgresRecordStore(
+            database_url=f"sqlite+pysqlite:///{self.root / 'state.sqlite3'}"
+        )
+        self.addCleanup(self.store.close)
+        self.store.ensure_schema()
+        seed(self.store)
+        self.store.write_deployment_record(_deployment("deployment-prod-1", "artifact-prod"))
+        self.review_read = github_read
+        for target, replacement in (
+            (
+                "control_plane.client_release.current_release_review",
+                lambda **kwargs: build_release_review(
+                    store=cast(Any, self.store),
+                    profile=kwargs["profile"],
+                    read=self.review_read,
+                ),
+            ),
+            (
+                "control_plane.client_release.admit_odoo_prod_promotion_run",
+                self._admission,
+            ),
+            (
+                "control_plane.client_release.resolve_odoo_prod_rollback_target",
+                lambda **kwargs: None,
+            ),
+            (
+                "control_plane.workflows.production_backup_gate.resolve_production_backup_binding",
+                _backup_binding,
+            ),
+        ):
+            replacement_patch = patch(target, side_effect=replacement)
+            replacement_patch.start()
+            self.addCleanup(replacement_patch.stop)
+
+    def _admission(self, **_kwargs: object) -> OdooProdPromotionRunAdmission:
+        testing = self.store.read_release_tuple_record(context_name=CONTEXT, channel_name="testing")
+        return OdooProdPromotionRunAdmission(
+            inputs_result=OdooProdPromotionInputsResult(
+                context=CONTEXT,
+                from_instance="testing",
+                to_instance="prod",
+                request_id="admission",
+                input_status="ready",
+                artifact_id=testing.artifact_id,
+            )
+        )
+
+    def switch(self, mode: ReleaseOnAcceptance) -> None:
+        current = self.store.read_product_profile_record(PRODUCT)
+        self.store.write_product_profile_record(
+            current.model_copy(update={"release_on_acceptance": mode})
+        )
+
+    def accept(self, *, date: str = "2026-09-23T01:00:00Z") -> ReleaseReviewDecisionRecord:
+        accepted = decision(self.store, date=date).model_copy(
+            update={
+                "release_start": release_start_for_acceptance(
+                    store=self.store, profile=self.store.read_product_profile_record(PRODUCT)
+                )
+            }
+        )
+        self.store.write_release_review_decision_record(accepted)
+        return accepted
+
+    def advance(self) -> tuple[str, ...]:
+        return advance_client_releases(store=self.store, control_plane_root=self.root)
+
+    def set_prod(self, artifact_id: str) -> None:
+        self.store.write_release_tuple_record(
+            ReleaseTupleRecord(
+                tuple_id=f"tuple-prod-{artifact_id}",
+                context=CONTEXT,
+                channel="prod",
+                artifact_id=artifact_id,
+                repo_shas={"example/site": BASE if artifact_id == "artifact-prod" else HEAD},
+                provenance="ship",
+                minted_at="2026-09-23T03:00:00Z",
+            )
+        )
+
+    def finish(self, operation_id: str, status: StepStatus = "pass") -> None:
+        finished = {"status": status, "finished_at": "2026-09-23T04:00:00Z"}
+        error = {} if status == "pass" else {"error_message": "failed", "error_code": "failed"}
+        if operation_id.startswith("production-backup-gate-"):
+            backup = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+            self.store.write_verireel_prod_backup_gate_operation_record(
+                backup.model_validate(
+                    {
+                        **backup.model_dump(mode="json"),
+                        **finished,
+                        **error,
+                        "result": VeriReelProdBackupGateResult(
+                            backup_record_id=backup.backup_record_id, backup_status=status
+                        ).model_dump(mode="json"),
+                    }
+                )
+            )
+            return
+        terminal = {
+            **finished,
+            **error,
+            "phase": "completed" if status == "pass" else "failed",
+        }
+        try:
+            promotion = self.store.read_odoo_prod_promotion_operation_record(operation_id)
+        except FileNotFoundError:
+            rollback = self.store.read_odoo_prod_rollback_operation_record(operation_id)
+            self.store.write_odoo_prod_rollback_operation_record(
+                rollback.model_validate(
+                    {
+                        **rollback.model_dump(mode="json"),
+                        **terminal,
+                        "result": OdooProdRollbackResult(
+                            context=CONTEXT,
+                            instance="prod",
+                            source_channel="previous-deployment",
+                            artifact_id=rollback.target.artifact_id,
+                            promotion_record_id="promotion-1",
+                            rollback_status=status,
+                        ).model_dump(mode="json"),
+                    }
+                )
+            )
+            return
+        self.store.write_odoo_prod_promotion_operation_record(
+            promotion.model_validate(
+                {
+                    **promotion.model_dump(mode="json"),
+                    **terminal,
+                    "result": OdooProdPromotionRunResult(
+                        context=CONTEXT,
+                        from_instance="testing",
+                        to_instance="prod",
+                        request_id=promotion.request.request_id,
+                        run_status=status,
+                        input_status="ready",
+                    ).model_dump(mode="json"),
+                }
+            )
+        )
+
+
+class ClientReleaseTests(ClientReleaseFixture):
     def test_failures_before_different_steps_are_not_hidden_by_intermediate_delivery(self) -> None:
         from control_plane.production_delivery_monitor import monitor_production_delivery_once
 
@@ -297,61 +444,6 @@ class ClientReleaseTests(unittest.TestCase):
             )
             self.assertEqual(self.advance(), ())
 
-    def setUp(self) -> None:
-        directory = TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.root = Path(directory.name)
-        self.store = PostgresRecordStore(
-            database_url=f"sqlite+pysqlite:///{self.root / 'state.sqlite3'}"
-        )
-        self.addCleanup(self.store.close)
-        self.store.ensure_schema()
-        seed(self.store)
-        self.store.write_deployment_record(_deployment("deployment-prod-1", "artifact-prod"))
-        self.review_read = github_read
-        for target, replacement in (
-            (
-                "control_plane.client_release.current_release_review",
-                lambda **kwargs: build_release_review(
-                    store=self.store, profile=kwargs["profile"], read=self.review_read
-                ),
-            ),
-            (
-                "control_plane.client_release.admit_odoo_prod_promotion_run",
-                self._admission,
-            ),
-            (
-                "control_plane.client_release.resolve_odoo_prod_rollback_target",
-                lambda **kwargs: None,
-            ),
-            (
-                "control_plane.workflows.production_backup_gate.resolve_production_backup_binding",
-                _backup_binding,
-            ),
-        ):
-            replacement_patch = patch(target, side_effect=replacement)
-            replacement_patch.start()
-            self.addCleanup(replacement_patch.stop)
-
-    def _admission(self, **kwargs: object) -> OdooProdPromotionRunAdmission:
-        testing = self.store.read_release_tuple_record(context_name=CONTEXT, channel_name="testing")
-        return OdooProdPromotionRunAdmission(
-            inputs_result=OdooProdPromotionInputsResult(
-                context=CONTEXT,
-                from_instance="testing",
-                to_instance="prod",
-                request_id="admission",
-                input_status="ready",
-                artifact_id=testing.artifact_id,
-            )
-        )
-
-    def switch(self, mode: ReleaseOnAcceptance) -> None:
-        current = self.store.read_product_profile_record(PRODUCT)
-        self.store.write_product_profile_record(
-            current.model_copy(update={"release_on_acceptance": mode})
-        )
-
     def test_standing_acceptance_publishes_odoo_candidate_before_gated_drill(self) -> None:
         self.switch("director_standing")
         with patch("control_plane.client_release.publish_release_decision") as publish:
@@ -451,94 +543,6 @@ class ClientReleaseTests(unittest.TestCase):
         )
         self.assertEqual(release_start_for_acceptance(store=self.store, profile=current), "")
 
-    def accept(self, *, date: str = "2026-09-23T01:00:00Z") -> ReleaseReviewDecisionRecord:
-        accepted = decision(self.store, date=date).model_copy(
-            update={
-                "release_start": release_start_for_acceptance(
-                    store=self.store, profile=self.store.read_product_profile_record(PRODUCT)
-                )
-            }
-        )
-        self.store.write_release_review_decision_record(accepted)
-        return accepted
-
-    def advance(self) -> tuple[str, ...]:
-        return advance_client_releases(store=self.store, control_plane_root=self.root)
-
-    def set_prod(self, artifact_id: str) -> None:
-        self.store.write_release_tuple_record(
-            ReleaseTupleRecord(
-                tuple_id=f"tuple-prod-{artifact_id}",
-                context=CONTEXT,
-                channel="prod",
-                artifact_id=artifact_id,
-                repo_shas={"example/site": BASE if artifact_id == "artifact-prod" else HEAD},
-                provenance="ship",
-                minted_at="2026-09-23T03:00:00Z",
-            )
-        )
-
-    def finish(self, operation_id: str, status: StepStatus = "pass") -> None:
-        finished = {"status": status, "finished_at": "2026-09-23T04:00:00Z"}
-        error = {} if status == "pass" else {"error_message": "failed", "error_code": "failed"}
-        if operation_id.startswith("production-backup-gate-"):
-            backup = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
-            self.store.write_verireel_prod_backup_gate_operation_record(
-                backup.model_validate(
-                    {
-                        **backup.model_dump(mode="json"),
-                        **finished,
-                        **error,
-                        "result": VeriReelProdBackupGateResult(
-                            backup_record_id=backup.backup_record_id, backup_status=status
-                        ).model_dump(mode="json"),
-                    }
-                )
-            )
-            return
-        terminal = {
-            **finished,
-            **error,
-            "phase": "completed" if status == "pass" else "failed",
-        }
-        try:
-            promotion = self.store.read_odoo_prod_promotion_operation_record(operation_id)
-        except FileNotFoundError:
-            rollback = self.store.read_odoo_prod_rollback_operation_record(operation_id)
-            self.store.write_odoo_prod_rollback_operation_record(
-                rollback.model_validate(
-                    {
-                        **rollback.model_dump(mode="json"),
-                        **terminal,
-                        "result": OdooProdRollbackResult(
-                            context=CONTEXT,
-                            instance="prod",
-                            source_channel="previous-deployment",
-                            artifact_id=rollback.target.artifact_id,
-                            promotion_record_id="promotion-1",
-                            rollback_status=status,
-                        ).model_dump(mode="json"),
-                    }
-                )
-            )
-            return
-        self.store.write_odoo_prod_promotion_operation_record(
-            promotion.model_validate(
-                {
-                    **promotion.model_dump(mode="json"),
-                    **terminal,
-                    "result": OdooProdPromotionRunResult(
-                        context=CONTEXT,
-                        from_instance="testing",
-                        to_instance="prod",
-                        request_id=promotion.request.request_id,
-                        run_status=status,
-                        input_status="ready",
-                    ).model_dump(mode="json"),
-                }
-            )
-        )
-
     def test_settings_release_completes_drill_and_reapplies_accepted_settings(self) -> None:
         self._assert_settings_release_drill(same_artifact=False)
 
@@ -582,10 +586,30 @@ class ClientReleaseTests(unittest.TestCase):
                 )
             )
             settings = OdooWebsiteSettings.model_validate(payload["website_settings"])
+            self.assertEqual(
+                payload["website_indexing"],
+                {
+                    "website_id": settings.website_id,
+                    "public_origin": settings.public_origin,
+                    "production_use": "live",
+                },
+            )
             applied.append(settings)
-            return _module_update_evidence(website_settings_sha256=settings.digest)
+            return _module_update_evidence(
+                website_settings_sha256=settings.digest, website_indexing_production_use="live"
+            )
 
         with (
+            patch(
+                "control_plane.odoo_website_indexing.WebsiteIndexingExecution.observe",
+                return_value={
+                    "native": {
+                        "website_id": settings.settings.website_id,
+                        "public_origin": settings.settings.public_origin,
+                        "production_use": "live",
+                    }
+                },
+            ),
             patch(
                 "control_plane.workflows.odoo_post_deploy._resolve_compose_target_definition",
                 return_value=DokployTargetDefinition(
@@ -808,12 +832,15 @@ class ClientReleaseTests(unittest.TestCase):
         )
         self.assertEqual(limited.events, activity.events[:1])
 
-    def test_nothing_starts_when_held_prelaunch_overridden_or_unsupported(self) -> None:
+    def test_nothing_starts_when_held_overridden_or_unsupported(self) -> None:
         self.assertEqual(self.accept().release_start, "")
         self.assertEqual(self.advance(), ())
         self.switch("promote")
         current = self.store.read_product_profile_record(PRODUCT)
-        for update in ({"production_use": "prelaunch"}, {"driver_id": "unsupported"}):
+        for update in (
+            {"driver_id": "unsupported"},
+            {"driver_id": "generic-web", "production_use": "prelaunch"},
+        ):
             with self.subTest(update=update):
                 self.assertEqual(
                     release_start_for_acceptance(
