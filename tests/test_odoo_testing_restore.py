@@ -1005,16 +1005,13 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         modes: list[str] = []
 
         def consume(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-            program = kwargs.get("input")
-            if (
-                not isinstance(program, bytes)
-                or program != self.spec["native_files_program"].encode()
-            ):
+            program: str = self.spec["native_files_program"]
+            if kwargs.get("input") != program.encode():
                 return original(arguments, **kwargs)
             receiver = json.loads(base64.b64decode(arguments[-1]))
             modes.append(receiver["mode"])
             try:
-                migrated.fixture.consume(receiver["capture"], receiver["mode"], program.decode())
+                migrated.fixture.consume(receiver["capture"], receiver["mode"], program)
             except SystemExit as error:
                 self.assertEqual(error.code, 0)
             return subprocess.CompletedProcess(arguments, 0, stdout=b"", stderr=b"")
