@@ -546,6 +546,29 @@ def reconcile_testing_target(
         repository_id=repository_id,
         transport=transport,
     )
+    native_route_drift = False
+
+    def native_route_current() -> bool | None:
+        from control_plane.testing_copy_route import testing_copy_route_current
+
+        testing_lane = next(item for item in profile.lanes if item.instance == TESTING_INSTANCE)
+        if not isinstance(record_store, PostgresRecordStore):
+            return None
+        return testing_copy_route_current(
+            root=control_plane_root,
+            store=record_store,
+            product=profile.product,
+            context=testing_lane.context,
+        )
+
+    if isinstance(desired, VerifiedBuildArtifact) and plan.get("reason") == "already_deployed":
+        try:
+            native_route_drift = native_route_current() is False
+        except (ValueError, RuntimeError, FileNotFoundError, click.ClickException):
+            plan.update(action="wait", held=True, reason="testing_runtime_unverified")
+            return ReconcileOutcome(plan)
+        if native_route_drift:
+            plan.update(action="deploy", reason="testing_runtime_drift")
     if isinstance(desired, VerifiedGenericWebBuild) and plan.get("reason") == "already_deployed":
         from control_plane.generic_web_testing_inputs import (
             DELIVERY_RECEIPT_KEY,
@@ -688,6 +711,27 @@ def reconcile_testing_target(
             hold_recorded_at=hold.recorded_at,
         )
         return ReconcileOutcome(plan)
+    expected_current_artifact_id = ""
+    if native_route_drift:
+        try:
+            route_current = native_route_current()
+        except (ValueError, RuntimeError, FileNotFoundError, click.ClickException):
+            route_current = None
+        if route_current is None:
+            plan.update(action="wait", held=True, reason="testing_runtime_unverified")
+            return ReconcileOutcome(plan)
+        if route_current:
+            plan.update(action="none", held=False, reason="already_deployed")
+            return ReconcileOutcome(plan)
+        inventory = _testing_inventory(record_store, lane)
+        if (
+            inventory is None
+            or inventory.artifact_identity is None
+            or inventory.artifact_identity.artifact_id != plan["current_artifact_id"]
+        ):
+            plan.update(action="wait", held=True, reason="testing_runtime_unverified")
+            return ReconcileOutcome(plan)
+        expected_current_artifact_id = inventory.artifact_identity.artifact_id
     manifest = record_verified_build_artifact(
         record_store=cast(VerifiedArtifactStore, record_store), verified=desired
     )
@@ -711,7 +755,7 @@ def reconcile_testing_target(
         return ReconcileOutcome(plan)
     fresh_generation = generation is not None and not generation.completed_at
     data_source_mode: Literal["existing", "upstream_restore"] = (
-        "upstream_restore" if fresh_generation else "existing"
+        "upstream_restore" if fresh_generation and not native_route_drift else "existing"
     )
     if refusal := fresh_testing_mode_refusal(generation, data_source_mode):
         plan.update(action="wait", held=True, reason=refusal[0])
@@ -730,10 +774,12 @@ def reconcile_testing_target(
             product=profile.product,
             instance=TESTING_INSTANCE,
             strategy="recreate-in-place",
-            allow_empty_data=fresh_generation or not bool(rearmed_after),
+            allow_empty_data=not native_route_drift
+            and (fresh_generation or not bool(rearmed_after)),
             data_source_mode=data_source_mode,
             artifact_id=manifest.artifact_id,
             source_git_ref=manifest.source_commit,
+            expected_current_artifact_id=expected_current_artifact_id,
         ),
     )
     idempotency_scope = reconcile_reservation_scope(profile.product)
@@ -747,10 +793,11 @@ def reconcile_testing_target(
             inventory=_testing_inventory(record_store, lane),
         )
         plan.update(current_artifact_id=current_artifact_id, current_image_digest=current_digest)
-        return (
+        artifact_current = (
             manifest.artifact_id == current_artifact_id
             or manifest.image.digest.lower() == current_digest
         )
+        return artifact_current and not native_route_drift
 
     attempt = _next_testing_attempt(
         record_store=record_store,
