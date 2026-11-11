@@ -2454,13 +2454,14 @@ def _build_preview_summary(
         return ProductPreviewSummary(enabled=False, context=profile.preview.context)
     list_previews = getattr(record_store, "list_preview_records", None)
     anchor_repo = _profile_anchor_repo(profile)
+    preview_records: tuple[PreviewRecord, ...] = ()
+    if callable(list_previews):
+        preview_records = list_previews(
+            context_name=profile.preview.context, anchor_repo=anchor_repo, limit=None
+        )
     previews = tuple(
         preview
-        for preview in (
-            list_previews(context_name=profile.preview.context, anchor_repo=anchor_repo, limit=None)
-            if callable(list_previews)
-            else ()
-        )
+        for preview in preview_records
         if preview.context == profile.preview.context
         and preview.anchor_repo == anchor_repo
         and preview.state != "destroyed"
