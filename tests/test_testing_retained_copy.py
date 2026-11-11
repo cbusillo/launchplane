@@ -225,11 +225,29 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.containers[0]["Config"]["Cmd"] = compose_created_web_command()
 
         self.web_processes = ["sh", "sleep"]
-        waiting, _ = self.run_host(extra={"allow_unavailable": True})
+        waiting, calls = self.run_host(extra={"allow_unavailable": True})
         self.assertEqual(waiting["type"], "complete", waiting)
+        observations: dict[str, Any] = {}
+        observed, observed_calls = self.run_host(
+            extra={"allow_unavailable": True}, evidence=observations
+        )
+        self.assertEqual(observed, waiting)
+        self.assertEqual(observed_calls, calls)
+        self.assertEqual(len(observations["containers"]), len(self.containers))
+        self.assertEqual(observations["containers"][0]["checks"]["web_process"], "pass")
+        from control_plane.contracts.candidate_custody_evidence import LifecycleEvidence
+
+        LifecycleEvidence.model_validate(observations)
         self.web_processes = ["sh", "python3"]
-        serving, _ = self.run_host(extra={"allow_unavailable": True})
+        observations = {}
+        serving, _ = self.run_host(extra={"allow_unavailable": True}, evidence=observations)
         self.assertEqual(serving["type"], "failed")
+        self.assertEqual(len(observations["containers"]), len(self.containers))
+        self.assertEqual(observations["containers"][0]["checks"]["web_process"], "fail")
+        self.assertEqual(observations["checks"]["lifecycle_acquisition"], "unavailable")
+        LifecycleEvidence.model_validate(observations)
+        for value in (self.spec["project"], self.containers[0]["Id"], str(self.root)):
+            self.assertNotIn(value, json.dumps(observations))
 
     def test_failed_candidate_without_web_keeps_exact_original_runtime_custody(self) -> None:
         from control_plane.odoo_testing_resources import OdooTestingResources
@@ -293,6 +311,23 @@ class RetainedTestingCopyTests(unittest.TestCase):
         }
         gate = Path(web["Mounts"][0]["Source"]) / Path(INTEGRATION_READBACK_PASSED_PATH).name
         return web, spec, gate
+
+    def test_web_evidence_preserves_gate_and_process_refusals_without_exporting_inputs(
+        self,
+    ) -> None:
+        from control_plane.dokploy.testing_retained_copy import failed_candidate_own_web
+
+        web, spec, gate = self.own_web_spec()
+        evidence: dict[str, str] = {}
+        self.assertFalse(failed_candidate_own_web(web, spec, lambda _: ["sh", "odoo"], evidence))
+        self.assertEqual(evidence["web_gate"], "pass")
+        self.assertEqual(evidence["web_process"], "fail")
+        gate.write_text("private-gate-content")
+        evidence = {}
+        self.assertFalse(failed_candidate_own_web(web, spec, lambda _: ["sh", "sleep"], evidence))
+        self.assertEqual(evidence["web_gate"], "fail")
+        self.assertNotIn("web_process", evidence)
+        self.assertNotIn("private-gate-content", json.dumps(evidence))
 
     def test_waiting_web_requires_original_command_processes_and_absent_gate(self) -> None:
         from control_plane.dokploy.testing_retained_copy import failed_candidate_own_web
@@ -453,8 +488,16 @@ class RetainedTestingCopyTests(unittest.TestCase):
         remove_refused: bool = False,
         extra: dict[str, Any] | None = None,
         inspect_result: list[dict[str, Any]] | None = None,
+        evidence: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[list[str]]]:
-        payload = {**self.spec, "mode": mode, "identity": self.identity, **(extra or {})}
+        payload: dict[str, Any] = {
+            **self.spec,
+            "mode": mode,
+            "identity": self.identity,
+            **(extra or {}),
+        }
+        if evidence is not None:
+            payload["custody_evidence"] = True
         commands: list[list[str]] = []
 
         def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
@@ -552,7 +595,14 @@ class RetainedTestingCopyTests(unittest.TestCase):
                 self.assertEqual(error.code, 1)
         for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS:
             self.assertNotIn("fixture-" + key, stdout.getvalue())
-        return json.loads(stdout.getvalue().removeprefix("FRAME:")), commands
+        frames = [
+            json.loads(line.removeprefix("FRAME:")) for line in stdout.getvalue().splitlines()
+        ]
+        if evidence is not None:
+            for frame in frames[:-1]:
+                self.assertEqual(frame["type"], "custody_evidence")
+                evidence.update(frame["evidence"])
+        return frames[-1], commands
 
     def test_command_failure_after_inventory_retains_private_output_bound_to_the_input(
         self,

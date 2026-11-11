@@ -2,6 +2,7 @@ import inspect
 from pathlib import Path
 from control_plane.dokploy.testing_retained_copy import (
     failed_candidate_own_web,
+    failed_candidate_check,
     read_container_processes,
     web_gate_unexpected,
 )
@@ -63,6 +64,7 @@ NATIVE_TESTING_RETENTION_INSPECTION = (
     + inspect.getsource(staged_source_inputs)
     + inspect.getsource(web_gate_unexpected)
     + inspect.getsource(read_container_processes)
+    + inspect.getsource(failed_candidate_check)
     + inspect.getsource(failed_candidate_own_web)
     + CLEAN_TESTING_SNAPSHOT_LIBRARY
     + STORAGE_MAINTENANCE_LIBRARY
@@ -155,6 +157,8 @@ def inspect_candidate():
             'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
             'monotonic_deadline':time.monotonic()+300})
     for row in result:
+        if spec.get('custody_evidence') is True:
+            row['gate_unexpected']=gate_unexpected
         if row['status']=='observed' and not row['empty'] and gate_unexpected:
             row['reasons'].append('completed_or_unknown_web_gate')
             if row['reason'] in ('','container_reference'):

@@ -556,6 +556,74 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         self.assertEqual(item.resources[0].readback[ReadbackPredicate.STORAGE_CONSUMERS], "pass")
         self.assertEqual(item.status, "held")
 
+    def test_packet_keeps_acquired_snapshot_and_three_physical_bindings_after_invalidation(
+        self,
+    ) -> None:
+        from control_plane.contracts.candidate_custody_evidence import CandidateCustodyEvidence
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+        from unittest.mock import patch
+
+        self.observation["volumes"] = [
+            {
+                **self.observation["volumes"][0],
+                "role": role,
+                "name": self.candidate.namespace + suffix,
+                "referenced": True,
+                "reason": "container_reference",
+                "backing": ["fixture", index],
+            }
+            for index, (role, suffix) in enumerate(
+                (
+                    ("ODOO_DB_VOLUME", "-db"),
+                    ("ODOO_DATA_VOLUME", "-data"),
+                    ("ODOO_LOG_VOLUME", "-logs"),
+                )
+            )
+        ]
+        lifecycle = {"payload": {"container_ids": ["1" * 64], "container_snapshot": "2" * 64}}
+        request = self.request.model_copy(
+            update={"candidates": (self.candidate.namespace,), "receiver_operation_id": ""}
+        )
+        packets: list[CandidateCustodyEvidence] = []
+        with (
+            patch.object(self.retention, "candidate_lifecycle_custody", return_value=lifecycle),
+            patch.object(self.retention, "_source_preserved", return_value=True),
+            patch.object(self.retention, "_inventory_clear", return_value=False),
+        ):
+            result, private = self.retention.build_native_testing_sweep(
+                self.store, self.root, request, "trace", evidence=packets
+            )
+        self.assertEqual(len(packets), 1)
+        packet = packets[0]
+        self.assertEqual(packet.lifecycle.checks["lifecycle_acquisition"], "pass")
+        self.assertEqual(packet.lifecycle.checks["lifecycle_usable"], "fail")
+        self.assertEqual(len(packet.volumes), 3)
+        self.assertTrue(all(row.checks["physical"] == "pass" for row in packet.volumes))
+        self.assertEqual(
+            {row.planned_removal_sha256 for row in packet.volumes},
+            {
+                canonical_json_sha256(
+                    {
+                        "ids": lifecycle["payload"]["container_ids"],
+                        "snapshot": lifecycle["payload"]["container_snapshot"],
+                    }
+                )
+            },
+        )
+        self.assertFalse(private[self.candidate.namespace]["lifecycle"])
+        self.assertFalse(result.candidates[0].lifecycle_snapshot_sha256)
+        self.assertEqual(result.candidates[0].status, "held")
+        self.assertEqual(
+            len(
+                [
+                    ref
+                    for ref in result.candidates[0].references
+                    if ref.reason == "container_reference"
+                ]
+            ),
+            3,
+        )
+
     def test_lifecycle_readback_keeps_acquisition_distinct_from_later_inventory_hold(self) -> None:
         from unittest.mock import patch
         from control_plane.copy_readback_diagnostics import ReadbackPredicate

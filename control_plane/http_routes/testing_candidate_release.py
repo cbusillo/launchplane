@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Response
 from pydantic import BaseModel
 
 from control_plane.contracts.testing_candidate_release import (
@@ -56,11 +56,14 @@ def register_testing_candidate_release_route(
         product: str,
         operation_id: str,
         payload: TestingCandidateReleaseRequest,
+        response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> TestingCandidateReleaseResponse:
         trace_id = dependencies.next_trace_id()
+        if payload.include_evidence:
+            response.headers["Cache-Control"] = "no-store"
 
         def refusal(code: str, message: str, status: int = 409) -> Exception:
             return dependencies.http_error(
@@ -127,6 +130,7 @@ def register_testing_candidate_release_route(
                     product,
                     operation_id,
                     receiver_operation_id=payload.receiver_operation_id,
+                    include_evidence=payload.include_evidence,
                 )
             except TestingCandidateReleaseRefused as error:
                 raise refusal(error.code, str(error)) from error

@@ -418,6 +418,42 @@ class CandidateReleaseFixture(unittest.TestCase):
 
 
 class CandidateReleaseRouteTests(CandidateReleaseFixture):
+    def test_evidence_dry_run_binds_private_packet_and_rejects_effect_modes(self) -> None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+        from control_plane.contracts.testing_candidate_release import TestingCandidateReleaseRequest
+
+        legacy = self.post(mode="dry-run")
+        self.assertEqual(legacy.status_code, 200)
+        self.assertNotIn("evidence", legacy.json())
+        observed = self.post(mode="dry-run", include_evidence=True)
+        self.assertEqual(observed.status_code, 200, observed.text)
+        self.assertEqual(observed.headers["cache-control"], "no-store")
+        packet = observed.json()["evidence"]
+        self.assertEqual(packet["plan_sha256"], observed.json()["plan_sha256"])
+        self.assertEqual(
+            packet["packet_sha256"],
+            canonical_json_sha256(
+                {key: value for key, value in packet.items() if key != "packet_sha256"}
+            ),
+        )
+        self.assertEqual(len(packet["volumes"]), 3)
+        for mode in ("apply", "readback"):
+            refused = self.post(mode=mode, include_evidence=True, reviewed_plan_sha256="a" * 64)
+            self.assertEqual(refused.status_code, 422)
+        self.assertFalse(self.applied)
+        apply_request = TestingCandidateReleaseRequest(mode="apply", reviewed_plan_sha256="a" * 64)
+        original = apply_request.model_dump(
+            mode="json", exclude={"include_evidence"}, exclude_none=True
+        )
+        fingerprint = hashlib.sha256(
+            "\n".join(
+                ("actor", "product", "operation", json.dumps(original, separators=(",", ":")))
+            ).encode()
+        ).hexdigest()
+        self.assertEqual(
+            release.release_fingerprint("actor", "product", "operation", apply_request), fingerprint
+        )
+
     def test_dry_run_apply_readback_and_wrong_identity_release_once(self) -> None:
         self.assertEqual(self.post(director=False).status_code, 403)
         dry = self.post()

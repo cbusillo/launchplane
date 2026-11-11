@@ -40,6 +40,48 @@ namespace/target, ownership/source/provider/lifecycle digests, container count,
 resource identities and backing groups. Top-level `status` is `eligible`, `held`
 or `absent`. An active original may be inspected, but cannot be released.
 
+For a finite custody investigation, the same dry-run request accepts
+`include_evidence: true`, without a receiver. This inspects only the selected
+candidate while retaining the complete consumer inventory for each of its
+three volumes. Apply and readback reject this option. Defaults keep the existing
+context-wide result and release contract. This option adds no read authority,
+query selector, stored inventory or removal permission.
+
+The optional `evidence` packet is private and the response is `Cache-Control:
+no-store`. Its closed schema lives in `contracts/candidate_custody_evidence.py`.
+It carries the observation time, candidate/server/endpoint commitments, release
+plan digest, and a digest of the packet excluding `packet_sha256` and null
+fields. The outer response supplies the request trace. Digests bind the facts
+observed in this pass; they do not prove that later state is unchanged.
+
+Each volume retains native identity, engine/backing and planned-removal
+commitments, physical outcomes and every consumer's acquisition and resolution
+coverage. Placement distinguishes explicit local null, remote, missing and
+malformed server identity. Different server commitments never prove physical
+separation. Compose evidence records conversion type, source scope, root and
+include coverage, cached document digests, input precedence, default absence,
+and each empty-project prerequisite independently. Unreadable documents and
+failed volume definitions remain present alongside readable siblings. Resolved
+names and source paths are hashed; source, environments, commands, credentials,
+private settings and provider exception prose never appear in the packet.
+
+Lifecycle acquisition and final usable custody are separate outcomes. The
+packet retains the acquired container snapshot, resource and physical binding,
+per-container role/state, mount commitments and volume roles, web gate/process
+checks, and foreign references even when later inventory holds invalidate
+usable custody. Missing snapshots remain unavailable. A physical pass is bound
+to the planned container-removal snapshot; it cannot substitute for complete
+exclusive consumer inventory. The existing candidate/resource `references`
+remain the full hold list. No standalone stop or removal follows from this
+packet.
+
+Checks use `pass`, `fail`, `unavailable`, `not_reached` and `not_applicable`.
+Missing or unreached evidence never means absence. A reference check passes
+only when the corresponding qualified observation excludes that reference;
+partial resolution cannot establish that. Omitted optional commitments mean
+unavailable, not an empty or matching identity. The packet is evidence for a
+subsequent bounded diagnosis, not an eligible release or reclaimed capacity.
+
 Apply uses the saved eligible dry run's `plan_sha256`, the same optional receiver
 and a bounded `Idempotency-Key`. It rechecks selected/current references, active
 originals and leases, publication, public domains, people use and only-needed
