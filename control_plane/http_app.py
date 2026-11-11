@@ -31780,8 +31780,9 @@ def create_launchplane_fastapi_app(
             authz = detail.get("authz")
             authz_evaluation = http_error.authz_evaluation
             authz_policy_provenance = http_error.authz_policy_provenance
-            if cause := http_error.__cause__ or http_error.__context__:
-                log_handled_error_cause(cause, trace_id)
+            handled_cause = http_error.__cause__ or http_error.__context__
+            if handled_cause is not None:
+                log_handled_error_cause(handled_cause, trace_id)
         else:
             message = (
                 http_error.detail
