@@ -89,6 +89,54 @@ failures and exhausted budgets report unknown without provider exception text.
 Missing or expired evidence cannot establish a sleep state. Individual observations require the
 same `preview.read` authorization as individual preview identities.
 
+The existing `GET /v1/products` and `GET /v1/products/{product}` accept
+`include_preview_sleep_evidence=true` for a private, no-store projection of
+saved observations. This option performs no collection or provider call. The
+default response omits the optional `sleep_observations[].evidence` field;
+the sidebar and other existing readers retain the coarse summary contract.
+The exact context-scoped `preview.read` check remains separate from product
+read authority. Denial clears individual rows and reports
+`records_status=authorization_denied`. Missing, failed, stale, unsupported and
+unavailable inventory retain their existing distinct statuses, with no fallback
+to an older successful scan.
+
+The closed `PreviewSleepEvidence` model records per-preview `completed_at`,
+coverage, observed binding, gateway mode/activity, three service states and
+derived receipt agreement. Binding comes from the uniquely selected provider
+target and the application identity actually inspected by the poll, validated
+against the selected generation. It includes product/context/instance,
+preview/generation, provider target, artifact, source revision
+and image reference. These are observed configured identity fields, not a new
+runtime health or image-verification result.
+
+Only the collection poll requests this projection. It compares gateway status
+with the gateway's existing bounded local receipt file, returning presence and
+identity/mode/sleep/wake agreement booleans, never opaque receipt IDs, boot or
+sequence tokens, environment, Config/State bodies or provider errors. Missing,
+invalid and unavailable receipt files remain distinct. False means an observed
+disagreement; null means no comparison was available. A wake receipt while the
+gateway is asleep reports `waking`, including when all services are stopped;
+remaining running services without a wake receipt report `stopping`. A receipt
+disagreement or an awake gateway with stopped services reports `inconsistent`.
+These observations can race normal lifecycle work and do not create a wake gate.
+
+The read compares the retained binding with the current preview, generation
+identity and that generation's completed preparation target. Missing records
+leave `current_binding=unknown` while retaining the observed facts; they do not
+prevent the read. A changed generation or target reports `changed`, never a
+replacement binding. Per-preview `freshness` is independent of scan provenance;
+invalid, future or pre-scan completion times cannot qualify a current row.
+Noncurrent rows have an unknown coarse state. Legacy rows expose
+`coverage=legacy` with no binding, and incomplete polls remain partial or
+unavailable. Versioned opaque-source serialization keeps older record readers
+able to load a scan after rollback without treating new private details as
+legacy scope evidence.
+
+No positive observation establishes wake/import eligibility, public health,
+runtime verification, original disposition or effect release. Normal wake
+checks still own use, custody, originals, unknown effects, identity, resources
+and admission. No historical stop cause is required to read current facts.
+
 Older Odoo previews acquire the gateway on their next ordinary, identity-bound
 rebuild that preserves their data. Retained upstream settings still prevent
 sleep and are shown as a source-connection reason even with a gateway. A first upstream restore still needs its

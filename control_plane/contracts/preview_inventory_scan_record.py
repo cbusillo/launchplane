@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Annotated, Literal
 import json
 
 from pydantic import (
@@ -15,7 +15,68 @@ PreviewInventoryScanStatus = Literal["pass", "fail", "unsupported", "unavailable
 PREVIEW_INVENTORY_COLLECTION_SOURCE = "service-preview-inventory"
 _SCOPED_SOURCE_PREFIX = "preview-inventory-scope-v1:"
 _SLEEP_SOURCE_PREFIX = "preview-inventory-scope-v2:"
+_EXACT_SLEEP_SOURCE_PREFIX = "preview-inventory-scope-v3:"
 _SCOPED_READER_MESSAGE = "Scoped preview inventory; use a current reader for details."
+
+
+SleepBindingText = Annotated[str, Field(min_length=1, max_length=512, pattern=r"^\S+$")]
+
+
+class PreviewSleepBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    product: SleepBindingText
+    context: SleepBindingText
+    instance: SleepBindingText
+    preview_id: SleepBindingText
+    generation_id: SleepBindingText
+    provider_target_id: SleepBindingText
+    artifact_id: SleepBindingText
+    source_git_ref: SleepBindingText
+    image_reference: SleepBindingText
+
+
+class PreviewSleepServiceState(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    running: bool | None = None
+    healthy: bool | None = None
+
+
+class PreviewSleepServices(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    web: PreviewSleepServiceState = PreviewSleepServiceState()
+    database: PreviewSleepServiceState = PreviewSleepServiceState()
+    script_runner: PreviewSleepServiceState = PreviewSleepServiceState()
+
+
+class PreviewSleepReceipts(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    sleep_present: bool | None = None
+    wake_present: bool | None = None
+    persisted_state: Literal["observed", "missing", "invalid", "unavailable", "unknown"] = "unknown"
+    identity_agrees: bool | None = None
+    mode_agrees: bool | None = None
+    sleep_agrees: bool | None = None
+    wake_agrees: bool | None = None
+
+
+class PreviewSleepEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    coverage: Literal["complete", "partial", "unavailable", "not_attempted", "legacy"] = "legacy"
+    completed_at: str = Field(default="", max_length=64)
+    freshness: Literal["fresh", "stale", "invalid", "unknown"] = "unknown"
+    binding: PreviewSleepBinding | None = None
+    gateway_mode: Literal["awake", "asleep", "unknown"] = "unknown"
+    activity_requested: bool | None = None
+    active_connections: int | None = Field(default=None, ge=0)
+    services: PreviewSleepServices = PreviewSleepServices()
+    receipts: PreviewSleepReceipts = PreviewSleepReceipts()
+    phase: Literal["awake", "asleep", "stopping", "waking", "inconsistent", "unknown"] = "unknown"
+    current_binding: Literal["current", "changed", "unknown"] = "unknown"
 
 
 class PreviewSleepObservation(BaseModel):
@@ -24,6 +85,11 @@ class PreviewSleepObservation(BaseModel):
     slug: str
     state: Literal["awake", "asleep", "cannot_sleep", "unknown"]
     reason: str = ""
+    evidence: PreviewSleepEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class _ScanSource(BaseModel):
@@ -60,7 +126,9 @@ class PreviewInventoryScanRecord(BaseModel):
         if (
             isinstance(value, dict)
             and isinstance(source := value.get("source"), str)
-            and source.startswith((_SCOPED_SOURCE_PREFIX, _SLEEP_SOURCE_PREFIX))
+            and source.startswith(
+                (_SCOPED_SOURCE_PREFIX, _SLEEP_SOURCE_PREFIX, _EXACT_SLEEP_SOURCE_PREFIX)
+            )
             # Inventory callers control source, but cannot supply the persisted
             # compatibility message. Source alone must never establish scope.
             and value.get("error_message") == _SCOPED_READER_MESSAGE
@@ -97,6 +165,8 @@ class PreviewInventoryScanRecord(BaseModel):
             )
             metadata_payload = metadata.model_dump()
             prefix = _SLEEP_SOURCE_PREFIX if self.sleep_observations else _SCOPED_SOURCE_PREFIX
+            if any(item.evidence is not None for item in self.sleep_observations):
+                prefix = _EXACT_SLEEP_SOURCE_PREFIX
             if not self.sleep_observations:
                 metadata_payload.pop("sleep_observations")
             payload["source"] = prefix + json.dumps(

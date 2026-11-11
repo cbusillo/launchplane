@@ -80,6 +80,66 @@ def application_state(containers):
         for name, (_, item) in containers.items()}
 
 
+def poll_receipts(router, status):
+    program = r'''
+import json, os, stat, sys
+current = json.loads(sys.argv[1])
+result = {'persisted_state': 'unavailable'}
+for name in ('sleep', 'wake'):
+    value = current.get(name + '_record_id')
+    result[name + '_present'] = bool(value) if isinstance(value, str) else None
+try:
+    descriptor = os.open('/tmp/launchplane-preview-state.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+            raise ValueError('Invalid receipt file')
+        saved = json.loads(stream.read(4097))
+    if not isinstance(saved, dict) or saved.get('mode') not in ('awake', 'asleep'):
+        raise ValueError('Invalid receipt state')
+    if not isinstance(saved.get('identity'), str):
+        raise ValueError('Invalid receipt identity')
+    for source in (saved, current):
+        for name in ('sleep', 'wake'):
+            value = source.get(name + '_record_id')
+            if not isinstance(value, str) or (value and (not value.startswith('mutation-reservation-') or len(value) > 128)):
+                raise ValueError('Invalid receipt')
+    result.update(persisted_state='observed', identity_agrees=saved['identity'] == current.get('identity'),
+        mode_agrees=saved['mode'] == current.get('mode'))
+    for name in ('sleep', 'wake'):
+        key = name + '_record_id'
+        result[name + '_agrees'] = saved[key] == current[key]
+except FileNotFoundError:
+    result['persisted_state'] = 'missing'
+except (ValueError, TypeError, KeyError):
+    result['persisted_state'] = 'invalid'
+except OSError:
+    result['persisted_state'] = 'unavailable'
+print(json.dumps(result))
+'''
+    try:
+        return json.loads(docker('exec', router, '/venv/bin/python3', '-I', '-S', '-c', program, json.dumps(status)))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {'persisted_state': 'unavailable'}
+
+
+def poll_evidence(containers, router, status):
+    environment = dict(item.split('=', 1) for item in containers['web'][1]['Config'].get('Env', []) if '=' in item)
+    identity = json.loads(environment['LAUNCHPLANE_RUNTIME_IDENTITY_JSON'])
+    binding = {key: identity.get(key) for key in ('product', 'context', 'instance', 'preview_id',
+        'artifact_id', 'source_git_ref', 'image_reference')}
+    binding['generation_id'] = identity.get('preview_generation_id')
+    services = {}
+    for name, (_, item) in containers.items():
+        state = item.get('State', {})
+        running = state.get('Running')
+        health = state.get('Health', {}).get('Status')
+        services[name.replace('-', '_')] = {
+            'running': running if isinstance(running, bool) else None,
+            'healthy': health == 'healthy' if health in ('starting', 'healthy', 'unhealthy') else None}
+    return {'binding': binding, 'services': services, 'receipts': poll_receipts(router, status)}
+
+
 def wait_healthy(identifier, deadline):
     while time.monotonic() < deadline:
         state = one_inspection(identifier)['State']
@@ -105,7 +165,10 @@ def execute():
     states = application_state(containers)
     action = spec['action']
     if action in {'observe', 'poll'}:
-        return {'gateway': status, 'services': states}
+        result = {'gateway': status, 'services': states}
+        if action == 'poll' and spec.get('retain_evidence'):
+            result['evidence'] = poll_evidence(containers, router, status)
+        return result
     request = spec['control']
     if action == 'sleep':
         if status['mode'] == 'awake':

@@ -6,6 +6,7 @@ from contextlib import redirect_stdout, nullcontext, contextmanager
 from datetime import datetime, timedelta, timezone
 import io
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -360,6 +361,137 @@ class PreviewIdleOperationTests(unittest.TestCase):
         self.assertFalse(self.effects)
         self.assertEqual(self.store.list_held_provider_target_reservations(), ())
 
+    def test_inventory_retains_observed_binding_without_inventing_legacy_poll_evidence(
+        self,
+    ) -> None:
+        from control_plane.preview_sleep_evidence import collect_preview_sleep_observations
+
+        with (
+            patch("control_plane.preview_sleep_evidence._read_remote", side_effect=self.transport),
+            patch(
+                "control_plane.preview_sleep_evidence.api.dokploy_request",
+                return_value=self.provider,
+            ),
+        ):
+            result = collect_preview_sleep_observations(
+                store=self.store,
+                profile=self.profile,
+                host="fixture",
+                token="fixture",
+                inventory=(("env", "compose-fixture", self.identity.instance),),
+                prefix="fixture",
+            )[0]
+        self.assertIsNotNone(result.evidence)
+        assert result.evidence is not None
+        self.assertEqual(result.evidence.coverage, "partial")
+        self.assertIsNone(result.evidence.binding)
+        self.assertTrue(result.evidence.completed_at)
+        self.assertFalse(self.effects)
+
+    def test_inventory_preserves_receipt_disagreement_partial_wake_and_observed_identity(
+        self,
+    ) -> None:
+        from control_plane.preview_sleep_evidence import collect_preview_sleep_observations
+        from control_plane.preview_inventory_evidence import inventory_scan_evidence
+        from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+
+        identity = self.identity.model_dump()
+        binding = {
+            key: identity[key]
+            for key in (
+                "product",
+                "context",
+                "instance",
+                "preview_id",
+                "artifact_id",
+                "source_git_ref",
+                "image_reference",
+            )
+        }
+        binding["generation_id"] = identity["preview_generation_id"]
+        self.value = observation(mode="asleep", running=False)
+        self.value["evidence"] = {
+            "binding": binding,
+            "services": {
+                name.replace("-", "_"): state for name, state in self.value["services"].items()
+            },
+            "receipts": {
+                "persisted_state": "observed",
+                "sleep_present": True,
+                "wake_present": True,
+                "identity_agrees": True,
+                "mode_agrees": True,
+                "sleep_agrees": True,
+                "wake_agrees": True,
+            },
+        }
+        with (
+            patch("control_plane.preview_sleep_evidence._read_remote", side_effect=self.transport),
+            patch(
+                "control_plane.preview_sleep_evidence.api.dokploy_request",
+                return_value=self.provider,
+            ),
+        ):
+
+            def read() -> Any:
+                return collect_preview_sleep_observations(
+                    store=self.store,
+                    profile=self.profile,
+                    host="fixture",
+                    token="fixture",
+                    inventory=(("env", "compose-fixture", self.identity.instance),),
+                    prefix="fixture",
+                )[0]
+
+            started = datetime.now(timezone.utc).isoformat()
+            result = read()
+            self.assertEqual(result.evidence.phase, "waking")
+            self.assertEqual(result.evidence.coverage, "complete")
+            self.assertEqual(result.evidence.binding.generation_id, self.generation.generation_id)
+            self.assertEqual(result.evidence.binding.provider_target_id, self.provider["composeId"])
+            scan = PreviewInventoryScanRecord(
+                scan_id="exact-sleep",
+                context=self.profile.preview.context,
+                product=self.profile.product,
+                repository=self.profile.repository,
+                source="fixture",
+                scanned_at=started,
+                status="pass",
+                preview_count=1,
+                preview_slugs=("pr-1",),
+                sleep_observations=(result,),
+            )
+            self.store.write_preview_inventory_scan_record(scan)
+            restored = self.store.list_preview_inventory_scan_records()[0]
+            self.assertEqual(restored, scan)
+            self.assertNotIn(
+                "evidence", inventory_scan_evidence(restored).sleep_observations[0].model_dump()
+            )
+            self.assertNotIn("sleep_record_id", restored.model_dump_json())
+            self.assertNotIn("boot_id", restored.model_dump_json())
+            self.value["evidence"]["receipts"]["sleep_agrees"] = False
+            self.assertEqual(read().evidence.phase, "inconsistent")
+            self.value["evidence"]["receipts"]["sleep_agrees"] = None
+            incomplete = read()
+            self.assertEqual(incomplete.evidence.coverage, "partial")
+            self.assertEqual(incomplete.evidence.phase, "unknown")
+            self.value["evidence"]["receipts"].update(sleep_agrees=True, wake_present=None)
+            self.assertEqual(read().evidence.phase, "unknown")
+            self.value["evidence"]["receipts"].update(sleep_agrees=True, wake_present=False)
+            self.assertEqual(read().evidence.phase, "asleep")
+            self.value["evidence"]["services"]["web"]["running"] = True
+            self.assertEqual(read().evidence.phase, "stopping")
+            self.value["evidence"]["services"]["web"]["running"] = None
+            partial = read()
+            self.assertEqual(partial.evidence.phase, "unknown")
+            self.assertEqual(partial.evidence.coverage, "partial")
+            self.assertIsNone(partial.evidence.services.web.running)
+            self.value["evidence"]["binding"]["generation_id"] = "foreign-generation"
+            self.assertIsNone(read().evidence.binding)
+            self.provider["composeId"] = "foreign-target"
+            self.assertIsNone(read().evidence.binding)
+        self.assertFalse(self.effects)
+
     def test_inventory_polls_without_host_lock_and_stops_at_its_read_budget(self) -> None:
         from control_plane.preview_sleep_evidence import (
             collect_preview_sleep_observations,
@@ -376,7 +508,25 @@ class PreviewIdleOperationTests(unittest.TestCase):
             entry = tree.body[-2:]
             tree.body = tree.body[:-2]
             exec(compile(tree, "<sleep-poll>", "exec"), namespace)
-            namespace["runtime"] = lambda: ({}, "router")
+            namespace["runtime"] = lambda: (
+                {
+                    name: (
+                        name,
+                        {
+                            "Config": {
+                                "Env": [
+                                    "LAUNCHPLANE_RUNTIME_IDENTITY_JSON="
+                                    + kwargs["payload"]["identity"]
+                                ]
+                            },
+                            "State": {"Running": state["running"], "Health": {"Status": "healthy"}},
+                        },
+                    )
+                    for name, state in self.value["services"].items()
+                },
+                "router",
+            )
+            namespace["poll_receipts"] = lambda *_: {"persisted_state": "missing"}
             namespace["control"] = lambda *_: self.value["gateway"]
             namespace["application_state"] = lambda *_: self.value["services"]
             encoded = base64.b64encode(json.dumps(kwargs["payload"]).encode()).decode()
@@ -462,7 +612,11 @@ class PreviewIdleOperationTests(unittest.TestCase):
 
         def provider(**kwargs: Any) -> dict[str, Any]:
             number = kwargs["query"]["composeId"].removeprefix("compose-")
-            return {"name": f"fixture-pr-{number}", "composeFile": "services: {preview-router: {}}"}
+            return {
+                "name": f"fixture-pr-{number}",
+                "composeId": kwargs["query"]["composeId"],
+                "composeFile": "services: {preview-router: {}}",
+            }
 
         def remote(**kwargs: Any) -> None:
             preview_id = kwargs["payload"]["preview_id"]
@@ -861,6 +1015,62 @@ class PreviewIdleOperationTests(unittest.TestCase):
 
 
 class PreviewIdleRuntimeTests(unittest.TestCase):
+    def test_poll_receipts_compares_actual_saved_state_without_exporting_control_tokens(
+        self,
+    ) -> None:
+        import hashlib
+
+        status = {
+            **self.value["gateway"],
+            "identity": hashlib.sha256(self.identity.encode()).hexdigest(),
+            "sleep_record_id": "mutation-reservation-private-sleep",
+            "wake_record_id": "mutation-reservation-private-wake",
+        }
+        path = Path(self.enterContext(TemporaryDirectory())) / "receipt.json"
+        real_open = os.open
+
+        def docker(*arguments: str) -> bytes:
+            self.assertEqual(arguments[:2], ("exec", "router"))
+            output = io.StringIO()
+            with (
+                patch("sys.argv", ["receipt", arguments[-1]]),
+                patch("os.open", side_effect=lambda _path, flags: real_open(path, flags)),
+                redirect_stdout(output),
+            ):
+                exec(compile(arguments[-2], "<receipt-poll>", "exec"), {})
+            return output.getvalue().encode()
+
+        self.namespace["docker"] = docker
+        poll = self.namespace["poll_receipts"]
+        self.assertEqual(poll("router", status)["persisted_state"], "missing")
+        path.write_text(json.dumps(status))
+        matched = poll("router", status)
+        self.assertTrue(matched["identity_agrees"])
+        self.assertTrue(matched["sleep_agrees"])
+        self.assertTrue(matched["wake_agrees"])
+        self.assertNotIn("mutation-reservation", json.dumps(matched))
+        self.value["gateway"] = status
+        self.namespace["spec"].update(action="poll", retain_evidence=True)
+        projected = self.namespace["execute"]()["evidence"]
+        self.assertEqual(
+            projected["binding"]["source_git_ref"], json.loads(self.identity)["source_git_ref"]
+        )
+        self.assertIs(projected["services"]["web"]["running"], True)
+        self.assertNotIn("mutation-reservation", json.dumps(projected))
+        self.assertNotIn("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", json.dumps(projected))
+        for key, agreement in (
+            ("identity", "identity_agrees"),
+            ("sleep_record_id", "sleep_agrees"),
+            ("wake_record_id", "wake_agrees"),
+        ):
+            path.write_text(json.dumps({**status, key: "mutation-reservation-foreign"}))
+            self.assertIs(poll("router", status)[agreement], False)
+        path.write_text("{invalid secret")
+        malformed = poll("router", status)
+        self.assertEqual(malformed["persisted_state"], "invalid")
+        self.assertNotIn("sleep_agrees", malformed)
+        self.assertNotIn("secret", json.dumps(malformed))
+
     def test_native_inspection_allows_only_an_unmounted_directory_without_connection(self) -> None:
         spec = {
             "generation": {"instance": "preview", "namespace": "fixture"},
@@ -977,6 +1187,7 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
                         "Health": {"Status": "healthy" if state["healthy"] else "unhealthy"},
                     },
                     "ExecIDs": [],
+                    "Config": {"Env": ["LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + self.identity]},
                 },
             )
             for name, state in self.states.items()

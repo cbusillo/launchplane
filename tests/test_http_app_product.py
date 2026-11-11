@@ -1144,6 +1144,11 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_preview_references_preserve_existing_history_read_authority(self) -> None:
         from control_plane.contracts.preview_record import PreviewRecord
+        from control_plane.contracts.preview_inventory_scan_record import (
+            PreviewInventoryScanRecord,
+            PreviewSleepObservation,
+            PreviewSleepEvidence,
+        )
 
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
@@ -1167,6 +1172,26 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                     eligible_at=profile.updated_at,
                 )
                 store.write_preview_record(preview)
+                store.write_preview_inventory_scan_record(
+                    PreviewInventoryScanRecord(
+                        scan_id="private-sleep",
+                        context=profile.preview.context,
+                        product=profile.product,
+                        repository=profile.repository,
+                        source="fixture",
+                        scanned_at=datetime.now(timezone.utc).isoformat(),
+                        status="pass",
+                        preview_count=1,
+                        preview_slugs=("pr-28",),
+                        sleep_observations=(
+                            PreviewSleepObservation(
+                                slug="pr-28",
+                                state="unknown",
+                                evidence=PreviewSleepEvidence(coverage="partial"),
+                            ),
+                        ),
+                    )
+                )
                 base = _product_environment_read_policy(products=("launchplane", profile.product))
                 for product, context, allowed in (
                     (profile.product, preview.context, False),
@@ -1204,6 +1229,8 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                             detail.json()["product"]["preview"],
                         )
                         for summary in summaries:
+                            for item in summary["inventory"]["sleep_observations"]:
+                                self.assertNotIn("evidence", item)
                             self.assertEqual(summary["active_count"], 1)
                             self.assertEqual(
                                 summary["records_status"],
@@ -1213,6 +1240,25 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                                 [record["preview_id"] for record in summary["records"]],
                                 [preview.preview_id] if allowed else [],
                             )
+                        for path, key in (
+                            ("/v1/products", "products"),
+                            (f"/v1/products/{profile.product}", "product"),
+                        ):
+                            private = await _asgi_get(
+                                app,
+                                path + "?include_preview_sleep_evidence=true",
+                                headers={"Authorization": "Bearer valid-token"},
+                            )
+                            self.assertEqual(private.status_code, 200, private.text)
+                            self.assertEqual(private.headers["cache-control"], "private, no-store")
+                            payload = private.json()[key]
+                            overview = payload[0] if key == "products" else payload
+                            observations = overview["preview"]["inventory"]["sleep_observations"]
+                            if allowed:
+                                self.assertEqual(observations[0]["evidence"]["coverage"], "partial")
+                                self.assertIsNone(observations[0]["evidence"]["binding"])
+                            else:
+                                self.assertEqual(observations, [])
             finally:
                 store.close()
 

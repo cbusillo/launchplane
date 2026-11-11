@@ -114,6 +114,7 @@ from control_plane.timestamps import utc_now_timestamp
 from control_plane.preview_inventory_evidence import (
     PreviewInventoryEvidence,
     read_preview_inventory_evidence,
+    project_sleep_observations,
 )
 
 
@@ -726,7 +727,10 @@ class ProductActivityReadModel(BaseModel):
 
 
 def build_product_site_overviews(
-    *, record_store: ProductReadModelStore, action_allowed: ActionAllowed
+    *,
+    record_store: ProductReadModelStore,
+    action_allowed: ActionAllowed,
+    include_preview_sleep_evidence: bool = False,
 ) -> tuple[ProductSiteOverview, ...]:
     profiles = record_store.list_product_profile_records()
     return tuple(
@@ -735,6 +739,7 @@ def build_product_site_overviews(
             profile=profile,
             profiles=profiles,
             action_allowed=action_allowed,
+            include_preview_sleep_evidence=include_preview_sleep_evidence,
         )
         for profile in profiles
         if profile.is_active
@@ -742,12 +747,17 @@ def build_product_site_overviews(
 
 
 def build_product_site_overview(
-    *, record_store: ProductReadModelStore, product: str, action_allowed: ActionAllowed
+    *,
+    record_store: ProductReadModelStore,
+    product: str,
+    action_allowed: ActionAllowed,
+    include_preview_sleep_evidence: bool = False,
 ) -> ProductSiteOverview:
     return _build_product_site_overview(
         record_store=record_store,
         profile=record_store.read_product_profile_record(product),
         action_allowed=action_allowed,
+        include_preview_sleep_evidence=include_preview_sleep_evidence,
     )
 
 
@@ -757,6 +767,7 @@ def _build_product_site_overview(
     profile: LaunchplaneProductProfileRecord,
     action_allowed: ActionAllowed,
     profiles: tuple[LaunchplaneProductProfileRecord, ...] | None = None,
+    include_preview_sleep_evidence: bool = False,
 ) -> ProductSiteOverview:
     descriptor, descriptor_warning = _read_profile_descriptor(profile)
     environment_summaries = tuple(
@@ -771,7 +782,10 @@ def _build_product_site_overview(
         for lane in profile.lanes
     )
     preview_summary = _build_preview_summary(
-        record_store=record_store, profile=profile, action_allowed=action_allowed
+        record_store=record_store,
+        profile=profile,
+        action_allowed=action_allowed,
+        include_sleep_evidence=include_preview_sleep_evidence,
     )
     available_actions = _action_availability(
         descriptor=descriptor,
@@ -2449,6 +2463,7 @@ def _build_preview_summary(
     record_store: object,
     profile: LaunchplaneProductProfileRecord,
     action_allowed: ActionAllowed,
+    include_sleep_evidence: bool = False,
 ) -> ProductPreviewSummary:
     if not profile.preview.enabled:
         return ProductPreviewSummary(enabled=False, context=profile.preview.context)
@@ -2471,6 +2486,7 @@ def _build_preview_summary(
         context=profile.preview.context,
         product=profile.product,
         repository=profile.repository,
+        include_sleep_evidence=True,
     )
     provenance = inventory.provenance
     tracked_slugs = {
@@ -2482,6 +2498,13 @@ def _build_preview_summary(
     # Match the existing preview/history read grant exactly; product-read access
     # alone does not authorize these additional individual identities.
     records_allowed = action_allowed("preview.read", "launchplane", profile.preview.context, ())
+    if records_allowed:
+        inventory = project_sleep_observations(
+            inventory,
+            record_store=record_store,
+            profile=profile,
+            include_private=include_sleep_evidence,
+        )
     records_status: Literal["available", "authorization_denied", "unsupported"] = (
         "authorization_denied"
         if not records_allowed
