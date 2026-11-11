@@ -30512,6 +30512,7 @@ class PostgresRecordStore(HumanSessionStore):
         replacement_record: EnvironmentRouteBindingRecord,
         sources: RouteBindingReviewSources,
     ) -> None:
+        verified_observation = sources.ingress_audit.route_verification is not None
         if sources.product_profile is not None:
             profile_statement = (
                 select(LaunchplaneProductProfileRow)
@@ -30531,6 +30532,19 @@ class PostgresRecordStore(HumanSessionStore):
                 replacement_record.instance,
             ):
                 raise RouteBindingSourceChanged("Reviewed product profile changed before commit.")
+            if (
+                verified_observation
+                and self._read_product_profile_payload(profile_row.payload)
+                != sources.product_profile
+            ):
+                raise RouteBindingSourceChanged("Verified product profile changed before commit.")
+        if verified_observation:
+            from control_plane.route_binding_reconcile import _parse_utc_timestamp
+
+            if _parse_utc_timestamp(
+                self._database_mutation_timestamp(session)
+            ) >= _parse_utc_timestamp(replacement_record.source.stale_after):
+                raise RouteBindingSourceChanged("The route observation expired before commit.")
         # Fence the five planned rows and lane ownership through commit. This is
         # not an assertion about external provider truth or all historical audits.
         require_bundle_context_owner(
@@ -30547,7 +30561,7 @@ class PostgresRecordStore(HumanSessionStore):
                 for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
             ),
         )
-        checks = (
+        checks: list[tuple[type[Base], type[BaseModel], BaseModel | None, tuple[Any, ...]]] = [
             (
                 LaunchplaneDokployTargetRow,
                 DokployTargetRecord,
@@ -30587,17 +30601,39 @@ class PostgresRecordStore(HumanSessionStore):
                 sources.ingress_audit,
                 (LaunchplaneIngressRouteAuditRow.record_id == sources.ingress_audit.record_id,),
             ),
-        )
+        ]
+        if verified_observation:
+            checks.append(
+                (
+                    LaunchplaneInventoryRow,
+                    EnvironmentInventory,
+                    sources.environment_inventory,
+                    (
+                        LaunchplaneInventoryRow.context == replacement_record.context,
+                        LaunchplaneInventoryRow.instance == replacement_record.instance,
+                    ),
+                )
+            )
+            if sources.deployment is not None:
+                checks.append(
+                    (
+                        LaunchplaneDeploymentRow,
+                        DeploymentRecord,
+                        sources.deployment,
+                        (LaunchplaneDeploymentRow.record_id == sources.deployment.record_id,),
+                    )
+                )
         for row_type, record_type, expected, filters in checks:
             statement = select(row_type).where(*filters).limit(1)
             if not self.database_url.startswith("sqlite"):
                 statement = statement.with_for_update()
             row = session.scalar(statement)
-            if (
-                row is None
-                or self._read_payload(model_type=record_type, payload=_payload_from_row(row))
-                != expected
-            ):
+            actual = (
+                self._read_payload(model_type=record_type, payload=_payload_from_row(row))
+                if row is not None
+                else None
+            )
+            if actual != expected:
                 raise RouteBindingSourceChanged(
                     "Reviewed route binding source changed before commit."
                 )

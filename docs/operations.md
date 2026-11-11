@@ -1144,11 +1144,44 @@ the API. It never accepts domains, provider target IDs, ingress host IDs,
 certificate references, edge addresses, or provider payloads as workflow
 inputs, and it performs no provider mutation.
 
-The latest terminal applied ingress audit is the authority linking a tracked
-domain set to its active edge endpoint. Reconcile does not infer that link from
-Dokploy project or display names. Missing audits or an audit that names no active
-endpoint remain explicit blockers and require the ingress authority to be
-recorded through its supported service workflow before route-binding apply.
+Route reconciliation accepts a terminal applied ingress audit or a current
+exact-instance observation from the existing ingress dry run. No earlier apply
+audit is required. It never infers an edge from a project or display name, and
+missing history alone never verifies a route.
+
+When no usable audit exists, run the existing `POST /v1/drivers/ingress/route-apply`
+job with the product/context/instance, `ingress.mode=dry-run`, and
+`ingress.verify_route_binding=true`. Supply the known exact `expected_host_id`,
+`require_exact_expected_host_domains=true`, the recorded `edge_endpoint_key`,
+the full tracked domain set and the expected existing TLS/route settings. Set
+`allow_create`, `allow_update` and `allow_enable_disable` to false. The option is
+false when omitted, so ordinary dry runs keep their existing meaning. Maintained
+callers must support this option before using it; a raw caller is not a fallback.
+The option uses the existing `ingress_route.audit` projection permission, not
+ordinary planning permission. Opting in replaces historical authority with
+current observed evidence, including on lanes that already have an apply audit;
+an expired or differing observation cannot fall back to that older history.
+
+This uses the existing provider comparison, including ambiguity and shared-host
+checks. It captures and rechecks the exact tracked/provider target, target ID,
+active edge, product profile and any current inventory/deployment records. A
+successful observation remains a `dry-run` audit with hash-only
+`route_verification` provenance; it never becomes an apply/no-op attestation.
+An observed difference remains `planned` and blocks reconciliation, including
+when an older observation matched. A pending original apply retains its original
+recovery path and cannot be settled by this observation.
+
+After an unchanged verification, read the current binding and run the normal
+route-binding dry run, review it, then apply with its exact current-record
+digest and original reviewed-plan safeguards. Source changes require another
+observation. Atomic source comparison also checks profile and inventory/deployment
+changes or newly appearing inventory. Observation-backed evidence expires 24 hours
+after the observation; repeated reconciliation never extends that deadline.
+Missing current records, conflicting source/artifact/deployment identity, inactive
+edges, unknown TLS and provider differences require their existing owning job.
+The ingress observation establishes route configuration only. It does not establish
+running application identity, receiver compatibility, database identity, website
+selection, release acceptance or indexing eligibility; their existing checks remain.
 
 Route-binding read and apply authority is instance-aware. Context-scoped rules
 may list bindings only when no instance filter is supplied; current-record reads
@@ -1164,7 +1197,7 @@ digests, and redacted route authority. Apply requires a unique
 DB-backed records and compare-and-writes the full record; a concurrent change
 returns a conflict instead of overwriting newer authority.
 
-Each successful reconcile attests the current source-record set for 24 hours.
+For legacy apply-audit sources, each successful reconcile attests the current source-record set for 24 hours.
 Run reconciliation after any provider-target, tracked target, edge-endpoint, or
 ingress-audit authority change and on a cadence no slower than every 12 hours
 for active stable lanes. Calls made before half-life are unchanged no-ops; calls

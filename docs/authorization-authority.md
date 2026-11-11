@@ -208,6 +208,15 @@ responses contain only the requested lane's domains and redact provider config
 for inherited standing permission. Domain-authority repair and route-binding
 creation or reconciliation remain writes; an audit never performs them.
 
+The same `ingress_route.audit` action supports opted-in current observation with
+`mode=dry-run` and `verify_route_binding=true`. It uses that exact-instance
+comparison with all provider-write flags false, and records a truthful dry-run
+observation instead of an apply receipt. Source identity and observation time
+are bound to the evidence; reconciliation rechecks them at commit. Ordinary
+dry runs remain non-authoritative. See the current ingress verification flow in
+[operations](operations.md) for its prerequisites and
+maintained-caller boundary.
+
 Other agents retain exact subject/token/product-scoped DB `agent.read` rules
 and their existing context and instance matching. Client agents must be scoped
 to their Client's products; source delivery installs no Client credential or
