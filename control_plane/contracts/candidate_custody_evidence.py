@@ -19,6 +19,7 @@ Predicate = Literal[
     "root",
     "includes",
     "input_precedence",
+    "exact_environment",
     "default_absence",
     "stable_documents",
     "conversion_parse",
@@ -115,7 +116,6 @@ class ConsumerEvidence(QualificationEvidence):
         "mongo",
         "redis",
         "libsql",
-        "provider_inventory",
     ]
     record_sha256: Digest | None = None
     payload_sha256: Digest | None = None

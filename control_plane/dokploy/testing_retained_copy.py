@@ -239,10 +239,10 @@ def qualify_failed_testing_containers(
         for row in containers
         if (row["Config"]["Labels"] or {}).get("com.docker.compose.project") == spec["project"]
     ]
+    import hashlib
+
     roles = []
     for row in members:
-        import hashlib
-
         container_hash = hashlib.sha256(
             json.dumps(row.get("Id"), sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()

@@ -76,6 +76,11 @@ remain the full hold list. No standalone stop or removal follows from this
 packet.
 
 Checks use `pass`, `fail`, `unavailable`, `not_reached` and `not_applicable`.
+Acquired bytes and parsed-document shape are separate facts. Deterministic
+qualification failures are `fail`; failed reads are `unavailable`. Source
+`complete` passes only after the full document set qualifies. Empty-source
+prerequisites are inapplicable to non-null conversions. The data-volume gate
+observation is absent when unread, and never copied to DB or logs.
 Missing or unreached evidence never means absence. A reference check passes
 only when the corresponding qualified observation excludes that reference;
 partial resolution cannot establish that. Omitted optional commitments mean

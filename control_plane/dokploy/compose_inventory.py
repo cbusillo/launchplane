@@ -307,6 +307,10 @@ def read_cached_compose_source(
 ) -> CachedComposeSource:
     frames: list[dict[str, object]] = []
     if evidence is not None:
+        evidence.checks["complete"] = "unavailable"
+        for pending_entry in evidence.documents:
+            pending_entry.checks["acquisition"] = "unavailable"
+            pending_entry.checks["document_shape"] = "not_reached"
         evidence.cached_endpoint_sha256 = canonical_json_sha256({"host": host, "server": server_id})
     native_copy_stream.require_registered_remote_server(server_id)
     native_copy_stream.run_managed_server_program(
@@ -365,9 +369,11 @@ def read_cached_compose_source(
                 raise ValueError("Cached source bytes are unqualified.")
             if entry is not None:
                 entry.document_sha256 = row["sha256"]
-            document = yaml.safe_load(content)
-            if not isinstance(document, dict):
-                raise ValueError("Cached Compose document is unavailable.")
+                entry.checks["acquisition"] = "pass"
+            with acquiring(entry, "document_shape", failure="fail"):
+                document = yaml.safe_load(content)
+                if not isinstance(document, dict):
+                    raise ValueError("Cached Compose document is unavailable.")
             files[relative] = CachedComposeFile(document, row["sha256"], row["directory_env"])
             if entry is not None:
                 entry.checks["acquisition"] = "pass"
@@ -406,11 +412,15 @@ def _empty_source_checks(payload: dict[str, Any]) -> dict[Predicate, bool]:
     }
 
 
-def _record_empty_source(evidence: ConsumerEvidence, payload: dict[str, Any]) -> None:
+def _record_empty_source(
+    evidence: ConsumerEvidence, payload: dict[str, Any], *, applicable: bool = True
+) -> None:
     for predicate, passed in _empty_source_checks(payload).items():
         # PyCharm widens this Literal dictionary key; mypy preserves Predicate.
         # noinspection PyTypeChecker
-        check(evidence, predicate, passed)
+        evidence.checks[predicate] = (
+            ("pass" if passed else "fail") if applicable else "not_applicable"
+        )
 
 
 def _empty_project_documents(
@@ -422,8 +432,6 @@ def _empty_project_documents(
     evidence: ConsumerEvidence | None = None,
 ) -> tuple[dict[str, Any], ...]:
     prerequisites = _empty_source_checks(payload)
-    if evidence is not None:
-        _record_empty_source(evidence, payload)
     if not all(
         value
         for key, value in prerequisites.items()
@@ -515,10 +523,10 @@ def _included_documents(
     includes = document.get("include")
     if not check(evidence, "includes", _include_shape(document)):
         raise ValueError("Only local include wrappers are qualified.")
-    with acquiring(evidence, "root_path"):
+    with acquiring(evidence, "root_path", failure="fail"):
         root = source_relative_path(payload["composePath"])
     assert isinstance(includes, list)
-    with acquiring(evidence, "include_paths"):
+    with acquiring(evidence, "include_paths", failure="fail"):
         paths = [root, *(source_relative_path(path, posixpath.dirname(root)) for path in includes)]
     request = {"app_name": payload["appName"], "files": paths}
     arguments = {"host": host, "token": token, "server_id": payload["serverId"]}
@@ -534,15 +542,6 @@ def _included_documents(
         acquiring(evidence, "cached_acquisition"),
     ):
         observed = read_cached_compose_source(**arguments, request=request, evidence=evidence)
-    if evidence is not None:
-        for entry, path in zip(evidence.documents, paths, strict=True):
-            file = observed.files.get(path)
-            entry.checks["acquisition"] = "pass" if file else "unavailable"
-            if file:
-                entry.document_sha256 = file.sha256
-        evidence.checks["complete"] = (
-            "pass" if not observed.project_absent and set(observed.files) == set(paths) else "fail"
-        )
     if not check(
         evidence,
         "root",
@@ -563,7 +562,7 @@ def _included_documents(
         try:
             with _qualification(failures, "inventory_included_document_unqualified"):
                 file = observed.files[path]
-                with acquiring(child_evidence, "document_shape"):
+                with acquiring(child_evidence, "document_shape", failure="fail"):
                     child = readable_provider_compose(file.document)
                 if not check(
                     child_evidence,
@@ -581,9 +580,9 @@ def _included_documents(
                     ),
                 ):
                     raise ValueError("The included source has unsupported file scopes.")
-                with acquiring(child_evidence, "named_storage"):
+                with acquiring(child_evidence, "named_storage", failure="fail"):
                     require_named_storage(child)
-                with acquiring(child_evidence, "default_inputs"):
+                with acquiring(child_evidence, "default_inputs", failure="fail"):
                     child_keys = _default_volume_inputs(child, str(payload.get("env") or ""))
         except (ValueError, TypeError, KeyError, RecursionError, yaml.YAMLError):
             if failures is None:
@@ -594,7 +593,7 @@ def _included_documents(
         if child_evidence is not None:
             qualified_entries.append(child_evidence)
     if keys:
-        if not check(evidence, "input_precedence", exact and isinstance(payload.get("env"), str)):
+        if not check(evidence, "exact_environment", exact and isinstance(payload.get("env"), str)):
             raise ValueError("Default absence requires complete exact environment evidence.")
         with (
             _qualification(failures, "inventory_source_acquisition_failed"),
@@ -638,6 +637,15 @@ def _included_documents(
             }
             for child in documents
         ]
+    elif evidence is not None:
+        evidence.checks.update(
+            {
+                "default_acquisition": "not_applicable",
+                "default_absence": "not_applicable",
+                "stable_documents": "not_applicable",
+                "exact_environment": "not_applicable",
+            }
+        )
     for index, entry in enumerate(qualified_entries):
         entry.resolution_index = index
     if evidence is not None:
@@ -673,6 +681,7 @@ def read_volume_documents(
             "default_acquisition",
             "complete",
             "input_precedence",
+            "exact_environment",
             "default_absence",
             "stable_documents",
             "placement",
@@ -684,11 +693,13 @@ def read_volume_documents(
         _record_empty_source(evidence, payload)
     with (
         _qualification(failures, "inventory_converted_document_malformed"),
-        acquiring(evidence, "conversion_parse"),
+        acquiring(evidence, "conversion_parse", failure="fail"),
     ):
         document = yaml.safe_load(raw)
     if evidence is not None:
         evidence.conversion_shape = shape(document)
+        if document is not None:
+            _record_empty_source(evidence, payload, applicable=False)
         evidence.source_path_shape = shape(
             payload.get("composePath"), present="composePath" in payload
         )
@@ -710,11 +721,12 @@ def read_volume_documents(
                 evidence.documents.append(
                     VolumeDocumentEvidence(
                         document_sha256=hashlib.sha256(raw.encode()).hexdigest(),
-                        resolution_index=0,
                     )
                 )
-            with acquiring(evidence, "document_shape"):
+            with acquiring(evidence, "document_shape", failure="fail"):
                 result = readable_provider_compose(document)
+            if evidence is not None:
+                evidence.documents[0].resolution_index = 0
             check(evidence, "complete", True)
             return (result,)
     if evidence is not None and isinstance(document, dict):

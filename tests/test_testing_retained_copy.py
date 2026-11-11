@@ -234,6 +234,12 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.assertEqual(observed, waiting)
         self.assertEqual(observed_calls, calls)
         self.assertEqual(len(observations["containers"]), len(self.containers))
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        self.assertEqual(
+            {row["container_sha256"] for row in observations["containers"]},
+            {canonical_json_sha256(row["Id"]) for row in self.containers},
+        )
         self.assertEqual(observations["containers"][0]["checks"]["web_process"], "pass")
         from control_plane.contracts.candidate_custody_evidence import LifecycleEvidence
 
@@ -243,6 +249,12 @@ class RetainedTestingCopyTests(unittest.TestCase):
         serving, _ = self.run_host(extra={"allow_unavailable": True}, evidence=observations)
         self.assertEqual(serving["type"], "failed")
         self.assertEqual(len(observations["containers"]), len(self.containers))
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        self.assertEqual(
+            {row["container_sha256"] for row in observations["containers"]},
+            {canonical_json_sha256(row["Id"]) for row in self.containers},
+        )
         self.assertEqual(observations["containers"][0]["checks"]["web_process"], "fail")
         self.assertEqual(observations["checks"]["lifecycle_acquisition"], "unavailable")
         LifecycleEvidence.model_validate(observations)

@@ -22,10 +22,20 @@ def check(evidence: QualificationEvidence | None, predicate: Predicate, passed: 
 
 
 @contextmanager
-def acquiring(evidence: QualificationEvidence | None, predicate: Predicate) -> Iterator[None]:
+def acquiring(
+    evidence: QualificationEvidence | None,
+    predicate: Predicate,
+    *,
+    failure: Literal["fail", "unavailable"] = "unavailable",
+) -> Iterator[None]:
     if evidence is not None:
         evidence.checks[predicate] = "unavailable"
-    yield
+    try:
+        yield
+    except Exception:
+        if evidence is not None:
+            evidence.checks[predicate] = failure
+        raise
     if evidence is not None:
         evidence.checks[predicate] = "pass"
 

@@ -119,12 +119,15 @@ class CachedComposeInventoryTests(unittest.TestCase):
         )
         self.assertEqual(
             by_path[canonical_json_sha256("addons/sync/bad.yml")].checks["acquisition"],
-            "unavailable",
+            "pass",
+        )
+        self.assertEqual(
+            by_path[canonical_json_sha256("addons/sync/bad.yml")].checks["document_shape"], "fail"
         )
         self.assertTrue(all(row.document_sha256 for row in evidence.documents))
         self.assertNotIn("private-fixture-token", evidence.model_dump_json())
 
-    def test_packet_keeps_both_failed_consumers_for_each_protected_volume(self) -> None:
+    def test_packet_keeps_failed_consumers_beside_unreadable_environments(self) -> None:
         first = {**self.payload, "composeId": "remote-consumer", "serverId": "another-server"}
         second = {
             **self.payload,
@@ -143,8 +146,15 @@ class CachedComposeInventoryTests(unittest.TestCase):
             patch.object(
                 api,
                 "fetch_dokploy_projects",
-                return_value=[{"projectId": "project", "env": "", "environments": [environment]}],
+                return_value=[
+                    {
+                        "projectId": "project",
+                        "env": "",
+                        "environments": [None, {"environmentId": "unreadable"}, environment],
+                    }
+                ],
             ),
+            patch.object(api, "dokploy_request", side_effect=OSError("private detail error")),
             patch.object(
                 api,
                 "fetch_dokploy_target_payload",
@@ -161,50 +171,65 @@ class CachedComposeInventoryTests(unittest.TestCase):
                 ),
             ),
         ):
-            for volume in ("protected-db", "protected-data", "protected-logs"):
-                evidence: list[ConsumerEvidence] = []
-                references: list[dict[str, str]] = []
-                binding = RetainedVolumeBinding(
-                    volume_name=volume,
-                    server_id="selected-server",
-                    application_id="candidate",
-                    application_name="candidate",
-                    volume_identity_sha256="a" * 64,
-                    engine_identity_sha256="b" * 64,
+            volume = "protected-data"
+            evidence: list[ConsumerEvidence] = []
+            references: list[dict[str, str]] = []
+            binding = RetainedVolumeBinding(
+                volume_name=volume,
+                server_id="selected-server",
+                application_id="candidate",
+                application_name="candidate",
+                volume_identity_sha256="a" * 64,
+                engine_identity_sha256="b" * 64,
+            )
+            self.assertFalse(
+                _inventory_clear(
+                    self.base, binding, exact=True, references=references, evidence=evidence
                 )
-                self.assertFalse(
-                    _inventory_clear(
-                        self.base, binding, exact=True, references=references, evidence=evidence
-                    )
-                )
-                consumers = [item for item in evidence if item.kind == "compose"]
-                self.assertEqual(len(consumers), 2)
-                self.assertEqual(consumers[0].checks["placement"], "fail")
-                self.assertEqual(consumers[1].conversion_shape, "null")
-                self.assertEqual(consumers[1].checks["command_empty"], "fail")
-                self.assertEqual(consumers[1].checks["domains_empty"], "fail")
-                self.assertEqual(consumers[1].checks["source_fields_empty"], "pass")
-                self.assertEqual(consumers[1].checks["schedules_empty"], "not_reached")
-                self.assertEqual(
-                    {item.record_sha256 for item in consumers},
-                    {
-                        canonical_json_sha256({"kind": "compose", "id": row["composeId"]})
-                        for row in (first, second)
-                    },
-                )
-                self.assertEqual(
-                    {row["record_id"] for row in references}, {"remote-consumer", "null-consumer"}
-                )
-                encoded = json.dumps([item.model_dump(mode="json") for item in evidence])
-                for secret in (
-                    "private-token",
-                    "private-command",
-                    "private.invalid",
-                    "another-server",
-                    "selected-server",
-                    "customGitUrl",
-                ):
-                    self.assertNotIn(secret, encoded)
+            )
+            consumers = [
+                item
+                for item in evidence
+                if item.kind == "compose"
+                and item.record_sha256
+                in {
+                    canonical_json_sha256({"kind": "compose", "id": row["composeId"]})
+                    for row in (first, second)
+                }
+            ]
+            project = next(item for item in evidence if item.kind == "project")
+            self.assertEqual(project.checks["complete"], "fail")
+            environments = [item for item in evidence if item.kind == "environment"]
+            self.assertEqual(environments[0].checks["identity"], "fail")
+            self.assertEqual(environments[1].checks["acquisition"], "unavailable")
+            self.assertEqual(len(consumers), 2)
+            self.assertEqual(consumers[0].checks["placement"], "fail")
+            self.assertEqual(consumers[1].conversion_shape, "null")
+            self.assertEqual(consumers[1].checks["command_empty"], "fail")
+            self.assertEqual(consumers[1].checks["domains_empty"], "fail")
+            self.assertEqual(consumers[1].checks["source_fields_empty"], "pass")
+            self.assertEqual(consumers[1].checks["schedules_empty"], "not_reached")
+            self.assertEqual(
+                {item.record_sha256 for item in consumers},
+                {
+                    canonical_json_sha256({"kind": "compose", "id": row["composeId"]})
+                    for row in (first, second)
+                },
+            )
+            self.assertTrue(
+                {"remote-consumer", "null-consumer", "unreadable"}
+                <= {row.get("record_id") for row in references}
+            )
+            encoded = json.dumps([item.model_dump(mode="json") for item in evidence])
+            for secret in (
+                "private-token",
+                "private-command",
+                "private.invalid",
+                "another-server",
+                "selected-server",
+                "customGitUrl",
+            ):
+                self.assertNotIn(secret, encoded)
 
     def test_packet_distinguishes_local_missing_malformed_placement_and_empty_prerequisites(
         self,
@@ -263,7 +288,7 @@ class CachedComposeInventoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             compose_volume_names(document, self.payload, evidence=evidence)
         self.assertEqual(len(evidence.volumes), 4)
-        self.assertEqual(evidence.volumes[0].checks["unique_inputs"], "unavailable")
+        self.assertEqual(evidence.volumes[0].checks["unique_inputs"], "fail")
         self.assertEqual(
             set(evidence.resolved_name_sha256),
             {
@@ -323,14 +348,58 @@ class CachedComposeInventoryTests(unittest.TestCase):
             self.assertEqual(evidence.checks["conversion_parse"], "pass")
             self.assertNotEqual(evidence.checks["root"], "pass")
             self.assertNotEqual(evidence.checks["default_absence"], "pass")
-            self.assertEqual(evidence.checks["source_fields_empty"], "fail")
-            self.assertEqual(evidence.checks["command_empty"], "pass")
+            self.assertEqual(
+                evidence.checks["source_fields_empty"],
+                "fail" if raw == "null" else "not_applicable",
+            )
+            self.assertEqual(
+                evidence.checks["command_empty"], "pass" if raw == "null" else "not_applicable"
+            )
             self.assertIsNone(evidence.cached_endpoint_sha256)
             if raw == "null":
                 self.assertEqual(evidence.checks["source_scope"], "not_reached")
             else:
                 self.assertEqual(evidence.checks["source_scope"], "pass")
                 self.assertEqual(evidence.checks["includes"], "pass")
+        evidence = ConsumerEvidence(kind="compose")
+        self.root.write_text('{"include":["different.yml"]}')
+        with self.assertRaises(ValueError):
+            inventory.read_volume_documents(
+                host="provider",
+                token="private",
+                payload=self.payload,
+                raw=json.dumps(self.wrapper),
+                server_id="selected-server",
+                exact=True,
+                evidence=evidence,
+            )
+        self.assertEqual(evidence.checks["root"], "fail")
+        self.assertNotEqual(evidence.checks["complete"], "pass")
+        self.write_sources()
+        self.child.unlink()
+        evidence = ConsumerEvidence(kind="compose")
+
+        def unavailable(**kwargs: Any) -> None:
+            kwargs["receive"]({"type": "complete", "result": {"unavailable": True}})
+
+        with (
+            patch.object(native_copy_stream, "run_managed_server_program", side_effect=unavailable),
+            self.assertRaises(ValueError),
+        ):
+            inventory.read_volume_documents(
+                host="provider",
+                token="private",
+                payload=self.payload,
+                raw=json.dumps(self.wrapper),
+                server_id="selected-server",
+                exact=True,
+                evidence=evidence,
+            )
+        self.assertTrue(
+            all(row.checks["acquisition"] == "unavailable" for row in evidence.documents)
+        )
+        self.assertNotEqual(evidence.checks["complete"], "pass")
+        self.write_sources()
         evidence = ConsumerEvidence(kind="compose")
         original = inventory.read_cached_compose_source
         calls = 0

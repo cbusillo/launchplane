@@ -179,9 +179,9 @@ def compose_volume_names(
                     ),
                 ):
                     raise ValueError("Compose volume identity uses an unreviewed input.")
-                with acquiring(resolution, "unique_inputs"):
+                with acquiring(resolution, "unique_inputs", failure="fail"):
                     environment = require_unique_compose_inputs(str(payload.get("env") or ""), keys)
-                with acquiring(resolution, "interpolation"):
+                with acquiring(resolution, "interpolation", failure="fail"):
                     actual = interpolate(actual, environment)
             if not check(
                 resolution,
@@ -290,6 +290,9 @@ def _inventory_clear(
             continue
         for environment in environments:
             if not isinstance(environment, dict):
+                malformed_environment = consumer("environment", None)
+                check(malformed_environment, "identity", False)
+                check(project_evidence, "complete", False)
                 if refused("project", project_id):
                     return False
                 continue
@@ -302,14 +305,15 @@ def _inventory_clear(
                 else:
                     detail_reason = "inventory_environment_identity_unqualified"
                     try:
-                        detail = api.as_json_object(
-                            api.dokploy_request(
-                                host=host,
-                                token=token,
-                                path="/api/environment.one",
-                                query={"environmentId": environment_id},
+                        with acquiring(environment_evidence, "acquisition"):
+                            detail = api.as_json_object(
+                                api.dokploy_request(
+                                    host=host,
+                                    token=token,
+                                    path="/api/environment.one",
+                                    query={"environmentId": environment_id},
+                                )
                             )
-                        )
                     except (ValueError, OSError, click.ClickException) as error:
                         if references is None or isinstance(
                             error, native_copy_stream.NativeSourceAuthorizationDenied
@@ -331,6 +335,13 @@ def _inventory_clear(
                             raise
                         detail = None
                         detail_reason = "inventory_environment_acquisition_failed"
+                    check(
+                        environment_evidence,
+                        "identity",
+                        detail is not None
+                        and detail.get("environmentId") == environment_id
+                        and detail.get("projectId") == project_id,
+                    )
                     if (
                         detail is None
                         or detail.get("environmentId") != environment_id
