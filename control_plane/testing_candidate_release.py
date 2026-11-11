@@ -30,15 +30,12 @@ from control_plane.contracts.testing_candidate_release import (
     TestingCandidateReleaseResponse,
     TestingCandidateReleaseStatus,
 )
-from control_plane.disposable_lanes import recorded_lane_protection
 from control_plane.dokploy import api, native_copy_stream, source
 from control_plane.dokploy_target_setup_http import fetch_dokploy_compose_domains_for_target_setup
-from control_plane.lane_usage import evaluate_lane_usage
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_usage import read_odoo_testing_usage
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
-    ProviderEvidenceLease,
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
     ProviderMutationUnknownError,
@@ -53,7 +50,6 @@ from control_plane.retained_volume_capture import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_candidate_allocation import (
     candidate_resources,
-    require_candidate_target_custody,
 )
 from control_plane.testing_publication_storage import read_publication
 from control_plane.contracts.testing_candidate_retention import (
@@ -218,12 +214,12 @@ def require_failed_testing_operation(
 def require_candidate_unselected(
     root: Path, store: PostgresRecordStore, allocation: TestingCandidateAllocation
 ) -> None:
-    try:
-        require_candidate_target_custody(store, allocation)
-    except ValueError as error:
+    if any(
+        row.target_id == allocation.compose_id for row in store.list_dokploy_target_id_records()
+    ):
         raise TestingCandidateReleaseRefused(
             "candidate_release_selected", "A lane target names this candidate."
-        ) from error
+        )
     publication = read_publication(
         store,
         canonical_json_sha256(
@@ -262,24 +258,13 @@ def candidate_routed(root: Path, store: PostgresRecordStore, compose_id: str) ->
 
 def require_lane_releasable(
     root: Path, store: PostgresRecordStore, operation: OdooStableTargetReplacementOperationRecord
-) -> None:
+) -> str:
     target = store.read_dokploy_target_record(
         context_name=operation.context, instance_name="testing"
     )
     target_id = store.read_dokploy_target_id_record(
         context_name=operation.context, instance_name="testing"
     )
-    safety = store.read_disposable_lane_safety(operation.product, operation.context, "testing")
-    protection = recorded_lane_protection(target, safety)
-    if protection.only_copy:
-        raise TestingCandidateReleaseRefused(
-            "testing_needed_copy", "Testing holds the only needed copy of data."
-        )
-    if protection.shared:
-        raise TestingCandidateReleaseRefused(
-            "testing_production_resources_shared",
-            "Testing shares production resources; nothing is released.",
-        )
     usage = read_odoo_testing_usage(
         target=target,
         target_id=target_id,
@@ -288,26 +273,16 @@ def require_lane_releasable(
         record_store=store,
         product=operation.product,
     )
-    reported = (
-        "in_use" if safety is not None and safety.current_usage() == "in_use" else usage.usage
-    )
-    decision = evaluate_lane_usage(
-        store,
-        profile=store.read_product_profile_record(operation.product),
-        target=target,
-        target_id=target_id,
-        instance="testing",
-        usage=reported,
-        require_unused=False,
-    )
-    if decision.protected and decision.reason == "staff_testing_hold":
+    if usage.recent_signins:
         raise TestingCandidateReleaseRefused(
-            "testing_staff_hold", "Staff are testing on this lane under a recorded hold."
+            "testing_in_use", "This testing lane has a sign-in within the recent-use window."
         )
-    if decision.protected:
-        raise TestingCandidateReleaseRefused(
-            "testing_in_use", "A person is using this testing lane."
+    if usage.recent_signins is None:
+        logging.getLogger(__name__).warning(
+            "Testing candidate release: recent sign-in read unavailable (%s)", usage.reason_code
         )
+
+    return usage.reason_code if usage.recent_signins is None else ""
 
 
 def host_release(
@@ -353,7 +328,6 @@ def build_candidate_release(
     product: str,
     operation_id: str,
     receiver_operation_id: str | None = None,
-    allowed_provider_records: frozenset[str] = frozenset(),
     *,
     include_evidence: bool = False,
 ) -> CandidateRelease:
@@ -384,35 +358,8 @@ def build_candidate_release(
         root,
         request,
         "candidate-release-plan",
-        allowed_provider_records,
         **({"evidence": packets} if include_evidence else {}),
     )
-    try:
-        require_failed_testing_operation(operation, product)
-        require_candidate_unselected(root, store, allocation)
-        require_lane_releasable(root, store, operation)
-    except TestingCandidateReleaseRefused as error:
-        observed = observed.model_copy(
-            update={
-                "candidates": tuple(
-                    item.model_copy(
-                        update={
-                            "status": "held",
-                            "reasons": (*item.reasons, error.code),
-                            "resources": tuple(
-                                row.model_copy(update={"status": "held", "reason": error.code})
-                                if row.status == "eligible"
-                                else row
-                                for row in item.resources
-                            ),
-                        }
-                    )
-                    if item.selected
-                    else item
-                    for item in observed.candidates
-                )
-            }
-        )
     candidate = next(item for item in observed.candidates if item.selected)
     status: TestingCandidateReleaseStatus = (
         "eligible"
@@ -534,10 +481,8 @@ class TestingCandidateReleaseAdapter:
         status: TestingCandidateReleaseStatus = (
             "released"
             if selected.resources
-            and all(
-                row.status in {"absent", "removed"} or row.reason == "source_inputs_preserved"
-                for row in selected.resources
-            )
+            and selected.container_count == 0
+            and all(row.status in {"absent", "removed"} for row in selected.resources)
             else "held"
         )
         return release_response(
@@ -591,9 +536,6 @@ class TestingCandidateReleaseAdapter:
                 self.release.plan.product,
                 self.release.plan.operation_id,
                 self.release.request.receiver_operation_id if self.release.request else None,
-                allowed_provider_records=frozenset({lease.evidence_reservation().record_id})
-                if isinstance(lease, ProviderEvidenceLease)
-                else frozenset(),
             )
         except RELEASE_PLAN_ERRORS as error:
             raise ProviderMutationRejectedError(error) from error

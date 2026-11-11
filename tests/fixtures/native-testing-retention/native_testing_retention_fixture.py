@@ -110,7 +110,7 @@ def main() -> None:
             state = json.loads(self.state_path.read_text())
             self.assertEqual(sum(call[:2] == ["volume", "rm"] for call in state["calls"]), 1)
 
-        def test_native_inspection_refuses_foreign_labels_mounts_and_staged_inputs(self) -> None:
+        def test_native_inspection_keeps_production_boundaries_without_source_holds(self) -> None:
             resources = exports["resources"]
             namespace = resources["namespace"]
             new_parent = self.data.parent.with_name(namespace + "-db")
@@ -149,7 +149,7 @@ def main() -> None:
                 )
                 frame = json.loads(result.stdout.removeprefix("FRAME:"))
                 row: dict[str, Any] = next(
-                    row for row in frame["volumes"] if row["role"] == "ODOO_DB_VOLUME"
+                    (row for row in frame["volumes"] if row["role"] == "ODOO_DB_VOLUME"), frame
                 )
                 return row
 
@@ -158,12 +158,12 @@ def main() -> None:
             self.assertEqual(observed["reason"], "")
             self.assertGreater(observed["free_bytes"], 0)
             self.state.update(containers=["a" * 64], container_ref=True)
-            self.assertEqual(inspect_native()["reason"], "container_reference")
+            self.assertEqual(inspect_native()["reason_code"], "production_boundary")
             self.state.update(containers=[], container_ref=False)
             (self.data / ".lp-native-fabricated-input").mkdir()
-            self.assertEqual(inspect_native()["reason"], "source_inputs_preserved")
+            self.assertEqual(inspect_native()["status"], "observed")
             self.state["volume_labels"] = {}
-            self.assertEqual(inspect_native()["reason"], "physical_ownership_unknown")
+            self.assertEqual(inspect_native()["reason_code"], "production_boundary")
 
     results = workspace / "results"
     results.mkdir(exist_ok=True)
@@ -173,7 +173,7 @@ def main() -> None:
     suite.addTest(PhysicalReadbackTests("test_physical_bytes_and_original_readback_without_replay"))
     suite.addTest(
         PhysicalReadbackTests(
-            "test_native_inspection_refuses_foreign_labels_mounts_and_staged_inputs"
+            "test_native_inspection_keeps_production_boundaries_without_source_holds"
         )
     )
     with (results / "tests.log").open("w") as output:

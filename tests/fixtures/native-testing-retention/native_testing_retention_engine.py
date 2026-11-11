@@ -152,8 +152,8 @@ try:
         (paths[role] / "fabricated-bytes").write_bytes(os.urandom(2 * 1024 * 1024))
     preserved = paths["ODOO_LOG_VOLUME"] / ".lp-native-fabricated-input"
     preserved.write_text("synthetic preserved source")
-    assert inspect()["ODOO_LOG_VOLUME"]["reason"] == "source_inputs_preserved"
-    PROOF["staged_source_held"] = True
+    assert inspect()["ODOO_LOG_VOLUME"]["status"] == "observed"
+    PROOF["staged_source_is_not_a_candidate_release_hold"] = True
     spec = {
         "mode": "read",
         "context": RESOURCE["context"],
@@ -301,7 +301,7 @@ try:
         ), readback
         readings[role] = physical
     assert preserved.read_text() == "synthetic preserved source"
-    assert inspect()["ODOO_LOG_VOLUME"]["reason"] == "source_inputs_preserved"
+    assert inspect()["ODOO_LOG_VOLUME"]["status"] == "observed"
     PROOF.update(
         nonforce_volume_removal_and_original_readback=True,
         preserved_source_intact=True,
