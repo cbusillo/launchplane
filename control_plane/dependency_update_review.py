@@ -233,8 +233,11 @@ def _workspace_pin_only(
             for ref in (old_ref, new_ref)
         ):
             return False
+        # Only a digest update has its ancestry proved; a version update's
+        # digests are unchecked metadata.
         pins_forward_proven_digest = declared_updates is None or any(
-            update.get("depName") == old_repo.get("repository")
+            update.get("updateType") == "digest"
+            and update.get("depName") == old_repo.get("repository")
             and (update.get("currentDigest"), update.get("newDigest")) == (old_ref, new_ref)
             for update in declared_updates
         )
