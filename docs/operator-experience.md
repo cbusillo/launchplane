@@ -988,6 +988,11 @@ completion receipt in the existing store, outside uptime history. Missing,
 expired, denied, moved-target or invalid evidence remains unverified. A fresh
 read clears the warning. Launchplane does not run updates or reboot the host.
 
+Inventory reads load product profiles once and share each lane's recorded runtime
+verification with its topology. Preview counts read preview records directly;
+they do not load generation history. Evidence expiry still uses the monitor's
+observations and the same lane-status projection on every read.
+
 The catalog's `product-status-read` reads the same product
 inventory once and returns each caller-visible product and every recorded lane's sidebar tone and description,
 sidebar reasons and attention and warning reasons, plus the product's warnings. Missing lane status

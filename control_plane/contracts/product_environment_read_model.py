@@ -29,7 +29,6 @@ from control_plane.contracts.preview_desired_state_record import PreviewDesiredS
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord, PreviewState
-from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
@@ -95,14 +94,13 @@ from control_plane.contracts.sync_cycle_health import SyncCycleHealthEvidence
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretClass
 from control_plane.contracts.secret_record import SecretBinding, SecretSharingReason
 from control_plane.drivers.registry import (
-    read_product_lane_summary,
+    read_product_lane_evidence,
     effective_driver_actions,
     list_driver_descriptors,
     read_driver_descriptor,
 )
 from control_plane.lane_runtime_verification import (
     monitor_observation_provenance,
-    read_lane_runtime_verification,
 )
 from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
@@ -217,16 +215,6 @@ class ProductEnvironmentReadModelStore(ProductReadModelStore, Protocol):
         anchor_pr_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[PreviewRecord, ...]: ...
-
-    def list_preview_summaries(
-        self,
-        *,
-        context_name: str = "",
-        anchor_repo: str = "",
-        anchor_pr_number: int | None = None,
-        preview_limit: int | None = None,
-        generation_limit: int | None = 1,
-    ) -> tuple[LaunchplanePreviewSummary, ...]: ...
 
     def list_preview_desired_state_records(
         self, *, context_name: str = "", limit: int | None = None
@@ -740,13 +728,15 @@ class ProductActivityReadModel(BaseModel):
 def build_product_site_overviews(
     *, record_store: ProductReadModelStore, action_allowed: ActionAllowed
 ) -> tuple[ProductSiteOverview, ...]:
+    profiles = record_store.list_product_profile_records()
     return tuple(
-        build_product_site_overview(
+        _build_product_site_overview(
             record_store=record_store,
-            product=profile.product,
+            profile=profile,
+            profiles=profiles,
             action_allowed=action_allowed,
         )
-        for profile in record_store.list_product_profile_records()
+        for profile in profiles
         if profile.is_active
     )
 
@@ -754,7 +744,20 @@ def build_product_site_overviews(
 def build_product_site_overview(
     *, record_store: ProductReadModelStore, product: str, action_allowed: ActionAllowed
 ) -> ProductSiteOverview:
-    profile = record_store.read_product_profile_record(product)
+    return _build_product_site_overview(
+        record_store=record_store,
+        profile=record_store.read_product_profile_record(product),
+        action_allowed=action_allowed,
+    )
+
+
+def _build_product_site_overview(
+    *,
+    record_store: ProductReadModelStore,
+    profile: LaunchplaneProductProfileRecord,
+    action_allowed: ActionAllowed,
+    profiles: tuple[LaunchplaneProductProfileRecord, ...] | None = None,
+) -> ProductSiteOverview:
     descriptor, descriptor_warning = _read_profile_descriptor(profile)
     environment_summaries = tuple(
         _build_environment_summary(
@@ -763,6 +766,7 @@ def build_product_site_overview(
             descriptor=descriptor,
             lane=lane,
             action_allowed=action_allowed,
+            profiles=profiles,
         )
         for lane in profile.lanes
     )
@@ -904,7 +908,7 @@ def build_product_environment_detail(
         profile, declared_lane, read_split_ingress_binding(record_store, profile, declared_lane)
     )
     descriptor, descriptor_warning = _read_profile_descriptor(profile)
-    lane_summary = read_product_lane_summary(
+    lane_summary, runtime_verification = read_product_lane_evidence(
         record_store=record_store,
         profile=profile,
         lane=lane,
@@ -917,13 +921,7 @@ def build_product_environment_detail(
         profile=profile,
         lane=lane,
         lane_summary=lane_summary,
-        runtime_verification=(
-            read_lane_runtime_verification(
-                record_store=record_store, profile=profile, lane=lane, summary=lane_summary
-            )
-            if lane_summary is not None
-            else None
-        ),
+        runtime_verification=runtime_verification,
     )
     warnings = tuple(
         warning
@@ -1041,7 +1039,7 @@ def build_product_environment_config_status(
             provenance=DataProvenance(source_kind="record", freshness_status="recorded"),
         )
     else:
-        lane_summary = read_product_lane_summary(
+        lane_summary, _ = read_product_lane_evidence(
             record_store=record_store,
             profile=profile,
             lane=lane,
@@ -2366,11 +2364,13 @@ def _build_environment_summary(
     descriptor: DriverDescriptor | None,
     lane: ProductLaneProfile,
     action_allowed: ActionAllowed,
+    profiles: tuple[LaunchplaneProductProfileRecord, ...] | None = None,
 ) -> ProductEnvironmentSummary:
-    lane_summary = read_product_lane_summary(
+    lane_summary, runtime_verification = read_product_lane_evidence(
         record_store=record_store,
         profile=profile,
         lane=lane,
+        profiles=profiles,
     )
     provenance = (
         lane_summary.provenance if lane_summary is not None else _missing_lane_provenance(lane)
@@ -2380,13 +2380,7 @@ def _build_environment_summary(
         profile=profile,
         lane=lane,
         lane_summary=lane_summary,
-        runtime_verification=(
-            read_lane_runtime_verification(
-                record_store=record_store, profile=profile, lane=lane, summary=lane_summary
-            )
-            if lane_summary is not None
-            else None
-        ),
+        runtime_verification=runtime_verification,
     )
     return ProductEnvironmentSummary(
         environment=lane.instance,

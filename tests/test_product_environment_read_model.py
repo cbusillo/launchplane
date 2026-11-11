@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
+from sqlalchemy import event
 from typing import cast
 import unittest
 import os
@@ -678,31 +680,49 @@ class _HistoricalActivityRecordStore(_PreviewRecordStore):
 
 
 class ProductEnvironmentReadModelTest(unittest.TestCase):
-    def test_product_overview_reads_preview_records_without_loading_generation_history(
-        self,
-    ) -> None:
-        profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
-        preview = _preview_record(
-            preview_id="current-preview",
-            context=profile.preview.context,
-            anchor_repo=profile.repository.rsplit("/", 1)[-1],
-            state="active",
-            updated_at=profile.updated_at,
-        )
-        store = _PreviewRecordStore(profile, (preview,))
-        with patch.object(
-            store,
-            "list_preview_summaries",
-            side_effect=AssertionError("generation history read"),
-            create=True,
+    def test_product_overview_query_count_does_not_grow_with_preview_history(self) -> None:
+        with (
+            TemporaryDirectory() as directory,
+            closing(
+                PostgresRecordStore(database_url=f"sqlite+pysqlite:///{directory}/state.sqlite3")
+            ) as store,
         ):
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
+            store.write_product_profile_record(profile)
+            queries: list[None] = []
+
+            def count_query(*_: object) -> None:
+                queries.append(None)
+
+            event.listen(store._engine, "before_cursor_execute", count_query)
+            build_product_site_overview(
+                record_store=store, product=profile.product, action_allowed=lambda *_: True
+            )
+            empty_read_queries = len(queries)
+            previews = tuple(
+                _preview_record(
+                    preview_id=f"preview-{index}",
+                    context=profile.preview.context,
+                    anchor_repo=profile.repository.rsplit("/", 1)[-1],
+                    state="active" if index else "destroyed",
+                    updated_at=profile.updated_at,
+                )
+                for index in range(8)
+            )
+            for preview in previews:
+                store.write_preview_record(preview)
+            queries.clear()
             overview = build_product_site_overview(
                 record_store=store, product=profile.product, action_allowed=lambda *_: True
             )
-        self.assertEqual(overview.preview.latest_preview_id, preview.preview_id)
-        self.assertEqual(overview.preview.active_count, 1)
-        self.assertEqual(overview.preview.records[0].preview_id, preview.preview_id)
-        self.assertEqual(len(overview.environments), len(profile.lanes))
+            self.assertLessEqual(len(queries), empty_read_queries)
+            active_ids = {
+                preview.preview_id for preview in previews if preview.state != "destroyed"
+            }
+            self.assertEqual(overview.preview.active_count, len(active_ids))
+            self.assertIn(overview.preview.latest_preview_id, active_ids)
+            self.assertEqual({record.preview_id for record in overview.preview.records}, active_ids)
 
     def test_lane_status_warns_for_stored_credentials_without_integration_allowance(self) -> None:
         with TemporaryDirectory() as directory:
