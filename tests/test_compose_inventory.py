@@ -9,6 +9,7 @@ import sys
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
+import yaml
 from unittest.mock import patch
 
 from control_plane.dokploy import api, native_copy_stream
@@ -76,7 +77,9 @@ class CachedComposeInventoryTests(unittest.TestCase):
         result = inventory.read_cached_files(self.base, arguments["payload"])
         arguments["receive"]({"type": "complete", "result": result})
 
-    def documents(self, **overrides: Any) -> tuple[dict[str, Any], ...]:
+    def documents(
+        self, *, failures: list[str] | None = None, **overrides: Any
+    ) -> tuple[dict[str, Any], ...]:
         return inventory.read_volume_documents(
             host="https://provider.invalid",
             token="fixture",
@@ -84,7 +87,76 @@ class CachedComposeInventoryTests(unittest.TestCase):
             raw=json.dumps(self.wrapper),
             server_id="selected-server",
             exact=True,
+            failures=failures,
         )
+
+    def test_diagnostics_distinguish_conversion_source_and_acquisition_without_replacing_errors(
+        self,
+    ) -> None:
+        for raw, overrides, reason in (
+            ("[broken", {}, "inventory_converted_document_malformed"),
+            ("[]", {}, "inventory_converted_document_malformed"),
+            ('{"services": []}', {}, "inventory_converted_document_malformed"),
+            ("null", {}, "inventory_converted_document_absent"),
+            (
+                json.dumps(self.wrapper),
+                {"serverId": "elsewhere"},
+                "inventory_source_placement_unqualified",
+            ),
+            (
+                json.dumps(self.wrapper),
+                {"command": "unsupported"},
+                "inventory_source_scope_unqualified",
+            ),
+        ):
+            failures: list[str] = []
+            arguments: dict[str, Any] = dict(
+                host="https://provider.invalid",
+                token="fixture",
+                payload={**self.payload, **overrides},
+                raw=raw,
+                server_id="selected-server",
+                exact=True,
+            )
+            with self.subTest(reason=reason):
+                with self.assertRaises((ValueError, yaml.YAMLError)) as legacy:
+                    inventory.read_volume_documents(**arguments)
+                with self.assertRaises(type(legacy.exception)):
+                    inventory.read_volume_documents(**arguments, failures=failures)
+                self.assertIn(reason, failures)
+                self.assertNotIn("private-fixture-token", json.dumps(failures))
+        for error, reason in (
+            (OSError("private source path"), "inventory_source_acquisition_failed"),
+            (
+                native_copy_stream.NativeSourceAuthorizationDenied("secret denial"),
+                "inventory_acquisition_denied",
+            ),
+            (
+                api.DokployRequestFailed(
+                    method="GET", path="/private", detail="secret denial", status_code=403
+                ),
+                "inventory_acquisition_denied",
+            ),
+        ):
+            failures = []
+            with patch.object(inventory, "read_cached_compose_source", side_effect=error):
+                for diagnostics in (None, failures):
+                    with self.assertRaises(type(error)) as caught:
+                        self.documents(failures=diagnostics)
+                    self.assertIs(caught.exception, error)
+            self.assertIn(reason, failures)
+            self.assertNotIn(str(error), json.dumps(failures))
+
+    def test_diagnostic_include_qualification_preserves_readable_siblings(self) -> None:
+        self.wrapper["include"].insert(0, "broken.yml")
+        self.write_sources()
+        (self.root.parent / "broken.yml").write_text('{"services": []}')
+        with self.assertRaises(ValueError):
+            self.documents()
+        failures: list[str] = []
+        documents = self.documents(failures=failures)
+        self.assertEqual(compose_volume_names(documents[0], self.payload), (self.default_name,))
+        self.assertIn("inventory_included_document_unqualified", failures)
 
     def test_include_defaults_need_independent_absence_and_leave_sources_unchanged(self) -> None:
         before = (self.root.read_bytes(), self.child.read_bytes(), self.environment.read_bytes())
