@@ -75,7 +75,6 @@ class CandidateRetentionPlanTests(unittest.TestCase):
     def setUp(self) -> None:
         from control_plane import testing_candidate_retention as retention
         from control_plane.contracts.testing_candidate_retention import NativeTestingSweepRequest
-        from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
         from control_plane.contracts.deploy_target import ProviderTargetRecord
         from tests.test_testing_replacement_resources import TestingReplacementResourceFixture
         from unittest.mock import patch
@@ -126,14 +125,7 @@ class CandidateRetentionPlanTests(unittest.TestCase):
             compose_id="failed-copy",
             created_at=datetime.now(timezone.utc),
         )
-        with self.store._session_factory() as session:
-            session.add(
-                LaunchplaneTestingCandidateRow(
-                    namespace=self.candidate.namespace,
-                    payload=self.candidate.model_dump(mode="json"),
-                )
-            )
-            session.commit()
+        self.store_candidate(self.candidate)
         self.store.write_provider_target_record(
             ProviderTargetRecord(
                 provider_id="dokploy",
@@ -176,6 +168,184 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         return self.retention.build_native_testing_sweep(
             self.store, self.root, self.request, "trace"
         )[0]
+
+    def store_candidate(self, candidate: TestingCandidateAllocation) -> None:
+        from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
+
+        with self.store._session_factory() as session:
+            session.merge(
+                LaunchplaneTestingCandidateRow(
+                    namespace=candidate.namespace, payload=self.store._payload_dict(candidate)
+                )
+            )
+            session.commit()
+
+    def with_application(self, *, prepared: bool) -> TestingCandidateAllocation:
+        from control_plane.contracts.artifact_identity import (
+            ArtifactIdentityManifest,
+            ArtifactImageReference,
+        )
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+        from control_plane.contracts.testing_candidate_application import (
+            TestingCandidateApplication,
+            TestingCandidateApplicationPlan,
+            TestingCandidatePrepared,
+        )
+
+        digest = "sha256:" + "d" * 64
+        identity = RuntimeIdentity(
+            product=self.candidate.product,
+            context=self.candidate.context,
+            instance="testing",
+            deployment_record_id="fixture-deployment",
+            artifact_id="fixture-artifact",
+            source_git_ref="a" * 40,
+            image_reference="ghcr.io/example/app@" + digest,
+            image_digest=digest,
+        )
+        plan = TestingCandidateApplicationPlan(
+            product=self.candidate.product,
+            context=self.candidate.context,
+            operation_id=self.candidate.operation_id,
+            namespace=self.candidate.namespace,
+            target_id=self.candidate.compose_id,
+            base_url="https://testing.example",
+            artifact=ArtifactIdentityManifest(
+                artifact_id="fixture-artifact",
+                source_commit="a" * 40,
+                enterprise_base_digest="sha256:" + "b" * 64,
+                image=ArtifactImageReference(repository="ghcr.io/example/app", digest=digest),
+            ),
+            runtime_identity=identity,
+            source="empty",
+            authority_sha256="c" * 64,
+            credential_bindings_sha256="f" * 64,
+        )
+        application = (
+            TestingCandidateApplication(
+                plan=plan,
+                phase="prepared",
+                deployment_id="fixture-deployment",
+                prepared=TestingCandidatePrepared(
+                    plan_sha256=plan.digest,
+                    runtime_identity=identity,
+                    private_endpoint="http://fixture-private",
+                    deployment_id="fixture-deployment",
+                    source_witness="fixture-witness",
+                    integration_isolation_verified=True,
+                    credentials_verified=True,
+                    observed_at=datetime.now(timezone.utc),
+                ),
+            )
+            if prepared
+            else TestingCandidateApplication(
+                plan=plan, phase="abandoned", abandonment_evidence="fixture-restore-failed"
+            )
+        )
+        self.candidate = self.candidate.model_copy(
+            update={"resources_binding_sha256": "e" * 64, "application": application}
+        )
+        self.candidate = TestingCandidateAllocation.model_validate(self.candidate.model_dump())
+        self.store_candidate(self.candidate)
+        return self.candidate
+
+    def selected(self) -> Any:
+        return next(
+            item for item in self.plan().candidates if item.namespace == self.candidate.namespace
+        )
+
+    def test_failed_copy_is_not_held_by_its_own_stored_records(self) -> None:
+        self.with_application(prepared=False)
+        candidate = self.selected()
+        self.assertEqual(candidate.status, "eligible")
+        self.assertEqual(candidate.references, ())
+
+    def test_another_record_naming_the_copy_holds_it_and_names_its_owner(self) -> None:
+        self.with_application(prepared=False)
+        reviewed = self.selected()
+        later = TestingCandidateAllocation(
+            namespace=testing_candidate_namespace(
+                self.candidate.product, self.candidate.context, "later-original"
+            ),
+            product=self.candidate.product,
+            context=self.candidate.context,
+            operation_id="later-original",
+            intent_sha256="a" * 64,
+            serving_target_id=self.candidate.compose_id,
+            server_id="host",
+            created_at=datetime.now(timezone.utc),
+        )
+        self.store_candidate(later)
+        candidate = self.selected()
+        self.assertNotEqual(candidate.ownership_sha256, reviewed.ownership_sha256)
+        self.assertEqual(candidate.status, "held")
+        self.assertIn("needed_copy_or_evidence_reference", candidate.reasons)
+        self.assertEqual(
+            [(row.kind, row.record_id) for row in candidate.references],
+            [("testing_candidate", later.namespace)],
+        )
+
+    def test_completed_copy_releases_only_with_its_preserved_source(self) -> None:
+        from unittest.mock import patch
+
+        self.with_application(prepared=True)
+        self.observation["volumes"][0].update(empty=False, reason="container_reference")
+        self.observation["project"] = self.candidate.namespace
+        lifecycle = {"payload": {"container_ids": ["1" * 64], "container_snapshot": "s"}}
+        custody = self.enterContext(
+            patch.object(self.retention, "candidate_lifecycle_custody", return_value=lifecycle)
+        )
+        self.assertEqual(self.selected().status, "eligible")
+        custody.assert_called_once()
+        with patch.object(self.retention, "_source_preserved", return_value=False):
+            held = self.selected()
+        self.assertEqual(held.status, "held")
+        self.assertEqual(held.reasons, ("completed_copy_requires_disposition",))
+        self.request = self.request.model_copy(
+            update={"receiver_operation_id": self.candidate.operation_id}
+        )
+        receiver = self.selected()
+        self.assertEqual(
+            receiver.reasons, ("receiver_candidate", "completed_copy_requires_disposition")
+        )
+        custody.assert_called_once()
+
+    def test_completed_copy_lifecycle_is_bound_to_its_serving_web(self) -> None:
+        from unittest.mock import patch
+        from control_plane.dokploy import source, testing_retained_copy
+
+        proof = {
+            "container_ids": [],
+            "container_snapshot": "s",
+            "resource_binding": "r",
+            "physical_binding": "p",
+        }
+        sent: list[dict[str, Any]] = []
+
+        def operation(**kwargs: Any) -> dict[str, Any]:
+            sent.append(kwargs["payload"])
+            return proof
+
+        self.enterContext(
+            patch.object(testing_retained_copy, "retained_copy_operation", side_effect=operation)
+        )
+        self.enterContext(patch.object(source, "read_dokploy_config", return_value=("h", "t")))
+        for prepared in (True, False):
+            self.with_application(prepared=prepared)
+            self.retention.candidate_lifecycle_custody(
+                self.root, self.store, self.candidate, self.candidate.namespace
+            )
+            self.assertIs(sent[-1]["failed_candidate"].get("completed", False), prepared)
+        configured = self.candidate.application.model_copy(  # type: ignore[union-attr]
+            update={"phase": "configured", "abandonment_evidence": ""}
+        )
+        with self.assertRaisesRegex(ValueError, "terminal"):
+            self.retention.candidate_lifecycle_custody(
+                self.root,
+                self.store,
+                self.candidate.model_copy(update={"application": configured}),
+                self.candidate.namespace,
+            )
 
     def test_original_records_survive_and_a_selected_target_loses_eligibility(self) -> None:
         from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord

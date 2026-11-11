@@ -49,13 +49,24 @@ current positive qualification. No new grant or assertion of empty data is used.
 The executor exclusion and original row lock stay held; the product-authority
 lock covers only effect admission, not remote work.
 
+A candidate's own record and its original operation record are its custody and
+failure evidence. They stay stored and never hold its storage. Any other record
+that names the candidate's namespace, target or volumes holds it, and the
+candidate's `references` list each one with its `reason`, `kind`, and
+`record_id` or, for current records, `record_sha256`. `references` is omitted
+when nothing else names the candidate.
+
 Mounted storage qualifies only through the existing native retained-copy
-lifecycle. The candidate must be terminally abandoned and its source preserved.
-A stopped container alone is insufficient. Serving/unknown web processes, execs,
-published ports, foreign mounts and changed IDs/configuration refuse. A web
-container still in the original integration-gate wait can qualify only with the
-exact command, runtime identity, data mount, absent gate and positive shell/sleep
-process evidence. A missing web container still requires runtime identity on its
+lifecycle. The candidate must be terminally abandoned, or a completed copy whose
+original failed, and its source must be preserved. A completed copy without a
+preserved source stays held as `completed_copy_requires_disposition`. A stopped
+container alone is insufficient. Unknown web processes, execs, published ports,
+foreign mounts and changed IDs/configuration refuse. A web container still in
+the original integration-gate wait can qualify only with the exact command,
+runtime identity, data mount, absent gate and positive shell/sleep process
+evidence. A completed copy's serving web qualifies only with the exact command,
+runtime identity, data mount and its regular gate file; it has no route, since
+a routed or published candidate is refused. A missing web container still requires runtime identity on its
 remaining runner. The existing Compose stop and exact non-force container
 removal have durable receipts and absence readback. Only then may the existing
 volume sweep remove reviewed eligible volumes; its apply still refuses mounts.

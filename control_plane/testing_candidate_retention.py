@@ -4,7 +4,7 @@ from collections.abc import Callable
 from contextlib import closing, ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import click
 
@@ -16,6 +16,7 @@ from control_plane.contracts.retained_volume import RetainedVolumeBinding
 from control_plane.contracts.testing_candidate_retention import (
     NativeTestingBackingCapacity,
     NativeTestingSweepCandidate,
+    NativeTestingSweepReference,
     NativeTestingSweepRequest,
     NativeTestingSweepResponse,
     NativeTestingSweepResource,
@@ -79,8 +80,6 @@ def candidate_record_refusals(
     if candidate.compose_id in selected_targets:
         reasons.append("selected_target")
     abandoned = candidate.application is not None and candidate.application.phase == "abandoned"
-    if candidate.application is not None and candidate.application.prepared is not None:
-        reasons.append("completed_copy_requires_disposition")
     if operation.status not in {"fail", "cancelled", "superseded"} and not (
         operation.status == "reconciliation_required" and abandoned
     ):
@@ -97,12 +96,22 @@ def candidate_record_refusals(
     return tuple(reasons)
 
 
+class CandidateAuthority(NamedTuple):
+    ownership_sha256: str
+    reasons: tuple[str, ...]
+    references: tuple[NativeTestingSweepReference, ...]
+
+
+def completed_copy(candidate: TestingCandidateAllocation) -> bool:
+    return candidate.application is not None and candidate.application.prepared is not None
+
+
 def candidate_authority(
     store: PostgresRecordStore,
     request: NativeTestingSweepRequest,
     candidate: TestingCandidateAllocation,
     allowed_provider_records: frozenset[str] = frozenset(),
-) -> tuple[str, tuple[str, ...]]:
+) -> CandidateAuthority:
     operation = store.read_odoo_stable_target_replacement_operation_record(candidate.operation_id)
     profile = store.read_product_profile_record(request.product)
     profiles = store.list_product_profile_records()
@@ -177,37 +186,68 @@ def candidate_authority(
         candidate.compose_id,
         candidate.namespace,
     )
+    references: list[NativeTestingSweepReference] = []
+
+    def names_candidate(evidence: object) -> bool:
+        return any(name and _volume_referenced(name, evidence, exact=True) for name in names)
+
+    def hold(reason: str, owner: str, evidence: dict[str, Any], record_id: str = "") -> None:
+        reasons.append(reason)
+        snapshot.append(evidence)
+        references.append(
+            NativeTestingSweepReference(
+                reason=reason,
+                kind=owner,
+                record_id=record_id,
+                record_sha256="" if record_id else canonical_json_sha256(evidence),
+            )
+        )
+
     collections = (
-        store.list_runtime_environment_records(),
-        store.list_preview_records(),
-        store.list_preview_generation_records(),
-        store.list_private_health_endpoint_records(),
-        store.list_production_backup_policy_records(status="active"),
-        store.list_odoo_prod_backup_restore_operation_records(),
-        store.list_odoo_prod_retained_volume_backup_import_operation_records(),
+        ("runtime_environment", store.list_runtime_environment_records()),
+        ("preview", store.list_preview_records()),
+        ("preview_generation", store.list_preview_generation_records()),
+        ("private_health_endpoint", store.list_private_health_endpoint_records()),
+        ("production_backup_policy", store.list_production_backup_policy_records(status="active")),
+        ("production_restore", store.list_odoo_prod_backup_restore_operation_records()),
+        (
+            "production_volume_import",
+            store.list_odoo_prod_retained_volume_backup_import_operation_records(),
+        ),
     )
-    for rows in collections:
+    for kind, rows in collections:
         for row in rows:
             payload = row.model_dump(mode="json")
-            if any(name and _volume_referenced(name, payload, exact=True) for name in names):
-                reasons.append("current_or_recovery_reference")
-                snapshot.append(payload)
-    with closing(store.retained_volume_recovery_payloads()) as payloads:
-        for payload in payloads:
-            if payload == candidate.model_dump(mode="json") or payload == operation.model_dump(
-                mode="json"
-            ):
+            if names_candidate(payload):
+                hold("current_or_recovery_reference", kind, payload)
+    own_records = {
+        ("testing_candidate", candidate.namespace),
+        ("testing_operation", candidate.operation_id),
+    }
+    with closing(store.retained_volume_recovery_records()) as records:
+        for record in records:
+            if (record.kind, record.record_id) in own_records:
                 continue
-            if any(name and _volume_referenced(name, payload, exact=True) for name in names):
-                reasons.append("needed_copy_or_evidence_reference")
-                snapshot.append(payload)
+            if names_candidate(record.payload):
+                hold(
+                    "needed_copy_or_evidence_reference",
+                    record.kind,
+                    record.payload,
+                    record.record_id,
+                )
     for reservation in store.list_held_provider_target_reservations():
         if reservation.record_id in allowed_provider_records:
             continue
         if any(name and name in reservation.provider_target_key for name in names):
-            reasons.append("active_provider_operation")
-            snapshot.append(reservation.model_dump(mode="json"))
-    return canonical_json_sha256(snapshot), tuple(dict.fromkeys(reasons))
+            hold(
+                "active_provider_operation",
+                "provider_reservation",
+                reservation.model_dump(mode="json"),
+                reservation.record_id,
+            )
+    return CandidateAuthority(
+        canonical_json_sha256(snapshot), tuple(dict.fromkeys(reasons)), tuple(references)
+    )
 
 
 def candidate_provider_snapshot(payload: dict[str, Any]) -> str:
@@ -272,6 +312,7 @@ def inspect_candidate_resources(
                     _odoo_web_command(hold_until_integration_readback=True).replace("$$", "$"),
                 ],
                 "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
+                **({"completed": True} if completed_copy(candidate) else {}),
             },
         },
         receive=frames.append,
@@ -337,8 +378,8 @@ def candidate_lifecycle_custody(
     from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
     app = candidate.application
-    if app is None or app.phase != "abandoned":
-        raise ValueError("Container reclamation needs its terminal abandoned candidate.")
+    if app is None or app.phase not in {"abandoned", "prepared"}:
+        raise ValueError("Container reclamation needs its terminal failed candidate.")
     payload: dict[str, Any] = {
         "context": candidate.context,
         "project": project,
@@ -354,6 +395,7 @@ def candidate_lifecycle_custody(
                 _odoo_web_command(hold_until_integration_readback=True).replace("$$", "$"),
             ],
             "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
+            **({"completed": True} if completed_copy(candidate) else {}),
         },
     }
     host, token = source.read_dokploy_config(
@@ -491,7 +533,7 @@ def build_native_testing_sweep(
     for candidate in owned:
         selected = candidate.namespace in request.candidates
         try:
-            ownership, reasons = candidate_authority(
+            ownership, reasons, references = candidate_authority(
                 store, request, candidate, allowed_provider_records
             )
             source_proof: dict[str, Any] = {}
@@ -502,6 +544,8 @@ def build_native_testing_sweep(
             except (ValueError, FileNotFoundError, OSError):
                 source_preserved = False
                 source_proof.clear()
+            if completed_copy(candidate) and not source_preserved:
+                reasons = (*reasons, "completed_copy_requires_disposition")
             observed, provider_reason = inspect_candidate_resources(root, store, candidate)
             if candidate.namespace == receiver_namespace:
                 capacity_refusal = observed["capacity_refusal"]
@@ -616,6 +660,7 @@ def build_native_testing_sweep(
                 lifecycle_snapshot_sha256=canonical_json_sha256(lifecycle) if lifecycle else "",
                 container_count=len(lifecycle["payload"]["container_ids"]) if lifecycle else 0,
                 resources=tuple(resources),
+                references=references,
             )
             private[candidate.namespace] = {
                 "allocation": candidate.model_dump(mode="json"),
@@ -841,7 +886,7 @@ class NativeTestingSweepAdapter:
                     )
                     if parent_record:
                         own_records = own_records | {parent_record}
-                    ownership, reasons = candidate_authority(
+                    ownership, reasons, _ = candidate_authority(
                         self.store, self.request, original, allowed_provider_records=own_records
                     )
                     if current != original or reasons or ownership != candidate.ownership_sha256:

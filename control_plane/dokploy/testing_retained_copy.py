@@ -1,5 +1,6 @@
 import inspect
 from collections.abc import Callable
+from pathlib import Path
 from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
 from typing import Any
 from control_plane.copy_readback_diagnostics import CopyReadbackRefused, ReadbackPredicate
@@ -69,10 +70,15 @@ def retained_container_snapshot(containers: list[dict[str, Any]]) -> str:
     ).hexdigest()
 
 
-def failed_testing_web_wait(
+def web_gate_unexpected(gate: Path, completed: bool) -> bool:
+    if completed:
+        return gate.is_symlink() or not gate.is_file()
+    return gate.exists() or gate.is_symlink()
+
+
+def failed_candidate_own_web(
     container: dict[str, Any], spec: dict[str, Any], read_processes: Callable[[str], list[str]]
 ) -> bool:
-    from pathlib import Path
     import json
 
     original = spec.get("failed_candidate", {})
@@ -97,10 +103,13 @@ def failed_testing_web_wait(
         return False
     backing = Path(mounts[0]["Source"])
     gate = backing / Path(original["web_gate_path"]).relative_to("/volumes/data")
-    if backing.resolve(strict=True) != backing or gate.exists() or gate.is_symlink():
+    completed = original.get("completed") is True
+    if backing.resolve(strict=True) != backing or web_gate_unexpected(gate, completed):
         return False
+    if completed:
+        return True
     processes = read_processes(container["Id"])
-    return "sh" in processes and bool(processes) and set(processes) <= {"sh", "sleep", "tini"}
+    return "sh" in processes and set(processes) <= {"sh", "sleep", "tini"}
 
 
 def qualify_failed_testing_containers(
@@ -142,7 +151,7 @@ def qualify_failed_testing_containers(
             or role not in {"web", "database", "script-runner"}
             or role == "web"
             and state["Status"] == "running"
-            and (read_processes is None or not failed_testing_web_wait(row, spec, read_processes))
+            and (read_processes is None or not failed_candidate_own_web(row, spec, read_processes))
             or role in {"web", "script-runner"}
             and config.get("Image") != spec["failed_candidate"]["image"]
             or labels.get("dokploy.application.id") not in (None, resources["target_id"])
@@ -408,7 +417,8 @@ def retained_copy_host_program() -> str:
         + inspect.getsource(matches_unavailable_web_process)
         + inspect.getsource(require_complete_container_inventory)
         + inspect.getsource(retained_container_snapshot)
-        + inspect.getsource(failed_testing_web_wait)
+        + inspect.getsource(web_gate_unexpected)
+        + inspect.getsource(failed_candidate_own_web)
         + inspect.getsource(qualify_failed_testing_containers)
         + "\nHEALTH_PROGRAM="
         + repr(RETAINED_PRIVATE_HEALTH_PROGRAM)
