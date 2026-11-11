@@ -82,6 +82,7 @@ _SCHEMA_KEYS = frozenset(
         "required",
         "type",
         "uniqueItems",
+        "x-launchplane-safe-output",
     }
 )
 _SEMANTICALLY_UNORDERED_LIST_KEYS = frozenset({"enum", "required"})
