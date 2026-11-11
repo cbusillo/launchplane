@@ -1292,6 +1292,17 @@ A refused qualification keeps the same response for every cause. Its trace's
 refused; a refused storage observation also carries the fixed program's line
 numbers and hash.
 
+Use the supported [service-log reader](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/service-log-reader.md)
+and map the trace's location to the installed source revision. Each missing or
+conflicting provider fact has a distinct site. Missing fields require a complete
+provider observation, not an empty-state assumption. Identity failures need
+target-binding qualification; populated environment, source or mounts need
+existing-input ownership qualification before selecting an action. Enabled
+auto-deploy needs the supported setup path to establish disabled state;
+unverified auto-deploy needs observation-contract repair. If setup cannot meet
+the prerequisite, route that concrete source gap without accepting a default.
+The first refusal stops qualification; later checks remain unverified.
+
 ## Shared preview settings
 
 See [preview runtime settings](preview-settings.md) for the managed `preview`
