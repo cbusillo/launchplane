@@ -93,6 +93,13 @@ pre-dispatch failures release their reservation, and failures after dispatch
 remain `mutation_reconciliation_required` with the original key required.
 Historical failures without a retained predicate remain unknown.
 
+Container selection or inspection failures carry the fixed
+`reason: runtime_container_unverified` through the same existing error projection.
+It means an available container could not be proved, including unavailable
+inventory or inspection, and does not establish that a container stopped.
+Later binding, ownership and native fixture checks remain unavailable when
+runtime connection refuses. This attribution changes no guard or recovery rule.
+
 ## Review, apply and recover
 
 Use `scripts/preview-fixture.py` with the installed catalog transport.
