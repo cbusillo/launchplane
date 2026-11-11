@@ -16949,26 +16949,26 @@ def create_launchplane_fastapi_app(
                     ):
                         raise ValueError("First-empty review changed.")
                     first_empty_plan = qualified
-                except NativeSourceAuthorizationDenied:
+                except NativeSourceAuthorizationDenied as error:
                     raise _launchplane_http_error(
                         status_code=403,
                         trace_id=trace_id,
                         code="authorization_denied",
                         message="The original target refused the first-empty observation.",
-                    ) from None
+                    ) from error
                 except (
                     ValueError,
                     OSError,
                     KeyError,
                     TypeError,
                     click.ClickException,
-                ):
+                ) as error:
                     raise _launchplane_http_error(
                         status_code=409,
                         trace_id=trace_id,
                         code="first_empty_qualification_required",
                         message="The original target, current storage, custody or reviewed inputs could not be qualified. Keep the original key; read and review the current facts.",
-                    ) from None
+                    ) from error
             if product_config_request.odoo_business_hours is not None:
                 assert config_profile is not None
                 try:
