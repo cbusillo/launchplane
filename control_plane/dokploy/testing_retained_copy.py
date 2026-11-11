@@ -84,20 +84,105 @@ def read_container_processes(docker: Callable[..., str | bytes], identifier: str
     return [row.split(maxsplit=1)[1] for row in rows]
 
 
+def failed_candidate_container_evidence(
+    containers: list[dict[str, Any]], spec: dict[str, Any]
+) -> list[dict[str, Any]]:
+    import hashlib
+    import json
+
+    result = []
+    namespace = spec["failed_candidate"]["resources"]["namespace"]
+    for container in containers:
+        config = container.get("Config")
+        labels = config.get("Labels") if isinstance(config, dict) else None
+        labels = labels if isinstance(labels, dict) else {}
+        mounts = container.get("Mounts")
+        roles = tuple(
+            role
+            for role, suffix in (
+                ("ODOO_DB_VOLUME", "-db"),
+                ("ODOO_DATA_VOLUME", "-data"),
+                ("ODOO_LOG_VOLUME", "-logs"),
+            )
+            if isinstance(mounts, list)
+            and any(
+                isinstance(mount, dict) and mount.get("Name") == namespace + suffix
+                for mount in mounts
+            )
+        )
+        owned = labels.get("com.docker.compose.project") == spec["project"]
+        if not owned and not roles and isinstance(mounts, list):
+            continue
+        role = labels.get("com.docker.compose.service")
+        state = container.get("State")
+        state = state.get("Status") if isinstance(state, dict) else None
+        result.append(
+            {
+                "container_sha256": hashlib.sha256(
+                    json.dumps(container.get("Id"), sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                "role": role
+                if role in ("web", "database", "script-runner")
+                else "unknown"
+                if role is None
+                else "other",
+                "state": state
+                if state in ("running", "exited", "created", "dead")
+                else "unknown"
+                if state is None
+                else "other",
+                "volume_roles": roles,
+                "mounts_sha256": hashlib.sha256(
+                    json.dumps(mounts, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                "checks": {
+                    "owned": "pass" if owned else "fail",
+                    "mounts": "pass" if isinstance(mounts, list) else "unavailable",
+                    "foreign_reference": "fail"
+                    if not owned and roles
+                    else "pass"
+                    if isinstance(mounts, list)
+                    else "unavailable",
+                    "container_qualification": "not_reached",
+                    "web_command": "not_reached",
+                    "runtime_identity": "not_reached",
+                    "web_data_mount": "not_reached",
+                    "web_gate": "not_reached",
+                    "web_process": "not_reached",
+                },
+            }
+        )
+    return result
+
+
+def failed_candidate_check(evidence: dict[str, str] | None, predicate: str, passed: bool) -> bool:
+    if evidence is not None:
+        evidence[predicate] = "pass" if passed else "fail"
+    return passed
+
+
 def failed_candidate_own_web(
-    container: dict[str, Any], spec: dict[str, Any], read_processes: Callable[[str], list[str]]
+    container: dict[str, Any],
+    spec: dict[str, Any],
+    read_processes: Callable[[str], list[str]],
+    evidence: dict[str, str] | None = None,
 ) -> bool:
     import json
 
     original = spec.get("failed_candidate", {})
     command = original.get("web_command")
-    if not command or container["Config"].get("Cmd") != command:
+    if not failed_candidate_check(
+        evidence, "web_command", bool(command) and container["Config"].get("Cmd") == command
+    ):
         return False
     environment = dict(
         value.split("=", 1) for value in container["Config"].get("Env", []) if "=" in value
     )
-    if json.loads(environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", "null")) != spec.get(
-        "identity"
+    if not failed_candidate_check(
+        evidence,
+        "runtime_identity",
+        json.loads(environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", "null"))
+        == spec.get("identity"),
     ):
         return False
     mounts = [
@@ -107,23 +192,34 @@ def failed_candidate_own_web(
         and row.get("Type") == "volume"
         and row.get("Name") == original["resources"]["namespace"] + "-data"
     ]
-    if len(mounts) != 1:
+    if not failed_candidate_check(evidence, "web_data_mount", len(mounts) == 1):
         return False
     backing = Path(mounts[0]["Source"])
     gate = backing / Path(original["web_gate_path"]).relative_to("/volumes/data")
     completed = original.get("completed") is True
-    if backing.resolve(strict=True) != backing or web_gate_unexpected(gate, completed):
+    if not failed_candidate_check(
+        evidence,
+        "web_gate",
+        backing.resolve(strict=True) == backing and not web_gate_unexpected(gate, completed),
+    ):
         return False
     if completed:
+        if evidence is not None:
+            evidence["web_process"] = "not_applicable"
         return True
+    if evidence is not None:
+        evidence["web_process"] = "unavailable"
     processes = read_processes(container["Id"])
-    return "sh" in processes and set(processes) <= {"sh", "sleep", "tini"}
+    return failed_candidate_check(
+        evidence, "web_process", "sh" in processes and set(processes) <= {"sh", "sleep", "tini"}
+    )
 
 
 def qualify_failed_testing_containers(
     containers: list[dict[str, Any]],
     spec: dict[str, Any],
     read_processes: Callable[[str], list[str]] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     import re
     import json
@@ -143,8 +239,23 @@ def qualify_failed_testing_containers(
         for row in containers
         if (row["Config"]["Labels"] or {}).get("com.docker.compose.project") == spec["project"]
     ]
+    import hashlib
+
     roles = []
     for row in members:
+        container_hash = hashlib.sha256(
+            json.dumps(row.get("Id"), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        observations: dict[str, str] | None = next(
+            (
+                item["checks"]
+                for item in evidence or ()
+                if item["container_sha256"] == container_hash
+            ),
+            None,
+        )
+        if observations is not None:
+            observations["container_qualification"] = "fail"
         config, state = row["Config"], row["State"]
         labels = config["Labels"]
         role = labels.get("com.docker.compose.service")
@@ -159,7 +270,10 @@ def qualify_failed_testing_containers(
             or role not in {"web", "database", "script-runner"}
             or role == "web"
             and state["Status"] == "running"
-            and (read_processes is None or not failed_candidate_own_web(row, spec, read_processes))
+            and (
+                read_processes is None
+                or not failed_candidate_own_web(row, spec, read_processes, observations)
+            )
             or role in {"web", "script-runner"}
             and config.get("Image") != spec["failed_candidate"]["image"]
             or labels.get("dokploy.application.id") not in (None, resources["target_id"])
@@ -186,6 +300,8 @@ def qualify_failed_testing_containers(
                 not in {namespace + suffix for suffix in ("-db", "-data", "-logs")}
             ):
                 raise ValueError("Failed candidate has unbound writable storage.")
+        if observations is not None:
+            observations["container_qualification"] = "pass"
     if len(roles) != len(set(roles)):
         raise ValueError("Failed candidate service identity is ambiguous.")
     snapshot = retained_container_snapshot(members)
@@ -427,6 +543,8 @@ def retained_copy_host_program() -> str:
         + inspect.getsource(retained_container_snapshot)
         + inspect.getsource(web_gate_unexpected)
         + inspect.getsource(read_container_processes)
+        + inspect.getsource(failed_candidate_container_evidence)
+        + inspect.getsource(failed_candidate_check)
         + inspect.getsource(failed_candidate_own_web)
         + inspect.getsource(qualify_failed_testing_containers)
         + "\nHEALTH_PROGRAM="
@@ -464,6 +582,7 @@ try:
         os.environ['DOCKER_HOST']='unix:///var/run/docker.sock'
     copy_failure_stage=CopyFailureStage.CLEANUP if spec['mode']=='remove' else CopyFailureStage.HOST_PREPARATION
     containers=inventory()
+    custody_evidence={'containers':failed_candidate_container_evidence(containers,spec),'checks':{'container_inventory':'pass','lifecycle_acquisition':'unavailable'}} if spec.get('custody_evidence') is True and spec.get('failed_candidate') and spec['mode']=='read' else None
     own={item['Id'] for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==spec['project']}
     failed_custody={}
     qualification_spec=spec
@@ -473,7 +592,7 @@ try:
             if any(item['Id'] in expected and item['Id'] not in own for item in containers) or own-set(expected):
                 raise ValueError('Original candidate container ownership changed')
         else:
-            failed_custody=qualify_failed_testing_containers(containers,spec,lambda identifier: read_container_processes(docker,identifier))
+            failed_custody=qualify_failed_testing_containers(containers,spec,lambda identifier: read_container_processes(docker,identifier),custody_evidence['containers'] if custody_evidence is not None else None)
         if not any(item['Id'] in own and item['Config']['Labels'].get('com.docker.compose.service')=='web' for item in containers):
             qualification_spec={**spec,'identity':None}
     if spec['mode'] in {'remove','removal-readback'}:
@@ -544,6 +663,9 @@ try:
             result['healthy']=True
         elif spec['mode'] not in {'read'}:
             raise ValueError('Unsupported retained testing operation')
+    if custody_evidence is not None:
+        custody_evidence['checks']['lifecycle_acquisition']='pass'
+        print(sys.argv[2]+json.dumps({'type':'custody_evidence','evidence':custody_evidence}),flush=True)
     print(sys.argv[2]+json.dumps({**result,**failed_custody}),flush=True)
 except FailedCandidateRemovalRefused:
     print(sys.argv[2]+json.dumps({'type':'complete','availability':'incomplete','reason':'container_removal_refused'}),flush=True)
@@ -551,6 +673,8 @@ except PermissionError:
     print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
     sys.exit(1)
 except Exception as error:
+    if globals().get('custody_evidence') is not None:
+        print(sys.argv[2]+json.dumps({'type':'custody_evidence','evidence':custody_evidence}),flush=True)
     print(sys.argv[2]+json.dumps(copy_readback_failure_frame(error)),flush=True)
 """
     )
@@ -563,15 +687,27 @@ def retained_copy_operation(
     server_id: str,
     payload: dict[str, Any],
     dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     frames: list[dict[str, Any]] = []
+
+    def receive(frame: dict[str, Any]) -> None:
+        if frame.get("type") == "custody_evidence" and evidence is not None:
+            from control_plane.contracts.candidate_custody_evidence import LifecycleEvidence
+
+            evidence.update(
+                LifecycleEvidence.model_validate(frame["evidence"]).model_dump(mode="json")
+            )
+        else:
+            frames.append(frame)
+
     _read_remote(
         host=host,
         token=token,
         server_id=server_id,
         program=retained_copy_host_program(),
         payload=payload,
-        receive=frames.append,
+        receive=receive,
         timeout_seconds=180,
         dispatch_guard=dispatch_guard,
     )

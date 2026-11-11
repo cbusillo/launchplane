@@ -4,11 +4,21 @@ from collections.abc import Callable
 from contextlib import closing, ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Literal, cast
 
 import click
 
-from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.candidate_custody_evidence import readback_outcome
+
+from control_plane.contracts.canonical_json import (
+    canonical_json_sha256,
+    nonvalidating_compact_sorted_json_sha256,
+)
+from control_plane.contracts.candidate_custody_evidence import (
+    CandidateCustodyEvidence,
+    LifecycleEvidence,
+    VolumeCustodyEvidence,
+)
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
@@ -266,7 +276,11 @@ def candidate_provider_snapshot(payload: dict[str, Any]) -> str:
 
 
 def inspect_candidate_resources(
-    root: Path, store: PostgresRecordStore, candidate: TestingCandidateAllocation
+    root: Path,
+    store: PostgresRecordStore,
+    candidate: TestingCandidateAllocation,
+    *,
+    evidence: CandidateCustodyEvidence | None = None,
 ) -> tuple[dict[str, Any], str]:
     host, token = source.read_dokploy_config(
         control_plane_root=root, database_url=store.database_url
@@ -274,6 +288,13 @@ def inspect_candidate_resources(
     payload = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=candidate.compose_id
     )
+    if evidence is not None:
+        evidence.endpoint_sha256 = canonical_json_sha256(
+            {"host": host, "server": payload.get("serverId")}
+        )
+        evidence.checks["placement"] = (
+            "pass" if payload.get("serverId") == candidate.server_id else "fail"
+        )
     project = payload.get("appName")
     from control_plane.contracts.testing_candidate_application import (
         candidate_compose_project_matches,
@@ -370,6 +391,7 @@ def inspect_candidate_resources(
                 program=NATIVE_TESTING_RETENTION_INSPECTION,
                 payload={
                     "resources": candidate_resources(candidate).model_dump(mode="json"),
+                    **({"custody_evidence": True} if evidence is not None else {}),
                     "project": project,
                     "generation": generation.model_dump(mode="json") if generation else None,
                     "database_name": environment.get("ODOO_DB_NAME", ""),
@@ -412,6 +434,8 @@ def candidate_lifecycle_custody(
     store: PostgresRecordStore,
     candidate: TestingCandidateAllocation,
     project: str,
+    *,
+    evidence: LifecycleEvidence | None = None,
 ) -> dict[str, Any]:
     from control_plane.dokploy.testing_retained_copy import retained_copy_operation
     from control_plane.dokploy.compose import held_odoo_web_container_command
@@ -437,9 +461,28 @@ def candidate_lifecycle_custody(
     host, token = source.read_dokploy_config(
         control_plane_root=root, database_url=store.database_url
     )
-    proof = retained_copy_operation(
-        host=host, token=token, server_id=candidate.server_id, payload=payload
-    )
+    observation: dict[str, Any] = {}
+    try:
+        proof = retained_copy_operation(
+            host=host,
+            token=token,
+            server_id=candidate.server_id,
+            payload={**payload, **({"custody_evidence": True} if evidence is not None else {})},
+            evidence=observation if evidence is not None else None,
+        )
+    finally:
+        if evidence is not None and observation:
+            parsed = LifecycleEvidence.model_validate(observation)
+            evidence.containers = parsed.containers
+            for predicate, outcome in parsed.checks.items():
+                # noinspection PyTypeChecker
+                evidence.checks[predicate] = outcome
+    if evidence is not None:
+        evidence.snapshot_sha256 = proof.get("container_snapshot")
+        evidence.resource_binding_sha256 = proof.get("resource_binding")
+        evidence.physical_binding_sha256 = proof.get("physical_binding")
+        evidence.container_count = len(proof["container_ids"])
+
     payload.update(
         {
             key: proof[key]
@@ -552,6 +595,8 @@ def build_native_testing_sweep(
     request: NativeTestingSweepRequest,
     trace_id: str,
     allowed_provider_records: frozenset[str] = frozenset(),
+    *,
+    evidence: list[CandidateCustodyEvidence] | None = None,
 ) -> tuple[NativeTestingSweepResponse, dict[str, Any]]:
     receiver = store.read_odoo_stable_target_replacement_operation_record(request.operation_id)
     if (receiver.product, receiver.context, receiver.instance) != (
@@ -593,6 +638,42 @@ def build_native_testing_sweep(
     verified_sources: dict[str, dict[str, Any]] = {}
     for candidate in owned:
         selected = candidate.namespace in request.candidates
+        if evidence is not None and not selected:
+            continue
+        packet = (
+            CandidateCustodyEvidence(
+                observed_at=datetime.now(timezone.utc),
+                candidate_sha256=nonvalidating_compact_sorted_json_sha256(
+                    candidate.model_dump(mode="json")
+                ),
+                server_sha256=canonical_json_sha256({"server": candidate.server_id}),
+                checks={"native_inventory": "not_reached", "source_preserved": "not_reached"},
+                lifecycle=LifecycleEvidence(
+                    checks={
+                        "lifecycle_acquisition": "not_reached",
+                        "lifecycle_usable": "not_reached",
+                    }
+                ),
+            )
+            if evidence is not None
+            else None
+        )
+        if evidence is not None and packet is not None:
+            evidence.append(packet)
+            packet.volumes = [
+                VolumeCustodyEvidence(
+                    role=cast(
+                        Literal["ODOO_DB_VOLUME", "ODOO_DATA_VOLUME", "ODOO_LOG_VOLUME"], role
+                    ),
+                    name_sha256=canonical_json_sha256(name),
+                    checks={
+                        "native_inventory": "not_reached",
+                        "provider_inventory": "not_reached",
+                        "physical": "not_reached",
+                    },
+                )
+                for role, name in candidate_resources(candidate).volumes.items()
+            ]
         readback: dict[ReadbackPredicate, Any] = {
             ReadbackPredicate.FILES_READ: "skipped",
             ReadbackPredicate.CUSTODY: "skipped",
@@ -633,7 +714,17 @@ def build_native_testing_sweep(
             if completed_copy(candidate) and not source_preserved:
                 reasons = (*reasons, "completed_copy_requires_disposition")
             readback[ReadbackPredicate.NATIVE_READ] = "unavailable"
-            observed, provider_reason = inspect_candidate_resources(root, store, candidate)
+            if packet is not None:
+                packet.checks["source_preserved"] = readback_outcome(
+                    readback[ReadbackPredicate.FILES_READ]
+                )
+                packet.checks["native_inventory"] = "unavailable"
+            observed, provider_reason = inspect_candidate_resources(
+                root, store, candidate, **({"evidence": packet} if packet is not None else {})
+            )
+            if packet is not None:
+                packet.checks["native_inventory"] = "pass" if observed["volumes"] else "unavailable"
+
             readback[ReadbackPredicate.NATIVE_READ] = (
                 "pass" if observed["volumes"] else "unavailable"
             )
@@ -648,16 +739,28 @@ def build_native_testing_sweep(
                 for row in observed["volumes"]
             ):
                 readback[ReadbackPredicate.CUSTODY] = "unavailable"
+                if packet is not None:
+                    packet.lifecycle.checks["lifecycle_acquisition"] = "unavailable"
                 try:
                     lifecycle = candidate_lifecycle_custody(
-                        root, store, candidate, observed.get("project", "")
+                        root,
+                        store,
+                        candidate,
+                        observed.get("project", ""),
+                        **({"evidence": packet.lifecycle} if packet is not None else {}),
                     )
                     readback[ReadbackPredicate.CUSTODY] = "pass"
+                    if packet is not None:
+                        packet.lifecycle.checks["lifecycle_acquisition"] = "pass"
                 except native_copy_stream.NativeProgramFailed as error:
                     readback[ReadbackPredicate.CUSTODY] = (
                         "unavailable" if error.unavailable else "fail"
                     )
                     readback[error.predicate] = "unavailable" if error.unavailable else "fail"
+                    if packet is not None:
+                        packet.lifecycle.checks["lifecycle_acquisition"] = readback[
+                            ReadbackPredicate.CUSTODY
+                        ]
                 except (ValueError, OSError, click.ClickException) as error:
                     if isinstance(error, native_copy_stream.NativeSourceAuthorizationDenied) or (
                         isinstance(error, api.DokployRequestFailed)
@@ -689,6 +792,27 @@ def build_native_testing_sweep(
             bindings = []
             lifecycle_blocked = False
             for index, row in enumerate(observed["volumes"]):
+                volume_evidence = (
+                    VolumeCustodyEvidence(
+                        role=row["role"],
+                        name_sha256=canonical_json_sha256(row["name"]),
+                        identity_sha256=row.get("identity"),
+                        engine_sha256=row.get("engine_identity"),
+                        backing_sha256=resources[index].backing_sha256 or None,
+                        referenced=row.get("referenced"),
+                        empty=row.get("empty"),
+                        source_inputs=row.get("source_inputs"),
+                        gate_unexpected=row.get("gate_unexpected"),
+                        checks={"provider_inventory": "not_reached", "physical": "not_reached"},
+                    )
+                    if packet is not None
+                    else None
+                )
+                if packet is not None and volume_evidence is not None:
+                    packet.volumes = [
+                        volume_evidence if item.role == volume_evidence.role else item
+                        for item in packet.volumes
+                    ]
                 resource_readback = resources[index].readback
                 qualified_reason = "physical_ownership_unknown"
                 holds = list(
@@ -735,6 +859,11 @@ def build_native_testing_sweep(
                                 ignored_compose_id=candidate.compose_id,
                                 exact=True,
                                 references=inventory_references,
+                                **(
+                                    {"evidence": volume_evidence.consumers}
+                                    if volume_evidence is not None
+                                    else {}
+                                ),
                             )
                         except (
                             ValueError,
@@ -777,6 +906,25 @@ def build_native_testing_sweep(
                         else:
                             resource_readback[ReadbackPredicate.STORAGE_CONSUMERS] = "pass"
                         resource_readback[ReadbackPredicate.RESOURCES] = "unavailable"
+                        if volume_evidence is not None:
+                            volume_evidence.checks["provider_inventory"] = readback_outcome(
+                                resource_readback[ReadbackPredicate.STORAGE_CONSUMERS]
+                            )
+                            volume_evidence.checks["physical"] = "unavailable"
+                            if lifecycle:
+                                volume_evidence.planned_snapshot_sha256 = lifecycle["payload"][
+                                    "container_snapshot"
+                                ]
+                                volume_evidence.planned_container_sha256 = tuple(
+                                    canonical_json_sha256(identifier)
+                                    for identifier in lifecycle["payload"]["container_ids"]
+                                )
+                                volume_evidence.planned_removal_sha256 = canonical_json_sha256(
+                                    {
+                                        "ids": volume_evidence.planned_container_sha256,
+                                        "snapshot": volume_evidence.planned_snapshot_sha256,
+                                    }
+                                )
                         try:
                             physical_status, physical_reason = _host_result(
                                 root,
@@ -798,6 +946,10 @@ def build_native_testing_sweep(
                                 if physical_status == "unknown"
                                 else "fail"
                             )
+                            if volume_evidence is not None:
+                                volume_evidence.checks["physical"] = readback_outcome(
+                                    resource_readback[ReadbackPredicate.RESOURCES]
+                                )
                             if physical_status not in {"eligible", "absent"}:
                                 holds.append(physical_reason or "physical_ownership_unknown")
                             elif not holds:
@@ -855,6 +1007,14 @@ def build_native_testing_sweep(
                     else item
                     for item in resources
                 ]
+            if packet is not None:
+                packet.lifecycle.checks["lifecycle_usable"] = (
+                    "pass"
+                    if lifecycle
+                    else "fail"
+                    if packet.lifecycle.checks.get("lifecycle_acquisition") == "pass"
+                    else packet.lifecycle.checks["lifecycle_acquisition"]
+                )
             item = NativeTestingSweepCandidate(
                 namespace=candidate.namespace,
                 operation_id=candidate.operation_id,

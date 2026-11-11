@@ -14,10 +14,18 @@ from typing import Any
 import click
 import yaml
 
+from control_plane.candidate_custody_evidence import acquiring, check, placement, shape
+from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.candidate_custody_evidence import (
+    ConsumerEvidence,
+    Predicate,
+    VolumeDocumentEvidence,
+)
 from control_plane.dokploy import native_copy_stream
 from control_plane.dokploy import api
 from control_plane.dokploy.target_source_setup import (
     COMPOSE_SOURCE_FIELDS,
+    EMPTY_TARGET_SOURCE_TYPES,
     require_empty_compose_source,
 )
 from control_plane.testing_activation_compose import (
@@ -290,9 +298,20 @@ CACHED_COMPOSE_PROGRAM = (
 
 
 def read_cached_compose_source(
-    *, host: str, token: str, server_id: str, request: dict[str, Any]
+    *,
+    host: str,
+    token: str,
+    server_id: str,
+    request: dict[str, Any],
+    evidence: ConsumerEvidence | None = None,
 ) -> CachedComposeSource:
     frames: list[dict[str, object]] = []
+    if evidence is not None:
+        evidence.checks["complete"] = "unavailable"
+        for pending_entry in evidence.documents:
+            pending_entry.checks["acquisition"] = "unavailable"
+            pending_entry.checks["document_shape"] = "not_reached"
+        evidence.cached_endpoint_sha256 = canonical_json_sha256({"host": host, "server": server_id})
     native_copy_stream.require_registered_remote_server(server_id)
     native_copy_stream.run_managed_server_program(
         host=host,
@@ -322,59 +341,126 @@ def read_cached_compose_source(
         raise ValueError("Cached source observation differs from its request.")
     files = {}
     size = 0
+    invalid = False
     for relative, row in rows.items():
-        content = base64.b64decode(row["content"], validate=True)
-        size += len(content)
-        if (
-            len(content) > SOURCE_FILE_BYTES
-            or size > SOURCE_TOTAL_BYTES
-            or hashlib.sha256(content).hexdigest() != row["sha256"]
-            or type(row["directory_env"]) is not bool
-        ):
-            raise ValueError("Cached source bytes are unqualified.")
-        document = yaml.safe_load(content)
-        if not isinstance(document, dict):
-            raise ValueError("Cached Compose document is unavailable.")
-        files[relative] = CachedComposeFile(document, row["sha256"], row["directory_env"])
+        entry = (
+            next(
+                (
+                    item
+                    for item in evidence.documents
+                    if item.path_sha256 == canonical_json_sha256(relative)
+                ),
+                None,
+            )
+            if evidence is not None
+            else None
+        )
+        if entry is not None:
+            entry.checks["acquisition"] = "unavailable"
+        try:
+            content = base64.b64decode(row["content"], validate=True)
+            size += len(content)
+            if (
+                len(content) > SOURCE_FILE_BYTES
+                or size > SOURCE_TOTAL_BYTES
+                or hashlib.sha256(content).hexdigest() != row["sha256"]
+                or type(row["directory_env"]) is not bool
+            ):
+                raise ValueError("Cached source bytes are unqualified.")
+            if entry is not None:
+                entry.document_sha256 = row["sha256"]
+                entry.checks["acquisition"] = "pass"
+            with acquiring(entry, "document_shape", failure="fail"):
+                document = yaml.safe_load(content)
+                if not isinstance(document, dict):
+                    raise ValueError("Cached Compose document is unavailable.")
+            files[relative] = CachedComposeFile(document, row["sha256"], row["directory_env"])
+            if entry is not None:
+                entry.checks["acquisition"] = "pass"
+        except (ValueError, TypeError, KeyError, yaml.YAMLError):
+            if evidence is None:
+                raise
+            invalid = True
+    if invalid:
+        raise ValueError("Cached Compose document set is incomplete.")
     return CachedComposeSource(absent, files, frozenset(inputs))
 
 
-def _empty_project_documents(
-    *, host: str, token: str, payload: dict[str, Any], failures: list[str] | None = None
-) -> tuple[dict[str, Any], ...]:
-    if (
-        not set(COMPOSE_SOURCE_FIELDS) <= payload.keys()
-        or "sourceType" not in payload
-        or "env" not in payload
-        or not isinstance(payload["env"], str | type(None))
-        or payload.get("mounts") != []
-        or payload.get("command") not in (None, "")
-        or "command" not in payload
-        or payload.get("backups") != []
-        or payload.get("domains") != []
-        or not isinstance(payload.get("deployments"), list)
-        or any(
-            not isinstance(row, dict) or row.get("status") not in {"done", "error", "cancelled"}
+def _empty_source_checks(payload: dict[str, Any]) -> dict[Predicate, bool]:
+    return {
+        "compose_identity_present": "composeId" in payload,
+        "environment_identity": bool(payload.get("environmentId")),
+        "application_identity": "appName" in payload,
+        "source_fields_present": set(COMPOSE_SOURCE_FIELDS) <= payload.keys(),
+        "source_fields_empty": not any(
+            payload.get(key) for key in (*COMPOSE_SOURCE_FIELDS, "dockerImage", "repositoryId")
+        ),
+        "source_type": "sourceType" in payload
+        and payload.get("sourceType") in EMPTY_TARGET_SOURCE_TYPES,
+        "env_shape": "env" in payload and isinstance(payload["env"], str | type(None)),
+        "mounts_empty": payload.get("mounts") == [],
+        "command_present": "command" in payload,
+        "command_empty": payload.get("command") in (None, ""),
+        "backups_empty": payload.get("backups") == [],
+        "domains_empty": payload.get("domains") == [],
+        "deployments_shape": isinstance(payload.get("deployments"), list),
+        "deployments_terminal": isinstance(payload.get("deployments"), list)
+        and all(
+            isinstance(row, dict) and row.get("status") in {"done", "error", "cancelled"}
             for row in payload["deployments"]
+        ),
+    }
+
+
+def _record_empty_source(
+    evidence: ConsumerEvidence, payload: dict[str, Any], *, applicable: bool = True
+) -> None:
+    for predicate, passed in _empty_source_checks(payload).items():
+        # noinspection PyTypeChecker
+        evidence.checks[predicate] = (
+            ("pass" if passed else "fail") if applicable else "not_applicable"
         )
+
+
+def _empty_project_documents(
+    *,
+    host: str,
+    token: str,
+    payload: dict[str, Any],
+    failures: list[str] | None = None,
+    evidence: ConsumerEvidence | None = None,
+) -> tuple[dict[str, Any], ...]:
+    prerequisites = _empty_source_checks(payload)
+    if not all(
+        value
+        for key, value in prerequisites.items()
+        if key not in {"compose_identity_present", "environment_identity", "application_identity"}
     ):
         raise ValueError("The empty source is not independently qualified.")
     require_empty_compose_source(payload, payload["composeId"])
-    with _qualification(failures, "inventory_source_acquisition_failed"):
+    with (
+        _qualification(failures, "inventory_source_acquisition_failed"),
+        acquiring(evidence, "schedules_acquisition"),
+    ):
         schedules = api.list_dokploy_schedules(
             host=host, token=token, target_id=payload["composeId"], schedule_type="compose"
         )
-    if schedules:
+    if not check(evidence, "schedules_empty", not schedules):
         raise ValueError("The empty source has scheduled work.")
-    with _qualification(failures, "inventory_source_acquisition_failed"):
+    with (
+        _qualification(failures, "inventory_source_acquisition_failed"),
+        acquiring(evidence, "cached_acquisition"),
+    ):
         observed = read_cached_compose_source(
             host=host,
             token=token,
             server_id=payload["serverId"],
             request={"app_name": payload["appName"], "files": []},
+            evidence=evidence,
         )
-    if not observed.project_absent:
+    if not check(evidence, "cached_project_absent", observed.project_absent):
         raise ValueError("The unconfigured source retains cached project custody.")
+    check(evidence, "complete", True)
     return ()
 
 
@@ -398,16 +484,8 @@ def _default_volume_inputs(document: dict[str, Any], raw_env: str) -> set[str]:
     return keys
 
 
-def _included_documents(
-    *,
-    host: str,
-    token: str,
-    payload: dict[str, Any],
-    document: dict[str, Any],
-    exact: bool,
-    failures: list[str] | None = None,
-) -> tuple[dict[str, Any], ...]:
-    if (
+def _include_scope(payload: dict[str, Any], document: dict[str, Any]) -> bool:
+    return not (
         payload.get("sourceType") != "git"
         or not standard_compose_environment(payload)
         or payload.get("isolatedDeployment") is not False
@@ -417,60 +495,109 @@ def _included_documents(
         or document.get("volumes")
         or document.get("configs")
         or document.get("secrets")
-    ):
+    )
+
+
+def _include_shape(document: dict[str, Any]) -> bool:
+    includes = document.get("include")
+    return (
+        isinstance(includes, list)
+        and bool(includes)
+        and all(isinstance(path, str) for path in includes)
+    )
+
+
+def _included_documents(
+    *,
+    host: str,
+    token: str,
+    payload: dict[str, Any],
+    document: dict[str, Any],
+    exact: bool,
+    failures: list[str] | None = None,
+    evidence: ConsumerEvidence | None = None,
+) -> tuple[dict[str, Any], ...]:
+    if not check(evidence, "source_scope", _include_scope(payload, document)):
         raise ValueError("Cached include scope is unsupported.")
     includes = document.get("include")
-    if (
-        not isinstance(includes, list)
-        or not includes
-        or any(not isinstance(path, str) for path in includes)
-    ):
+    if not check(evidence, "includes", _include_shape(document)):
         raise ValueError("Only local include wrappers are qualified.")
-    root = source_relative_path(payload["composePath"])
-    paths = [root, *(source_relative_path(path, posixpath.dirname(root)) for path in includes)]
+    with acquiring(evidence, "root_path", failure="fail"):
+        root = source_relative_path(payload["composePath"])
+    assert isinstance(includes, list)
+    with acquiring(evidence, "include_paths", failure="fail"):
+        paths = [root, *(source_relative_path(path, posixpath.dirname(root)) for path in includes)]
     request = {"app_name": payload["appName"], "files": paths}
     arguments = {"host": host, "token": token, "server_id": payload["serverId"]}
-    with _qualification(failures, "inventory_source_acquisition_failed"):
-        observed = read_cached_compose_source(**arguments, request=request)
-    if (
-        observed.project_absent
-        or not observed.files[root].document.keys() <= {"name", "include", "networks"}
-        or observed.files[root].document.get("include") != includes
+    if evidence is not None:
+        evidence.documents.extend(
+            VolumeDocumentEvidence(
+                path_sha256=canonical_json_sha256(path), checks={"acquisition": "not_reached"}
+            )
+            for path in paths
+        )
+    with (
+        _qualification(failures, "inventory_source_acquisition_failed"),
+        acquiring(evidence, "cached_acquisition"),
+    ):
+        observed = read_cached_compose_source(**arguments, request=request, evidence=evidence)
+    if not check(
+        evidence,
+        "root",
+        not (
+            observed.project_absent
+            or not observed.files[root].document.keys() <= {"name", "include", "networks"}
+            or observed.files[root].document.get("include") != includes
+        ),
     ):
         raise ValueError("The cached source differs from the converted include.")
     from control_plane.production_recipient import readable_provider_compose
 
     documents = []
+    qualified_entries: list[VolumeDocumentEvidence] = []
     keys: set[str] = set()
-    for path in paths[1:]:
+    for index, path in enumerate(paths[1:], 1):
+        child_evidence = evidence.documents[index] if evidence is not None else None
         try:
             with _qualification(failures, "inventory_included_document_unqualified"):
                 file = observed.files[path]
-                child = readable_provider_compose(file.document)
-                if (
-                    child.get("include")
-                    or file.directory_env
-                    and posixpath.dirname(path) != posixpath.dirname(root)
-                    or any(
-                        service.get("env_file")
-                        or isinstance(service.get("extends"), dict)
-                        and service["extends"].get("file")
-                        for service in child["services"].values()
-                    )
+                with acquiring(child_evidence, "document_shape", failure="fail"):
+                    child = readable_provider_compose(file.document)
+                if not check(
+                    child_evidence,
+                    "input_precedence",
+                    not (
+                        child.get("include")
+                        or file.directory_env
+                        and posixpath.dirname(path) != posixpath.dirname(root)
+                        or any(
+                            service.get("env_file")
+                            or isinstance(service.get("extends"), dict)
+                            and service["extends"].get("file")
+                            for service in child["services"].values()
+                        )
+                    ),
                 ):
                     raise ValueError("The included source has unsupported file scopes.")
-                require_named_storage(child)
-                child_keys = _default_volume_inputs(child, str(payload.get("env") or ""))
+                with acquiring(child_evidence, "named_storage", failure="fail"):
+                    require_named_storage(child)
+                with acquiring(child_evidence, "default_inputs", failure="fail"):
+                    child_keys = _default_volume_inputs(child, str(payload.get("env") or ""))
         except (ValueError, TypeError, KeyError, RecursionError, yaml.YAMLError):
             if failures is None:
                 raise
             continue
         keys.update(child_keys)
         documents.append(child)
+        if child_evidence is not None:
+            qualified_entries.append(child_evidence)
     if keys:
-        if not exact or not isinstance(payload.get("env"), str):
+        if not check(evidence, "exact_environment", exact and isinstance(payload.get("env"), str)):
             raise ValueError("Default absence requires complete exact environment evidence.")
-        with _qualification(failures, "inventory_source_acquisition_failed"):
+        with (
+            _qualification(failures, "inventory_source_acquisition_failed"),
+            acquiring(evidence, "default_acquisition"),
+        ):
             proof = read_cached_compose_source(
                 **arguments,
                 request={
@@ -479,11 +606,22 @@ def _included_documents(
                     "env_file": posixpath.join(posixpath.dirname(root), ".env"),
                 },
             )
-        if (
-            proof.project_absent
-            or proof.absent_inputs != keys
-            or {path: file.sha256 for path, file in proof.files.items()}
-            != {path: file.sha256 for path, file in observed.files.items()}
+        if evidence is not None:
+            check(
+                evidence,
+                "stable_documents",
+                {path: file.sha256 for path, file in proof.files.items()}
+                == {path: file.sha256 for path, file in observed.files.items()},
+            )
+        if not check(
+            evidence,
+            "default_absence",
+            not (
+                proof.project_absent
+                or proof.absent_inputs != keys
+                or {path: file.sha256 for path, file in proof.files.items()}
+                != {path: file.sha256 for path, file in observed.files.items()}
+            ),
         ):
             raise ValueError("Cached default absence changed or remains unqualified.")
         documents = [
@@ -498,6 +636,19 @@ def _included_documents(
             }
             for child in documents
         ]
+    elif evidence is not None:
+        evidence.checks.update(
+            {
+                "default_acquisition": "not_applicable",
+                "default_absence": "not_applicable",
+                "stable_documents": "not_applicable",
+                "exact_environment": "not_applicable",
+            }
+        )
+    for index, entry in enumerate(qualified_entries):
+        entry.resolution_index = index
+    if evidence is not None:
+        evidence.checks["complete"] = "pass" if len(documents) == len(paths) - 1 else "fail"
     return tuple(documents)
 
 
@@ -510,21 +661,99 @@ def read_volume_documents(
     server_id: str,
     exact: bool,
     failures: list[str] | None = None,
+    evidence: ConsumerEvidence | None = None,
 ) -> tuple[dict[str, Any], ...]:
-    with _qualification(failures, "inventory_converted_document_malformed"):
+    placement(evidence, payload, host)
+    if evidence is not None:
+        evidence.converted_sha256 = hashlib.sha256(raw.encode()).hexdigest()
+        predicate: Predicate
+        for predicate in (
+            "resolution",
+            "conversion_parse",
+            "document_shape",
+            "source_scope",
+            "root",
+            "root_path",
+            "includes",
+            "include_paths",
+            "cached_acquisition",
+            "default_acquisition",
+            "complete",
+            "input_precedence",
+            "exact_environment",
+            "default_absence",
+            "stable_documents",
+            "placement",
+            "schedules_acquisition",
+            "schedules_empty",
+            "cached_project_absent",
+        ):
+            evidence.checks[predicate] = "not_reached"
+        _record_empty_source(evidence, payload)
+    with (
+        _qualification(failures, "inventory_converted_document_malformed"),
+        acquiring(evidence, "conversion_parse", failure="fail"),
+    ):
         document = yaml.safe_load(raw)
+    if evidence is not None:
+        evidence.conversion_shape = shape(document)
+        if document is not None:
+            _record_empty_source(evidence, payload, applicable=False)
+        evidence.source_path_shape = shape(
+            payload.get("composePath"), present="composePath" in payload
+        )
+        evidence.include_shape = (
+            shape(document.get("include"), present="include" in document)
+            if isinstance(document, dict)
+            else "missing"
+        )
+        evidence.include_count = (
+            len(document["include"])
+            if isinstance(document, dict) and isinstance(document.get("include"), list)
+            else None
+        )
     from control_plane.production_recipient import readable_provider_compose
 
     if isinstance(document, dict) and not document.get("include"):
         with _qualification(failures, "inventory_converted_document_malformed"):
-            return (readable_provider_compose(document),)
-    if not server_id or payload.get("serverId") != server_id:
+            if evidence is not None:
+                evidence.documents.append(
+                    VolumeDocumentEvidence(
+                        document_sha256=hashlib.sha256(raw.encode()).hexdigest(),
+                    )
+                )
+            with acquiring(evidence, "document_shape", failure="fail"):
+                result = readable_provider_compose(document)
+            if evidence is not None:
+                evidence.documents[0].resolution_index = 0
+            check(evidence, "complete", True)
+            return (result,)
+    if evidence is not None and isinstance(document, dict):
+        check(evidence, "source_scope", _include_scope(payload, document))
+        check(evidence, "includes", _include_shape(document))
+        try:
+            raw_path = payload.get("composePath")
+            if not isinstance(raw_path, str):
+                raise ValueError("Cached root path is unavailable.")
+            root_path = source_relative_path(raw_path)
+        except (ValueError, TypeError):
+            check(evidence, "root_path", False)
+        else:
+            check(evidence, "root_path", True)
+            try:
+                for path in document.get("include", ()):
+                    source_relative_path(path, posixpath.dirname(root_path))
+            except (ValueError, TypeError):
+                check(evidence, "include_paths", False)
+            else:
+                check(evidence, "include_paths", True)
+    if not check(evidence, "placement", bool(server_id) and payload.get("serverId") == server_id):
         with _qualification(failures, "inventory_source_placement_unqualified"):
             raise ValueError("Cached source placement is unqualified.")
     if document is None:
         with _qualification(failures, "inventory_converted_document_absent"):
             return _empty_project_documents(
-                host=host, token=token, payload=payload, failures=failures
+                host=host, token=token, payload=payload, failures=failures, evidence=evidence
             )
     if not isinstance(document, dict):
         with _qualification(failures, "inventory_converted_document_malformed"):
@@ -537,4 +766,5 @@ def read_volume_documents(
             document=document,
             exact=exact,
             failures=failures,
+            evidence=evidence,
         )

@@ -2,12 +2,23 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing
 from datetime import datetime, timezone
 import json
+import hashlib
 
 import click
 import yaml
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from control_plane.candidate_custody_evidence import acquiring, check, placement
+from control_plane.contracts.canonical_json import (
+    canonical_json_sha256,
+    nonvalidating_compact_sorted_json_sha256,
+)
+from control_plane.contracts.candidate_custody_evidence import (
+    ConsumerEvidence,
+    VolumeDocumentEvidence,
+    VolumeResolutionEvidence,
+)
 from control_plane.retained_volume_sweep_program import RETAINED_VOLUME_SWEEP_HOST_PROGRAM
 from control_plane.contracts.product_retirement import ProductRetirementRecord
 from control_plane.contracts.retained_volume import RetainedVolumeBinding
@@ -89,46 +100,109 @@ def _custody_clear(
 
 
 def compose_volume_names(
-    document: dict[str, Any], payload: dict[str, Any], allowed_keys: set[str] | None = None
+    document: dict[str, Any],
+    payload: dict[str, Any],
+    allowed_keys: set[str] | None = None,
+    *,
+    evidence: VolumeDocumentEvidence | None = None,
 ) -> tuple[str, ...]:
     import re
     from control_plane.dokploy.environment import require_unique_compose_inputs
     from control_plane.testing_activation_compose import compose_interpolation_keys, interpolate
 
     volumes = document.get("volumes", {})
-    if not isinstance(volumes, dict):
+    if not check(evidence, "volume_definitions", isinstance(volumes, dict)):
         raise ValueError("Compose volume inventory is unavailable.")
     standard_environment = standard_compose_environment(payload)
     names = []
+    if evidence is not None:
+        evidence.input_sha256 = nonvalidating_compact_sorted_json_sha256(
+            {
+                "environment": payload.get("env"),
+                "standard": standard_environment,
+                "allowed_keys": sorted(allowed_keys) if allowed_keys is not None else None,
+            }
+        )
+        evidence.checks["standard_environment"] = "pass" if standard_environment else "fail"
+    failed = False
     for alias, definition in volumes.items():
-        if not isinstance(alias, str) or not isinstance(definition, dict | type(None)):
-            raise ValueError("Compose volume definition is unavailable.")
-        declared = definition or {}
-        actual = declared.get("name")
-        if actual is None:
-            project = payload.get("appName") if standard_environment else None
-            actual = (
-                alias
-                if declared.get("external")
-                else str(project) + "_" + alias
-                if isinstance(project, str) and project
-                else None
+        resolution = (
+            VolumeResolutionEvidence(
+                alias_sha256=hashlib.sha256(repr(alias).encode()).hexdigest(),
+                checks={"resolution": "unavailable"},
             )
-        if not isinstance(actual, str):
-            raise ValueError("Compose volume identity is unavailable.")
-        if "$" in actual:
-            keys = compose_interpolation_keys(actual)
-            if (
-                not standard_environment
-                or allowed_keys is not None
-                and (not keys <= allowed_keys or actual not in {"${" + key + "}" for key in keys})
+            if evidence is not None
+            else None
+        )
+        if evidence is not None and resolution is not None:
+            evidence.volumes.append(resolution)
+        try:
+            if not check(
+                resolution,
+                "volume_definition",
+                isinstance(alias, str) and isinstance(definition, dict | type(None)),
             ):
-                raise ValueError("Compose volume identity uses an unreviewed input.")
-            environment = require_unique_compose_inputs(str(payload.get("env") or ""), keys)
-            actual = interpolate(actual, environment)
-        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", actual) is None:
-            raise ValueError("Compose volume identity is unsupported.")
-        names.append(actual)
+                raise ValueError("Compose volume definition is unavailable.")
+            declared = definition or {}
+            actual = declared.get("name")
+            if actual is None:
+                project = payload.get("appName") if standard_environment else None
+                if resolution is not None:
+                    resolution.name_source = (
+                        "external_alias" if declared.get("external") else "project_prefix"
+                    )
+                actual = (
+                    alias
+                    if declared.get("external")
+                    else str(project) + "_" + alias
+                    if isinstance(project, str) and project
+                    else None
+                )
+            elif resolution is not None:
+                resolution.name_source = "explicit"
+            if not isinstance(actual, str):
+                check(resolution, "volume_identity", False)
+                raise ValueError("Compose volume identity is unavailable.")
+            check(resolution, "volume_identity", True)
+            if "$" in actual:
+                keys = compose_interpolation_keys(actual)
+                if not check(
+                    resolution,
+                    "allowed_inputs",
+                    not (
+                        not standard_environment
+                        or allowed_keys is not None
+                        and (
+                            not keys <= allowed_keys
+                            or actual not in {"${" + key + "}" for key in keys}
+                        )
+                    ),
+                ):
+                    raise ValueError("Compose volume identity uses an unreviewed input.")
+                with acquiring(resolution, "unique_inputs", failure="fail"):
+                    environment = require_unique_compose_inputs(str(payload.get("env") or ""), keys)
+                with acquiring(resolution, "interpolation", failure="fail"):
+                    actual = interpolate(actual, environment)
+            if not check(
+                resolution,
+                "supported_name",
+                re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", actual) is not None,
+            ):
+                raise ValueError("Compose volume identity is unsupported.")
+            names.append(actual)
+            if resolution is not None:
+                resolution.resolved_name_sha256 = canonical_json_sha256(actual)
+                resolution.checks["resolution"] = "pass"
+        except (ValueError, TypeError, KeyError, RecursionError):
+            if evidence is None:
+                raise
+            failed = True
+    if evidence is not None:
+        evidence.resolved_name_sha256 = tuple(canonical_json_sha256(name) for name in names)
+    if failed:
+        check(evidence, "resolution", False)
+        raise ValueError("Compose volume identities are unqualified.")
+    check(evidence, "resolution", True)
     return tuple(names)
 
 
@@ -146,6 +220,7 @@ def _inventory_clear(
     ignored_compose_id: str = "",
     exact: bool = False,
     references: list[dict[str, str]] | None = None,
+    evidence: list[ConsumerEvidence] | None = None,
 ) -> bool:
     clear = True
 
@@ -155,7 +230,6 @@ def _inventory_clear(
         nonlocal clear
         clear = False
         import re
-        from control_plane.contracts.canonical_json import canonical_json_sha256
 
         if references is not None:
             row = {
@@ -179,9 +253,29 @@ def _inventory_clear(
                     references.append(attributed)
         return references is None
 
+    def consumer(consumer_kind: str, identity: object) -> ConsumerEvidence | None:
+        if evidence is None:
+            return None
+        item = ConsumerEvidence.model_validate(
+            {
+                "kind": consumer_kind,
+                "record_sha256": canonical_json_sha256({"kind": consumer_kind, "id": identity}),
+            }
+        )
+        evidence.append(item)
+        return item
+
     host, token = source.read_dokploy_config(control_plane_root=root)
     for project in api.fetch_dokploy_projects(host=host, token=token):
         project_id = project.get("projectId")
+        project_evidence = consumer("project", project_id)
+        check(project_evidence, "env_shape", isinstance(project.get("env"), str))
+        if project_evidence is not None:
+            check(
+                project_evidence,
+                "environment_reference",
+                not _environment_referenced(binding.volume_name, project),
+            )
         if exact and not isinstance(project.get("env"), str):
             if refused("project", project_id):
                 return False
@@ -189,16 +283,21 @@ def _inventory_clear(
             if refused("project", project_id, referenced=True):
                 return False
         environments = project.get("environments")
+        check(project_evidence, "complete", isinstance(environments, list))
         if not isinstance(environments, list):
             if refused("project", project_id):
                 return False
             continue
         for environment in environments:
             if not isinstance(environment, dict):
+                malformed_environment = consumer("environment", None)
+                check(malformed_environment, "identity", False)
+                check(project_evidence, "complete", False)
                 if refused("project", project_id):
                     return False
                 continue
             environment_id = environment.get("environmentId")
+            environment_evidence = consumer("environment", environment_id)
             if exact and "env" not in environment:
                 if not isinstance(environment_id, str) or not isinstance(project_id, str):
                     if refused("environment", environment_id):
@@ -206,14 +305,15 @@ def _inventory_clear(
                 else:
                     detail_reason = "inventory_environment_identity_unqualified"
                     try:
-                        detail = api.as_json_object(
-                            api.dokploy_request(
-                                host=host,
-                                token=token,
-                                path="/api/environment.one",
-                                query={"environmentId": environment_id},
+                        with acquiring(environment_evidence, "acquisition"):
+                            detail = api.as_json_object(
+                                api.dokploy_request(
+                                    host=host,
+                                    token=token,
+                                    path="/api/environment.one",
+                                    query={"environmentId": environment_id},
+                                )
                             )
-                        )
                     except (ValueError, OSError, click.ClickException) as error:
                         if references is None or isinstance(
                             error, native_copy_stream.NativeSourceAuthorizationDenied
@@ -235,6 +335,13 @@ def _inventory_clear(
                             raise
                         detail = None
                         detail_reason = "inventory_environment_acquisition_failed"
+                    check(
+                        environment_evidence,
+                        "identity",
+                        detail is not None
+                        and detail.get("environmentId") == environment_id
+                        and detail.get("projectId") == project_id,
+                    )
                     if (
                         detail is None
                         or detail.get("environmentId") != environment_id
@@ -250,21 +357,46 @@ def _inventory_clear(
             elif exact and _environment_referenced(binding.volume_name, environment):
                 if refused("environment", environment_id, referenced=True):
                     return False
+            check(environment_evidence, "env_shape", isinstance(environment.get("env"), str))
+            if environment_evidence is not None:
+                check(
+                    environment_evidence,
+                    "environment_reference",
+                    not _environment_referenced(binding.volume_name, environment),
+                )
             for kind, (target_type, identifier) in TARGET_COLLECTIONS.items():
                 targets = environment.get(kind)
                 if not isinstance(targets, list):
+                    missing = consumer(target_type, None)
+                    check(missing, "complete", False)
                     if refused("environment", environment_id):
                         return False
                     continue
                 for target in targets:
                     if not isinstance(target, dict) or not isinstance(target.get(identifier), str):
+                        malformed = consumer(target_type, None)
+                        check(malformed, "identity", False)
                         if refused("environment", environment_id):
                             return False
                         continue
                     target_id = target[identifier]
                     assert isinstance(target_id, str)
+                    item_evidence = consumer(target_type, target_id)
                     if target_type == "compose" and target_id == ignored_compose_id:
+                        check(item_evidence, "own_candidate_excluded", True)
                         continue
+                    if item_evidence is not None:
+                        item_evidence.checks.update(
+                            {
+                                "target_acquisition": "unavailable",
+                                "conversion_acquisition": "not_reached"
+                                if target_type == "compose"
+                                else "not_applicable",
+                                "resolution": "not_reached"
+                                if target_type == "compose"
+                                else "not_applicable",
+                            }
+                        )
                     try:
                         if target_type in {"application", "compose"}:
                             payload = api.fetch_dokploy_target_payload(
@@ -319,6 +451,15 @@ def _inventory_clear(
                             return False
                         refused(target_type, target_id, cause="inventory_target_checks_skipped")
                         continue
+                    check(item_evidence, "target_acquisition", True)
+                    placement(item_evidence, payload, host)
+                    check(item_evidence, "identity", payload.get(identifier) == target_id)
+                    if item_evidence is not None:
+                        check(
+                            item_evidence,
+                            "environment_reference",
+                            not _environment_referenced(binding.volume_name, payload),
+                        )
                     if exact and _environment_referenced(binding.volume_name, payload):
                         if refused(
                             target_type,
@@ -330,6 +471,13 @@ def _inventory_clear(
                         ):
                             return False
                     mounts = payload.get("mounts")
+                    check(item_evidence, "mounts_shape", isinstance(mounts, list))
+                    if item_evidence is not None:
+                        check(
+                            item_evidence,
+                            "mount_reference",
+                            not _volume_referenced(binding.volume_name, payload, exact=exact),
+                        )
                     if not isinstance(mounts, list):
                         if refused(target_type, target_id, cause="inventory_mounts_unavailable"):
                             return False
@@ -341,9 +489,10 @@ def _inventory_clear(
                         stage = "inventory_conversion_acquisition_failed"
                         previous_failures = 0
                         try:
-                            raw = compose.fetch_dokploy_converted_compose_file(
-                                host=host, token=token, compose_id=target_id
-                            )
+                            with acquiring(item_evidence, "conversion_acquisition"):
+                                raw = compose.fetch_dokploy_converted_compose_file(
+                                    host=host, token=token, compose_id=target_id
+                                )
                             stage = "inventory_document_qualification_failed"
                             previous_failures = len(failures or ())
                             documents = read_volume_documents(
@@ -354,13 +503,38 @@ def _inventory_clear(
                                 server_id=binding.server_id,
                                 exact=exact,
                                 failures=failures,
+                                **(
+                                    {"evidence": item_evidence} if item_evidence is not None else {}
+                                ),
                             )
-                            for document in documents:
+                            stage = "inventory_volume_identity_unqualified"
+                            for document_index, document in enumerate(documents):
+                                document_evidence = (
+                                    next(
+                                        (
+                                            entry
+                                            for entry in item_evidence.documents
+                                            if entry.resolution_index == document_index
+                                        ),
+                                        None,
+                                    )
+                                    if item_evidence is not None
+                                    else None
+                                )
+                                if item_evidence is not None and document_evidence is None:
+                                    document_evidence = VolumeDocumentEvidence(
+                                        resolution_index=document_index
+                                    )
+                                    item_evidence.documents.append(document_evidence)
+                                if document_evidence is not None:
+                                    document_evidence.checks["resolution"] = "unavailable"
                                 stage = "inventory_volume_identity_unqualified"
                                 previous_failures = len(failures or ())
                                 try:
                                     names = compose_volume_names(
-                                        document, payload if exact else {**payload, "env": ""}
+                                        document,
+                                        payload if exact else {**payload, "env": ""},
+                                        evidence=document_evidence,
                                     )
                                 except (
                                     ValueError,
@@ -374,6 +548,18 @@ def _inventory_clear(
                                         raise
                                     refused(target_type, target_id, cause=stage)
                                     names = ()
+                                if document_evidence is not None:
+                                    document_evidence.checks["volume_reference"] = (
+                                        "fail"
+                                        if canonical_json_sha256(binding.volume_name)
+                                        in document_evidence.resolved_name_sha256
+                                        or _volume_referenced(
+                                            binding.volume_name, document, exact=exact
+                                        )
+                                        else "pass"
+                                        if document_evidence.checks.get("resolution") == "pass"
+                                        else "unavailable"
+                                    )
                                 if binding.volume_name in names or _volume_referenced(
                                     binding.volume_name, document, exact=exact
                                 ):
@@ -416,6 +602,18 @@ def _inventory_clear(
                                 target_type, target_id, cause="inventory_volume_resolution_skipped"
                             )
                         finally:
+                            if item_evidence is not None:
+                                item_evidence.checks["resolution"] = (
+                                    "not_reached"
+                                    if stage != "inventory_volume_identity_unqualified"
+                                    else "pass"
+                                    if not failures
+                                    and all(
+                                        row.checks.get("resolution", "pass") == "pass"
+                                        for row in item_evidence.documents
+                                    )
+                                    else "unavailable"
+                                )
                             for failure in failures or ():
                                 refused(target_type, target_id, cause=failure)
 

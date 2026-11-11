@@ -2,6 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.candidate_custody_evidence import CandidateCustodyEvidence
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.testing_candidate_retention import (
     NativeTestingSweepCandidate,
@@ -22,11 +23,18 @@ class TestingCandidateReleaseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["dry-run", "apply", "readback"] = "dry-run"
+    include_evidence: bool = False
     reviewed_plan_sha256: str = ""
     receiver_operation_id: str | None = Field(default=None, min_length=1, max_length=200)
 
     @model_validator(mode="after")
     def validate_review(self) -> "TestingCandidateReleaseRequest":
+        if self.include_evidence and (
+            self.mode != "dry-run" or self.receiver_operation_id is not None
+        ):
+            raise ValueError(
+                "Custody evidence requires an effect-free selected candidate dry-run without a receiver."
+            )
         self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
         if self.mode in {"apply", "readback"} and len(self.reviewed_plan_sha256) != 64:
             raise ValueError("Apply and readback require the reviewed release plan digest.")
@@ -63,6 +71,9 @@ class TestingCandidateReleaseResponse(BaseModel):
     error_code: str
     plan_sha256: str
     status: TestingCandidateReleaseStatus
+    evidence: CandidateCustodyEvidence | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
     reclaimable_bytes: int | None = Field(
         default=None, json_schema_extra={"x-launchplane-optional-response": True}
     )

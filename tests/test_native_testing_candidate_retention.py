@@ -64,7 +64,7 @@ class StagedSourceInputsTests(unittest.TestCase):
                 }
             }
             namespace: dict[str, Any] = {
-                "spec": {"resources": resources, "project": "project"},
+                "spec": {"resources": resources, "project": "project", "custody_evidence": True},
                 "hashlib": hashlib,
                 "json": json,
                 "os": os,
@@ -98,7 +98,13 @@ class StagedSourceInputsTests(unittest.TestCase):
 
             with patch.object(Path, "read_text", return_value="boot"):
                 result = namespace["inspect_candidate"]()
+                del volumes[resources["namespace"] + "-data"]
+                missing_data = namespace["inspect_candidate"]()
+        self.assertTrue(all(row["gate_unexpected"] is None for row in missing_data["volumes"]))
         for row in result["volumes"]:
+            self.assertIs(
+                row["gate_unexpected"], True if row["role"] == "ODOO_DATA_VOLUME" else None
+            )
             self.assertEqual(
                 set(row.get("reasons", ())),
                 {
@@ -555,6 +561,162 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         self.assertEqual(item.readback[ReadbackPredicate.FILES_READ], "pass")
         self.assertEqual(item.resources[0].readback[ReadbackPredicate.STORAGE_CONSUMERS], "pass")
         self.assertEqual(item.status, "held")
+
+    def test_packet_keeps_acquired_snapshot_and_three_physical_bindings_after_invalidation(
+        self,
+    ) -> None:
+        from control_plane.contracts.candidate_custody_evidence import CandidateCustodyEvidence
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+        from unittest.mock import patch
+
+        self.observation["volumes"] = [
+            {
+                **self.observation["volumes"][0],
+                "role": role,
+                "name": self.candidate.namespace + suffix,
+                "referenced": True,
+                "reason": "container_reference",
+                "backing": ["fixture", index],
+            }
+            for index, (role, suffix) in enumerate(
+                (
+                    ("ODOO_DB_VOLUME", "-db"),
+                    ("ODOO_DATA_VOLUME", "-data"),
+                    ("ODOO_LOG_VOLUME", "-logs"),
+                )
+            )
+        ]
+        from control_plane.dokploy import source, testing_retained_copy, api, compose
+        from control_plane.dokploy_inventory import TARGET_COLLECTIONS
+        from control_plane.retained_volume_sweep_execution import _inventory_clear
+        from control_plane.contracts.candidate_custody_evidence import ContainerEvidence
+
+        self.with_application(prepared=False)
+        self.observation["project"] = self.candidate.namespace
+        proof = {
+            "type": "complete",
+            "container_ids": ["1" * 64],
+            "container_snapshot": "2" * 64,
+            "resource_binding": "3" * 64,
+            "physical_binding": "4" * 64,
+        }
+        container = ContainerEvidence(
+            container_sha256=canonical_json_sha256(proof["container_ids"][0]),
+            role="web",
+            state="running",
+            volume_roles=tuple(row["role"] for row in self.observation["volumes"]),
+            checks={"web_gate": "pass", "web_process": "pass"},
+        )
+
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        fail_read = False
+
+        def native_read(**kwargs: Any) -> None:
+            kwargs["receive"](
+                {
+                    "type": "custody_evidence",
+                    "evidence": {"containers": [container.model_dump(mode="json")]},
+                }
+            )
+            if fail_read:
+                raise NativeProgramFailed(
+                    "fixture refusal", predicate=ReadbackPredicate.MOUNTS, kind="refused"
+                )
+            kwargs["receive"](proof)
+
+        request = self.request.model_copy(
+            update={"candidates": (self.candidate.namespace,), "receiver_operation_id": ""}
+        )
+        targets = [
+            {
+                "composeId": "remote",
+                "serverId": "another-server",
+                "sourceType": "git",
+                "composePath": "compose.yml",
+                "env": "",
+                "mounts": [],
+            },
+            {"composeId": "null", "serverId": self.candidate.server_id, "env": "", "mounts": []},
+        ]
+        environment: dict[str, Any] = {key: [] for key in TARGET_COLLECTIONS}
+        environment.update({"environmentId": "environment", "env": "", "compose": targets})
+        packets: list[CandidateCustodyEvidence] = []
+        with (
+            patch.object(testing_retained_copy, "_read_remote", side_effect=native_read),
+            patch.object(source, "read_dokploy_config", return_value=("provider", "token")),
+            patch.object(self.retention, "_source_preserved", return_value=True),
+            patch.object(self.retention, "_inventory_clear", side_effect=_inventory_clear),
+            patch.object(
+                api,
+                "fetch_dokploy_projects",
+                return_value=[{"projectId": "project", "env": "", "environments": [environment]}],
+            ),
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                side_effect=lambda **kwargs: next(
+                    row for row in targets if row["composeId"] == kwargs["target_id"]
+                ),
+            ),
+            patch.object(
+                compose,
+                "fetch_dokploy_converted_compose_file",
+                side_effect=lambda **kwargs: (
+                    '{"include":["compose.yml"]}' if kwargs["compose_id"] == "remote" else "null"
+                ),
+            ),
+        ):
+            result, private = self.retention.build_native_testing_sweep(
+                self.store, self.root, request, "trace", evidence=packets
+            )
+            fail_read = True
+            failed_packets: list[CandidateCustodyEvidence] = []
+            self.retention.build_native_testing_sweep(
+                self.store, self.root, request, "failed-trace", evidence=failed_packets
+            )
+        self.assertEqual(failed_packets[0].lifecycle.containers, [container])
+        self.assertEqual(failed_packets[0].lifecycle.checks["lifecycle_acquisition"], "fail")
+        self.assertIsNone(failed_packets[0].lifecycle.snapshot_sha256)
+        self.assertEqual(len(packets), 1)
+        packet = packets[0]
+        self.assertEqual(packet.lifecycle.checks["lifecycle_acquisition"], "pass")
+        self.assertEqual(packet.lifecycle.checks["lifecycle_usable"], "fail")
+        self.assertEqual(packet.lifecycle.snapshot_sha256, proof["container_snapshot"])
+        self.assertEqual(packet.lifecycle.resource_binding_sha256, proof["resource_binding"])
+        self.assertEqual(packet.lifecycle.physical_binding_sha256, proof["physical_binding"])
+        self.assertEqual(packet.lifecycle.containers, [container])
+        self.assertEqual(packet.lifecycle.container_count, len(proof["container_ids"]))
+        self.assertEqual(len(packet.volumes), 3)
+        self.assertTrue(all(row.checks["physical"] == "pass" for row in packet.volumes))
+        for row, call in zip(
+            packet.volumes, self.host.call_args_list[: len(packet.volumes)], strict=True
+        ):
+            consumers = [item for item in row.consumers if item.kind == "compose"]
+            self.assertEqual(len(consumers), len(targets))
+            self.assertEqual(consumers[0].checks["placement"], "fail")
+            self.assertEqual(consumers[1].conversion_shape, "null")
+            self.assertEqual(consumers[1].checks["source_fields_present"], "fail")
+            self.assertEqual(row.planned_snapshot_sha256, packet.lifecycle.snapshot_sha256)
+            self.assertEqual(row.planned_container_sha256, (container.container_sha256,))
+            self.assertEqual(
+                call.kwargs["planned_container_removals"],
+                {"ids": proof["container_ids"], "snapshot": proof["container_snapshot"]},
+            )
+        self.assertFalse(private[self.candidate.namespace]["lifecycle"])
+        self.assertFalse(result.candidates[0].lifecycle_snapshot_sha256)
+        self.assertEqual(result.candidates[0].status, "held")
+        self.assertEqual(
+            len(
+                [
+                    ref
+                    for ref in result.candidates[0].references
+                    if ref.reason == "container_reference"
+                ]
+            ),
+            3,
+        )
 
     def test_lifecycle_readback_keeps_acquisition_distinct_from_later_inventory_hold(self) -> None:
         from unittest.mock import patch

@@ -1,6 +1,7 @@
 """Release a failed native testing candidate's private containers and volumes."""
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 import hashlib
 import inspect
 import json
@@ -19,6 +20,7 @@ from control_plane.contracts.testing_candidate import (
     testing_candidate_namespace,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.candidate_custody_evidence import CandidateCustodyEvidence
 from control_plane.contracts.testing_candidate_release import (
     AUTOMATIC_RELEASE_REASONS_MAX,
     TESTING_CANDIDATE_RELEASE_ROUTE,
@@ -196,6 +198,7 @@ class CandidateRelease:
     retention: NativeTestingSweepResponse | None = None
     private: dict[str, Any] = field(default_factory=dict)
     request: NativeTestingSweepRequest | None = None
+    evidence: CandidateCustodyEvidence | None = None
 
 
 def require_failed_testing_operation(
@@ -351,6 +354,8 @@ def build_candidate_release(
     operation_id: str,
     receiver_operation_id: str | None = None,
     allowed_provider_records: frozenset[str] = frozenset(),
+    *,
+    include_evidence: bool = False,
 ) -> CandidateRelease:
     operation = store.read_odoo_stable_target_replacement_operation_record(operation_id)
     if operation.product != product or not operation.is_native_testing_rebuild:
@@ -373,8 +378,14 @@ def build_candidate_release(
         receiver_operation_id=receiver_operation_id or "",
         candidates=(allocation.namespace,),
     )
+    packets: list[CandidateCustodyEvidence] = []
     observed, private = build_native_testing_sweep(
-        store, root, request, "candidate-release-plan", allowed_provider_records
+        store,
+        root,
+        request,
+        "candidate-release-plan",
+        allowed_provider_records,
+        **({"evidence": packets} if include_evidence else {}),
     )
     try:
         require_failed_testing_operation(operation, product)
@@ -419,8 +430,15 @@ def build_candidate_release(
         resources_binding_sha256=resources.binding_sha256,
         retention_plan_sha256=observed.plan_sha256,
     )
+    packet = packets[0] if packets else None
+    if packet is not None:
+        packet.plan_sha256 = plan.digest()
+        packet.completed_at = datetime.now(timezone.utc)
+        packet.packet_sha256 = canonical_json_sha256(
+            packet.model_dump(mode="json", exclude={"packet_sha256"}, exclude_none=True)
+        )
     return CandidateRelease(
-        plan, resources, allocation.server_id, status, None, observed, private, request
+        plan, resources, allocation.server_id, status, None, observed, private, request, packet
     )
 
 
@@ -438,6 +456,7 @@ def release_response(
         plan_sha256=release.plan.digest(),
         status=status,
         reclaimable_bytes=release.reclaimable_bytes,
+        evidence=release.evidence,
         candidates=release.retention.candidates if release.retention else (),
         capacity=release.retention.capacity if release.retention else (),
         capacity_refusal=release.retention.capacity_refusal if release.retention else "",
@@ -627,7 +646,12 @@ def release_fingerprint(
     normalized = request.model_copy(update={"mode": "apply"})
     return hashlib.sha256(
         "\n".join(
-            (actor, product, operation_id, normalized.model_dump_json(exclude_none=True))
+            (
+                actor,
+                product,
+                operation_id,
+                normalized.model_dump_json(exclude_none=True, exclude={"include_evidence"}),
+            )
         ).encode()
     ).hexdigest()
 

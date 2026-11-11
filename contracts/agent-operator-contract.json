@@ -1145,7 +1145,7 @@
           "reviewed_plan_sha256",
           "receiver_operation_id"
         ],
-        "schema_fingerprint_sha256": "9641633b6c64c69956b6f54ec10b7a8453bb44aeab87982fe0bb3793b133569f",
+        "schema_fingerprint_sha256": "363eb2ec0e1887c9e698a44073018a59f13192e5c9a970c70199f81b65ff293a",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1566,8 +1566,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "6b56e666f7efdb078f7c8e1ea7f5e52f1f1a7179"
+    "source_commit_sha": "a9bd26b20353e40c298d81c131645ec6cb9002c1"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "70bb3443a92e92c36c70be1ada8fe674f846d6add633ccc45d2904c768ceeeee"
+  "semantic_digest_sha256": "ea6d6b9856915edebeba0a1f8f5ab4e8c403fe8ab612f98d717fdf5dd72d1c2b"
 }

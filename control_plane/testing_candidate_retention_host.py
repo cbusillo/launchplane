@@ -2,6 +2,7 @@ import inspect
 from pathlib import Path
 from control_plane.dokploy.testing_retained_copy import (
     failed_candidate_own_web,
+    failed_candidate_check,
     read_container_processes,
     web_gate_unexpected,
 )
@@ -63,6 +64,7 @@ NATIVE_TESTING_RETENTION_INSPECTION = (
     + inspect.getsource(staged_source_inputs)
     + inspect.getsource(web_gate_unexpected)
     + inspect.getsource(read_container_processes)
+    + inspect.getsource(failed_candidate_check)
     + inspect.getsource(failed_candidate_own_web)
     + CLEAN_TESTING_SNAPSHOT_LIBRARY
     + STORAGE_MAINTENANCE_LIBRARY
@@ -117,6 +119,7 @@ def inspect_candidate():
                 use_reasons.append('candidate_published_ports')
     completed=spec.get('failed_candidate',{}).get('completed') is True
     gate_unexpected=True
+    gate_observed=False
     result=[]
     pools=storage_backing_pools()
     for role,name in expected.items():
@@ -147,6 +150,7 @@ def inspect_candidate():
         if role=='ODOO_DATA_VOLUME':
             gate=path/Path(WEB_GATE_PATH).relative_to('/volumes/data')
             gate_unexpected=web_gate_unexpected(gate,completed)
+            gate_observed=True
         reasons=list(dict.fromkeys(use_reasons+(['source_inputs_preserved'] if sources else [])+(['container_reference'] if referenced else [])))
         result.append({'role':role,'name':name,'status':'observed','reason':next(iter(reasons),''),'reasons':reasons,
             'identity':identity,'engine_identity':retained_volume_engine_identity(engine_id),
@@ -155,6 +159,8 @@ def inspect_candidate():
             'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
             'monotonic_deadline':time.monotonic()+300})
     for row in result:
+        if spec.get('custody_evidence') is True:
+            row['gate_unexpected']=gate_unexpected if gate_observed and row['role']=='ODOO_DATA_VOLUME' else None
         if row['status']=='observed' and not row['empty'] and gate_unexpected:
             row['reasons'].append('completed_or_unknown_web_gate')
             if row['reason'] in ('','container_reference'):
