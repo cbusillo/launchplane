@@ -214,6 +214,8 @@ class AgentOperatorContractTests(unittest.TestCase):
             purpose="Read from https://private.example.invalid.",
         )
         with patch.object(contract_module, "OPERATION_SPECS", tuple(unsafe_specs)):
+            with self.assertRaises(AgentOperatorContractError):
+                contract_module.agent_operations(self.document, self.app)
             with self.assertRaisesRegex(AgentOperatorContractError, "Unsafe public"):
                 build_agent_operator_contract(source_commit_sha="a" * 40)
 
