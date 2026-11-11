@@ -8,6 +8,11 @@ title: Testing Style
 - CI's `repository_pins` job runs the shared
   [change-detector scanner](https://github.com/cbusillo/codex-skills/blob/main/skills/references/test-quality.md)
   as warnings only. Triage its annotations on tests you add or change.
+- The same job fails when this change's OpenAPI declares a bounded-read
+  response field outside the catalog helper's
+  [allowlist](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/write-action-helper-contract.md),
+  read from catalog `main`. Land the catalog's allowlist change first, then
+  rerun this check.
 - Read live state only on the path that acts on it.
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
 - When a fixture follows a record written with the current clock, derive its

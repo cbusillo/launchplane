@@ -1,8 +1,10 @@
 """Release a failed native testing candidate's private containers and volumes."""
 
 from dataclasses import dataclass, field, replace
+import hashlib
 import inspect
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +18,13 @@ from control_plane.contracts.testing_candidate import (
     TestingCandidateAllocation,
     testing_candidate_namespace,
 )
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.testing_candidate_release import (
+    AUTOMATIC_RELEASE_REASONS_MAX,
+    TESTING_CANDIDATE_RELEASE_ROUTE,
+    AutomaticCandidateReleaseView,
     TestingCandidateReleasePlan,
+    TestingCandidateReleaseRequest,
     TestingCandidateReleaseResponse,
     TestingCandidateReleaseStatus,
 )
@@ -28,12 +35,14 @@ from control_plane.lane_usage import evaluate_lane_usage
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_usage import read_odoo_testing_usage
 from control_plane.provider_operations import (
+    DurableProviderOperationResult,
     ProviderEvidenceLease,
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
     ProviderMutationUnknownError,
     ProviderObservation,
     ProviderOperationLease,
+    run_durable_provider_operation,
 )
 from control_plane.retained_volume_capture import (
     _batched_docker_inspect,
@@ -55,7 +64,10 @@ from control_plane.testing_candidate_retention import (
 )
 
 RELEASE_TIMEOUT_SECONDS = 600
+RELEASE_LEASE_SECONDS = 900
 RELEASE_PLAN_ERRORS = (ValueError, OSError, click.ClickException, ProviderMutationUnknownError)
+AUTOMATIC_RELEASE_KEY = "automatic"
+AUTOMATIC_RELEASE_ACTOR = "launchplane:failed-testing-candidate"
 
 TESTING_CANDIDATE_RELEASE_PROGRAM = (
     "from collections.abc import Callable,Sequence\n"
@@ -413,7 +425,10 @@ def build_candidate_release(
 
 
 def release_response(
-    release: CandidateRelease, trace_id: str, status: TestingCandidateReleaseStatus
+    release: CandidateRelease,
+    trace_id: str,
+    status: TestingCandidateReleaseStatus,
+    reason_code: str = "",
 ) -> TestingCandidateReleaseResponse:
     return TestingCandidateReleaseResponse(
         trace_id=trace_id,
@@ -426,6 +441,7 @@ def release_response(
         candidates=release.retention.candidates if release.retention else (),
         capacity=release.retention.capacity if release.retention else (),
         capacity_refusal=release.retention.capacity_refusal if release.retention else "",
+        reason_code=reason_code or None,
     )
 
 
@@ -440,6 +456,7 @@ class TestingCandidateReleaseAdapter:
     ) -> None:
         self.store, self.root, self.release = store, root, release
         self.reviewed_plan_sha256, self.trace_id = reviewed_plan_sha256, trace_id
+        self.fresh: CandidateRelease | None = None
 
     def target_key(self) -> str:
         return "testing-candidate-release:" + self.release.plan.namespace
@@ -561,6 +578,7 @@ class TestingCandidateReleaseAdapter:
             )
         except RELEASE_PLAN_ERRORS as error:
             raise ProviderMutationRejectedError(error) from error
+        self.fresh = fresh
         if fresh.plan.digest() != self.reviewed_plan_sha256:
             raise ProviderMutationRejectedError(
                 TestingCandidateReleaseRefused(
@@ -597,3 +615,224 @@ def release_from_receipt(reconciliation_key: str) -> CandidateRelease:
         if "request" in recorded
         else None,
     )
+
+
+def release_scope(product: str, operation_id: str) -> str:
+    return f"testing-candidate-release:{product}:{operation_id}"
+
+
+def release_fingerprint(
+    actor: str, product: str, operation_id: str, request: TestingCandidateReleaseRequest
+) -> str:
+    normalized = request.model_copy(update={"mode": "apply"})
+    return hashlib.sha256(
+        "\n".join(
+            (actor, product, operation_id, normalized.model_dump_json(exclude_none=True))
+        ).encode()
+    ).hexdigest()
+
+
+def run_release_operation(
+    store: PostgresRecordStore,
+    *,
+    product: str,
+    operation_id: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+    trace_id: str,
+    adapter: Any,
+    allow_mutation: bool = True,
+) -> DurableProviderOperationResult:
+    return run_durable_provider_operation(
+        store=store,
+        scope=release_scope(product, operation_id),
+        route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+        lease_owner=trace_id,
+        response_trace_id=trace_id,
+        adapter=adapter,
+        lease_seconds=RELEASE_LEASE_SECONDS,
+        allow_mutation=allow_mutation,
+    )
+
+
+def read_automatic_receipt(
+    store: PostgresRecordStore, product: str, operation_id: str
+) -> LaunchplaneIdempotencyRecord | None:
+    return store.read_idempotency_record(
+        scope=release_scope(product, operation_id),
+        route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
+        idempotency_key=AUTOMATIC_RELEASE_KEY,
+    )
+
+
+@dataclass(frozen=True)
+class SettledCandidateRelease:
+    target: str
+    binding: str
+    payload: dict[str, object]
+
+    def target_key(self) -> str:
+        return self.target
+
+    def reconciliation_key(self) -> str:
+        return self.binding
+
+    def observe(
+        self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
+    ) -> ProviderObservation:
+        del provider_operation_key, provider_effect_phase
+        return ProviderObservation("absent" if reconciliation_key == self.binding else "unknown")
+
+    def apply(
+        self, provider_operation_key: str, lease: ProviderOperationLease
+    ) -> ProviderMutationOutcome:
+        del provider_operation_key
+        lease.assert_current()
+        return ProviderMutationOutcome(202, self.payload, provider_effect_performed=False)
+
+
+def _refusal_code(error: Exception) -> str:
+    if isinstance(error, TestingCandidateReleaseRefused):
+        return error.code
+    if isinstance(error, native_copy_stream.NativeSourceAuthorizationDenied):
+        return "authorization_denied"
+    return "candidate_release_unavailable"
+
+
+def _failed_original_with_candidate(
+    store: PostgresRecordStore, operation_id: str
+) -> OdooStableTargetReplacementOperationRecord | None:
+    operation = store.read_odoo_stable_target_replacement_operation_record(operation_id)
+    if not operation.is_native_testing_rebuild or operation.status != "fail":
+        return None
+    if not operation.error_code:
+        return None
+    allocation = store.read_testing_candidate(
+        testing_candidate_namespace(operation.product, operation.context, operation_id)
+    )
+    return operation if allocation is not None and allocation.compose_id else None
+
+
+def release_failed_candidate(store: PostgresRecordStore, root: Path, operation_id: str) -> None:
+    operation = _failed_original_with_candidate(store, operation_id)
+    if operation is None:
+        return
+    product, trace_id = operation.product, f"automatic-release-{operation_id}"
+    if read_automatic_receipt(store, product, operation_id) is not None:
+        return
+    namespace = testing_candidate_namespace(product, operation.context, operation_id)
+
+    def run(adapter: Any, plan_sha256: str) -> None:
+        run_release_operation(
+            store,
+            product=product,
+            operation_id=operation_id,
+            idempotency_key=AUTOMATIC_RELEASE_KEY,
+            request_fingerprint=release_fingerprint(
+                AUTOMATIC_RELEASE_ACTOR,
+                product,
+                operation_id,
+                TestingCandidateReleaseRequest(mode="apply", reviewed_plan_sha256=plan_sha256),
+            ),
+            trace_id=trace_id,
+            adapter=adapter,
+        )
+
+    try:
+        release = build_candidate_release(root, store, product, operation_id)
+    except (TestingCandidateReleaseRefused, *RELEASE_PLAN_ERRORS) as error:
+        binding = json.dumps(
+            {"product": product, "operation_id": operation_id, "refusal": _refusal_code(error)},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        reviewed = hashlib.sha256(binding.encode()).hexdigest()
+        payload = TestingCandidateReleaseResponse(
+            trace_id=trace_id,
+            product=product,
+            operation_id=operation_id,
+            error_code=operation.error_code,
+            plan_sha256=reviewed,
+            status="held",
+            reason_code=_refusal_code(error),
+        ).model_dump(mode="json", exclude_none=True)
+        run(
+            SettledCandidateRelease("testing-candidate-release:" + namespace, binding, payload),
+            reviewed,
+        )
+        return
+    reviewed = release.plan.digest()
+    effect = TestingCandidateReleaseAdapter(store, root, release, reviewed, trace_id)
+    settled_status: TestingCandidateReleaseStatus = release.status
+    reason_code, observed = "", release
+    if release.status == "eligible":
+        try:
+            run(effect, reviewed)
+            return
+        except (TestingCandidateReleaseRefused, *RELEASE_PLAN_ERRORS) as error:
+            settled_status, reason_code = "held", _refusal_code(error)
+            if effect.fresh is not None:
+                observed = replace(release, retention=effect.fresh.retention)
+    payload = release_response(observed, trace_id, settled_status, reason_code).model_dump(
+        mode="json", exclude_none=True
+    )
+    run(
+        SettledCandidateRelease(effect.target_key(), effect.reconciliation_key(), payload), reviewed
+    )
+
+
+def _held_reasons(response: TestingCandidateReleaseResponse) -> tuple[str, ...]:
+    reasons = [response.reason_code] if response.reason_code else []
+    for candidate in response.candidates:
+        if not candidate.selected:
+            continue
+        reasons.extend(candidate.reasons)
+        reasons.extend(row.reason for row in candidate.resources if row.status == "held")
+    return tuple(dict.fromkeys(reason for reason in reasons if reason))[
+        :AUTOMATIC_RELEASE_REASONS_MAX
+    ]
+
+
+def _reviewed_plan_sha256(reconciliation_key: str) -> str:
+    try:
+        return release_from_receipt(reconciliation_key).plan.digest()
+    except (ValueError, KeyError, TypeError):
+        return hashlib.sha256(reconciliation_key.encode()).hexdigest()
+
+
+def automatic_release_view(
+    record: LaunchplaneIdempotencyRecord | None,
+) -> AutomaticCandidateReleaseView | None:
+    if record is None:
+        return None
+    if record.state != "completed":
+        return AutomaticCandidateReleaseView(
+            status="unknown",
+            reasons=("mutation_reconciliation_required",),
+            plan_sha256=_reviewed_plan_sha256(record.reconciliation_key),
+            idempotency_key=AUTOMATIC_RELEASE_KEY,
+        )
+    try:
+        response = TestingCandidateReleaseResponse.model_validate(record.response_payload)
+    except ValueError:
+        logging.getLogger(__name__).warning("Automatic candidate release receipt is unreadable.")
+        return AutomaticCandidateReleaseView(
+            status="unknown",
+            reasons=("release_receipt_unreadable",),
+            idempotency_key=AUTOMATIC_RELEASE_KEY,
+        )
+    status = response.status if response.status != "eligible" else "unknown"
+    return AutomaticCandidateReleaseView(
+        status=status,
+        reasons=_held_reasons(response) if status == "held" else (),
+        plan_sha256=response.plan_sha256,
+        idempotency_key=AUTOMATIC_RELEASE_KEY,
+    )
+
+
+def read_automatic_release(
+    store: PostgresRecordStore, product: str, operation_id: str
+) -> AutomaticCandidateReleaseView | None:
+    return automatic_release_view(read_automatic_receipt(store, product, operation_id))
