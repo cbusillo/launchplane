@@ -558,6 +558,91 @@ class RetainedVolumeSweepTests(unittest.TestCase):
         ):
             self.assertFalse(_inventory_clear(self.root, self.binding, exact=True))
 
+    def test_inventory_reports_unavailable_projects_and_later_consumers_together(self) -> None:
+        environment: dict[str, object] = {kind: [] for kind in TARGET_COLLECTIONS}
+        environment.update(environmentId="environment", env="STATE=" + self.binding.volume_name)
+        projects = (
+            {"projectId": "unreadable", "environments": []},
+            {"projectId": "consumer", "env": "", "environments": [environment]},
+        )
+        references: list[dict[str, str]] = []
+        with patch(
+            "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_projects",
+            return_value=projects,
+        ):
+            self.assertFalse(
+                _inventory_clear(self.root, self.binding, exact=True, references=references)
+            )
+        self.assertEqual(
+            {(row["reason"], row["record_id"]) for row in references},
+            {
+                ("provider_inventory_unavailable", "unreadable"),
+                ("foreign_provider_reference", "environment"),
+            },
+        )
+
+    def test_unreadable_target_does_not_hide_a_later_target_consumer(self) -> None:
+        environment: dict[str, object] = {kind: [] for kind in TARGET_COLLECTIONS}
+        environment.update(
+            environmentId="environment",
+            env="",
+            applications=[{"applicationId": "unreadable"}, {"applicationId": "consumer"}],
+        )
+        references: list[dict[str, str]] = []
+        with (
+            patch(
+                "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_projects",
+                return_value=({"env": "", "environments": [environment]},),
+            ),
+            patch(
+                "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_target_payload",
+                side_effect=[
+                    ValueError("malformed detail"),
+                    {
+                        "applicationId": "consumer",
+                        "env": "",
+                        "mounts": [{"volumeName": self.binding.volume_name}],
+                    },
+                ],
+            ),
+        ):
+            self.assertFalse(
+                _inventory_clear(self.root, self.binding, exact=True, references=references)
+            )
+        self.assertEqual(
+            {(item["reason"], item["record_id"]) for item in references},
+            {
+                ("provider_inventory_unavailable", "unreadable"),
+                ("foreign_provider_reference", "consumer"),
+            },
+        )
+
+    def test_nondiagnostic_inventory_preserves_read_exceptions(self) -> None:
+        for detail_kind in ("environment", "target"):
+            environment: dict[str, object] = {kind: [] for kind in TARGET_COLLECTIONS}
+            environment["environmentId"] = "environment"
+            if detail_kind == "target":
+                environment.update(env="", applications=[{"applicationId": "target"}])
+            with (
+                self.subTest(detail_kind=detail_kind),
+                patch(
+                    "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_projects",
+                    return_value=(
+                        {"projectId": "project", "env": "", "environments": [environment]},
+                    ),
+                ),
+                patch(
+                    "control_plane.retained_volume_sweep_execution.api.dokploy_request",
+                    side_effect=ValueError("malformed detail"),
+                ),
+                patch(
+                    "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_target_payload",
+                    side_effect=ValueError("malformed detail"),
+                ),
+                self.assertRaises(ValueError),
+            ):
+                _inventory_clear(self.root, self.binding, exact=True)
+
     def test_exact_inventory_reads_environment_variables_from_complete_identity_bound_detail(
         self,
     ) -> None:
