@@ -16840,6 +16840,7 @@ def create_launchplane_fastapi_app(
             and config_profile is not None
             and config_profile.production_use == "live"
             and product_config_request.instance == "prod"
+            and product_config_request.adopts_provider_keys()
             and product_config_has_undeclared_runtime_settings(
                 profile=config_profile, payload=request_payload
             )
