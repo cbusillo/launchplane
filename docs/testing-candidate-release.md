@@ -56,6 +56,27 @@ candidate's `references` list each one with its `reason`, `kind`, and
 `record_id` or, for current records, `record_sha256`. `references` is omitted
 when nothing else names the candidate.
 
+Candidate and resource rows also expose optional `readback` maps, using the
+existing `ReadbackPredicate` keys and `pass`, `fail`, `unavailable`, or `skipped`.
+A skipped check supplies no evidence. Candidate `copy_native_files_readable`
+reports independent source verification; a missing receipt or file is unavailable,
+and an invalid or changed file fails. `copy_custody_matches` reports lifecycle
+acquisition. It remains `pass` when later resource checks invalidate that
+lifecycle and add `candidate_lifecycle_custody_incomplete`; the lifecycle digest
+and container count still describe only usable custody. A failed native
+lifecycle also projects its existing failed predicate.
+
+Resource readback retains the evaluated staging, mount and gate observations
+even when an earlier hold determines `reason`. `storage_consumers_exclusive`
+reports the provider-wide inventory check, and `resources_qualified` reports
+the subsequent physical sweep check. They remain skipped when an earlier guard
+prevents those reads. A real provider reference keeps
+`foreign_provider_reference`; incomplete provider inventory reports
+`provider_inventory_unavailable`. The existing candidate `references` identifies
+the project, environment or target using only its safe ID or an identity digest.
+No provider environment contents or error prose are returned. Sibling retirement
+callers retain the same boolean inventory safety contract.
+
 Mounted storage qualifies only through the existing native retained-copy
 lifecycle. The candidate must be terminally abandoned, or a completed copy whose
 original failed, and its source must be preserved. A completed copy without a
@@ -72,12 +93,26 @@ removal have durable receipts and absence readback. Only then may the existing
 volume sweep remove reviewed eligible volumes, the data volume that holds the
 gate last; its apply still refuses mounts.
 
-Staged `.lp-native-*` source directories, unknown copy gates, completed copies
+Staged `.lp-native-*` source contents, unknown copy gates, completed copies
 without a preserved source, current lanes, only-needed data, original pairs and
 operation/failure/provider records stay protected. Production labels, wrong ownership, aliases and unknown backings
 refuse. There is no compose-target deletion or resize. `released` means the
 reviewed eligible resources are absent; explicitly preserved source resources
 remain listed, not falsely reported as deleted.
+
+A canonical, unchanged, genuinely empty `.lp-native-<32 hex characters>` directory
+left by migrated cleanup is not source contents. Files, partials, links, aliases,
+noncanonical names and unreadable contents still hold. This does not classify
+the surrounding volume as empty or waive its other checks.
+
+Preparation and prepared resume retain the private source cache until the
+original rebuild completes without error. The existing completion path then
+performs cleanup; failed or uncertain candidates retain their original inputs.
+Cleanup, including ordinary post-deploy cleanup, checks other candidates sharing
+the cache binding. Migrated generations share their original source binding;
+any pending, failed or unknown candidate keeps those bytes. Successful cleanup
+remains repeatable after a lost reply. A retained receipt alone never satisfies
+source proof, and no source is recaptured or replaced.
 
 Readback uses the original request, digest and key and does not plan again.
 Completed receipts replay their stored result. Unknown/interrupted effects only

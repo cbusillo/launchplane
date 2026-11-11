@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.retained_volume_sweep import RetainedVolumeSweepItem
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 
 
 class NativeTestingSweepRequest(BaseModel):
@@ -50,6 +51,11 @@ class NativeTestingSweepResource(RetainedVolumeSweepItem):
     role: str
     backing_sha256: str = ""
     free_bytes: int | None = Field(default=None, ge=0)
+    readback: dict[ReadbackPredicate, Literal["pass", "fail", "unavailable", "skipped"]] = Field(
+        default_factory=dict,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class NativeTestingSweepReference(BaseModel):
@@ -80,6 +86,11 @@ class NativeTestingSweepCandidate(BaseModel):
     container_count: int = Field(default=0, ge=0)
     resources: tuple[NativeTestingSweepResource, ...] = ()
     physical_readback: dict[str, dict[str, int | str]] = Field(default_factory=dict)
+    readback: dict[ReadbackPredicate, Literal["pass", "fail", "unavailable", "skipped"]] = Field(
+        default_factory=dict,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     references: tuple[NativeTestingSweepReference, ...] = Field(
         default=(),
         exclude_if=lambda value: not value,

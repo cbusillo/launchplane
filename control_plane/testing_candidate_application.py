@@ -587,7 +587,7 @@ def remove_prepared_candidate_source_cache(
     capture = recorded_native_testing_capture(store, generation)
     if capture is None:
         raise ValueError("The prepared native copy has no original capture receipt.")
-    remove_completed_native_capture_cache(capture)
+    remove_completed_native_capture_cache(capture, store=store)
 
 
 def candidate_restore_terminal(

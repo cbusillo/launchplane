@@ -649,7 +649,7 @@ def execute_odoo_post_deploy(
                 remove_completed_native_capture_cache,
             )
 
-            remove_completed_native_capture_cache(native_capture)
+            remove_completed_native_capture_cache(native_capture, store=record_store)
     except (click.ClickException, OSError) as error:
         from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 
