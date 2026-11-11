@@ -3015,6 +3015,65 @@ operation is part of source completion. After service delivery and the bounded h
 RepairShopr Sync's setup session can complete its tracked testing source through
 this operation. The existing creation-only helper cannot call completion.
 
+`disable-empty-compose-auto-deploy` is a distinct corrective intent in the same
+`POST /v1/dokploy-targets/setup` lifecycle. It disables automatic deployment on
+an existing original, empty, never-live Odoo production Compose target. It
+requires the existing authenticated Director-agent identity, not a workflow,
+Client, substituted identity or new grant. It does not change first-empty
+credential qualification or authorize credential generation, a deploy or release.
+
+The closed `DokployTargetSetupEnvelope` accepts `mode`, this `operation`,
+`context`, `instance: "prod"`, `target_type: "compose"`, exact `target_id`,
+`project_id`, `environment_id`, `server_id`, and
+`expected_current_provider_target` matching the tracked provider reference.
+`product` retains its service value `launchplane`; the exclusive lane owner is
+derived and bound separately. Supply the same `reason` throughout review/apply.
+Other creation, allocation, source, domain, storage and credential inputs are
+refused. Dry-run omits `automation_review` and writes nothing. Its
+`result.setup.automation_review` is a typed closed object with:
+
+- `observed_auto_deploy`: a strict boolean, never a coerced string or number.
+- `observed_at`: an aware timestamp, valid for a new effect for five minutes.
+- `plan_sha256`: the current request, ownership, target, placement, provider and
+  original-storage review digest, not an individual secret/value hash.
+
+Apply supplies that complete object unchanged, the same exact request and reason,
+`confirmation: "APPLY DOKPLOY TARGET SETUP"`, and a distinct corrective
+`Idempotency-Key`. It does not replay completed creation as a repair. A completed
+correction replay returns stored evidence without another provider read or write;
+a later correction needs a new current review and distinct intent/key. New keys
+cannot escape a held or uncertain predecessor. The service binds strict current
+boolean state, refuses stale or changed review, requires complete empty provider
+history and quiescent work, proves exact exclusive project/environment membership,
+and reuses original first-empty ownership/storage qualification. Missing prior
+records grant no extra authority: positive current storage proof is still required.
+Recorded use, needed data, shared/foreign resources, Live/history, holds and
+unresolved original operations retain their protections. Executor exclusion and
+the existing serialized effect-admission checkpoint protect dispatch.
+
+Only `{composeId, autoDeploy: false}` reaches the provider update driver. Existing
+False is a verified no-op. Independent target reads must report literal False
+and preserve the complete observed provider configuration, except `updatedAt`
+and the intended boolean transition. Environment, source, mounts, secrets,
+identity/allocation and Launchplane release/data/target records are not written.
+The existing storage program proves no original files, data or workload are
+occupied; absence of deployments alone never establishes that fact. Readback
+checks the same current ownership, placement and storage proof.
+
+An uncertain update or readback retains its original request/key and reconciliation
+fence. `mode: "readback"` requires that original corrective request, unchanged
+review object and key. It can adopt an independently verified completed effect,
+even after the review expires, but cannot issue another provider mutation. A
+still-True, malformed, missing, changed or unavailable observation stays uncertain;
+there is no retry-safe absence or new-key escape. All setup intents keep their
+existing errors; this intent uses `invalid_dokploy_target_setup` (409) for failed
+qualification/review, `dokploy_target_evidence_unavailable` (503) for unavailable
+reads, and the existing operation conflict/in-progress/reconciliation responses.
+Responses contain review metadata and boolean outcome only, not provider source,
+environment values, mounts, private hosts or storage/value hashes. Until a maintained
+caller explicitly supports this typed intent, source delivery does not make it
+usable through a nearby installed create/source-completion command.
+
 Dokploy target inspect uses the native FastAPI
 `GET /v1/dokploy-targets/inspect` route. The route is a read-only proof surface
 for provider identity before an adoption, creation, or repair: callers may pass

@@ -7,6 +7,10 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.browser_route_repair import BrowserRouteRepairRequest
+from control_plane.dokploy_empty_automation import (
+    EmptyAutomationReview,
+    OPERATION as EMPTY_AUTOMATION_OPERATION,
+)
 from control_plane.contracts.compose_setup_recovery import RetainedComposeSetup
 from control_plane.generic_web_onboarding import GenericWebOnboardingIntent
 from control_plane.contracts.deploy_target import DeployedTargetReference
@@ -345,6 +349,7 @@ class DokployTargetSetupEnvelope(BaseModel):
         "create-application",
         "create-compose",
         "complete-compose-source",
+        "disable-empty-compose-auto-deploy",
         "prune-compose-domain",
         "reconcile-compose-domain",
         "repair-domain-authority",
@@ -391,6 +396,9 @@ class DokployTargetSetupEnvelope(BaseModel):
     browser_review: BrowserRouteRepairRequest | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    automation_review: EmptyAutomationReview | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     expected_current_provider_target: DeployedTargetReference | None = None
     expected_current_provider_target_fingerprint: str = Field(default="", max_length=256)
     replaces_operation_id: str = ""
@@ -404,6 +412,37 @@ class DokployTargetSetupEnvelope(BaseModel):
     @model_validator(mode="after")
     def _validate_setup(self) -> "DokployTargetSetupEnvelope":
         supplied_fields = self.model_fields_set.copy()
+        if self.operation == EMPTY_AUTOMATION_OPERATION:
+            allowed = {
+                "schema_version",
+                "mode",
+                "operation",
+                "product",
+                "context",
+                "instance",
+                "target_type",
+                "target_id",
+                "project_id",
+                "environment_id",
+                "server_id",
+                "expected_current_provider_target",
+                "automation_review",
+                "confirmation",
+                "reason",
+            }
+            if (
+                supplied_fields - allowed
+                or self.instance != "prod"
+                or self.target_type != "compose"
+                or not all((self.target_id, self.project_id, self.environment_id, self.server_id))
+                or self.expected_current_provider_target is None
+                or (self.mode == "dry-run") != (self.automation_review is None)
+            ):
+                raise ValueError(
+                    "Empty automation setup requires an exact original production review."
+                )
+        elif self.automation_review is not None:
+            raise ValueError("Automation review only supports original empty automation setup.")
         if self.retained_compose_setup is not None or self.expected_compose_recovery_sha256:
             if (
                 self.operation != "create-compose"
@@ -476,6 +515,7 @@ class DokployTargetSetupEnvelope(BaseModel):
             (
                 self.mode == "readback"
                 and not (self.operation == "create-compose" and self.instance == "prod")
+                and self.operation != EMPTY_AUTOMATION_OPERATION
             )
             or self.retain_allocation
             or self.expected_allocation_custody_sha256
