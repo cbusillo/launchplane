@@ -65,20 +65,33 @@ acquisition. It remains `pass` when later resource checks invalidate that
 lifecycle and add `candidate_lifecycle_custody_incomplete`; the lifecycle digest
 and container count still describe only usable custody. A failed native
 lifecycle also projects its existing failed predicate.
+When a candidate-level hold already explains the refusal, successful lifecycle
+readback still clears its unusable digest without adding a second refusal reason.
 
-Evaluated staging and mount holds remain in the existing candidate `references`
-as `source_inputs_preserved` and `container_reference`, identifying the retained
-volume, even when another hold determines its primary `reason`. These are native
-observations; later lifecycle custody can qualify the candidate's own mounts.
+All safely readable holds remain in the existing candidate `references`, identifying
+the retained volume or provider record, even when another hold determines the
+resource's primary `reason`. Native observations include simultaneous web use,
+published ports, staged source, container references and unknown web gates.
+Later lifecycle custody can qualify the candidate's own mounts; it cannot clear
+another hold. Lifecycle invalidation considers every hold, including holds on
+a volume whose primary reason is `source_inputs_preserved`.
 `native_inspection_complete` reports resource observation coverage. `storage_consumers_exclusive`
 reports the provider-wide inventory check, and `resources_qualified` reports
-the subsequent physical sweep check. They remain skipped when an earlier guard
-prevents those reads. A real provider reference keeps
+the independent physical sweep check. An earlier hold does not skip independent
+reads: a failed source check can coexist with lifecycle acquisition, and an
+unavailable provider inventory can coexist with physical holds. Reads whose own
+identity or custody prerequisites are missing remain skipped or unavailable;
+no observation grants removal authority. An active provider snapshot still
+prevents host inspection but does not hide readable public-use, job or schedule
+holds on that identity-bound target. A real provider reference keeps
 `foreign_provider_reference`; incomplete provider inventory reports
 `provider_inventory_unavailable`. The existing candidate `references` identifies
 the project, environment or target using only its safe ID or an identity digest.
-No provider environment contents or error prose are returned. Sibling retirement
-callers retain the same boolean inventory safety contract.
+No provider environment contents or error prose are returned. Diagnostic inventory
+traversal keeps unreadable records and continues through independently readable
+siblings. It never drops an unknown project or treats an unreadable source as
+empty. Sibling retirement callers retain the same boolean inventory safety
+contract and stop on their first hold when no diagnostics are requested.
 
 Mounted storage qualifies only through the existing native retained-copy
 lifecycle. The candidate must be terminally abandoned, or a completed copy whose
