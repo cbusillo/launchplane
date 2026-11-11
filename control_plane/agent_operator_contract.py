@@ -182,6 +182,15 @@ OPERATION_SPECS = (
         (),
     ),
     OperationSpec(
+        "GET",
+        "/v1/products/{product}/environments/{environment}/odoo-inventory-readback",
+        "Read current stored inventory, bounded private part witnesses and one declared purchaser seed on exact testing without writes or external connections.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
         "POST",
         INTEGRATION_ATTESTATION_ROUTE,
         "Record an exact-merge engineering attestation with a confirming independent model review; records no new Client decision and never promotes.",
