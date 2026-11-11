@@ -536,6 +536,7 @@ class ProviderKeyRetirementApiTests(unittest.IsolatedAsyncioTestCase):
         runtime = planned.json()["result"]["runtime_environment"]
         self.assertEqual(runtime["retired_provider_keys_before"], ["LISTEN_HOST"])
         self.assertEqual(runtime["retired_provider_keys_after"], [])
+        self.assertEqual(runtime["env_value_count_after"], 2)
 
 
 class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
