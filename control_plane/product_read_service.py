@@ -166,6 +166,7 @@ def build_product_environment_read_service_result(
             record_store=record_store,
             product=product,
             action_allowed=action_allowed,
+            include_preview_sleep_evidence=params.get("include_preview_sleep_evidence") == "true",
         )
         return ProductEnvironmentReadServiceResult(
             payload={"product": overview.model_dump(mode="json")},
@@ -184,11 +185,13 @@ def build_product_environment_list_service_payload(
     *,
     record_store: ProductEnvironmentReadModelStore,
     action_allowed: ActionAllowed,
+    include_preview_sleep_evidence: bool = False,
 ) -> dict[str, object]:
 
     overviews = build_product_site_overviews(
         record_store=record_store,
         action_allowed=action_allowed,
+        include_preview_sleep_evidence=include_preview_sleep_evidence,
     )
     return {
         "products": [overview.model_dump(mode="json") for overview in overviews],

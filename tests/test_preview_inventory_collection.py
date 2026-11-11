@@ -142,7 +142,7 @@ class PreviewInventoryCollectionTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.preview_sleep_evidence.api.dokploy_request",
-                return_value={"composeFile": "services: {web: {}}"},
+                return_value={"composeId": "compose", "composeFile": "services: {web: {}}"},
             ),
         ):
             collect_preview_inventory(control_plane_root=self.root, record_store=self.store)

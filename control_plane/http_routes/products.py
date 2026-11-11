@@ -1152,10 +1152,14 @@ def register_product_environment_read_routes(
     common = dependencies.common
 
     def list_product_environment_overviews(
+        response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
+        include_preview_sleep_evidence: Annotated[bool, Query()] = False,
     ) -> ProductEnvironmentListResponse:
         trace_id = common.next_trace_id()
+        if include_preview_sleep_evidence:
+            response.headers["Cache-Control"] = "private, no-store"
 
         def action_allowed(
             requested_action: str,
@@ -1202,6 +1206,7 @@ def register_product_environment_read_routes(
                 control_plane_product_read_service.build_product_environment_list_service_payload(
                     record_store=product_read_store,
                     action_allowed=action_allowed,
+                    include_preview_sleep_evidence=include_preview_sleep_evidence,
                 )
             )
         except ProductIncidentReferenceUnavailableError as error:
@@ -1237,16 +1242,23 @@ def register_product_environment_read_routes(
 
     def read_product_overview(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
+        include_preview_sleep_evidence: Annotated[bool, Query()] = False,
     ) -> ProductOverviewResponse:
         trace_id = common.next_trace_id()
+        if include_preview_sleep_evidence:
+            response.headers["Cache-Control"] = "private, no-store"
         result = _build_product_environment_read_result(
             dependencies=common,
             identity=identity,
             record_store=record_store,
             trace_id=trace_id,
-            params={"product": product},
+            params={
+                "product": product,
+                "include_preview_sleep_evidence": str(include_preview_sleep_evidence).lower(),
+            },
         )
         _require_product_environment_result_authorization(
             dependencies=common,

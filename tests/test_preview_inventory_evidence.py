@@ -12,6 +12,59 @@ from tests.test_product_environment_read_model import _PreviewRecordStore, _site
 
 
 class PreviewInventoryEvidenceTests(unittest.TestCase):
+    def test_unbound_observations_preserve_public_reasons(self) -> None:
+        from control_plane.contracts.preview_inventory_scan_record import (
+            PreviewSleepObservation,
+        )
+        from control_plane.preview_inventory_evidence import (
+            inventory_scan_evidence,
+            project_sleep_observations,
+        )
+
+        profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
+        for state, coverage, reason in (
+            ("cannot_sleep", "not_attempted", "Gateway is missing."),
+            ("unknown", "not_attempted", "Read budget exhausted."),
+            ("unknown", "unavailable", "Poll failed."),
+            ("awake", "partial", ""),
+        ):
+            with self.subTest(state=state, coverage=coverage):
+                observation = PreviewSleepObservation.model_validate(
+                    {
+                        "slug": "pr-1",
+                        "state": state,
+                        "reason": reason,
+                        "evidence": {"coverage": coverage},
+                    }
+                )
+                scan = PreviewInventoryScanRecord(
+                    scan_id="saved",
+                    context=profile.preview.context,
+                    product=profile.product,
+                    repository=profile.repository,
+                    scanned_at=datetime.now(timezone.utc).isoformat(),
+                    source="fixture",
+                    status="pass",
+                    preview_count=1,
+                    preview_slugs=("pr-1",),
+                    sleep_observations=(observation,),
+                )
+                for private in (False, True):
+                    row = project_sleep_observations(
+                        inventory_scan_evidence(scan, include_sleep_evidence=True),
+                        record_store=object(),
+                        profile=profile,
+                        previews=(),
+                        include_private=private,
+                    ).sleep_observations[0]
+                    self.assertEqual((row.state, row.reason), (state, reason))
+                    if private:
+                        assert row.evidence is not None
+                        self.assertEqual(row.evidence.current_binding, "unknown")
+                        self.assertEqual(row.evidence.coverage, coverage)
+                    else:
+                        self.assertNotIn("evidence", row.model_dump())
+
     def test_product_uses_real_empty_scan_instead_of_default_preview_provenance(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
         base_store = _PreviewRecordStore(profile, ())
@@ -234,6 +287,21 @@ class PreviewInventoryEvidenceTests(unittest.TestCase):
         restored = PreviewInventoryScanRecord.model_validate_json(payload)
         self.assertEqual(
             inventory_scan_evidence(restored).sleep_observations, scan.sleep_observations
+        )
+        from control_plane.contracts.preview_inventory_scan_record import PreviewSleepEvidence
+
+        extended = scan.model_copy(
+            update={
+                "sleep_observations": (
+                    scan.sleep_observations[0].model_copy(
+                        update={"evidence": PreviewSleepEvidence(coverage="partial")}
+                    ),
+                )
+            }
+        )
+        V1Scan.model_validate_json(extended.model_dump_json())
+        self.assertEqual(
+            PreviewInventoryScanRecord.model_validate_json(extended.model_dump_json()), extended
         )
         stale = restored.model_copy(update={"scanned_at": "2000-01-01T00:00:00Z"})
         self.assertEqual(inventory_scan_evidence(stale).sleep_observations, ())

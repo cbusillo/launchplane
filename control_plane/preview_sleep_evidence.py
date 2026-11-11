@@ -1,11 +1,19 @@
 from collections.abc import Callable
+from datetime import datetime, timezone
+import json
 import logging
 from time import monotonic
 from typing import Any
 
 import yaml
 
-from control_plane.contracts.preview_inventory_scan_record import PreviewSleepObservation
+from control_plane.contracts.preview_inventory_scan_record import (
+    PreviewSleepBinding,
+    PreviewSleepEvidence,
+    PreviewSleepObservation,
+    PreviewSleepReceipts,
+    PreviewSleepServices,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_execution import odoo_preview_target_key
 from control_plane.dokploy import api
@@ -32,7 +40,7 @@ def poll_preview_sleep(
         token=token,
         server_id=target["server_id"],
         program=PREVIEW_IDLE_RUNTIME_PROGRAM,
-        payload={**target["spec"], "action": "poll"},
+        payload={**target["spec"], "action": "poll", "retain_evidence": True},
         receive=frames.append,
         timeout_seconds=timeout,
         dispatch_guard=lambda dispatch: dispatch(),
@@ -41,6 +49,78 @@ def poll_preview_sleep(
     if not isinstance(result, dict) or frames[0].get("type") != "complete":
         raise NativeSourceUnavailable("Preview sleep observation is unavailable.")
     return result
+
+
+def _sleep_phase(evidence: PreviewSleepEvidence) -> str:
+    receipts = evidence.receipts
+    agreements = (
+        receipts.identity_agrees,
+        receipts.mode_agrees,
+        receipts.sleep_agrees,
+        receipts.wake_agrees,
+    )
+    if False in agreements:
+        return "inconsistent"
+    services = (evidence.services.web, evidence.services.database, evidence.services.script_runner)
+    if any(item.running is None for item in services):
+        return "unknown"
+    if evidence.gateway_mode == "awake":
+        if any(item.running is False or item.healthy is False for item in services):
+            return "inconsistent"
+        return "awake" if all(item.healthy is True for item in services) else "unknown"
+    if evidence.gateway_mode != "asleep" or not all(agreements):
+        return "unknown"
+    if receipts.sleep_present is None or receipts.wake_present is None:
+        return "unknown"
+    if not receipts.sleep_present:
+        return "inconsistent"
+    if receipts.wake_present:
+        return "waking"
+    return "stopping" if any(item.running for item in services) else "asleep"
+
+
+def _retain_poll_evidence(
+    observation: dict[str, Any], target: dict[str, Any]
+) -> PreviewSleepEvidence:
+    evidence = PreviewSleepEvidence(coverage="partial")
+    gateway = observation.get("gateway", {})
+    mode = gateway.get("mode")
+    if mode in {"awake", "asleep"}:
+        evidence.gateway_mode = mode
+    requested, active = gateway.get("requested"), gateway.get("active")
+    evidence.activity_requested = requested if type(requested) is bool else None
+    evidence.active_connections = active if type(active) is int and active >= 0 else None
+    projected = observation.get("evidence")
+    if not isinstance(projected, dict):
+        return evidence
+    try:
+        binding = PreviewSleepBinding.model_validate(
+            {**projected["binding"], "provider_target_id": target["compose_id"]}
+        )
+        expected = json.loads(target["spec"]["identity"])
+        if any(
+            value != expected.get("preview_generation_id" if key == "generation_id" else key)
+            for key, value in binding.model_dump().items()
+            if key != "provider_target_id"
+        ):
+            raise ValueError("Observed binding differs from selected target")
+        evidence.binding = binding
+        evidence.services = PreviewSleepServices.model_validate(projected["services"])
+        evidence.receipts = PreviewSleepReceipts.model_validate(projected["receipts"])
+    except (ValueError, TypeError, KeyError):
+        _LOGGER.warning("Preview sleep poll projection is incomplete")
+        return evidence
+    services = (evidence.services.web, evidence.services.database, evidence.services.script_runner)
+    if (
+        evidence.gateway_mode != "unknown"
+        and evidence.activity_requested is not None
+        and evidence.active_connections is not None
+        and all(item.running is not None and item.healthy is not None for item in services)
+        and evidence.receipts.persisted_state == "observed"
+        and all(value is not None for value in evidence.receipts.model_dump().values())
+    ):
+        evidence.coverage = "complete"
+    return evidence.model_copy(update={"phase": _sleep_phase(evidence)})
 
 
 def collect_preview_sleep_observations(
@@ -82,6 +162,7 @@ def collect_preview_sleep_observations(
             slug=slug,
             state="unknown",
             reason="Sleep eligibility could not be verified; inspect preview diagnostics.",
+            evidence=PreviewSleepEvidence(coverage="not_attempted"),
         )
         if monotonic() >= deadline:
             observations.append(
@@ -102,6 +183,8 @@ def collect_preview_sleep_observations(
             )
             if not isinstance(payload, dict):
                 raise NativeSourceUnavailable("Preview target read is unavailable.")
+            if payload.get("composeId") != compose_id:
+                raise NativeSourceUnavailable("Preview target identity differs.")
             declaration = yaml.safe_load(str(payload.get("composeFile") or ""))
             if not isinstance(declaration, dict) or PREVIEW_GATEWAY_SERVICE not in declaration.get(
                 "services", {}
@@ -135,13 +218,14 @@ def collect_preview_sleep_observations(
                     "Sleep observation budget or shutdown boundary reached."
                 )
             observation = poll_preview_sleep(host=host, token=token, target=target, timeout=timeout)
+            state.evidence = _retain_poll_evidence(observation, target)
             services = observation["services"]
             if set(services) != {"web", "database", "script-runner"}:
                 raise ValueError("Incomplete application state")
             if observation["gateway"]["mode"] == "asleep" and all(
                 not item["running"] for item in services.values()
             ):
-                state = PreviewSleepObservation(slug=slug, state="asleep")
+                state = state.model_copy(update={"state": "asleep", "reason": ""})
             elif store.list_held_provider_target_reservations(
                 provider_target_key=odoo_preview_target_key(
                     context=target["context"], compose_name=target["compose_name"]
@@ -153,7 +237,7 @@ def collect_preview_sleep_observations(
             elif observation["gateway"]["mode"] == "awake" and all(
                 item["running"] and item["healthy"] for item in services.values()
             ):
-                state = PreviewSleepObservation(slug=slug, state="awake")
+                state = state.model_copy(update={"state": "awake", "reason": ""})
             else:
                 raise PreviewCannotSleep(
                     "Application services are stopped, unhealthy or changing sleep state."
@@ -162,6 +246,11 @@ def collect_preview_sleep_observations(
             state = state.model_copy(update={"state": "cannot_sleep", "reason": str(error)})
         except Exception:
             _LOGGER.warning("Preview sleep observation is unavailable for %s", slug)
+            if state.evidence is not None and state.evidence.coverage == "not_attempted":
+                state.evidence.coverage = "unavailable"
+        evidence = state.evidence
+        if evidence is not None:
+            evidence.completed_at = datetime.now(timezone.utc).isoformat()
         observations.append(state)
     if should_stop():
         raise PreviewLifecycleSweepCancelled()
