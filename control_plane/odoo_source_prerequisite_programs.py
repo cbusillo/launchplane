@@ -473,6 +473,39 @@ def inspect(instance="testing"):
         'State':{key:value['State'].get(key) for key in ('Running','StartedAt','Pid')},
         'VerifiedImage':{'Id':image,'RepoDigests':images[0]['RepoDigests']}}
 
+def inspect_database_peer(web):
+    raw=subprocess.run(['docker','ps','-q','--no-trunc','--filter','label=com.docker.compose.project='+spec['project'],
+        '--filter','label=com.docker.compose.service=database'],capture_output=True,check=True,timeout=5)
+    peers=raw.stdout.decode().split()
+    if len(peers)!=1 or not re.fullmatch('[0-9a-f]{64}',peers[0]):
+        raise ValueError()
+    raw=subprocess.run(['docker','inspect','--type','container',peers[0]],capture_output=True,check=True,timeout=5)
+    if len(raw.stdout)>262144:
+        raise ValueError()
+    values=json.loads(raw.stdout)
+    if not isinstance(values,list) or len(values)!=1:
+        raise ValueError()
+    database=values[0]
+    labels=database['Config']['Labels']
+    networks=database['NetworkSettings']['Networks']
+    if (database['Id']!=peers[0] or database['State'].get('Running') is not True
+        or labels.get('com.docker.compose.project')!=spec['project']
+        or labels.get('com.docker.compose.service')!='database' or len(networks)!=1):
+        raise ValueError()
+    network=next(iter(networks))
+    if network not in web['NetworkSettings']['Networks'] or not networks[network].get('IPAddress'):
+        raise ValueError()
+    raw=subprocess.run(['docker','network','inspect',network],capture_output=True,check=True,timeout=5)
+    if len(raw.stdout)>262144:
+        raise ValueError()
+    topology=json.loads(raw.stdout)
+    if (not isinstance(topology,list) or len(topology)!=1 or topology[0].get('Internal') is not True
+        or (topology[0].get('Labels') or {}).get('com.docker.compose.project')!=spec['project']):
+        raise ValueError()
+    return {'address':networks[network]['IPAddress'],
+        'container':{key:database.get(key) for key in ('Id','Config','HostConfig','Mounts','NetworkSettings','RestartCount')},
+        'state':{key:database['State'].get(key) for key in ('Running','StartedAt','Pid')},'network':topology[0]}
+
 """
 
 HOST_LIBRARY = (
