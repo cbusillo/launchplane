@@ -172,6 +172,7 @@ class EmptyAutomationAdapter:
                 host=host, token=token, target_type="compose", target_id=self.request.target_id
             )
             require_empty_compose_source(live, self.request.target_id)
+            project = live.get("appName")
             if (
                 not {"env", "composeFile", "mounts", "autoDeploy", "appName"} <= live.keys()
                 or live["env"] not in (None, "")
@@ -180,8 +181,8 @@ class EmptyAutomationAdapter:
                 or type(live["autoDeploy"]) is not bool
                 or live.get("environmentId") != self.request.environment_id
                 or live.get("serverId") != self.request.server_id
-                or not isinstance(live["appName"], str)
-                or re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", live["appName"]) is None
+                or not isinstance(project, str)
+                or re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", project) is None
             ):
                 raise ValueError(
                     "The original provider observation is occupied, changed or unknown."
@@ -328,7 +329,7 @@ class EmptyAutomationAdapter:
         )
 
     def observe(
-        self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
+        self, _provider_operation_key: str, _provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
         if reconciliation_key != self.reconciliation_key():
             return ProviderObservation("unknown")
@@ -339,7 +340,7 @@ class EmptyAutomationAdapter:
         return ProviderObservation("present", 202, self.completed_payload())
 
     def apply(
-        self, provider_operation_key: str, lease: ProviderOperationLease
+        self, _provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         with self.setup_lock():
             return self.apply_locked(lease)
