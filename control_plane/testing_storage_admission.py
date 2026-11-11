@@ -8,10 +8,11 @@ from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBu
 from control_plane.contracts.odoo_testing_source import MigratedOdooTestingSource
 from control_plane.dokploy import source
 from control_plane.dokploy.native_copy_stream import run_managed_server_program
+from control_plane.testing_storage_capacity import storage_capacity_requirements
 
 TESTING_STORAGE_CAPACITY_INSUFFICIENT = "testing_storage_capacity_insufficient"
 TESTING_STORAGE_CAPACITY_UNAVAILABLE = "testing_storage_capacity_unavailable"
-VOLUME_ROLES = ("database", "data")
+VOLUME_ROLES = ("database", "data", "data_staging")
 
 TESTING_BACKING_READ_PROGRAM = (
     "CLEAN_SNAPSHOT_STATE_DIRECTORY = "
@@ -106,7 +107,8 @@ def migrated_restore_demand(
     staged_pair = migrated.database.size + migrated.filestore.size
     demand = {
         "database": budget.database_bytes,
-        "data": budget.filestore_bytes + staged_pair,
+        "data": budget.filestore_bytes,
+        "data_staging": staged_pair,
         "writable": migrated.database.size,
     }
     if clean_snapshot:
@@ -117,18 +119,23 @@ def migrated_restore_demand(
 def worst_shortfall(
     demand: dict[str, int], roles: dict[str, BackingMeasurement], reserve: int
 ) -> CapacityShortfall | None:
-    required: dict[str, int] = {}
+    backings: dict[str, str] = {}
     available: dict[str, int] = {}
-    for role, size in demand.items():
+    for role in demand:
         measurement = roles["volumes" if role in VOLUME_ROLES else role]
-        required[measurement.backing] = required.get(measurement.backing, 0) + size
+        if type(measurement.available) is not int or measurement.available < 0:
+            raise ValueError("Testing storage capacity is unavailable")
+        backings[role] = measurement.backing
         available[measurement.backing] = min(
             available.get(measurement.backing, measurement.available), measurement.available
         )
+    required = storage_capacity_requirements(
+        demand, backings, reserve, staging_cleanup_before_snapshot=True
+    )
     shortfalls = [
-        CapacityShortfall(required=size + reserve, available=available[backing])
+        CapacityShortfall(required=size, available=available[backing])
         for backing, size in required.items()
-        if size + reserve > available[backing]
+        if size > available[backing]
     ]
     return max(shortfalls, key=lambda item: item.missing, default=None)
 
@@ -168,7 +175,13 @@ def require_migrated_restore_capacity(
 ) -> None:
     budget = migrated_storage_budget(lane_budget, migrated)
     demand = migrated_restore_demand(budget, migrated, clean_snapshot=clean_snapshot)
-    shortfall = worst_shortfall(demand, roles, budget.reserve_bytes)
+    try:
+        shortfall = worst_shortfall(demand, roles, budget.reserve_bytes)
+    except (KeyError, ValueError, TypeError) as error:
+        raise TestingStorageCapacityRefused(
+            TESTING_STORAGE_CAPACITY_UNAVAILABLE,
+            "Testing storage backing or capacity is unavailable for this migrated restore.",
+        ) from error
     if shortfall is None:
         return
     raise TestingStorageCapacityRefused(

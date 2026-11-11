@@ -10,8 +10,16 @@ under the Director's disposable testing rule.
 ## Admission
 
 Migrated restore admission reads the testing server's free space and groups paths
-that share a backing. It charges the database, filestore, staged pair, runner copy,
-optional clean snapshot and reserve using `migrated_storage_budget`. A shortfall
+that share a backing. It keeps the full database and expanded filestore bounds
+from `migrated_storage_budget`, the uploaded pair and the runner dump copy.
+Admission and the native receiver/retention observation use the same phase model:
+the pair overlaps restore, then successful local cleanup precedes the full clean
+snapshot, while the runner dump remains. Each backing needs its largest simultaneous
+demand plus the unchanged reserve. Unqualified phase ordering keeps demands overlapping.
+This conditional bound does not count unlink as physically freed space or grant a
+clone discount. Snapshot capture verifies local cleanup and freshly measures physical
+free space for its entire new demand and reserve before dumping or copying; pinned
+blocks, concurrent consumption and unavailable capacity still stop it. A shortfall
 returns `testing_storage_capacity_insufficient`; unavailable backing information
 returns `testing_storage_capacity_unavailable`. Neither creates a candidate.
 
