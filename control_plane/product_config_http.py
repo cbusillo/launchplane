@@ -193,7 +193,9 @@ class ProductConfigRuntimeEnvironmentRecordSummary(BaseModel):
 class ProductConfigRuntimeEnvironmentResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["skipped", "created", "updated", "unchanged"]
+    action: Literal["skipped", "created", "updated", "unchanged"] = Field(
+        json_schema_extra={"x-launchplane-safe-output": True}
+    )
     scope: RuntimeEnvironmentScope
     context: str
     instance: str
@@ -272,8 +274,10 @@ class ProductConfigProviderKeyAdoptionResult(BaseModel):
 class ProductConfigApplySummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    runtime_changed_key_count: int = Field(ge=0)
-    secret_change_count: int = Field(ge=0)
+    runtime_changed_key_count: int = Field(
+        ge=0, json_schema_extra={"x-launchplane-safe-output": True}
+    )
+    secret_change_count: int = Field(ge=0, json_schema_extra={"x-launchplane-safe-output": True})
 
 
 class ProductConfigLiveTarget(BaseModel):
@@ -328,7 +332,7 @@ class ProductConfigApplyResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["ok", "records_applied_live_sync_required"]
-    mode: ProductConfigMode
+    mode: ProductConfigMode = Field(json_schema_extra={"x-launchplane-safe-output": True})
     product: str
     context: str
     instance: str

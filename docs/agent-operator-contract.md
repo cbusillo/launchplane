@@ -16,6 +16,23 @@ is original-key recovery; standalone readback remains fixture-only. Route-level
 modes aggregate the discriminated preview actions; stable post-deploy maintenance
 retains its legacy request shape. The OpenAPI action schema selects the fields.
 
+## Live caller description
+
+`GET /openapi.json` also publishes `x-launchplane-agent-contract.operations`,
+from the same operation builder as the exported contract. A caller resolves its
+operation ID there and uses that operation's method and path from OpenAPI.
+The extension contains no runtime records or credentials.
+
+Response fields explicitly marked `x-launchplane-safe-output: true` may be
+printed by a generic caller. Marks authorize scalar values only; object and
+array containers do not authorize their unmarked contents. Unmarked fields
+remain private, including unknown fields added by a later response. The first
+marked configuration fields are mode, runtime action and change counts.
+Status, trace ID and the common service error's code, message and reason are
+also caller output. Full responses belong in private 0600 task-evidence files.
+The service remains responsible for authorization, reviewed dry-run binding,
+idempotency and request validation; the caller must not duplicate those rules.
+
 ## Generate And Check
 
 Generate the canonical OpenAPI document, UI bindings, and agent/admin

@@ -836,18 +836,12 @@ def _semantic_payload(contract: Mapping[str, Any]) -> dict[str, Any]:
     return {"normalization_version": NORMALIZATION_VERSION, "contract": contract}
 
 
-def build_agent_operator_contract(
-    *,
-    openapi_document: Mapping[str, Any] | None = None,
-    app: FastAPI | None = None,
-    source_commit_sha: str | None = None,
-) -> dict[str, Any]:
-    document = openapi_document or canonical_openapi_document()
+def agent_operations(document: Mapping[str, Any], app: FastAPI) -> list[dict[str, Any]]:
     paths = document.get("paths")
     components = document.get("components", {}).get("schemas", {})
     if not isinstance(paths, Mapping) or not isinstance(components, Mapping):
         raise AgentOperatorContractError("Canonical OpenAPI paths or schemas are unavailable")
-    routes = _live_routes(app or build_deterministic_export_app())
+    routes = _live_routes(app)
 
     operations = []
     for spec in OPERATION_SPECS:
@@ -889,6 +883,18 @@ def build_agent_operator_contract(
                 "schema_fingerprint_sha256": _digest(normalized_operation),
             }
         )
+
+    return operations
+
+
+def build_agent_operator_contract(
+    *,
+    openapi_document: Mapping[str, Any] | None = None,
+    app: FastAPI | None = None,
+    source_commit_sha: str | None = None,
+) -> dict[str, Any]:
+    document = openapi_document or canonical_openapi_document()
+    operations = agent_operations(document, app or build_deterministic_export_app())
 
     for workflow in PROTECTED_WORKFLOWS:
         for key in ("workflow_file", "reusable_workflow_file"):

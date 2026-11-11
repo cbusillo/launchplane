@@ -3828,6 +3828,12 @@ class _LaunchplaneFastAPI(FastAPI):
                 responses = operation.get("responses")
                 if isinstance(responses, dict):
                     responses.pop("422", None)
+        if "x-launchplane-agent-contract" not in schema:
+            from control_plane.agent_operator_contract import agent_operations
+
+            schema["x-launchplane-agent-contract"] = {
+                "operations": agent_operations(schema, self),
+            }
         return schema
 
     def _response_media_type(self, kwargs: dict[str, Any]) -> str:

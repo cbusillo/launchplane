@@ -29,6 +29,7 @@ from control_plane.service_auth import (
     action_safety,
     LaunchplaneAuthzPolicy,
     LocalOperatorIdentity,
+    LocalAdminPolicyRule,
 )
 from control_plane.service_human_auth import (
     HumanSessionManager,
@@ -1767,6 +1768,83 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_testing_config_changed_since_dry_run_is_refused_before_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(Path(temporary_directory_name) / "proof.sqlite3")
+            with closing(PostgresRecordStore(database_url=database_url)) as store:
+                _write_product_config_profile(
+                    store,
+                    product="schema-caller-proof",
+                    context="schema-caller-proof",
+                    instance="testing",
+                )
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(
+                        local_admins=(
+                            LocalAdminPolicyRule(
+                                subjects=("isolated-proof",),
+                                token_labels=("isolated-proof",),
+                                products=("schema-caller-proof",),
+                                contexts=("schema-caller-proof",),
+                                actions=("product_config.plan", "product_config.apply"),
+                            ),
+                        )
+                    ),
+                    record_store_factory=lambda: store,
+                    bearer_identity_config=BearerIdentityConfig(
+                        local_admin_token="isolated-proof-token",
+                        local_admin_subject="isolated-proof",
+                        local_admin_token_label="isolated-proof",
+                    ),
+                )
+                payload = {
+                    "product": "schema-caller-proof",
+                    "context": "schema-caller-proof",
+                    "instance": "testing",
+                    "reason": "Review isolated testing configuration",
+                    "runtime_env": {"SCHEMA_CALLER_PROOF": "reviewed"},
+                }
+                with patch.dict(
+                    os.environ,
+                    {
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "isolated-master-key"
+                    },
+                ):
+                    dry_run = await _post_product_config_apply(
+                        app,
+                        {**payload, "mode": "dry-run"},
+                        authorization="Bearer isolated-proof-token",
+                    )
+                    self.assertEqual(dry_run.status_code, 202)
+                    refused = await _post_product_config_apply(
+                        app,
+                        {
+                            **payload,
+                            "mode": "apply",
+                            "runtime_env": {"SCHEMA_CALLER_PROOF": "unreviewed"},
+                        },
+                        authorization="Bearer isolated-proof-token",
+                        idempotency_key="isolated-proof-mismatch",
+                    )
+                    self.assertEqual(refused.status_code, 409)
+                    self.assertEqual(refused.json()["error"]["code"], "matching_dry_run_required")
+                    self.assertFalse(
+                        store.list_runtime_environment_records(context_name="schema-caller-proof")
+                    )
+                    applied = await _post_product_config_apply(
+                        app,
+                        {**payload, "mode": "apply"},
+                        authorization="Bearer isolated-proof-token",
+                        idempotency_key="isolated-proof-apply",
+                    )
+                self.assertEqual(applied.status_code, 202)
+                records = store.list_runtime_environment_records(
+                    context_name="schema-caller-proof", instance_name="testing"
+                )
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0].env, payload["runtime_env"])
+
     async def test_onboarding_profile_conflict_replays_winner_or_returns_conflict(self) -> None:
         for completed in (True, False):
             with self.subTest(completed=completed):
