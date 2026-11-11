@@ -308,6 +308,66 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             "original_scope": idempotency_scope(_github_human_identity()),
         }
 
+    async def test_operation_read_reports_only_a_recorded_automatic_candidate_release(
+        self,
+    ) -> None:
+        from control_plane import testing_candidate_release as release
+        from control_plane.contracts.testing_candidate_release import (
+            TESTING_CANDIDATE_RELEASE_ROUTE,
+            TestingCandidateReleaseResponse,
+        )
+        from control_plane.provider_operations import run_durable_provider_operation
+
+        operation = self.fixture.operation
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(
+                update={
+                    "status": "fail",
+                    "phase": "failed",
+                    "finished_at": operation.updated_at,
+                    "error_code": "fixture_failure",
+                    "error_message": "Fabricated restore failure",
+                }
+            )
+        )
+        path = self.url + "/operations/" + operation.operation_id
+        plain = await self.call("GET", path=path)
+        self.assertEqual(plain.status_code, 200, plain.text)
+        self.assertNotIn("candidate_release", plain.json()["operation"])
+        held = TestingCandidateReleaseResponse(
+            trace_id="fixture",
+            product=operation.product,
+            operation_id=operation.operation_id,
+            error_code="fixture_failure",
+            plan_sha256="d" * 64,
+            status="held",
+            reason_code="testing_in_use",
+        )
+        run_durable_provider_operation(
+            store=self.store,
+            scope=release.release_scope(operation.product, operation.operation_id),
+            route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
+            idempotency_key=release.AUTOMATIC_RELEASE_KEY,
+            request_fingerprint="fixture",
+            lease_owner="fixture",
+            response_trace_id="fixture",
+            adapter=release.SettledCandidateRelease(
+                "testing-candidate-release:fixture",
+                "fixture-binding",
+                held.model_dump(mode="json", exclude_none=True),
+            ),
+        )
+        reported = await self.call("GET", path=path)
+        self.assertEqual(
+            reported.json()["operation"]["candidate_release"],
+            {
+                "status": "held",
+                "reasons": ["testing_in_use"],
+                "plan_sha256": "d" * 64,
+                "idempotency_key": release.AUTOMATIC_RELEASE_KEY,
+            },
+        )
+
     async def test_exclusion_is_durable_and_cannot_be_reused_for_another_intent(self) -> None:
         payload = self.settlement_payload()
         before = self.store.list_odoo_stable_target_replacement_operation_records()

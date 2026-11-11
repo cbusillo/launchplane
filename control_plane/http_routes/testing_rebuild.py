@@ -53,6 +53,8 @@ from control_plane.service_auth import (
     launchplane_identity_actor,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.testing_candidate_release import AutomaticCandidateReleaseView
+from control_plane.testing_candidate_release import read_automatic_release
 from control_plane.testing_rebuild_preflight import (
     TestingRebuildPreflight,
     inspect_testing_rebuild,
@@ -108,6 +110,11 @@ class TestingRebuildOperationView(BaseModel):
     phase: str
     updated_at: str
     attempt: int = Field(ge=0)
+    candidate_release: AutomaticCandidateReleaseView | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class TestingRebuildResume(BaseModel):
@@ -236,7 +243,9 @@ def register_testing_rebuild_routes(
         )
 
     def response(
-        operation: OdooStableTargetReplacementOperationRecord, trace_id: str
+        operation: OdooStableTargetReplacementOperationRecord,
+        trace_id: str,
+        candidate_release: AutomaticCandidateReleaseView | None = None,
     ) -> TestingRebuildResponse:
         return TestingRebuildResponse(
             trace_id=trace_id,
@@ -247,6 +256,7 @@ def register_testing_rebuild_routes(
                 phase=operation.phase,
                 updated_at=operation.updated_at,
                 attempt=operation.attempt,
+                candidate_release=candidate_release,
             ),
         )
 
@@ -458,7 +468,7 @@ def register_testing_rebuild_routes(
                 code="not_found",
                 message="This testing rebuild was not found.",
             ) from error
-        return response(operation, trace_id)
+        return response(operation, trace_id, read_automatic_release(store, product, operation_id))
 
     def lookup_original(
         product: Annotated[str, Path(min_length=1)],

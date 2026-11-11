@@ -328,7 +328,7 @@ class CandidateReleaseGuardTests(unittest.TestCase):
         self.assertIsNone(self.lane_refusal())
 
 
-class CandidateReleaseRouteTests(unittest.TestCase):
+class CandidateReleaseFixture(unittest.TestCase):
     def setUp(self) -> None:
         from contextlib import nullcontext
         from unittest.mock import PropertyMock
@@ -353,7 +353,9 @@ class CandidateReleaseRouteTests(unittest.TestCase):
                 side_effect=lambda _: nullcontext(Mock()),
             )
         )
-        self.enterContext(patch.object(release, "candidate_routed", return_value=False))
+        self.routed = self.enterContext(
+            patch.object(release, "candidate_routed", return_value=False)
+        )
         self.usage = self.enterContext(patch.object(release, "require_lane_releasable"))
         self.applied: list[str] = []
         self.interrupt = False
@@ -414,6 +416,8 @@ class CandidateReleaseRouteTests(unittest.TestCase):
             )
         )
 
+
+class CandidateReleaseRouteTests(CandidateReleaseFixture):
     def test_dry_run_apply_readback_and_wrong_identity_release_once(self) -> None:
         self.assertEqual(self.post(director=False).status_code, 403)
         dry = self.post()
@@ -565,6 +569,153 @@ class CandidateReleaseRouteTests(unittest.TestCase):
             ("released", True, plan.digest()),
         )
         self.assertEqual(self.applied, [])
+
+
+class AutomaticCandidateReleaseTests(CandidateReleaseFixture):
+    def release_failed(self, operation_id: str = "") -> None:
+        release.release_failed_candidate(
+            self.store, self.root, operation_id or self.fixture.candidate.operation_id
+        )
+
+    def view(self, operation_id: str = "") -> Any:
+        return release.read_automatic_release(
+            self.store,
+            self.fixture.candidate.product,
+            operation_id or self.fixture.candidate.operation_id,
+        )
+
+    def original(self) -> Any:
+        return self.store.read_odoo_stable_target_replacement_operation_record(
+            self.fixture.candidate.operation_id
+        )
+
+    def forget_automatic_receipt(self) -> None:
+        from sqlalchemy import delete
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        with self.store._session_factory() as session:
+            session.execute(
+                delete(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.idempotency_key == release.AUTOMATIC_RELEASE_KEY
+                )
+            )
+            session.commit()
+
+    def test_failed_rebuild_releases_its_eligible_candidate_once(self) -> None:
+        before = self.original()
+        self.release_failed()
+        view = self.view()
+        self.assertEqual((view.status, view.reasons), ("released", ()))
+        self.release_failed()
+        self.assertEqual(len(self.applied), 1)
+        self.assertEqual(self.original(), before)
+        readback = self.post(
+            key=release.AUTOMATIC_RELEASE_KEY,
+            mode="readback",
+            reviewed_plan_sha256=view.plan_sha256,
+        )
+        self.assertEqual(readback.status_code, 200, readback.text)
+        self.assertEqual(
+            (readback.json()["status"], readback.json()["replayed"]), ("released", True)
+        )
+        self.assertNotIn("reason_code", readback.json())
+
+    def test_each_refusal_keeps_the_candidate_and_names_it(self) -> None:
+        lane_refusals = (
+            "testing_needed_copy",
+            "testing_production_resources_shared",
+            "testing_staff_hold",
+            "testing_in_use",
+        )
+        for code in (*lane_refusals, "candidate_release_selected", "candidate_release_unavailable"):
+            with self.subTest(code=code):
+                self.usage.side_effect, self.routed.side_effect = None, None
+                self.routed.return_value = code == "candidate_release_selected"
+                if code in lane_refusals:
+                    self.usage.side_effect = TestingCandidateReleaseRefused(code, "Kept.")
+                if code == "candidate_release_unavailable":
+                    self.routed.side_effect = OSError("Fabricated provider read failure")
+                self.forget_automatic_receipt()
+                self.release_failed()
+                view = self.view()
+                self.assertEqual(view.status, "held")
+                self.assertIn(code, view.reasons)
+                self.assertEqual(self.applied, [])
+
+    def test_change_after_planning_settles_held_without_effect(self) -> None:
+        planned: list[bool] = []
+
+        def changed_use(*_args: object) -> None:
+            if planned:
+                raise TestingCandidateReleaseRefused("testing_in_use", "A person arrived.")
+            planned.append(True)
+
+        self.usage.side_effect = changed_use
+        self.release_failed()
+        view = self.view()
+        self.assertEqual(view.status, "held")
+        self.assertEqual(view.reasons[:2], ("candidate_release_held", "testing_in_use"))
+        self.assertEqual(self.applied, [])
+
+    def test_concurrent_executor_settles_held_without_effect(self) -> None:
+        self.executor.side_effect = ValueError("The original still has an executor.")
+        self.release_failed()
+        self.assertEqual(self.view().status, "held")
+        self.assertEqual(self.applied, [])
+
+    def test_manual_apply_cannot_dispatch_through_the_automatic_key(self) -> None:
+        reviewed = self.post().json()["plan_sha256"]
+        manual = self.post(
+            key=release.AUTOMATIC_RELEASE_KEY, mode="apply", reviewed_plan_sha256=reviewed
+        )
+        self.assertEqual(manual.status_code, 409, manual.text)
+        self.assertEqual(manual.json()["detail"]["code"], "idempotency_key_reused")
+        self.assertIsNone(self.view())
+        self.assertEqual(self.applied, [])
+
+    def test_uncertain_automatic_effect_is_only_observed(self) -> None:
+        self.interrupt = True
+        self.release_failed()
+        view = self.view()
+        self.assertEqual(
+            (view.status, view.reasons), ("unknown", ("mutation_reconciliation_required",))
+        )
+        self.release_failed()
+        manual = self.post(
+            key=release.AUTOMATIC_RELEASE_KEY, mode="apply", reviewed_plan_sha256=view.plan_sha256
+        )
+        self.assertEqual(manual.status_code, 409, manual.text)
+        self.assertEqual(len(self.applied), 1)
+        self.uncertain = False
+        observed = self.post(
+            key=release.AUTOMATIC_RELEASE_KEY,
+            mode="readback",
+            reviewed_plan_sha256=view.plan_sha256,
+        )
+        self.assertEqual(observed.json()["status"], "released", observed.text)
+        self.assertEqual(self.view().status, "released")
+        self.assertEqual(len(self.applied), 1)
+
+    def test_only_a_failed_native_testing_rebuild_with_a_cause_is_released(self) -> None:
+        failed = self.original()
+        for changes in (
+            {"status": "pass", "phase": "completed", "error_code": ""},
+            {"status": "cancelled", "phase": "cancelled"},
+            {"status": "reconciliation_required", "phase": "running", "finished_at": ""},
+            {"error_code": ""},
+            {"instance": "prod"},
+        ):
+            with (
+                self.subTest(changes=changes),
+                patch.object(
+                    self.store,
+                    "read_odoo_stable_target_replacement_operation_record",
+                    return_value=failed.model_copy(update=changes),
+                ),
+            ):
+                self.release_failed()
+                self.assertIsNone(self.view())
+                self.fixture.host.assert_not_called()
 
 
 if __name__ == "__main__":

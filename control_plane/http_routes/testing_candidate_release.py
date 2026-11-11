@@ -1,7 +1,6 @@
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
-import hashlib
 from pathlib import Path
 from typing import Annotated
 
@@ -28,13 +27,18 @@ from control_plane.service_auth import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.testing_candidate_release import (
+    AUTOMATIC_RELEASE_ACTOR,
+    AUTOMATIC_RELEASE_KEY,
+    RELEASE_LEASE_SECONDS,
     RELEASE_PLAN_ERRORS,
     CandidateRelease,
     TestingCandidateReleaseAdapter,
     TestingCandidateReleaseRefused,
     build_candidate_release,
+    release_fingerprint,
     release_from_receipt,
     release_response,
+    release_scope,
 )
 
 
@@ -86,18 +90,18 @@ def register_testing_candidate_release_route(
                 "Apply and readback require a bounded Idempotency-Key.",
                 400,
             )
-        normalized = payload.model_copy(update={"mode": "apply"})
-        fingerprint = hashlib.sha256(
-            "\n".join(
-                (
-                    launchplane_identity_actor(identity),
-                    product,
-                    operation_id,
-                    normalized.model_dump_json(exclude_none=True),
-                )
-            ).encode()
-        ).hexdigest()
-        scope = f"testing-candidate-release:{product}:{operation_id}"
+        automatic = key == AUTOMATIC_RELEASE_KEY
+        if automatic and payload.mode == "apply":
+            raise refusal(
+                "idempotency_key_reused", "The automatic release key permits readback only."
+            )
+        fingerprint = release_fingerprint(
+            AUTOMATIC_RELEASE_ACTOR if automatic else launchplane_identity_actor(identity),
+            product,
+            operation_id,
+            payload,
+        )
+        scope = release_scope(product, operation_id)
         original = (
             store.read_idempotency_record(
                 scope=scope, route_path=TESTING_CANDIDATE_RELEASE_ROUTE, idempotency_key=key
@@ -154,7 +158,7 @@ def register_testing_candidate_release_route(
                         payload.reviewed_plan_sha256,
                         trace_id,
                     ),
-                    lease_seconds=900,
+                    lease_seconds=RELEASE_LEASE_SECONDS,
                     allow_mutation=payload.mode == "apply",
                 )
             except TestingCandidateReleaseRefused as error:

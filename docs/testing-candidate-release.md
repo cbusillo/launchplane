@@ -63,9 +63,9 @@ volume sweep remove reviewed eligible volumes; its apply still refuses mounts.
 Staged `.lp-native-*` source directories, completed/unknown copy gates, current
 lanes, only-needed data, original pairs and operation/failure/provider records
 stay protected. Production labels, wrong ownership, aliases and unknown backings
-refuse. There is no compose-target deletion, resize or automatic failed-restore
-cleanup. `released` means the reviewed eligible resources are absent; explicitly
-preserved source resources remain listed, not falsely reported as deleted.
+refuse. There is no compose-target deletion or resize. `released` means the
+reviewed eligible resources are absent; explicitly preserved source resources
+remain listed, not falsely reported as deleted.
 
 Readback uses the original request, digest and key and does not plan again.
 Completed receipts replay their stored result. Unknown/interrupted effects only
@@ -75,6 +75,28 @@ a new eligible plan is needed for another attempt. Pre-convergence completed
 receipts remain replayable, and incomplete older receipts retain read-only absence
 reconciliation. They cannot dispatch the removed less-bound host effect path.
 `mutation_reconciliation_required` means preserve that original key and evidence.
+
+## Automatic release after a failed rebuild
+
+When the worker commits a native testing rebuild as `fail` with an
+`error_code`, the failed record's lease ends at its finish time. After that
+commit, and outside the execution lock, the worker plans this same release and
+applies it under the route's scope with the key `automatic`. The fresh checks,
+effects and physical readback are the route's. A plan that is held or absent,
+or a fresh check that refuses before any effect, settles as a `held` (or
+`absent`) receipt naming its reasons, and nothing is removed. The operation's
+status, cause and evidence are never changed. Other outcomes, other instances
+and production never reach the host.
+
+`GET .../testing-rebuild/operations/{operation_id}` reports that receipt as
+`candidate_release`: `status` (`released`, `absent`, `held` or `unknown`),
+bounded `reasons`, `plan_sha256` and `idempotency_key`. It is omitted when no
+automatic receipt exists. `unknown` means an effect's outcome is unproven. Its
+original receipt is only observed: route readback with the `automatic` key and
+that `plan_sha256` reconciles it, and apply with that key always refuses
+`idempotency_key_reused`. A later attempt is a new reviewed plan with a new key.
+The release response's optional `reason_code` names a refusal no candidate row
+carries.
 
 `capacity` groups the optional receiver's actual backing observations, reporting
 `backing_sha256`, `free_bytes`, `required_additional_bytes`, `reserve_bytes` and
