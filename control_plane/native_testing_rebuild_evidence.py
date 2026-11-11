@@ -43,6 +43,7 @@ from control_plane.contracts.testing_rebuild import (
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_publication_storage import read_publication
+from control_plane.testing_candidate_runtime import candidate_application_intent
 from control_plane.testing_rebuild_storage import RecordTestingRebuildStore, RebuildRecordStore
 from control_plane.traffic_switch import require_route_authority
 from control_plane.copy_readback_diagnostics import copy_failure_summary
@@ -317,7 +318,13 @@ def _selection(
         operation.operation_id,
         checkpoint.plan.new.copy_id,
         checkpoint.plan.new.target_id,
-        reservation.reconciliation_key,
+        candidate_application_intent(
+            product=operation.product,
+            context=operation.context,
+            artifact_id=operation.request.artifact_id,
+            source=checkpoint.plan.source,
+            migrated_source=operation.request.migrated_source,
+        ),
         reservation.record_id,
         reservation.provider_target_key,
     ) or plan.deployment.record_id != checkpoint.plan.new.runtime_identity.deployment_record_id:
@@ -438,7 +445,13 @@ def _candidate_read(
         operation.context,
         operation.operation_id,
         plan.new.copy_id,
-        plan.authority_digest,
+        candidate_application_intent(
+            product=operation.product,
+            context=operation.context,
+            artifact_id=operation.request.artifact_id,
+            source=plan.source,
+            migrated_source=operation.request.migrated_source,
+        ),
         plan.new.target_id,
         plan.new.resource_binding,
         intent.get("server_id"),

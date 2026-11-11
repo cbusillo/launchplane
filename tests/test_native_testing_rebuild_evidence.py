@@ -70,6 +70,8 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_authorization import (
     capture_director_testing_rebuild_authorization,
 )
+from control_plane.testing_candidate_runtime import candidate_application_intent
+from control_plane.testing_rebuild_service import rebuild_source
 from control_plane.testing_rebuild_storage import (
     REBUILD_CHECKPOINT_SCOPE,
     RebuildRecordStore,
@@ -229,7 +231,13 @@ class NativeTestingEvidenceTests(unittest.TestCase):
             product=plan.product,
             context=plan.context,
             operation_id=plan.operation_id,
-            intent_sha256=plan.authority_digest,
+            intent_sha256=candidate_application_intent(
+                product=self.operation.product,
+                context=self.operation.context,
+                artifact_id=self.operation.request.artifact_id,
+                source=rebuild_source(self.operation),
+                migrated_source=self.operation.request.migrated_source,
+            ),
             serving_target_id=plan.old.target_id,
             server_id=self.intent["server_id"],
             project_id="private-project",
@@ -1011,6 +1019,131 @@ class NativeTestingEvidenceTests(unittest.TestCase):
                 self.assertEqual(evidence.candidate_preparation.availability, "null")
                 self.assertEqual(evidence.candidate_readiness.availability, "null")
                 self.assertFalse(evidence.rollback_started)
+
+
+class NativeTestingProducerEvidenceTests(unittest.TestCase):
+    def test_producer_records_bind_candidate_selection_and_both_routes(self) -> None:
+        from tests.test_testing_rebuild_worker import NativeTestingWorkerTests
+        from control_plane.testing_publication_storage import read_publication
+        from control_plane import testing_rebuild_service
+
+        for migrated in (False, True):
+            with self.subTest(migrated=migrated):
+                fixture = NativeTestingWorkerTests()
+                fixture.migrated_candidate = migrated
+                try:
+                    fixture.setUp()
+                    fixture.fail_public = True
+                    read_candidate = fixture.store.read_testing_candidate
+
+                    def prepare_storage(**kwargs: Any) -> TestingCandidateAllocation:
+                        produced = kwargs["allocation"]
+                        prepared = fixture.fixture.candidate.model_copy(
+                            update={"intent_sha256": produced.intent_sha256}
+                        )
+                        fixture.store.compare_and_write_testing_candidate(
+                            fixture.fixture.candidate, prepared
+                        )
+                        missing.side_effect = read_candidate
+                        return prepared
+
+                    with (
+                        patch.object(
+                            fixture.store, "read_testing_candidate", return_value=None
+                        ) as missing,
+                        patch.object(
+                            testing_rebuild_service,
+                            "prepare_candidate_storage",
+                            side_effect=prepare_storage,
+                        ) as storage,
+                        patch(
+                            "control_plane.product_reconcile.verified_testing_rebuild_artifact",
+                            return_value=Mock(manifest=fixture.app.plan.artifact),
+                        ),
+                    ):
+                        fixture.execute()
+                    storage.assert_called_once()
+                    binding = read_native_testing_execution_binding(
+                        fixture.store, fixture.operation
+                    )
+                    self.assertEqual(
+                        (binding.candidate.binding, binding.native_evidence.selection.binding),
+                        ("matched", "matched"),
+                    )
+                    self.assertIsNotNone(binding.candidate.selector)
+                    for route in (binding.forward_route, binding.inverse_route):
+                        self.assertEqual(route.binding, "matched")
+                        self.assertTrue(route.route_digest_matches)
+                        self.assertIsNotNone(route.selector)
+
+                    key = canonical_json_sha256(
+                        {
+                            "product": fixture.operation.product,
+                            "context": fixture.operation.context,
+                            "operation": fixture.operation.operation_id,
+                        }
+                    )
+                    publication = read_publication(fixture.store, key)
+                    assert publication is not None
+                    candidate = publication.plan.candidate
+                    for changes in (
+                        {"intent_sha256": binding.intent_sha256},
+                        {"intent_sha256": "f" * 64},
+                        {"operation_id": "foreign"},
+                        {"namespace": "foreign"},
+                    ):
+                        with self.subTest(changes=changes):
+                            foreign = candidate.model_copy(update=changes)
+                            with (
+                                patch.object(
+                                    fixture.store, "read_testing_candidate", return_value=foreign
+                                ),
+                                patch(
+                                    "control_plane.native_testing_rebuild_evidence.read_publication",
+                                    return_value=publication.model_copy(
+                                        update={
+                                            "plan": publication.plan.model_copy(
+                                                update={"candidate": foreign}
+                                            )
+                                        }
+                                    ),
+                                ),
+                            ):
+                                rejected = read_native_testing_execution_binding(
+                                    fixture.store, fixture.operation
+                                )
+                            self.assertEqual(rejected.candidate.availability, "unbound")
+                            self.assertIsNone(rejected.candidate.selector)
+                            self.assertEqual(
+                                rejected.native_evidence.selection.availability, "unbound"
+                            )
+                            self.assertEqual(rejected.forward_route.binding, "unverified")
+                            self.assertEqual(rejected.inverse_route.binding, "unverified")
+                    for field in ("mutation_record_id", "provider_target_key"):
+                        with (
+                            self.subTest(field=field),
+                            patch(
+                                "control_plane.native_testing_rebuild_evidence.read_publication",
+                                return_value=publication.model_copy(
+                                    update={
+                                        "plan": publication.plan.model_copy(
+                                            update={field: "foreign"}
+                                        )
+                                    }
+                                ),
+                            ),
+                        ):
+                            rejected = read_native_testing_execution_binding(
+                                fixture.store, fixture.operation
+                            )
+                            self.assertEqual(rejected.candidate.binding, "matched")
+                            self.assertEqual(
+                                rejected.native_evidence.selection.availability, "unbound"
+                            )
+                            self.assertEqual(rejected.forward_route.binding, "unverified")
+                            self.assertEqual(rejected.inverse_route.binding, "unverified")
+                finally:
+                    fixture.doCleanups()
 
 
 if __name__ == "__main__":
