@@ -13,6 +13,13 @@ IngressRouteTlsOwner = Literal["launchplane", "provider", "external", "none", "u
 TESTING_PRIVATE_INGRESS_AUDIT_PREFIX = "testing-private-ingress-"
 
 
+class IngressRouteVerification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    instance: str = Field(min_length=1)
+    sources_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class IngressRouteAuditOperation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -51,6 +58,11 @@ class IngressRouteAuditRecord(BaseModel):
     testing_generation_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     testing_authority_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     testing_application_id: str = ""
+    route_verification: IngressRouteVerification | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     expected_host_id: int | None = Field(default=None, ge=1)
     provider_host_id: int | None = Field(default=None, ge=1)
     operations: tuple[IngressRouteAuditOperation, ...]
@@ -92,6 +104,19 @@ class IngressRouteAuditRecord(BaseModel):
             raise ValueError("dry-run ingress audit must have dry_run=true")
         if self.mode == "apply" and self.dry_run:
             raise ValueError("apply ingress audit must have dry_run=false")
+        if self.route_verification is not None and (
+            self.mode != "dry-run"
+            or self.status not in {"planned", "unchanged"}
+            or not self.edge_endpoint_key
+            or not self.provider_route_sha256
+            or self.expected_host_id is None
+            or self.expected_host_id != self.provider_host_id
+            or (
+                self.status == "unchanged"
+                and any(operation.requires_apply for operation in self.operations)
+            )
+        ):
+            raise ValueError("Route verification requires an exact-host dry-run observation")
         return self
 
 

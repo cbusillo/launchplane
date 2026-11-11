@@ -417,9 +417,11 @@ from control_plane.contracts.ingress_canary_route_record import IngressCanaryRou
 from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditOperation,
     IngressRouteAuditRecord,
+    IngressRouteVerification,
     IngressRouteTlsOwner,
     build_ingress_route_audit_record_id,
 )
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.merge_train_github_token import (
     resolve_merge_train_github_token,
@@ -22184,6 +22186,7 @@ def create_launchplane_fastapi_app(
         result: NpmplusIngressApplyResult,
         idempotency_key: str,
         record_id: str = "",
+        route_verification: IngressRouteVerification | None = None,
     ) -> IngressRouteAuditRecord:
         provider_host_id = result.proxy_host.id if result.proxy_host is not None else None
         certificate_id = (
@@ -22213,6 +22216,12 @@ def create_launchplane_fastapi_app(
             provider_certificate_ref=provider_certificate_ref,
             expected_host_id=request.expected_host_id,
             provider_host_id=provider_host_id,
+            route_verification=route_verification,
+            provider_route_sha256=(
+                canonical_json_sha256(result.proxy_host.model_dump(mode="json"))
+                if route_verification is not None and result.proxy_host is not None
+                else ""
+            ),
             operations=tuple(
                 IngressRouteAuditOperation.model_validate(operation.model_dump(mode="json"))
                 for operation in result.operations
@@ -23128,6 +23137,10 @@ def create_launchplane_fastapi_app(
             or director_evidence_refresh
             or reconcile_plan.native_review_sources is not None
             or reconcile_plan.record.external_ingress is not None
+            or (
+                reconcile_plan.review_sources is not None
+                and reconcile_plan.review_sources.ingress_audit.route_verification is not None
+            )
         ):
             assert isinstance(record_store, PostgresRecordStore)
             try:
@@ -23722,6 +23735,13 @@ def create_launchplane_fastapi_app(
             else native_routes.native_driver_route_alternate_authz_action(apply_ingress_route)
         )
         instance_name = route_request.instance.strip()
+        if route_request.ingress.verify_route_binding and not instance_name:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_ingress_instance_scope",
+                message="Current route verification requires an exact product/context/instance.",
+            )
         director_wildcard_create = (
             isinstance(identity, LocalOperatorIdentity)
             and director_agent_identity(identity)
@@ -23901,6 +23921,45 @@ def create_launchplane_fastapi_app(
 
         audit_ingress_request = resolved_ingress_request
         provider_ingress_request = resolved_ingress_request
+        verification_sources = None
+        if resolved_ingress_request.verify_route_binding:
+            try:
+                verification_sources = (
+                    control_plane_route_binding_reconcile.read_route_binding_verification_sources(
+                        record_store,
+                        product=route_request.product,
+                        context=route_request.context,
+                        instance=instance_name,
+                        endpoint_key=resolved_ingress_request.route.edge_endpoint_key,
+                    )
+                )
+                if set(verification_sources.dokploy_target.domains) != set(
+                    resolved_ingress_request.route.domain_names
+                ):
+                    raise ValueError("Route verification requires the full tracked domain set.")
+                edge = verification_sources.edge_endpoint
+                if (
+                    resolved_ingress_request.route.forward_scheme,
+                    resolved_ingress_request.route.forward_host,
+                    resolved_ingress_request.route.forward_port,
+                ) != (
+                    edge.upstream_scheme,
+                    edge.upstream_host,
+                    edge.upstream_port,
+                ):
+                    raise ValueError(
+                        "The recorded edge changed during resolution; repeat verification."
+                    )
+                if not isinstance(record_store, PostgresRecordStore):
+                    raise ValueError("Current route verification requires database-backed sources.")
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="ingress_verification_required",
+                    message=str(error),
+                ) from error
+        verification_started_at = utc_now_timestamp()
         preflight_result: NpmplusIngressApplyResult | None = None
         guarded_instance_apply = False
         try:
@@ -24097,6 +24156,48 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
         response_ingress_result = ingress_result
+        route_verification = None
+        if verification_sources is not None:
+            try:
+                after = (
+                    control_plane_route_binding_reconcile.read_route_binding_verification_sources(
+                        record_store,
+                        product=route_request.product,
+                        context=route_request.context,
+                        instance=instance_name,
+                        endpoint_key=resolved_ingress_request.route.edge_endpoint_key,
+                    )
+                )
+                if after != verification_sources:
+                    raise ValueError(
+                        "Current route sources changed during observation; repeat verification."
+                    )
+                elapsed = parse_utc_timestamp(utc_now_timestamp()) - parse_utc_timestamp(
+                    verification_started_at
+                )
+                if not timedelta() <= elapsed <= timedelta(minutes=2):
+                    raise ValueError(
+                        "Current route observation did not complete within its freshness window."
+                    )
+                if (
+                    not ingress_result.dry_run
+                    or ingress_result.proxy_host is None
+                    or ingress_result.proxy_host.id != resolved_ingress_request.expected_host_id
+                ):
+                    raise ValueError(
+                        "The current provider route differs from the requested route; review the existing ingress plan."
+                    )
+                route_verification = IngressRouteVerification(
+                    instance=instance_name,
+                    sources_sha256=verification_sources.fingerprint(),
+                )
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="ingress_verification_required",
+                    message=str(error),
+                ) from error
         response_records: dict[str, object] = {
             "ingress_provider": ingress_provider.provider_id,
         }
@@ -24144,6 +24245,7 @@ def create_launchplane_fastapi_app(
             request=audit_ingress_request,
             result=response_ingress_result,
             idempotency_key=normalized_key,
+            route_verification=route_verification,
         )
         response_records["ingress_route_audit_record_id"] = ingress_audit_record.record_id
         response = accepted_evidence_response(

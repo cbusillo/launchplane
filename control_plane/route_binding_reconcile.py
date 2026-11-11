@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
 from typing import Literal, Protocol, cast
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
@@ -147,17 +151,134 @@ class RouteBindingSourceChanged(ValueError):
     """An exact reviewed source row was removed or changed before its atomic write."""
 
 
-class RouteBindingReviewSources(BaseModel):
-    """Private exact source snapshots for the browser's commit guard."""
-
+class RouteBindingVerificationSources(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider_target: ProviderTargetRecord
     dokploy_target: DokployTargetRecord
     dokploy_target_id: DokployTargetIdRecord
     edge_endpoint: EdgeEndpointRecord
-    ingress_audit: IngressRouteAuditRecord
     product_profile: LaunchplaneProductProfileRecord | None = None
+    environment_inventory: EnvironmentInventory | None = None
+    deployment: DeploymentRecord | None = None
+
+    def fingerprint(self) -> str:
+        return canonical_json_sha256(self.model_dump(mode="json"))
+
+
+class RouteBindingReviewSources(RouteBindingVerificationSources):
+    ingress_audit: IngressRouteAuditRecord
+
+
+def read_route_binding_verification_sources(
+    record_store: object,
+    *,
+    product: str,
+    context: str,
+    instance: str,
+    endpoint_key: str,
+) -> RouteBindingVerificationSources:
+    def read(method: str, label: str, **kwargs: str) -> object:
+        reader = getattr(record_store, method, None)
+        if not callable(reader):
+            raise ValueError(f"Current route verification needs the existing {label} reader.")
+        try:
+            return cast(Callable[..., object], reader)(**kwargs)
+        except FileNotFoundError:
+            raise ValueError(
+                f"Current route verification needs the current {label} record."
+            ) from None
+        except ValidationError:
+            raise ValueError(f"Current route verification needs a valid {label} record.") from None
+
+    scope = {"context_name": context, "instance_name": instance}
+    provider = ProviderTargetRecord.model_validate(
+        read("read_provider_target_record", "provider target", **scope)
+    )
+    target = DokployTargetRecord.model_validate(
+        read("read_dokploy_target_record", "tracked target", **scope)
+    )
+    target_id = DokployTargetIdRecord.model_validate(
+        read("read_dokploy_target_id_record", "target identity", **scope)
+    )
+    edge = EdgeEndpointRecord.model_validate(
+        read("read_edge_endpoint_record", "edge endpoint", endpoint_key=endpoint_key)
+    )
+    profile = LaunchplaneProductProfileRecord.model_validate(
+        read("read_product_profile_record", "product profile", product=product)
+    )
+    if (
+        any(
+            (record.context, record.instance) != (context, instance)
+            for record in (provider, target, target_id)
+        )
+        or profile.product != product
+    ):
+        raise ValueError(
+            "Current route verification source identity differs from the requested lane."
+        )
+    if provider_target_projection(provider) != provider_target_projection(
+        ProviderTargetRecord.from_dokploy_records(target_record=target, target_id_record=target_id)
+    ):
+        raise ValueError("Current route verification target records disagree.")
+    if (
+        edge.endpoint_key != endpoint_key
+        or edge.status != "active"
+        or edge.provider != provider.provider_id
+    ):
+        raise ValueError("Current route verification requires the named active provider edge.")
+    from control_plane.ingress_route_scope import (
+        tracked_ingress_targets,
+        validate_ingress_route_instance_scope,
+    )
+
+    validate_ingress_route_instance_scope(
+        profile=profile,
+        context=context,
+        instance=instance,
+        requested_domains=target.domains,
+        tracked_targets=tracked_ingress_targets(record_store, profile),
+    )
+    inventory_reader = getattr(record_store, "read_environment_inventory", None)
+    if not callable(inventory_reader):
+        raise ValueError(
+            "Current route verification needs the existing environment inventory reader."
+        )
+    try:
+        inventory = EnvironmentInventory.model_validate(
+            cast(Callable[..., object], inventory_reader)(**scope)
+        )
+    except FileNotFoundError:
+        inventory = None
+    deployment = None
+    if inventory is not None:
+        deployment = DeploymentRecord.model_validate(
+            read("read_deployment_record", "deployment", record_id=inventory.deployment_record_id)
+        )
+        deployed = deployment.deployed_target
+        if (
+            (inventory.context, inventory.instance) != (context, instance)
+            or (deployment.context, deployment.instance) != (context, instance)
+            or deployment.record_id != inventory.deployment_record_id
+            or deployed is None
+            or (deployed.provider_id, deployed.target_id, deployed.provider_target_type)
+            != (provider.provider_id, provider.target_id, provider.provider_target_type)
+            or deployment.artifact_identity != inventory.artifact_identity
+            or deployment.source_git_ref != inventory.source_git_ref
+            or deployment.runtime_identity != inventory.runtime_identity
+        ):
+            raise ValueError(
+                "Current route verification target, source, artifact or deployment records disagree."
+            )
+    return RouteBindingVerificationSources(
+        provider_target=provider,
+        dokploy_target=target,
+        dokploy_target_id=target_id,
+        edge_endpoint=edge,
+        product_profile=profile,
+        environment_inventory=inventory,
+        deployment=deployment,
+    )
 
 
 class RouteBindingReconcilePlan(BaseModel):
@@ -326,9 +447,13 @@ def plan_route_binding_reconcile(
         )
     if _route_binding_evidence_projection(current_record) != (
         _route_binding_evidence_projection(record)
-    ) or _route_binding_refresh_due(
-        current_record=current_record,
-        evaluated_at=request.evaluated_at,
+    ) or (
+        candidate.review_sources is not None
+        and candidate.review_sources.ingress_audit.route_verification is None
+        and _route_binding_refresh_due(
+            current_record=current_record,
+            evaluated_at=request.evaluated_at,
+        )
     ):
         return RouteBindingReconcilePlan(
             status="ready",
@@ -592,8 +717,7 @@ def build_route_binding_candidate(
         audit_record.product != request.product
         or audit_record.context != request.context
         or audit_record.requested_domains != managed_domains
-        or audit_record.mode != "apply"
-        or audit_record.status not in {"applied", "unchanged"}
+        or not _usable_ingress_audit(audit_record, request.instance)
     ):
         raise ValueError("The explicit ingress audit does not describe this route.")
     if audit_record is None:
@@ -626,6 +750,37 @@ def build_route_binding_candidate(
             current_record=current_record,
             current_record_sha256=current_record_sha256,
         )
+    verification_sources = None
+    if audit_record.route_verification is not None:
+        try:
+            verification_sources = read_route_binding_verification_sources(
+                record_store,
+                product=request.product,
+                context=request.context,
+                instance=request.instance,
+                endpoint_key=edge_endpoint.endpoint_key,
+            )
+            if verification_sources.fingerprint() != audit_record.route_verification.sources_sha256:
+                raise ValueError(
+                    "Route sources changed since the observation; repeat the exact-instance ingress verification dry run."
+                )
+            if (
+                _parse_utc_timestamp(request.evaluated_at)
+                >= _parse_utc_timestamp(audit_record.recorded_at) + _EVIDENCE_FRESHNESS_WINDOW
+            ):
+                raise ValueError(
+                    "The route observation expired; repeat the exact-instance ingress verification dry run."
+                )
+        except ValueError as error:
+            return _blocked_plan(
+                findings=(
+                    RouteBindingReconcileFinding(
+                        code="ingress_verification_required", detail=str(error)
+                    ),
+                ),
+                current_record=current_record,
+                current_record_sha256=current_record_sha256,
+            )
     if audit_record.tls_owner == "unknown":
         return _blocked_plan(
             findings=(
@@ -673,6 +828,10 @@ def build_route_binding_candidate(
             current_record=current_record,
             current_record_sha256=current_record_sha256,
         )
+    if verification_sources is not None:
+        stale_after = _format_utc_timestamp(
+            _parse_utc_timestamp(audit_record.recorded_at) + _EVIDENCE_FRESHNESS_WINDOW
+        )
     record = EnvironmentRouteBindingRecord(
         product=request.product,
         context=request.context,
@@ -716,7 +875,7 @@ def build_route_binding_candidate(
             source_label=request.source_label,
             source_record_ids=source_record_ids,
             source_versions=source_versions,
-            refreshed_at=request.evaluated_at,
+            refreshed_at=audit_record.recorded_at if verification_sources else request.evaluated_at,
             freshness_status="recorded",
             stale_after=stale_after,
         ),
@@ -736,7 +895,13 @@ def build_route_binding_candidate(
             dokploy_target_id=dokploy_target_id,
             edge_endpoint=edge_endpoint,
             ingress_audit=audit_record,
-            product_profile=split_profile,
+            product_profile=verification_sources.product_profile
+            if verification_sources
+            else split_profile,
+            environment_inventory=verification_sources.environment_inventory
+            if verification_sources
+            else None,
+            deployment=verification_sources.deployment if verification_sources else None,
         ),
     )
 
@@ -919,6 +1084,15 @@ def _resolve_edge_endpoint(
     return candidates[0]
 
 
+def _usable_ingress_audit(record: IngressRouteAuditRecord, instance: str) -> bool:
+    return (record.mode == "apply" and record.status in {"applied", "unchanged"}) or (
+        record.mode == "dry-run"
+        and record.status == "unchanged"
+        and record.route_verification is not None
+        and record.route_verification.instance == instance
+    )
+
+
 def _resolve_ingress_audit(
     *,
     record_store: RouteBindingReconcileStore,
@@ -945,7 +1119,10 @@ def _resolve_ingress_audit(
         return None
     matching_records: list[tuple[IngressRouteAuditRecord, datetime]] = []
     for record in audit_records:
-        if record.mode != "apply":
+        if record.mode != "apply" and not (
+            record.route_verification is not None
+            and record.route_verification.instance == request.instance
+        ):
             continue
         requested_domains, requested_domain_finding = _normalized_domains(record.requested_domains)
         if requested_domain_finding is not None:
@@ -967,23 +1144,40 @@ def _resolve_ingress_audit(
             RouteBindingReconcileFinding(
                 code="ingress_audit_missing",
                 detail=(
-                    "Reconcile requires exactly one applied ingress audit matching the "
-                    "tracked domain set for the requested product/context."
+                    "Current ingress verification is required. Run the existing exact-instance "
+                    "ingress dry run with verify_route_binding=true, the recorded edge, the exact "
+                    "provider host and all mutation flags false, then reconcile again. "
+                    "A prior apply audit is not required."
                 ),
             )
         )
         return None
     latest_recorded_at = max(recorded_at for _, recorded_at in matching_records)
+    applied_records = [
+        (record, stamp) for record, stamp in matching_records if record.mode == "apply"
+    ]
+    if applied_records:
+        latest_apply = max(stamp for _, stamp in applied_records)
+        unresolved = tuple(
+            record
+            for record, stamp in applied_records
+            if stamp == latest_apply and record.status not in {"applied", "unchanged"}
+        )
+        if unresolved:
+            matching_records = [(record, latest_apply) for record in unresolved]
+            latest_recorded_at = latest_apply
     latest_records = tuple(
         record for record, recorded_at in matching_records if recorded_at == latest_recorded_at
     )
     if any(record.status not in {"applied", "unchanged"} for record in latest_records):
         findings.append(
             RouteBindingReconcileFinding(
-                code="ingress_audit_unresolved",
+                code="ingress_verification_required"
+                if any(record.route_verification is not None for record in latest_records)
+                else "ingress_audit_unresolved",
                 detail=(
-                    "The latest matching ingress audit is not terminal, so route evidence "
-                    "cannot be promoted."
+                    "The latest matching ingress evidence does not verify an unchanged route. "
+                    "Review the existing ingress plan; unresolved apply effects retain their original recovery path."
                 ),
             )
         )
@@ -1008,12 +1202,17 @@ def _resolve_ingress_audit(
         )
         for record in latest_records
     }
-    if len(latest_routes) != 1:
+    observed_sources = {
+        record.route_verification.sources_sha256
+        for record in latest_records
+        if record.route_verification is not None
+    }
+    if len(latest_routes) != 1 or len(observed_sources) > 1:
         findings.append(
             RouteBindingReconcileFinding(
                 code="ingress_audit_ambiguous",
                 detail=(
-                    "The latest matching ingress audits disagree about provider or edge endpoint."
+                    "The latest matching ingress audits disagree about route or observed sources."
                 ),
             )
         )

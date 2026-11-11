@@ -219,6 +219,7 @@ class NpmplusIngressApplyRequest(BaseModel):
     allow_enable_disable: bool = True
     dns_secret_version_id: str = Field(default="", exclude_if=lambda value: not value)
     reason: str = ""
+    verify_route_binding: bool = Field(default=False, exclude_if=lambda value: not value)
 
     def is_preview_wildcard_create(self) -> bool:
         return (
@@ -271,6 +272,18 @@ class NpmplusIngressApplyRequest(BaseModel):
         if self.require_exact_expected_host_domains and self.expected_host_id is None:
             raise ValueError(
                 "NPMplus ingress exact expected-host domain checks require expected_host_id"
+            )
+        if self.verify_route_binding and (
+            self.mode != "dry-run"
+            or not self.require_exact_expected_host_domains
+            or self.allow_create
+            or self.allow_update
+            or self.allow_enable_disable
+            or not self.route.edge_endpoint_key
+            or not self.route.enabled
+        ):
+            raise ValueError(
+                "Route verification requires an enabled exact-host dry run without mutation"
             )
         return self
 
