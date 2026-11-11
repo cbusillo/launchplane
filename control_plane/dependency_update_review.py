@@ -215,10 +215,10 @@ def _workspace_pin_only(
             return False
     changed = False
     old, new = documents
-    for slot in ("devkit", "runtime"):
-        old_repos, new_repos = old.get("repos"), new.get("repos")
-        if not isinstance(old_repos, dict) or not isinstance(new_repos, dict):
-            return False
+    old_repos, new_repos = old.get("repos"), new.get("repos")
+    if not isinstance(old_repos, dict) or not isinstance(new_repos, dict):
+        return False
+    for slot in _movable_pin_slots(old_repos, declared_updates):
         old_repo = old_repos.get(slot)
         new_repo = new_repos.get(slot)
         if not isinstance(old_repo, dict) or not isinstance(new_repo, dict):
@@ -232,8 +232,9 @@ def _workspace_pin_only(
         ):
             return False
         pins_forward_proven_digest = declared_updates is None or any(
-            update.get("depName") == old_repo.get("repository")
-            and (update.get("currentDigest"), update.get("newDigest")) == (old_ref, new_ref)
+            _declares_ancestry_checked_digest(
+                update, repository=old_repo.get("repository"), old_ref=old_ref, new_ref=new_ref
+            )
             for update in declared_updates
         )
         if not pins_forward_proven_digest:
@@ -242,6 +243,25 @@ def _workspace_pin_only(
         old_repo.pop("ref")
         new_repo.pop("ref")
     return changed and old == new
+
+
+UNPROVEN_MOVABLE_PIN_SLOTS = ("devkit", "runtime")
+
+
+def _movable_pin_slots(
+    repos: dict[str, object], declared_updates: Sequence[dict[str, str]] | None
+) -> tuple[str, ...]:
+    return UNPROVEN_MOVABLE_PIN_SLOTS if declared_updates is None else tuple(repos)
+
+
+def _declares_ancestry_checked_digest(
+    update: dict[str, str], *, repository: object, old_ref: object, new_ref: object
+) -> bool:
+    return (
+        update.get("updateType") == "digest"
+        and update.get("depName") == repository
+        and (update.get("currentDigest"), update.get("newDigest")) == (old_ref, new_ref)
+    )
 
 
 def dependency_update_policy(
