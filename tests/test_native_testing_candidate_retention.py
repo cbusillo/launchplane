@@ -259,6 +259,7 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         candidate = self.selected()
         self.assertEqual(candidate.status, "eligible")
         self.assertEqual(candidate.references, ())
+        self.assertNotIn("references", candidate.model_dump(mode="json"))
 
     def test_another_record_naming_the_copy_holds_it_and_names_its_owner(self) -> None:
         self.with_application(prepared=False)
