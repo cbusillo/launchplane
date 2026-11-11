@@ -242,6 +242,34 @@ class MigratedUploadTests(unittest.TestCase):
             ):
                 self.fail("FIFO admitted")
 
+    def test_cleanup_keeps_migrated_pair_for_another_generations_pending_candidate(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from control_plane import odoo_testing_native_source as native
+        from control_plane.migrated_testing_source import finish_migrated_upload
+
+        (self.directory / "database").write_bytes(b"database")
+        (self.directory / "filestore").write_bytes(b"store")
+        capture = finish_migrated_upload(self.store, self.allocation)
+        assert capture is not None
+        other_generation = self.generation.model_copy(update={"operation_id": "another-original"})
+        other = SimpleNamespace(
+            product=self.source.product,
+            context=self.source.context,
+            operation_id=other_generation.operation_id,
+            namespace="another-candidate",
+            compose_id="another-target",
+            application=SimpleNamespace(plan=SimpleNamespace(generation=other_generation)),
+        )
+        self.store.list_testing_candidates.return_value = [other]
+        self.store.read_idempotency_record.return_value = None
+        with patch.object(native, "_cache_directory", return_value=self.directory):
+            native.remove_completed_native_capture_cache(capture, store=self.store)
+            self.assertEqual((self.directory / "database").read_bytes(), b"database")
+            self.store.list_testing_candidates.return_value = []
+            native.remove_completed_native_capture_cache(capture, store=self.store)
+            self.assertFalse(self.directory.exists())
+
     def test_lost_receipt_commit_reply_reuses_the_original_pair_and_timestamp(self) -> None:
         from control_plane.migrated_testing_source import finish_migrated_upload
 
@@ -450,6 +478,9 @@ class MigratedArtifactConsumptionTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.fixture.consume(capture, mode="cleanup")
         self.assertEqual(list(self.staging.iterdir()), [])
+        from control_plane.testing_candidate_retention_host import staged_source_inputs
+
+        self.assertFalse(staged_source_inputs(self.staging.parent))
         self.assertFalse(self.filestore.exists())
 
     def test_metadata_extraction_preserves_space_before_and_during_writes(self) -> None:

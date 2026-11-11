@@ -10,6 +10,43 @@ from control_plane.contracts.testing_candidate import (
 from control_plane.testing_candidate_retention import candidate_record_refusals
 
 
+class StagedSourceInputsTests(unittest.TestCase):
+    def test_only_canonical_empty_markers_are_not_preserved_inputs(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+        from control_plane.testing_candidate_retention_host import staged_source_inputs
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            marker = root / (".lp-native-" + "a" * 32)
+            marker.mkdir()
+            self.assertFalse(staged_source_inputs(root))
+            for name in ("database.artifact", "filestore.artifact.partial", "unknown"):
+                with self.subTest(name=name):
+                    child = marker / name
+                    child.write_bytes(b"original or interrupted source")
+                    self.assertTrue(staged_source_inputs(root))
+                    child.unlink()
+            with patch("os.scandir", side_effect=PermissionError):
+                self.assertTrue(staged_source_inputs(root))
+            marker.rmdir()
+            marker.write_bytes(b"")
+            self.assertTrue(staged_source_inputs(root))
+            marker.unlink()
+            other = root / "empty"
+            other.mkdir()
+            marker.symlink_to(other, target_is_directory=True)
+            self.assertTrue(staged_source_inputs(root))
+            marker.unlink()
+            marker.symlink_to(root / "missing", target_is_directory=True)
+            self.assertTrue(staged_source_inputs(root))
+            marker.unlink()
+            alias = root / ".lp-native-unknown"
+            alias.mkdir()
+            self.assertTrue(staged_source_inputs(root))
+
+
 class CandidateRetentionGuardTests(unittest.TestCase):
     def setUp(self) -> None:
         self.candidate = TestingCandidateAllocation(
@@ -298,6 +335,7 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         )
         self.assertEqual(self.selected().status, "eligible")
         custody.assert_called_once()
+
         with patch.object(self.retention, "_source_preserved", return_value=False):
             held = self.selected()
         self.assertEqual(held.status, "held")
@@ -310,6 +348,114 @@ class CandidateRetentionPlanTests(unittest.TestCase):
             receiver.reasons, ("receiver_candidate", "completed_copy_requires_disposition")
         )
         custody.assert_called_once()
+
+    def test_source_readback_distinguishes_skipped_unavailable_and_invalid_files(self) -> None:
+        from unittest.mock import patch
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        self.with_application(prepared=True)
+        for error, status in (
+            (FileNotFoundError(), "unavailable"),
+            (NativeSourceUnavailable("Private capture mount is unavailable"), "unavailable"),
+            (ValueError(), "fail"),
+        ):
+            with (
+                self.subTest(status=status),
+                patch.object(self.retention, "_source_preserved", side_effect=error),
+            ):
+                item = self.selected()
+                self.assertEqual(item.readback[ReadbackPredicate.FILES_READ], status)
+                self.assertEqual(item.status, "held")
+        self.request = self.request.model_copy(
+            update={"receiver_operation_id": self.candidate.operation_id}
+        )
+        with patch.object(
+            self.retention,
+            "_source_preserved",
+            side_effect=AssertionError("held authority must short circuit"),
+        ):
+            item = self.selected()
+        self.assertEqual(item.readback[ReadbackPredicate.FILES_READ], "skipped")
+        self.assertEqual(item.resources[0].readback[ReadbackPredicate.STORAGE_CONSUMERS], "skipped")
+
+    def test_lifecycle_readback_keeps_acquisition_distinct_from_later_inventory_hold(self) -> None:
+        from unittest.mock import patch
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+
+        self.with_application(prepared=True)
+        self.observation["volumes"][0].update(empty=False, reason="container_reference")
+        self.observation["project"] = self.candidate.namespace
+        failure = NativeProgramFailed(
+            "fixture refusal", predicate=ReadbackPredicate.MOUNTS, kind="refused"
+        )
+        with patch.object(self.retention, "candidate_lifecycle_custody", side_effect=failure):
+            held = self.selected()
+        self.assertEqual(held.readback[ReadbackPredicate.CUSTODY], "fail")
+        self.assertEqual(held.readback[ReadbackPredicate.MOUNTS], "fail")
+        self.assertNotIn("candidate_lifecycle_custody_incomplete", held.reasons)
+        self.host.assert_not_called()
+        lifecycle = {"payload": {"container_ids": ["1" * 64], "container_snapshot": "s"}}
+
+        def unavailable(*_args: Any, **kwargs: Any) -> bool:
+            kwargs["references"].append(
+                {
+                    "reason": "provider_inventory_unavailable",
+                    "kind": "project",
+                    "record_id": "unreadable-project",
+                }
+            )
+            return False
+
+        with (
+            patch.object(self.retention, "candidate_lifecycle_custody", return_value=lifecycle),
+            patch.object(self.retention, "_inventory_clear", side_effect=unavailable),
+        ):
+            invalidated = self.selected()
+        self.assertEqual(invalidated.readback[ReadbackPredicate.CUSTODY], "pass")
+        self.assertIn("candidate_lifecycle_custody_incomplete", invalidated.reasons)
+        self.assertFalse(invalidated.lifecycle_snapshot_sha256)
+        self.assertEqual(
+            invalidated.resources[0].readback[ReadbackPredicate.STORAGE_CONSUMERS], "unavailable"
+        )
+        self.assertEqual(invalidated.references[0].record_id, "unreadable-project")
+        self.assertEqual(invalidated.status, "held")
+        self.host.assert_not_called()
+
+    def test_inventory_exception_keeps_observations_and_skips_later_checks(self) -> None:
+        from unittest.mock import patch
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        row = self.observation["volumes"][0]
+        row.update(source_inputs=False, referenced=False)
+        self.observation["volumes"].append(
+            {**row, "role": "ODOO_DATA_VOLUME", "name": self.candidate.namespace + "-data"}
+        )
+        with patch.object(self.retention, "_inventory_clear", side_effect=OSError):
+            held = self.selected()
+        self.assertEqual(held.status, "held")
+        self.assertEqual(len(held.resources), 2)
+        self.assertEqual(
+            held.resources[0].readback[ReadbackPredicate.STORAGE_CONSUMERS], "unavailable"
+        )
+        self.assertEqual(held.resources[1].readback[ReadbackPredicate.STORAGE_CONSUMERS], "skipped")
+        for resource in held.resources:
+            self.assertEqual(resource.status, "held")
+            self.assertEqual(resource.readback[ReadbackPredicate.NATIVE_READ], "pass")
+            self.assertEqual(resource.readback[ReadbackPredicate.RESOURCES], "skipped")
+        self.host.assert_not_called()
+
+    def test_staged_source_and_container_reference_both_survive_the_primary_hold(self) -> None:
+        row = self.observation["volumes"][0]
+        row.update(source_inputs=True, referenced=True, reason="source_inputs_preserved")
+        item = self.selected()
+        self.assertEqual(item.status, "held")
+        self.assertEqual(
+            {(reference.reason, reference.record_id) for reference in item.references},
+            {("source_inputs_preserved", row["name"]), ("container_reference", row["name"])},
+        )
+        self.host.assert_not_called()
 
     def test_completed_copy_lifecycle_is_bound_to_its_serving_web(self) -> None:
         from unittest.mock import patch

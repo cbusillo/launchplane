@@ -571,12 +571,24 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             "projectId": project["projectId"],
             "env": "",
         }
-        for response, clear in (
-            (detail, True),
-            ({**detail, "env": "STATE_VOLUME=" + self.binding.volume_name}, False),
-            ({**detail, "environmentId": "foreign-environment"}, False),
-            ({**detail, "projectId": "foreign-project"}, False),
-            ({key: value for key, value in detail.items() if key != "env"}, False),
+        for response, clear, reason in (
+            (detail, True, ""),
+            (
+                {**detail, "env": "STATE_VOLUME=" + self.binding.volume_name},
+                False,
+                "foreign_provider_reference",
+            ),
+            (
+                {**detail, "environmentId": "foreign-environment"},
+                False,
+                "provider_inventory_unavailable",
+            ),
+            ({**detail, "projectId": "foreign-project"}, False, "provider_inventory_unavailable"),
+            (
+                {key: value for key, value in detail.items() if key != "env"},
+                False,
+                "provider_inventory_unavailable",
+            ),
         ):
             with self.subTest(response=response):
                 with (
@@ -589,7 +601,19 @@ class RetainedVolumeSweepTests(unittest.TestCase):
                         return_value=response,
                     ) as read,
                 ):
-                    self.assertEqual(_inventory_clear(self.root, self.binding, exact=True), clear)
+                    references: list[dict[str, str]] = []
+                    self.assertEqual(
+                        _inventory_clear(
+                            self.root, self.binding, exact=True, references=references
+                        ),
+                        clear,
+                    )
+                    self.assertEqual(
+                        references,
+                        [{"reason": reason, "kind": "environment", "record_id": "environment"}]
+                        if reason
+                        else [],
+                    )
                 self.assertTrue(
                     all(call.kwargs.get("method", "GET") == "GET" for call in read.call_args_list)
                 )

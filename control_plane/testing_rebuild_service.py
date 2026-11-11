@@ -829,6 +829,18 @@ class NativeTestingRebuildAdapter:
             except NativeTestingRebuildAdmissionChanged as error:
                 result = executor.finish_admission_refusal(error)
             else:
+                if record.step == "complete" and not record.error:
+                    from control_plane.testing_candidate_application import (
+                        remove_prepared_candidate_source_cache,
+                    )
+
+                    try:
+                        remove_prepared_candidate_source_cache(self.store, executor.allocation)
+                    except (ValueError, OSError, click.ClickException):
+                        logging.warning(
+                            "Completed testing rebuild %s could not remove its source cache.",
+                            self.operation.operation_id,
+                        )
                 result = rebuild_result(record, executor.allocation)
             assert isinstance(lease, ProviderEvidenceLease)
             return ProviderMutationOutcome(
