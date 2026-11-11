@@ -1,4 +1,6 @@
 import base64
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import inspect
@@ -9,6 +11,7 @@ import re
 import stat
 from typing import Any
 
+import click
 import yaml
 
 from control_plane.dokploy import native_copy_stream
@@ -28,6 +31,32 @@ SOURCE_FILE_BYTES = 64 * 1024
 SOURCE_TOTAL_BYTES = SOURCE_FILE_BYTES
 SOURCE_FILE_COUNT = 16
 SOURCE_ENV_BYTES = 1024 * 1024
+
+
+@contextmanager
+def _qualification(failures: list[str] | None, reason: str) -> Iterator[None]:
+    previous = len(failures or ())
+    try:
+        yield
+    except (
+        ValueError,
+        TypeError,
+        KeyError,
+        RecursionError,
+        OSError,
+        click.ClickException,
+        yaml.YAMLError,
+    ) as error:
+        if failures is not None and len(failures) == previous:
+            denied = isinstance(error, native_copy_stream.NativeSourceAuthorizationDenied) or (
+                isinstance(error, api.DokployRequestFailed) and error.status_code in {401, 403}
+            )
+            if reason == "inventory_source_acquisition_failed" and isinstance(
+                error, (ValueError, TypeError, KeyError, RecursionError, yaml.YAMLError)
+            ):
+                reason = "inventory_source_observation_unqualified"
+            failures.append("inventory_acquisition_denied" if denied else reason)
+        raise
 
 
 @dataclass(frozen=True)
@@ -311,7 +340,7 @@ def read_cached_compose_source(
 
 
 def _empty_project_documents(
-    *, host: str, token: str, payload: dict[str, Any]
+    *, host: str, token: str, payload: dict[str, Any], failures: list[str] | None = None
 ) -> tuple[dict[str, Any], ...]:
     if (
         not set(COMPOSE_SOURCE_FIELDS) <= payload.keys()
@@ -331,16 +360,19 @@ def _empty_project_documents(
     ):
         raise ValueError("The empty source is not independently qualified.")
     require_empty_compose_source(payload, payload["composeId"])
-    if api.list_dokploy_schedules(
-        host=host, token=token, target_id=payload["composeId"], schedule_type="compose"
-    ):
+    with _qualification(failures, "inventory_source_acquisition_failed"):
+        schedules = api.list_dokploy_schedules(
+            host=host, token=token, target_id=payload["composeId"], schedule_type="compose"
+        )
+    if schedules:
         raise ValueError("The empty source has scheduled work.")
-    observed = read_cached_compose_source(
-        host=host,
-        token=token,
-        server_id=payload["serverId"],
-        request={"app_name": payload["appName"], "files": []},
-    )
+    with _qualification(failures, "inventory_source_acquisition_failed"):
+        observed = read_cached_compose_source(
+            host=host,
+            token=token,
+            server_id=payload["serverId"],
+            request={"app_name": payload["appName"], "files": []},
+        )
     if not observed.project_absent:
         raise ValueError("The unconfigured source retains cached project custody.")
     return ()
@@ -367,7 +399,13 @@ def _default_volume_inputs(document: dict[str, Any], raw_env: str) -> set[str]:
 
 
 def _included_documents(
-    *, host: str, token: str, payload: dict[str, Any], document: dict[str, Any], exact: bool
+    *,
+    host: str,
+    token: str,
+    payload: dict[str, Any],
+    document: dict[str, Any],
+    exact: bool,
+    failures: list[str] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     if (
         payload.get("sourceType") != "git"
@@ -392,7 +430,8 @@ def _included_documents(
     paths = [root, *(source_relative_path(path, posixpath.dirname(root)) for path in includes)]
     request = {"app_name": payload["appName"], "files": paths}
     arguments = {"host": host, "token": token, "server_id": payload["serverId"]}
-    observed = read_cached_compose_source(**arguments, request=request)
+    with _qualification(failures, "inventory_source_acquisition_failed"):
+        observed = read_cached_compose_source(**arguments, request=request)
     if (
         observed.project_absent
         or not observed.files[root].document.keys() <= {"name", "include", "networks"}
@@ -404,34 +443,42 @@ def _included_documents(
     documents = []
     keys: set[str] = set()
     for path in paths[1:]:
-        file = observed.files[path]
-        child = readable_provider_compose(file.document)
-        if (
-            child.get("include")
-            or file.directory_env
-            and posixpath.dirname(path) != posixpath.dirname(root)
-            or any(
-                service.get("env_file")
-                or isinstance(service.get("extends"), dict)
-                and service["extends"].get("file")
-                for service in child["services"].values()
-            )
-        ):
-            raise ValueError("The included source has unsupported file scopes.")
-        require_named_storage(child)
-        keys.update(_default_volume_inputs(child, str(payload.get("env") or "")))
+        try:
+            with _qualification(failures, "inventory_included_document_unqualified"):
+                file = observed.files[path]
+                child = readable_provider_compose(file.document)
+                if (
+                    child.get("include")
+                    or file.directory_env
+                    and posixpath.dirname(path) != posixpath.dirname(root)
+                    or any(
+                        service.get("env_file")
+                        or isinstance(service.get("extends"), dict)
+                        and service["extends"].get("file")
+                        for service in child["services"].values()
+                    )
+                ):
+                    raise ValueError("The included source has unsupported file scopes.")
+                require_named_storage(child)
+                child_keys = _default_volume_inputs(child, str(payload.get("env") or ""))
+        except (ValueError, TypeError, KeyError, RecursionError, yaml.YAMLError):
+            if failures is None:
+                raise
+            continue
+        keys.update(child_keys)
         documents.append(child)
     if keys:
         if not exact or not isinstance(payload.get("env"), str):
             raise ValueError("Default absence requires complete exact environment evidence.")
-        proof = read_cached_compose_source(
-            **arguments,
-            request={
-                **request,
-                "input_names": sorted(keys),
-                "env_file": posixpath.join(posixpath.dirname(root), ".env"),
-            },
-        )
+        with _qualification(failures, "inventory_source_acquisition_failed"):
+            proof = read_cached_compose_source(
+                **arguments,
+                request={
+                    **request,
+                    "input_names": sorted(keys),
+                    "env_file": posixpath.join(posixpath.dirname(root), ".env"),
+                },
+            )
         if (
             proof.project_absent
             or proof.absent_inputs != keys
@@ -455,19 +502,39 @@ def _included_documents(
 
 
 def read_volume_documents(
-    *, host: str, token: str, payload: dict[str, Any], raw: str, server_id: str, exact: bool
+    *,
+    host: str,
+    token: str,
+    payload: dict[str, Any],
+    raw: str,
+    server_id: str,
+    exact: bool,
+    failures: list[str] | None = None,
 ) -> tuple[dict[str, Any], ...]:
-    document = yaml.safe_load(raw)
+    with _qualification(failures, "inventory_converted_document_malformed"):
+        document = yaml.safe_load(raw)
     from control_plane.production_recipient import readable_provider_compose
 
     if isinstance(document, dict) and not document.get("include"):
-        return (readable_provider_compose(document),)
+        with _qualification(failures, "inventory_converted_document_malformed"):
+            return (readable_provider_compose(document),)
     if not server_id or payload.get("serverId") != server_id:
-        raise ValueError("Cached source placement is unqualified.")
+        with _qualification(failures, "inventory_source_placement_unqualified"):
+            raise ValueError("Cached source placement is unqualified.")
     if document is None:
-        return _empty_project_documents(host=host, token=token, payload=payload)
+        with _qualification(failures, "inventory_converted_document_absent"):
+            return _empty_project_documents(
+                host=host, token=token, payload=payload, failures=failures
+            )
     if not isinstance(document, dict):
-        raise ValueError("Converted source is unreadable.")
-    return _included_documents(
-        host=host, token=token, payload=payload, document=document, exact=exact
-    )
+        with _qualification(failures, "inventory_converted_document_malformed"):
+            raise ValueError("Converted source is unreadable.")
+    with _qualification(failures, "inventory_source_scope_unqualified"):
+        return _included_documents(
+            host=host,
+            token=token,
+            payload=payload,
+            document=document,
+            exact=exact,
+            failures=failures,
+        )

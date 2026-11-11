@@ -93,6 +93,18 @@ siblings. It never drops an unknown project or treats an unreadable source as
 empty. Sibling retirement callers retain the same boolean inventory safety
 contract and stop on their first hold when no diagnostics are requested.
 
+Diagnostic references also retain fixed `inventory_*` reasons on the same safe
+identity for target/environment acquisition and Compose qualification failures.
+The original generic reason remains. Skipped dependent checks are explicit,
+never evidence of absence. Independently readable targets and already acquired
+included documents remain inspectable after qualification failures. Cached-source
+acquisition still requires a complete bounded observation: a missing or malformed
+file leaves that prerequisite unavailable, not partially qualified.
+Authorization denials still raise through the existing refusal path;
+recording a fixed denial reason does not turn a denial into a completed inspection.
+Exception text, source contents, environment values and source paths are never
+part of these references. Historical results without attribution remain unknown.
+
 Mounted storage qualifies only through the existing native retained-copy
 lifecycle. The candidate must be terminally abandoned, or a completed copy whose
 original failed, and its source must be preserved. A completed copy without a
