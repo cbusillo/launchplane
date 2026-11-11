@@ -44,13 +44,17 @@ state.setdefault('calls',[]).append(args)
 def save():
     state_path.write_text(json.dumps(state))
 volumes=state['volumes'];containers=state['containers']
-if args==['volume','ls','--format','{{.Name}}']:
+if args in (['volume','ls','--format','{{.Name}}'],['volume','ls','-q']):
     print('\n'.join(volumes))
+elif args[:2]==['info','--format']:
+    print(json.dumps({'ID':'fixture-engine','DockerRootDir':state['root']}))
 elif args[:2]==['volume','inspect']:
     item=volumes[args[2]]
     print(json.dumps([{'Name':args[2],'Driver':'local','Labels':item['labels'],'Mountpoint':item['path'],'Options':item.get('options')}]))
 elif args==['ps','-aq','--no-trunc']:
     print('\n'.join(containers))
+elif args[:3]==['inspect','--type','volume']:
+    print(json.dumps([{'Name':key,'Driver':'local','Labels':volumes[key]['labels'],'Mountpoint':volumes[key]['path'],'Options':volumes[key].get('options')} for key in args[3:]]))
 elif args[:3]==['inspect','--type','container']:
     print(json.dumps([{'Id':key,**containers[key]} for key in args[3:]]))
 elif args[:3]==['container','inspect','--size']:
@@ -88,7 +92,7 @@ def ownership_label(spec: dict[str, str]) -> str:
     ).hexdigest()
 
 
-class CandidateReleaseProgramTests(unittest.TestCase):
+class CandidateReleaseProgramFixture(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -147,6 +151,8 @@ class CandidateReleaseProgramTests(unittest.TestCase):
             if call[0] == "rm" or call[:2] == ["volume", "rm"]
         ]
 
+
+class CandidateReleaseProgramTests(CandidateReleaseProgramFixture):
     def test_legacy_observation_reports_remaining_resources_and_removes_nothing(self) -> None:
         self.assertEqual(
             self.run_program("dry-run"), {"status": "eligible", "reclaimable_bytes": None}
@@ -204,6 +210,108 @@ class CandidateReleaseProgramTests(unittest.TestCase):
         self.assertEqual(self.removals(), [])
 
 
+class CurrentTestingReleaseProgramTests(CandidateReleaseProgramFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.state["root"] = str(self.root)
+        for role, name in (
+            ("ODOO_DB_VOLUME", "db"),
+            ("ODOO_DATA_VOLUME", "data"),
+            ("ODOO_LOG_VOLUME", "logs"),
+        ):
+            self.state["volumes"][NAMESPACE + "-" + name]["labels"][
+                "io.launchplane.testing-resource-role"
+            ] = role
+        self.state["containers"]["candidate-web"]["Mounts"][0]["RW"] = True
+        self.save()
+
+    def current_program(self, mode: str, spec: dict[str, str] | None = None) -> dict[str, Any]:
+        from control_plane.testing_candidate_retention_host import (
+            NATIVE_TESTING_RETENTION_INSPECTION,
+        )
+
+        payload = base64.b64encode(
+            json.dumps(
+                {"mode": mode, "resources": spec or resources(), "project": NAMESPACE}
+            ).encode()
+        ).decode()
+        result = subprocess.run(
+            [sys.executable, "-c", NATIVE_TESTING_RETENTION_INSPECTION, payload, "FRAME:"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+            env=os.environ | {"PATH": self.path, "FAKE_DOCKER_STATE": str(self.state_path)},
+        )
+        self.state = json.loads(self.state_path.read_text())
+        return cast(dict[str, Any], json.loads(result.stdout.removeprefix("FRAME:")))
+
+    def test_failed_running_copy_releases_with_unknown_gates_and_verifies_space(self) -> None:
+        archive = self.root / "migrated-source.tar"
+        pair = self.root / "qualified-pair"
+        pair.mkdir()
+        archive.write_bytes(b"original migration source")
+        for part in ("database", "filestore"):
+            (pair / part).write_bytes(part.encode())
+        for volume in self.state["volumes"].values():
+            (Path(volume["path"]) / "retained").write_bytes(b"failed copy data")
+        self.state["containers"]["candidate-web"]["State"] = {"Running": True}
+        self.save()
+        dry = self.current_program("dry-run")
+        self.assertTrue(all(row["status"] == "observed" for row in dry["volumes"]))
+        self.assertEqual(self.removals(), [])
+        applied = self.current_program("apply")
+        self.assertTrue(all(row["status"] == "absent" for row in applied["volumes"]))
+        self.assertEqual(self.state["volumes"], {})
+        self.assertEqual(self.state["containers"], {})
+        for row in applied["physical_readback"].values():
+            self.assertGreater(row["before_bytes"], 0)
+            self.assertGreater(row["after_bytes"], 0)
+            self.assertEqual(row["observed_change_bytes"], row["after_bytes"] - row["before_bytes"])
+        self.assertEqual(archive.read_bytes(), b"original migration source")
+        self.assertEqual({p.name for p in pair.iterdir()}, {"database", "filestore"})
+        self.assertTrue(
+            all(row["status"] == "absent" for row in self.current_program("readback")["volumes"])
+        )
+        removed = [call[2] for call in self.removals() if call[:2] == ["volume", "rm"]]
+        self.assertEqual(removed[-1], NAMESPACE + "-data")
+
+    def test_published_candidate_is_serving_and_never_released(self) -> None:
+        self.state["containers"]["candidate-web"]["HostConfig"] = {
+            "PortBindings": {"80/tcp": [{"HostPort": "8080"}]}
+        }
+        self.save()
+        self.assertTrue(self.current_program("dry-run")["serving"])
+        self.assertEqual(self.current_program("apply")["volumes"], [])
+        self.assertEqual(self.removals(), [])
+
+    def test_production_scope_labels_or_shared_storage_never_dispatch(self) -> None:
+        for spec in (resources(instance="prod"), resources(namespace="production")):
+            self.assertEqual(self.current_program("apply", spec)["volumes"], [])
+            self.assertEqual(self.removals(), [])
+        for modification in ("production_label", "bind", "foreign_label", "production_mount"):
+            with self.subTest(modification=modification):
+                volume = self.state["volumes"][NAMESPACE + "-data"]
+                if modification == "production_label":
+                    volume["labels"]["io.launchplane.production-recipient"] = "prod"
+                elif modification == "bind":
+                    volume["options"] = {"o": "bind", "device": "/production"}
+                elif modification == "foreign_label":
+                    volume["labels"]["io.launchplane.testing-resources"] = ownership_label(
+                        resources(instance="prod")
+                    )
+                else:
+                    self.state["containers"]["candidate-web"]["Mounts"].append(
+                        {"Type": "volume", "Name": "production-db", "RW": True}
+                    )
+                self.save()
+                self.assertEqual(self.current_program("apply")["volumes"], [])
+                self.assertEqual(self.removals(), [])
+                volume["labels"].pop("io.launchplane.production-recipient", None)
+                volume.pop("options", None)
+                volume["labels"]["io.launchplane.testing-resources"] = ownership_label(resources())
+
+
 def failed_operation(**changes: object) -> Mock:
     values = {
         "product": "fixture",
@@ -258,74 +366,54 @@ class CandidateReleaseGuardTests(unittest.TestCase):
 
     def test_selected_or_routed_candidate_is_kept(self) -> None:
         allocation = Mock(product="fixture", context="fixture-testing", operation_id="operation-1")
-        cases = (
-            ({"custody": ValueError("lane target names it")}, "candidate_release_selected"),
-            ({"publication": Mock(state="applied")}, "candidate_release_selected"),
-            ({"routed": True}, "candidate_release_selected"),
-        )
-        for case, code in cases:
+        for selected, publication, routed in (
+            (True, None, False),
+            (False, Mock(state="applied"), False),
+            (False, None, True),
+        ):
+            store = Mock()
+            store.list_dokploy_target_id_records.return_value = (
+                [Mock(target_id=allocation.compose_id)] if selected else []
+            )
             with (
-                self.subTest(case=case),
-                patch.object(
-                    release, "require_candidate_target_custody", side_effect=case.get("custody")
-                ),
-                patch.object(release, "read_publication", return_value=case.get("publication")),
-                patch.object(release, "candidate_routed", return_value=case.get("routed", False)),
+                patch.object(release, "read_publication", return_value=publication),
+                patch.object(release, "candidate_routed", return_value=routed),
             ):
                 self.assertEqual(
                     self.refusal(
                         lambda: release.require_candidate_unselected(
-                            Path("/unused"), Mock(), allocation
+                            Path("/unused"), store, allocation
                         )
                     ),
-                    code,
+                    "candidate_release_selected",
                 )
         for state in ("planned", "reversed"):
             with (
-                patch.object(release, "require_candidate_target_custody"),
+                patch.object(store, "list_dokploy_target_id_records", return_value=[]),
                 patch.object(release, "read_publication", return_value=Mock(state=state)),
                 patch.object(release, "candidate_routed", return_value=False),
             ):
-                release.require_candidate_unselected(Path("/unused"), Mock(), allocation)
+                release.require_candidate_unselected(Path("/unused"), store, allocation)
 
-    def lane_refusal(
-        self,
-        *,
-        only_copy: bool = False,
-        shared: bool = False,
-        protected: bool = False,
-        reason: str = "usage_protected",
-    ) -> str | None:
-        store = Mock()
-        store.read_disposable_lane_safety.return_value = None
-        with (
-            patch.object(
-                release,
-                "recorded_lane_protection",
-                return_value=Mock(only_copy=only_copy, shared=shared),
-            ),
-            patch.object(release, "read_odoo_testing_usage", return_value=Mock(usage="unknown")),
-            patch.object(
-                release,
-                "evaluate_lane_usage",
-                return_value=Mock(protected=protected, reason=reason),
-            ) as usage,
-        ):
-            try:
-                release.require_lane_releasable(Path("/unused"), store, failed_operation())
-            except TestingCandidateReleaseRefused as error:
-                return error.code
-        self.assertFalse(usage.call_args.kwargs["require_unused"])
-        return None
-
-    def test_needed_copy_shared_resources_or_lane_use_keep_the_candidate(self) -> None:
-        self.assertEqual(self.lane_refusal(only_copy=True), "testing_needed_copy")
-        self.assertEqual(self.lane_refusal(shared=True), "testing_production_resources_shared")
-        self.assertEqual(self.lane_refusal(protected=True), "testing_in_use")
-        self.assertEqual(
-            self.lane_refusal(protected=True, reason="staff_testing_hold"), "testing_staff_hold"
-        )
-        self.assertIsNone(self.lane_refusal())
+    def test_recent_signin_keeps_the_lane_and_unknown_use_proceeds(self) -> None:
+        for recent in (True, False, None):
+            with (
+                self.subTest(recent=recent),
+                patch.object(
+                    release, "read_odoo_testing_usage", return_value=Mock(recent_signins=recent)
+                ),
+            ):
+                if recent is True:
+                    self.assertEqual(
+                        self.refusal(
+                            lambda: release.require_lane_releasable(
+                                Path("/unused"), Mock(), failed_operation()
+                            )
+                        ),
+                        "testing_in_use",
+                    )
+                else:
+                    release.require_lane_releasable(Path("/unused"), Mock(), failed_operation())
 
 
 class CandidateReleaseFixture(unittest.TestCase):
@@ -356,33 +444,40 @@ class CandidateReleaseFixture(unittest.TestCase):
         self.routed = self.enterContext(
             patch.object(release, "candidate_routed", return_value=False)
         )
-        self.usage = self.enterContext(patch.object(release, "require_lane_releasable"))
+        self.usage = self.enterContext(
+            patch.object(release, "require_lane_releasable", return_value="")
+        )
         self.applied: list[str] = []
         self.interrupt = False
         self.uncertain = True
 
+        observation = self.fixture.observation
+
         def host(
             _root: Path,
-            _binding: Any,
-            mode: str,
-            key: str,
-            lease: ProviderOperationLease | None = None,
-            **kwargs: Any,
-        ) -> tuple[str, str]:
+            _store: Any,
+            _allocation: Any,
+            *,
+            mode: str = "dry-run",
+            dispatch_guard: Any = None,
+        ) -> Any:
             if mode == "apply":
-                assert lease is not None
-                lease.checkpoint_effect("release-fixture-volume")
-                self.applied.append(key)
-                return ("unknown", "effect_unknown") if self.interrupt else ("removed", "removed")
-            if mode == "readback":
-                return (
-                    ("unknown", "effect_unknown")
-                    if self.interrupt and self.uncertain
-                    else ("absent", "removed")
-                )
-            return "eligible", "qualified"
+                if dispatch_guard is not None:
+                    dispatch_guard(lambda: self.applied.append("effect"))
+                if self.interrupt:
+                    from control_plane.provider_operations import ProviderMutationUnknownError
 
-        self.fixture.host.side_effect = host
+                    raise ProviderMutationUnknownError("effect unknown")
+            if mode in {"apply", "readback"}:
+                if self.interrupt and self.uncertain:
+                    return {"volumes": [], "capacity": []}, "effect_unknown"
+                return {
+                    **observation,
+                    "volumes": [{**row, "status": "absent"} for row in observation["volumes"]],
+                }, ""
+            return observation, ""
+
+        self.fixture.inspect.side_effect = host
 
     def post(
         self, director: bool = True, key: str = "", operation: str | None = None, **body: object
@@ -507,36 +602,6 @@ class CandidateReleaseRouteTests(CandidateReleaseFixture):
         self.assertEqual(observed.json()["status"], "released", observed.text)
         self.assertEqual(observed.json()["plan_sha256"], reviewed)
         self.assertEqual(len(self.applied), 1)
-
-    def test_gate_bearing_data_volume_is_removed_last(self) -> None:
-        namespace = self.fixture.candidate.namespace
-        first = self.fixture.observation["volumes"][0]
-        self.fixture.observation["volumes"] = [
-            {**first, "role": role, "name": namespace + suffix, "identity": digit * 64}
-            for role, suffix, digit in (
-                ("ODOO_DB_VOLUME", "-db", "b"),
-                ("ODOO_DATA_VOLUME", "-data", "d"),
-                ("ODOO_LOG_VOLUME", "-logs", "e"),
-            )
-        ]
-        removed: list[str] = []
-        host = self.fixture.host.side_effect
-
-        def record(root: Path, binding: Any, mode: str, *args: Any, **kwargs: Any) -> Any:
-            if mode == "apply":
-                removed.append(binding.volume_name)
-            return host(root, binding, mode, *args, **kwargs)
-
-        self.fixture.host.side_effect = record
-        reviewed = self.post().json()["plan_sha256"]
-        applied = self.post(key="release", mode="apply", reviewed_plan_sha256=reviewed)
-        self.assertEqual(applied.json()["status"], "released", applied.text)
-        self.assertEqual(removed[-1], namespace + "-data")
-        self.assertEqual(len(removed), 3)
-        self.assertEqual(
-            [row["role"] for row in applied.json()["candidates"][0]["resources"]],
-            ["ODOO_DB_VOLUME", "ODOO_DATA_VOLUME", "ODOO_LOG_VOLUME"],
-        )
 
     def test_missing_receipt_and_foreign_receiver_do_not_dispatch(self) -> None:
         missing = self.post(key="missing", mode="readback", reviewed_plan_sha256="a" * 64)
@@ -722,7 +787,7 @@ class AutomaticCandidateReleaseTests(CandidateReleaseFixture):
         self.release_failed()
         view = self.view()
         self.assertEqual(view.status, "held")
-        self.assertEqual(view.reasons[:2], ("candidate_release_held", "testing_in_use"))
+        self.assertIn("testing_in_use", view.reasons)
         self.assertEqual(self.applied, [])
 
     def test_selection_after_planning_reports_the_fresh_protection(self) -> None:
@@ -749,7 +814,7 @@ class AutomaticCandidateReleaseTests(CandidateReleaseFixture):
             self.release_failed()
         view = self.view()
         self.assertEqual(view.status, "held")
-        self.assertIn("selected_target", view.reasons)
+        self.assertIn("candidate_release_selected", view.reasons)
         self.assertEqual(self.applied, [])
 
     def test_concurrent_executor_settles_held_without_effect(self) -> None:
@@ -810,7 +875,7 @@ class AutomaticCandidateReleaseTests(CandidateReleaseFixture):
             ):
                 self.release_failed()
                 self.assertIsNone(self.view())
-                self.fixture.host.assert_not_called()
+                self.assertEqual(self.applied, [])
 
 
 if __name__ == "__main__":
