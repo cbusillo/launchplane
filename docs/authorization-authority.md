@@ -242,7 +242,10 @@ its plain settings and provider-key retirements, or adopt plain settings from
 that lane's provider environment, after a matching dry run. Adoption reads stay
 inside the service and return only key dispositions. Credential-shaped keys
 remain refused; a request containing one cannot apply or create secret records.
-These operations record configuration without applying it to a provider. Production and
+These operations record configuration without applying it to a provider. The
+Director's existing product-config apply authority also admits reviewed
+[record-only provider adoption](service-boundary.md#record-only-live-provider-adoption)
+on an exclusively owned live production lane. Other production and
 context-wide undeclared settings still require admin authority and return
 `live_product_requires_operator` for the `local_operator` credential, even after
 a successful matching plan. Exact lane ownership, instance-only secret writes,

@@ -618,6 +618,41 @@ def product_config_has_undeclared_runtime_settings(
     return bool((set(values) | set(adopted_keys)) - declared)
 
 
+def product_config_only_adopts_provider_settings(payload: dict[str, object]) -> bool:
+    runtime = cast(dict[str, object], payload["runtime_env"])
+    keys = cast(tuple[str, ...], runtime.get("adopt_provider_keys") or ())
+    return bool(
+        keys
+        and payload["context"]
+        and payload["instance"]
+        and runtime["scope"] == "instance"
+        and not runtime["env"]
+        and runtime.get("retired_provider_keys") is None
+        and not any(
+            payload.get(field)
+            for field in (
+                "secrets",
+                "disable_secret_bindings",
+                "public_hosts",
+                "odoo_business_hours",
+                "odoo_first_empty",
+            )
+        )
+        and all(not provider_key_adoption.looks_like_credential(key, "") for key in keys)
+    )
+
+
+def product_config_plan_only_records_provider_settings(result: dict[str, object]) -> bool:
+    dispositions = cast(list[dict[str, str]], result["provider_key_adoption"])
+    runtime = cast(dict[str, object], result["runtime_environment"])
+    return bool(dispositions) and (
+        all(item["disposition"] == "adopted" for item in dispositions)
+        and set(cast(list[str], runtime["changed_keys"])) == {item["key"] for item in dispositions}
+        and runtime["retired_provider_keys_before"] == runtime["retired_provider_keys_after"]
+        and not result["secrets"]
+    )
+
+
 def product_environment_config_apply_request(
     *,
     profile: LaunchplaneProductProfileRecord,
