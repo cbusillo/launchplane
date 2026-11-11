@@ -35,6 +35,7 @@ from control_plane.lane_usage import evaluate_lane_usage
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_usage import read_odoo_testing_usage
 from control_plane.provider_operations import (
+    DurableProviderOperationResult,
     ProviderEvidenceLease,
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
@@ -631,6 +632,41 @@ def release_fingerprint(
     ).hexdigest()
 
 
+def run_release_operation(
+    store: PostgresRecordStore,
+    *,
+    product: str,
+    operation_id: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+    trace_id: str,
+    adapter: Any,
+    allow_mutation: bool = True,
+) -> DurableProviderOperationResult:
+    return run_durable_provider_operation(
+        store=store,
+        scope=release_scope(product, operation_id),
+        route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+        lease_owner=trace_id,
+        response_trace_id=trace_id,
+        adapter=adapter,
+        lease_seconds=RELEASE_LEASE_SECONDS,
+        allow_mutation=allow_mutation,
+    )
+
+
+def read_automatic_receipt(
+    store: PostgresRecordStore, product: str, operation_id: str
+) -> LaunchplaneIdempotencyRecord | None:
+    return store.read_idempotency_record(
+        scope=release_scope(product, operation_id),
+        route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
+        idempotency_key=AUTOMATIC_RELEASE_KEY,
+    )
+
+
 @dataclass(frozen=True)
 class SettledCandidateRelease:
     target: str
@@ -684,13 +720,15 @@ def release_failed_candidate(store: PostgresRecordStore, root: Path, operation_i
     if operation is None:
         return
     product, trace_id = operation.product, f"automatic-release-{operation_id}"
+    if read_automatic_receipt(store, product, operation_id) is not None:
+        return
     namespace = testing_candidate_namespace(product, operation.context, operation_id)
 
     def run(adapter: Any, plan_sha256: str) -> None:
-        run_durable_provider_operation(
-            store=store,
-            scope=release_scope(product, operation_id),
-            route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
+        run_release_operation(
+            store,
+            product=product,
+            operation_id=operation_id,
             idempotency_key=AUTOMATIC_RELEASE_KEY,
             request_fingerprint=release_fingerprint(
                 AUTOMATIC_RELEASE_ACTOR,
@@ -698,10 +736,8 @@ def release_failed_candidate(store: PostgresRecordStore, root: Path, operation_i
                 operation_id,
                 TestingCandidateReleaseRequest(mode="apply", reviewed_plan_sha256=plan_sha256),
             ),
-            lease_owner=trace_id,
-            response_trace_id=trace_id,
+            trace_id=trace_id,
             adapter=adapter,
-            lease_seconds=RELEASE_LEASE_SECONDS,
         )
 
     try:
@@ -737,9 +773,8 @@ def release_failed_candidate(store: PostgresRecordStore, root: Path, operation_i
             return
         except (TestingCandidateReleaseRefused, *RELEASE_PLAN_ERRORS) as error:
             settled_status, reason_code = "held", _refusal_code(error)
-            fresh = effect.fresh
-            if fresh is not None and fresh.plan.digest() == reviewed:
-                observed = replace(release, retention=fresh.retention)
+            if effect.fresh is not None:
+                observed = replace(release, retention=effect.fresh.retention)
     payload = release_response(observed, trace_id, settled_status, reason_code).model_dump(
         mode="json", exclude_none=True
     )
@@ -800,10 +835,4 @@ def automatic_release_view(
 def read_automatic_release(
     store: PostgresRecordStore, product: str, operation_id: str
 ) -> AutomaticCandidateReleaseView | None:
-    return automatic_release_view(
-        store.read_idempotency_record(
-            scope=release_scope(product, operation_id),
-            route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
-            idempotency_key=AUTOMATIC_RELEASE_KEY,
-        )
-    )
+    return automatic_release_view(read_automatic_receipt(store, product, operation_id))

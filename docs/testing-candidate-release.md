@@ -81,7 +81,8 @@ reconciliation. They cannot dispatch the removed less-bound host effect path.
 When the worker commits a native testing rebuild as `fail` with an
 `error_code`, the failed record's lease ends at its finish time. After that
 commit, and outside the execution lock, the worker plans this same release and
-applies it under the route's scope with the key `automatic`. The fresh checks,
+applies it once under the route's scope with the key `automatic`; an existing
+automatic receipt is never planned or applied again. The fresh checks,
 effects and physical readback are the route's. A plan that is held or absent,
 or a fresh check that refuses before any effect, settles as a `held` (or
 `absent`) receipt naming its reasons, and nothing is removed. The operation's
@@ -91,7 +92,9 @@ and production never reach the host.
 `GET .../testing-rebuild/operations/{operation_id}` reports that receipt as
 `candidate_release`: `status` (`released`, `absent`, `held` or `unknown`),
 bounded `reasons`, `plan_sha256` and `idempotency_key`. It is omitted when no
-automatic receipt exists. `unknown` means an effect's outcome is unproven. Its
+automatic receipt exists, including when the worker stops between the failed
+commit and the release; the candidate then stays in place for the route.
+Failures committed before this behavior shipped are not released automatically. `unknown` means an effect's outcome is unproven. Its
 original receipt is only observed: route readback with the `automatic` key and
 that `plan_sha256` reconciles it, and apply with that key always refuses
 `idempotency_key_reused`. A later attempt is a new reviewed plan with a new key.

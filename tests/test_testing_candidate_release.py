@@ -548,26 +548,28 @@ class CandidateReleaseRouteTests(CandidateReleaseFixture):
                 )
 
         adapter = LegacyAdapter()
-        run_durable_provider_operation(
-            store=self.store,
-            scope=f"testing-candidate-release:{candidate.product}:{candidate.operation_id}",
-            route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
-            idempotency_key="legacy",
-            request_fingerprint=fingerprint,
-            lease_owner="legacy",
-            response_trace_id="legacy",
-            adapter=adapter,
-        )
-        response = self.post(key="legacy", mode="readback", reviewed_plan_sha256=plan.digest())
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(
-            (
-                response.json()["status"],
-                response.json()["replayed"],
-                response.json()["plan_sha256"],
-            ),
-            ("released", True, plan.digest()),
-        )
+        for key in ("legacy", release.AUTOMATIC_RELEASE_KEY):
+            run_durable_provider_operation(
+                store=self.store,
+                scope=f"testing-candidate-release:{candidate.product}:{candidate.operation_id}",
+                route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
+                idempotency_key=key,
+                request_fingerprint=fingerprint,
+                lease_owner="legacy",
+                response_trace_id="legacy",
+                adapter=adapter,
+            )
+            for mode in ("readback", "apply"):
+                response = self.post(key=key, mode=mode, reviewed_plan_sha256=plan.digest())
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(
+                    (
+                        response.json()["status"],
+                        response.json()["replayed"],
+                        response.json()["plan_sha256"],
+                    ),
+                    ("released", True, plan.digest()),
+                )
         self.assertEqual(self.applied, [])
 
 
@@ -655,6 +657,33 @@ class AutomaticCandidateReleaseTests(CandidateReleaseFixture):
         view = self.view()
         self.assertEqual(view.status, "held")
         self.assertEqual(view.reasons[:2], ("candidate_release_held", "testing_in_use"))
+        self.assertEqual(self.applied, [])
+
+    def test_selection_after_planning_reports_the_fresh_protection(self) -> None:
+        from datetime import datetime, timezone
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
+        candidate, planned = self.fixture.candidate, release.build_candidate_release
+        calls: list[str] = []
+
+        def select_then_plan(*args: Any, **kwargs: Any) -> Any:
+            if calls:
+                self.store.write_dokploy_target_id_record(
+                    DokployTargetIdRecord(
+                        context=candidate.context,
+                        instance="testing",
+                        target_id=candidate.compose_id,
+                        updated_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                )
+            calls.append(candidate.operation_id)
+            return planned(*args, **kwargs)
+
+        with patch.object(release, "build_candidate_release", side_effect=select_then_plan):
+            self.release_failed()
+        view = self.view()
+        self.assertEqual(view.status, "held")
+        self.assertIn("selected_target", view.reasons)
         self.assertEqual(self.applied, [])
 
     def test_concurrent_executor_settles_held_without_effect(self) -> None:

@@ -13,10 +13,7 @@ from control_plane.contracts.testing_candidate_release import (
     TestingCandidateReleaseResponse,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, HttpErrorFactory
-from control_plane.provider_operations import (
-    run_durable_provider_operation,
-    ProviderMutationUnknownError,
-)
+from control_plane.provider_operations import ProviderMutationUnknownError
 from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneIdentity,
@@ -29,7 +26,6 @@ from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDe
 from control_plane.testing_candidate_release import (
     AUTOMATIC_RELEASE_ACTOR,
     AUTOMATIC_RELEASE_KEY,
-    RELEASE_LEASE_SECONDS,
     RELEASE_PLAN_ERRORS,
     CandidateRelease,
     TestingCandidateReleaseAdapter,
@@ -39,6 +35,7 @@ from control_plane.testing_candidate_release import (
     release_from_receipt,
     release_response,
     release_scope,
+    run_release_operation,
 )
 
 
@@ -90,25 +87,27 @@ def register_testing_candidate_release_route(
                 "Apply and readback require a bounded Idempotency-Key.",
                 400,
             )
-        automatic = key == AUTOMATIC_RELEASE_KEY
-        if automatic and payload.mode == "apply":
-            raise refusal(
-                "idempotency_key_reused", "The automatic release key permits readback only."
-            )
         fingerprint = release_fingerprint(
-            AUTOMATIC_RELEASE_ACTOR if automatic else launchplane_identity_actor(identity),
-            product,
-            operation_id,
-            payload,
+            launchplane_identity_actor(identity), product, operation_id, payload
         )
-        scope = release_scope(product, operation_id)
         original = (
             store.read_idempotency_record(
-                scope=scope, route_path=TESTING_CANDIDATE_RELEASE_ROUTE, idempotency_key=key
+                scope=release_scope(product, operation_id),
+                route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
+                idempotency_key=key,
             )
             if mutating
             else None
         )
+        manual_receipt = original is not None and original.request_fingerprint == fingerprint
+        if key == AUTOMATIC_RELEASE_KEY and not manual_receipt:
+            if payload.mode == "apply":
+                raise refusal(
+                    "idempotency_key_reused", "The automatic release key permits readback only."
+                )
+            fingerprint = release_fingerprint(
+                AUTOMATIC_RELEASE_ACTOR, product, operation_id, payload
+            )
         if original is not None and original.request_fingerprint != fingerprint:
             raise refusal(
                 "idempotency_key_reused", "The key belongs to a different release request."
@@ -143,14 +142,13 @@ def register_testing_candidate_release_route(
 
         def settle(release: CandidateRelease) -> TestingCandidateReleaseResponse:
             try:
-                result = run_durable_provider_operation(
-                    store=store,
-                    scope=scope,
-                    route_path=TESTING_CANDIDATE_RELEASE_ROUTE,
+                result = run_release_operation(
+                    store,
+                    product=product,
+                    operation_id=operation_id,
                     idempotency_key=key,
                     request_fingerprint=fingerprint,
-                    lease_owner=trace_id,
-                    response_trace_id=trace_id,
+                    trace_id=trace_id,
                     adapter=TestingCandidateReleaseAdapter(
                         store,
                         dependencies.control_plane_root,
@@ -158,7 +156,6 @@ def register_testing_candidate_release_route(
                         payload.reviewed_plan_sha256,
                         trace_id,
                     ),
-                    lease_seconds=RELEASE_LEASE_SECONDS,
                     allow_mutation=payload.mode == "apply",
                 )
             except TestingCandidateReleaseRefused as error:
