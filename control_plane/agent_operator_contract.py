@@ -884,6 +884,7 @@ def agent_operations(document: Mapping[str, Any], app: FastAPI) -> list[dict[str
             }
         )
 
+    _validate_public_safety(operations, "operations")
     return operations
 
 

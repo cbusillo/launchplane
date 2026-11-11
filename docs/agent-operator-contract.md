@@ -25,11 +25,9 @@ The extension contains no runtime records or credentials.
 
 Response fields explicitly marked `x-launchplane-safe-output: true` may be
 printed by a generic caller. Marks authorize scalar values only; object and
-array containers do not authorize their unmarked contents. Unmarked fields
-remain private, including unknown fields added by a later response. The first
-marked configuration fields are mode, runtime action and change counts.
-Status, trace ID and the common service error's code, message and reason are
-also caller output. Full responses belong in private 0600 task-evidence files.
+array containers do not authorize their unmarked contents. Status, trace ID and the common service error's code, message and reason may
+also be printed. Other unmarked fields, including unknown fields added by a
+later response, remain private. Full responses belong in private 0600 task-evidence files.
 The service remains responsible for authorization, reviewed dry-run binding,
 idempotency and request validation; the caller must not duplicate those rules.
 

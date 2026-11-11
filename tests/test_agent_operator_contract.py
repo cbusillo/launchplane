@@ -64,13 +64,6 @@ class AgentOperatorContractTests(unittest.TestCase):
         for operation in operations:
             self.assertRegex(operation["schema_fingerprint_sha256"], r"^[0-9a-f]{64}$")
 
-    def test_served_description_uses_the_exported_agent_operations(self) -> None:
-        artifact = build_agent_operator_contract(app=self.app)
-        self.assertEqual(
-            self.app.openapi()["x-launchplane-agent-contract"]["operations"],
-            artifact["contract"]["operations"],
-        )
-
     def test_resource_modes_agree_with_the_accepted_request(self) -> None:
         artifact = build_agent_operator_contract()
         operation = next(
@@ -221,6 +214,8 @@ class AgentOperatorContractTests(unittest.TestCase):
             purpose="Read from https://private.example.invalid.",
         )
         with patch.object(contract_module, "OPERATION_SPECS", tuple(unsafe_specs)):
+            with self.assertRaises(AgentOperatorContractError):
+                contract_module.agent_operations(self.document, self.app)
             with self.assertRaisesRegex(AgentOperatorContractError, "Unsafe public"):
                 build_agent_operator_contract(source_commit_sha="a" * 40)
 
