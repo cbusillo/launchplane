@@ -291,9 +291,9 @@ class OdooRuntimeEvidence(BaseModel):
 class RuntimeContainerObservation(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    inventory_observed_at: str | None = None
+    inventory_received_at: str | None = None
     inspection_attempted_at: str | None = None
-    inspected_at: str | None = None
+    inspection_received_at: str | None = None
     container_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{12,64}$")
     selection: Literal["unknown", "unique", "missing", "ambiguous", "missing_or_unavailable"] = (
         "unknown"
@@ -405,7 +405,7 @@ def connect_runtime(
         host=host, token=token, path="/api/docker.getContainersByAppNameMatch", query=query
     )
     if observation is not None:
-        observation.inventory_observed_at = utc_now_timestamp()
+        observation.inventory_received_at = utc_now_timestamp()
         observation.inventory_coverage = "invalid"
         if not isinstance(containers, list) or any(
             not isinstance(row, dict)
@@ -608,7 +608,7 @@ def inspect_runtime_container(
         observation.inspection_attempted_at = utc_now_timestamp()
     raw = api.dokploy_request(host=host, token=token, path="/api/docker.getConfig", query=query)
     if observation is not None:
-        observation.inspected_at = utc_now_timestamp()
+        observation.inspection_received_at = utc_now_timestamp()
         observation.inspection_coverage = "invalid"
     if isinstance(raw, str):
         raw = json.loads(raw)
@@ -620,7 +620,7 @@ def inspect_runtime_container(
         if not isinstance(raw, dict) or not ({"Config", "State"} & raw.keys()):
             raise OdooRuntimeReadError("container_unavailable", "Invalid inspection response.", 503)
         inspected_id = raw.get("Id")
-        if inspected_id is not None and (
+        if (
             not isinstance(inspected_id, str)
             or re.fullmatch(r"[a-f0-9]{64}", inspected_id) is None
             or not inspected_id.startswith(container_id)

@@ -88,7 +88,6 @@ class PreviewContainerEvidence(BaseModel):
     binding: PreviewContainerBinding
     current_binding: Literal["current", "changed", "unavailable"]
     observation: RuntimeContainerObservation
-    failure: Literal["unavailable", "invalid", "refused"] | None = None
     runtime_verification: Literal["not_performed"] = "not_performed"
     import_eligibility: Literal["not_evaluated"] = "not_evaluated"
 
@@ -113,9 +112,7 @@ def read_container_evidence(
     selection = authority.selection
     if authority.target_id.target_id != query.target_id:
         raise OdooRuntimeReadError("preview_target_mismatch", "The selected target differs.")
-    assert_selection_current(store, selection)
     observation = RuntimeContainerObservation()
-    failure: Literal["unavailable", "invalid", "refused"] | None = None
     try:
         connect_runtime(
             store=store,
@@ -130,31 +127,13 @@ def read_container_evidence(
             raise NativeSourceAuthorizationDenied(
                 "Provider refused container observation."
             ) from None
-        failure = "unavailable"
     except OdooPreviewTargetDiscoveryAmbiguousError:
         observation.selection = "ambiguous"
-        failure = "refused"
-    except OdooRuntimeReadError:
-        failure = "refused"
-    except ValueError:
-        failure = "invalid"
-    except (OSError, click.ClickException):
-        failure = "unavailable"
+    except (OdooRuntimeReadError, ValueError, OSError, click.ClickException):
+        pass
     binding: Literal["current", "changed", "unavailable"] = "current"
     try:
-        assert_selection_current(store, selection)
-        if (
-            read_preview_inspection_authority(store, store.read_preview_record(query.preview_id))
-            != authority
-        ):
-            binding = "changed"
-        after = store.read_idempotency_record_by_id(reservation.record_id)
-        if (
-            after is None
-            or preview_reservation_reference(after, store.read_original_mutation_intent(after))
-            != reference
-        ):
-            binding = "changed"
+        assert_preview_evidence_current(store, query, authority, reservation, reference)
     except OdooRuntimeReadError:
         binding = "changed"
     except (FileNotFoundError, ValueError):
@@ -174,8 +153,39 @@ def read_container_evidence(
         ),
         current_binding=binding,
         observation=observation,
-        failure=failure,
     ).model_dump(mode="json")
+
+
+def assert_preview_evidence_current(
+    store: PostgresRecordStore,
+    query: PreviewEvidenceQuery,
+    authority: PreviewInspectionAuthority | None,
+    reservation: LaunchplaneIdempotencyRecord,
+    reference: str,
+) -> None:
+    if authority is not None:
+        try:
+            assert_selection_current(store, authority.selection)
+        except (FileNotFoundError, ValueError):
+            raise OdooRuntimeReadError(
+                "preview_evidence_changed", "Preview selection changed during observation."
+            ) from None
+        if (
+            read_preview_inspection_authority(store, store.read_preview_record(query.preview_id))
+            != authority
+        ):
+            raise OdooRuntimeReadError(
+                "preview_evidence_changed", "Preview authority changed during observation."
+            )
+    after = store.read_idempotency_record_by_id(reservation.record_id)
+    if (
+        after is None
+        or preview_reservation_reference(after, store.read_original_mutation_intent(after))
+        != reference
+    ):
+        raise OdooRuntimeReadError(
+            "preview_evidence_changed", "The original changed during observation."
+        )
 
 
 def unavailable_history() -> dict[str, object]:
@@ -418,29 +428,7 @@ def read_preview_evidence(
     provider = read_preview_provider_history(
         store, root=root, reservation=reservation, compose_id=compose_id
     )
-    if authority is not None:
-        try:
-            assert_selection_current(store, authority.selection)
-        except (FileNotFoundError, ValueError):
-            raise OdooRuntimeReadError(
-                "preview_evidence_changed", "Preview selection changed during observation."
-            ) from None
-        if (
-            read_preview_inspection_authority(store, store.read_preview_record(query.preview_id))
-            != authority
-        ):
-            raise OdooRuntimeReadError(
-                "preview_evidence_changed", "Preview authority changed during observation."
-            )
-    after = store.read_idempotency_record_by_id(reservation.record_id)
-    if (
-        after is None
-        or preview_reservation_reference(after, store.read_original_mutation_intent(after))
-        != reference
-    ):
-        raise OdooRuntimeReadError(
-            "preview_evidence_changed", "The original changed during observation."
-        )
+    assert_preview_evidence_current(store, query, authority, reservation, reference)
     return {
         "read_only": True,
         "observed_at": datetime.now(timezone.utc).isoformat(),

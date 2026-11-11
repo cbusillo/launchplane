@@ -428,9 +428,17 @@ settle the reservation. Original availability flags remain false.
 
 ## Inert exact-original evidence
 
+`GET /v1/products/{product}/preview-evidence` uses the existing `preview.read`
+scope. Supply `pr_number`, `source_git_ref`, `image_digest` and exactly one of
+`original_reservation_id` or `plan_id`. The latter looks up the existing
+controller reservation by its issued plan in that product's reconciliation
+scope. The reader validates the retained original intent and exact requested
+tuple before reading provider evidence. Missing original intent refuses;
+current naming, a held-list row or a newer controller plan cannot replace it.
+
 For a narrow physical observation, use the same endpoint with
 `mode=container_observation`, both `preview_id` and `generation_id`, and
-`target_id` in addition to the original selectors below. The target must match
+`target_id` in addition to the original selectors above. The target must match
 the completed preview creation and provider discovery before container reads.
 This mode skips broad qualification, provider history, usage, public health,
 application/database access and credential-comparison probes. It publishes no
@@ -438,9 +446,10 @@ safety observation, starts no schedule and changes no runtime or import record.
 It requires no prior import plan or apply.
 
 The closed `PreviewContainerEvidence` result contains the exact binding and
-independent inventory/inspection timestamps, selected container ID, existence,
+independent inventory/inspection response-received timestamps, selected container ID, existence,
 Config-object validity, State-object validity and strictly boolean Running.
-Null and `unknown` mean no observation; missing or nonboolean Running is never
+Timestamps say when a response arrived, even if its coverage is invalid.
+Null and `unknown` mean no qualified observation; missing or nonboolean Running is never
 false. A failed inspection preserves facts established by the inventory. No
 Config/State bodies, environment, provider error text or credentials are returned.
 The outer trace identifies this read, not the original deployment.
@@ -449,7 +458,8 @@ An empty provider inventory is `missing_or_unavailable`, because Dokploy's
 [inventory implementation](https://github.com/Dokploy/dokploy/blob/canary/packages/server/src/services/docker.ts)
 also returns an empty list on command failure. Only a fully parsed nonempty
 inventory with no matching web service establishes absence. Malformed inventories
-remain invalid, and multiple matches remain ambiguous. A uniquely selected
+remain invalid, and multiple matches remain ambiguous. The stage identifies
+whether ambiguity concerns the target or its web containers. A uniquely selected
 container can be observed even when its State or Config is malformed. Identity
 and image agreement remain `not_reached` if earlier inspection checks fail.
 
@@ -460,14 +470,6 @@ runtime. Even a complete observation reports `runtime_verification=not_performed
 and `import_eligibility=not_evaluated`; container inspection does not replace
 the full qualification or import preflight. Existing callers default to
 `mode=qualification` and keep their existing result and checks.
-
-`GET /v1/products/{product}/preview-evidence` uses the existing `preview.read`
-scope. Supply `pr_number`, `source_git_ref`, `image_digest` and exactly one of
-`original_reservation_id` or `plan_id`. The latter looks up the existing
-controller reservation by its issued plan in that product's reconciliation
-scope. The reader validates the retained original intent and exact requested
-tuple before reading provider evidence. Missing original intent refuses;
-current naming, a held-list row or a newer controller plan cannot replace it.
 
 The response exposes the original's opaque reservation/reference, attempt,
 checkpoint, lease expiry and recorded terminal response status.

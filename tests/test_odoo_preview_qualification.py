@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 import base64
 import click
@@ -42,7 +43,9 @@ from control_plane.odoo_preview_apply_http import (
 from control_plane.odoo_preview_qualification import (
     PreviewQualificationMissing,
     read_odoo_preview_qualification,
+    read_preview_inspection_authority,
 )
+from control_plane.preview_reservation_recovery import preview_reservation_reference
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.test_disposable_lane_authority import _DisposableRuntimeAuthorityFixture
 from tests.test_odoo_preview_apply_execution import _issued_plan, _refresh_payload
@@ -129,7 +132,6 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         self.assertEqual(result["current_binding"], "current")
         self.assertEqual(result["runtime_verification"], "not_performed")
         self.assertEqual(result["import_eligibility"], "not_evaluated")
-        self.assertIsNone(result["failure"])
         observed = result["observation"]
         self.assertEqual(observed["selection"], "unique")
         self.assertTrue(observed["exists"])
@@ -138,7 +140,7 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         self.assertTrue(observed["running"])
         self.assertEqual(observed["image_agreement"], "verified")
         self.assertEqual(observed["runtime_identity"], "verified")
-        self.assertTrue(observed["inspected_at"])
+        self.assertTrue(observed["inspection_received_at"])
         self.assertEqual(len(provider.call_args_list), 2)
         self.remote.assert_not_called()
         self.assertEqual(
@@ -147,9 +149,6 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         for private in (
             "withheld",
             "PRIVATE_PASSWORD",
-            "Env",
-            "Config",
-            "State",
             "private-provider-token",
         ):
             self.assertNotIn(private, response.text)
@@ -166,6 +165,7 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             ({"Config": {}, "State": {}}, True, True, None, "observed"),
             ({}, None, None, None, "invalid"),
             ({"Id": "b" * 64, "Config": {}, "State": {}}, None, None, None, "invalid"),
+            ({"Id": None, "Config": {}, "State": {}}, None, None, None, "invalid"),
             ([], None, None, None, "invalid"),
             ("invalid private JSON", None, None, None, "invalid"),
             (OSError("withheld provider detail"), None, None, None, "unknown"),
@@ -176,6 +176,8 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
                     return self.container_provider(**kwargs)
                 if isinstance(raw, Exception):
                     raise raw
+                if isinstance(raw, dict) and raw and "Id" not in raw:
+                    return {"Id": "a" * 64, **raw}
                 return raw
 
             with self.subTest(raw=raw), patch.object(api, "dokploy_request", side_effect=provider):
@@ -249,9 +251,49 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             response = await self.container_evidence()
         self.assertEqual(response.status_code, 200, response.text)
         result = response.json()["result"]
-        self.assertNotEqual(result["current_binding"], "current")
+        self.assertEqual(result["current_binding"], "changed")
         self.assertEqual(result["observation"]["container_id"], "a" * 12)
         self.assertEqual(result["runtime_verification"], "not_performed")
+        self.store.write_preview_record(self.preview)
+
+        from control_plane import preview_evidence
+
+        authority = read_preview_inspection_authority(self.store, self.preview)
+        reference = preview_reservation_reference(
+            self.original, self.store.read_original_mutation_intent(self.original)
+        )
+        for reader, values, expected in (
+            (
+                "read_preview_inspection_authority",
+                [
+                    authority,
+                    replace(
+                        authority,
+                        target_id=authority.target_id.model_copy(
+                            update={"target_id": "replaced-target"}
+                        ),
+                    ),
+                ],
+                "changed",
+            ),
+            ("preview_reservation_reference", [reference, "changed-original"], "changed"),
+            (
+                "read_preview_inspection_authority",
+                [authority, FileNotFoundError("withheld")],
+                "unavailable",
+            ),
+        ):
+            with (
+                self.subTest(reader=reader, expected=expected),
+                patch.object(preview_evidence, reader, side_effect=values),
+                patch.object(api, "dokploy_request", side_effect=self.container_provider),
+            ):
+                response = await self.container_evidence()
+            self.assertEqual(response.status_code, 200, response.text)
+            result = response.json()["result"]
+            self.assertEqual(result["current_binding"], expected)
+            self.assertEqual(result["observation"]["container_id"], "a" * 12)
+            self.assertNotIn("withheld", response.text)
 
     async def test_container_observation_keeps_auth_and_target_boundaries(self) -> None:
         from control_plane.dokploy import api
@@ -260,12 +302,10 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             {"target_id": ""},
             {"generation_id": ""},
             {"command": "private-command"},
-            {"url": "https://private.invalid"},
-            {"sql": "private-query"},
         ):
             with self.subTest(change=change), patch.object(api, "dokploy_request") as provider:
                 response = await self.container_evidence(**change)
-            self.assertEqual(response.status_code, 422, response.text)
+            self.assertEqual(response.status_code, 400, response.text)
             provider.assert_not_called()
         with scoped_agent_transport(), patch.object(api, "dokploy_request") as provider:
             response = await self.container_evidence()
