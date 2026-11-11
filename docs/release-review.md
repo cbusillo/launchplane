@@ -1369,6 +1369,13 @@ is preserved. An interrupted response or repeated applied digest reads the same
 receipt, including after completion, without queueing another attempt. Fresh
 worker admission and existing unknown-effect reconciliation remain required;
 continuation does not supply a new acceptance or caller promotion permission.
+Only the exact failed promotion archived by this continuation is excluded from
+backup consumption. Unrelated promotions retain their existing consumption and
+delivery-failure reporting. An ordinary operation omits unused continuation
+fields. Once Apply writes a receipt, a source image that predates this receipt
+model cannot read that operation; service recovery must use an image compatible
+with the retained receipt. This source delivery does not qualify an actual
+continuation or a rollback to an older incompatible image.
 
 `GET /v1/release-review` returns
 `release_on_acceptance` (what the next acceptance would do), `live_site_url`,

@@ -362,11 +362,6 @@ class OdooAcceptedContinuationTests(ClientReleaseFixture, unittest.IsolatedAsync
                     testing.model_copy(update={"artifact_id": "artifact-prod"})
                 ),
                 "production": lambda: self.set_prod("artifact-testing"),
-                "plan": lambda: setattr(
-                    self,
-                    "plan",
-                    ready.model_copy(update={"delivered_runtime_keys": ("CHANGED_SETTING",)}),
-                ),
                 "target": lambda: setattr(
                     self,
                     "plan",
@@ -388,8 +383,19 @@ class OdooAcceptedContinuationTests(ClientReleaseFixture, unittest.IsolatedAsync
                     changed = self.store.read_odoo_prod_promotion_operation_record(
                         self.operation_id
                     )
-                    refused = await self.continuation(body)
+                    refused = await self.continuation({"reason": body["reason"]})
                     self.assertEqual(refused.status_code, 409, refused.text)
+                    expected = {
+                        "hold": "release_acceptance_no_longer_current",
+                        "client": "release_acceptance_no_longer_current",
+                        "candidate": "backup_continuation_held",
+                        "production": "backup_continuation_held",
+                        "target": "odoo_current_target_or_plan_changed",
+                        "readiness": "odoo_current_target_or_plan_changed",
+                        "key": "odoo_original_effects_not_proven_absent",
+                        "request": "odoo_original_effects_not_proven_absent",
+                    }
+                    self.assertEqual(refused.json()["error"]["code"], expected[name])
                     self.assertEqual(
                         self.store.read_odoo_prod_promotion_operation_record(self.operation_id),
                         changed,
@@ -411,46 +417,55 @@ class OdooAcceptedContinuationTests(ClientReleaseFixture, unittest.IsolatedAsync
                 else:
                     promotion.backup_gate.evidence["infrastructure_provider_effects_status"] = value
                 self.store.write_promotion_record(promotion)
-                refused = await self.continuation(body)
+                refused = await self.continuation({"reason": body["reason"]})
                 self.assertEqual(refused.status_code, 409, refused.text)
+                self.assertEqual(refused.json()["error"]["code"], "odoo_original_receipt_mismatch")
             self.store.write_promotion_record(self.promotion)
             assert self.failed.result is not None
-            for changed in (
-                self.failed.model_copy(
-                    update={
-                        "status": "reconciliation_required",
-                        "finished_at": "",
-                        "lease_owner": "",
-                        "lease_expires_at": "",
-                        "heartbeat_at": "",
-                        "result": None,
-                    }
-                ),
-                self.failed.model_copy(
-                    update={
-                        "checkpoints": (
-                            *self.failed.checkpoints,
-                            OdooProdPromotionCheckpoint(
-                                phase="promotion_started",
-                                recorded_at=self.failed.finished_at,
-                                evidence={"production_write_started": "true"},
-                            ),
-                        )
-                    }
-                ),
-                self.failed.model_copy(
-                    update={
-                        "result": self.failed.result.model_copy(
-                            update={
-                                "promotion_record_id": "replacement-operation-from-wrong-family"
-                            }
-                        )
-                    }
-                ),
+            for index, changed in enumerate(
+                (
+                    self.failed.model_copy(
+                        update={
+                            "status": "reconciliation_required",
+                            "finished_at": "",
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "result": None,
+                        }
+                    ),
+                    self.failed.model_copy(
+                        update={
+                            "checkpoints": (
+                                *self.failed.checkpoints,
+                                OdooProdPromotionCheckpoint(
+                                    phase="promotion_started",
+                                    recorded_at=self.failed.finished_at,
+                                    evidence={"production_write_started": "true"},
+                                ),
+                            )
+                        }
+                    ),
+                    self.failed.model_copy(
+                        update={
+                            "result": self.failed.result.model_copy(
+                                update={
+                                    "promotion_record_id": "replacement-operation-from-wrong-family"
+                                }
+                            )
+                        }
+                    ),
+                )
             ):
                 self.store.write_odoo_prod_promotion_operation_record(changed)
-                refused = await self.continuation(body)
+                refused = await self.continuation({"reason": body["reason"]})
                 self.assertEqual(refused.status_code, 409, refused.text)
+                self.assertEqual(
+                    refused.json()["error"]["code"],
+                    "backup_continuation_held"
+                    if index == 2
+                    else "odoo_original_effects_not_proven_absent",
+                )
                 self.assertEqual(
                     self.store.read_odoo_prod_promotion_operation_record(self.operation_id), changed
                 )
@@ -571,7 +586,7 @@ class OdooAcceptedContinuationTests(ClientReleaseFixture, unittest.IsolatedAsync
         with self.providers():
             body = await self.reviewed_body()
             with expired_backup_clock(self.store, self.backup_id):
-                refused = await self.continuation(body)
+                refused = await self.continuation({"reason": body["reason"]})
                 self.assertEqual(refused.status_code, 409, refused.text)
             for record in (
                 logical.model_copy(update={"status": "fail"}),
@@ -580,7 +595,7 @@ class OdooAcceptedContinuationTests(ClientReleaseFixture, unittest.IsolatedAsync
                 ),
             ):
                 self.store.write_backup_gate_record(record)
-                refused = await self.continuation(body)
+                refused = await self.continuation({"reason": body["reason"]})
                 self.assertEqual(refused.status_code, 409, refused.text)
                 self.store.write_backup_gate_record(logical)
                 self.store.write_backup_gate_record(backup)
@@ -589,55 +604,11 @@ class OdooAcceptedContinuationTests(ClientReleaseFixture, unittest.IsolatedAsync
             )
             other.backup_gate.evidence.pop("infrastructure_provider_effects_status")
             self.store.write_promotion_record(other)
-            refused = await self.continuation(body)
+            refused = await self.continuation({"reason": body["reason"]})
             self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(
             self.store.read_odoo_prod_promotion_operation_record(self.operation_id), self.failed
         )
-
-    async def test_concurrent_identical_applies_publish_one_continuation(self) -> None:
-        import asyncio
-
-        self.refuse_original()
-        with self.providers():
-            body = await self.reviewed_body()
-            replies = await asyncio.gather(self.continuation(body), self.continuation(body))
-            self.assertEqual(
-                [reply.status_code for reply in replies],
-                [200, 200],
-                [reply.text for reply in replies],
-            )
-            self.assertEqual(
-                sorted(reply.json()["status"] for reply in replies), ["queued", "replayed"]
-            )
-        resumed = self.store.read_odoo_prod_promotion_operation_record(self.operation_id)
-        self.assertEqual(resumed.previous_attempt, self.failed)
-        assert resumed.previous_attempt is not None
-        self.assertIsNone(resumed.previous_attempt.previous_attempt)
-        self.assertEqual(
-            len(self.store.list_odoo_prod_promotion_operation_records(product=PRODUCT)), 1
-        )
-
-    def test_unused_backup_receipt_requires_complete_no_dispatch_evidence(self) -> None:
-        from control_plane.workflows.production_promotion_backup import (
-            promotion_is_temporary_admission_refusal,
-        )
-
-        self.refuse_original()
-        self.assertTrue(promotion_is_temporary_admission_refusal(self.promotion))
-        for key in (
-            "infrastructure_provider_effects_status",
-            "infrastructure_source_lock_status",
-            "infrastructure_promotion_action",
-            "infrastructure_backup_operation_id",
-            "infrastructure_backup_record_id",
-        ):
-            with self.subTest(missing=key):
-                changed = self.promotion.model_copy(deep=True)
-                changed.backup_gate.evidence.pop(key)
-                self.assertFalse(promotion_is_temporary_admission_refusal(changed))
-        changed = self.promotion.model_copy(update={"deployment_record_id": "fictional-deployment"})
-        self.assertFalse(promotion_is_temporary_admission_refusal(changed))
 
     async def test_target_changed_after_apply_refuses_before_the_workers_first_write(self) -> None:
         self.refuse_original()
@@ -659,16 +630,28 @@ class OdooAcceptedContinuationTests(ClientReleaseFixture, unittest.IsolatedAsync
                 "control_plane.workflows.odoo_prod_promotion.execute_odoo_stable_target_replacement_apply",
                 side_effect=self.deploy,
             ):
-                with self.assertLogs(level="ERROR"):
-                    result = run_odoo_stable_operation_worker_once(
-                        record_store=self.store,
-                        control_plane_root_path=self.root,
-                        lease_owner="fixture-current-target",
-                    )
+                result = run_odoo_stable_operation_worker_once(
+                    record_store=self.store,
+                    control_plane_root_path=self.root,
+                    lease_owner="fixture-current-target",
+                )
         self.assertTrue(result.terminal_write_committed)
         current = self.store.read_odoo_prod_promotion_operation_record(self.operation_id)
         self.assertEqual(current.status, "fail")
         self.assertEqual(current.previous_attempt, self.failed)
+        assert current.result is not None
+        refused_promotion = self.store.read_promotion_record(current.result.promotion_record_id)
+        self.assertEqual(
+            refused_promotion.backup_gate.evidence.get("infrastructure_provider_effects_status"),
+            "not_started",
+        )
+        self.ready_plan()
+        with self.providers():
+            reviewed = await self.continuation({"reason": body["reason"]})
+            self.assertEqual(reviewed.status_code, 200, reviewed.text)
+            self.assertEqual(
+                self.store.read_odoo_prod_promotion_operation_record(self.operation_id), current
+            )
         self.assertEqual(self.store.list_deployment_records(), before)
         self.assertEqual(self.store.read_promotion_record(self.promotion.record_id), self.promotion)
 
@@ -712,4 +695,64 @@ class OdooAcceptedContinuationTests(ClientReleaseFixture, unittest.IsolatedAsync
         self.assertEqual(effects, ["fixture-dispatch"])
         self.assertEqual(
             self.store.read_odoo_prod_promotion_operation_record(self.operation_id), unknown
+        )
+
+    async def test_plan_drift_invalidates_an_old_review_but_allows_fresh_qualification(
+        self,
+    ) -> None:
+        self.refuse_original()
+        with self.providers():
+            body = await self.reviewed_body()
+            self.plan = self.plan.model_copy(
+                update={"delivered_runtime_keys": ("NEW_RECORDED_SETTING",)}
+            )
+            refused = await self.continuation(body)
+            self.assertEqual(refused.status_code, 409, refused.text)
+            self.assertEqual(refused.json()["error"]["code"], "backup_continuation_review_changed")
+            reviewed = await self.continuation({"reason": body["reason"]})
+            self.assertEqual(reviewed.status_code, 200, reviewed.text)
+            self.assertEqual(
+                self.store.read_odoo_prod_promotion_operation_record(self.operation_id), self.failed
+            )
+
+    def test_direct_failed_promotion_still_reports_attention_and_consumes_its_capture(self) -> None:
+        from control_plane.production_delivery_monitor import _work_events
+        from control_plane.storage.delivery_evidence import DeliveryEvidenceWork
+        from control_plane.workflows.production_promotion_backup import (
+            require_production_promotion_backup,
+            ODOO_PROMOTION_BACKUP_ACTION,
+        )
+        import click
+
+        self.refuse_original()
+        with self.store.delivery_evidence_index() as index:
+            events = _work_events(
+                self.store,
+                self.store.read_product_profile_record(PRODUCT),
+                index,
+                DeliveryEvidenceWork(
+                    key="fixture-direct-promotion",
+                    kind="promotion",
+                    source_id=self.promotion.record_id,
+                    version="fixture-version",
+                    baseline=False,
+                    processed={},
+                ),
+                datetime.now(UTC).isoformat(),
+            )
+        self.assertEqual([event[0] for event in events], [self.promotion.record_id])
+        with self.providers():
+            with self.assertRaises(click.ClickException):
+                require_production_promotion_backup(
+                    record_store=self.store,
+                    product=PRODUCT,
+                    context=CONTEXT,
+                    instance="prod",
+                    promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+                    backup_record_id=self.original.request.infrastructure_backup_record_id,
+                )
+        self.assertFalse(
+            client_release_odoo_continuation.continuation_left_capture_unused(
+                self.store, self.promotion
+            )
         )

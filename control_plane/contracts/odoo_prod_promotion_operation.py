@@ -174,12 +174,16 @@ class OdooProdPromotionOperationRecord(BaseModel):
     error_code: str = ""
     error_message: str = ""
     runner_trace_id: str = ""
-    previous_attempt: OdooProdPromotionOperationRecord | None = None
-    previous_promotion: PromotionRecord | None = None
-    continuation_digest: str = ""
-    continuation_actor: str = ""
-    continuation_reason: str = ""
-    continued_at: str = ""
+    previous_attempt: OdooProdPromotionOperationRecord | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    previous_promotion: PromotionRecord | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    continuation_digest: str = Field(default="", exclude_if=lambda value: value == "")
+    continuation_actor: str = Field(default="", exclude_if=lambda value: value == "")
+    continuation_reason: str = Field(default="", exclude_if=lambda value: value == "")
+    continued_at: str = Field(default="", exclude_if=lambda value: value == "")
 
     @model_validator(mode="after")
     def _validate_record(self) -> "OdooProdPromotionOperationRecord":

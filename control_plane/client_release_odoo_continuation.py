@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+import click
 
 from control_plane.client_release import (
     CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
@@ -18,6 +19,7 @@ from control_plane.client_release_backup_continuation import (
     BackupContinuationRefused,
     BackupContinuationResult,
     BackupContinuationReview,
+    _has_continuation_receipt,
 )
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.odoo_prod_promotion_operation import (
@@ -26,6 +28,7 @@ from control_plane.contracts.odoo_prod_promotion_operation import (
     OdooProdPromotionOperationRecord,
     OdooProdPromotionRunRequest,
     odoo_prod_promotion_request_fingerprint,
+    build_odoo_prod_promotion_operation_id,
 )
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementRequest,
@@ -41,15 +44,14 @@ from control_plane.odoo_release_recovery import (
 )
 from control_plane.service_deploy_drain import read_status
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.odoo_prod_promotion_run import admit_odoo_prod_promotion_run
 from control_plane.workflows.odoo_prod_backup_gate import BACKUP_GATE_SOURCE
+from control_plane.workflows.odoo_prod_promotion_run import admit_odoo_prod_promotion_run
 from control_plane.workflows.odoo_stable_target_replacement import (
     build_odoo_stable_target_replacement_plan,
     OdooStableTargetReplacementPlan,
 )
 from control_plane.workflows.production_promotion_backup import (
     ODOO_PROMOTION_BACKUP_ACTION,
-    promotion_is_temporary_admission_refusal,
     require_production_promotion_backup,
 )
 from control_plane.workflows.ship import utc_now_timestamp
@@ -140,7 +142,13 @@ def require_pre_effect_original(
     logical = store.read_backup_gate_record(result.backup_record_id)
     evidence = promotion.backup_gate.evidence
     if (
-        not promotion_is_temporary_admission_refusal(promotion)
+        promotion.deploy.status != "fail"
+        or promotion.deployment_record_id
+        or promotion.post_deploy_update.attempted
+        or promotion.post_deploy_update.status != "skipped"
+        or promotion.destination_health.status != "skipped"
+        or promotion.backup_gate.status != "pass"
+        or not promotion.backup_gate.required
         or evidence.get("infrastructure_provider_effects_status") != "not_started"
         or (promotion.context, promotion.from_instance, promotion.to_instance)
         != (operation.context, operation.request.from_instance, operation.instance)
@@ -157,6 +165,82 @@ def require_pre_effect_original(
         raise BackupContinuationRefused("odoo_original_receipt_mismatch")
     require_odoo_release_recovery_pin(store, operation)
     return operation, promotion
+
+
+def continuation_left_capture_unused(store: object, promotion: PromotionRecord) -> bool:
+    if (
+        not isinstance(store, PostgresRecordStore)
+        or promotion.deploy.status != "fail"
+        or promotion.deployment_record_id
+        or promotion.backup_gate.evidence.get("infrastructure_provider_effects_status")
+        != "not_started"
+    ):
+        return False
+    product = promotion.backup_gate.evidence.get("infrastructure_product", "")
+    if not product:
+        return False
+    for current in store.list_odoo_prod_promotion_operation_records(
+        product=product,
+        context_name=promotion.context,
+        instance_name=promotion.to_instance,
+    ):
+        while True:
+            original = current.previous_attempt
+            if original is None:
+                break
+            archived = current.previous_promotion
+            if archived == promotion and original.result is not None:
+                try:
+                    decision = store.read_release_review_decision_record(
+                        product=product,
+                        record_id=original.authorization.release_decision_record_id,
+                    )
+                except FileNotFoundError:
+                    return False
+                return (
+                    original.status == "fail"
+                    and original.phase == "failed"
+                    and original.error_code == "promotion_fail"
+                    and original.authorization.grant == "client_release_acceptance"
+                    and decision.decision == "accepted"
+                    and decision.product == original.product == product
+                    and (original.context, original.instance) == (promotion.context, "prod")
+                    and original.authorization
+                    == client_release_grant(
+                        decision=decision,
+                        action=ODOO_PROD_PROMOTION_RUN_ACTION,
+                        context=original.context,
+                        authorized_at=original.authorization.authorized_at,
+                    )
+                    and original.idempotency_scope == CLIENT_RELEASE_IDEMPOTENCY_SCOPE
+                    and original.idempotency_key
+                    in {
+                        _step_key(decision, step)
+                        for step in client_release_steps(decision.release_start)
+                        if step.kind == "promote"
+                    }
+                    and original.operation_id
+                    == build_odoo_prod_promotion_operation_id(
+                        product=original.product,
+                        context=original.context,
+                        idempotency_key=original.idempotency_key,
+                        idempotency_scope=original.idempotency_scope,
+                    )
+                    and original.request_fingerprint
+                    == odoo_prod_promotion_request_fingerprint(original.request)
+                    and original.result.promotion_record_id == promotion.record_id
+                    and original.result.backup_record_id == promotion.backup_record_id
+                    and original.request.infrastructure_backup_record_id
+                    == promotion.backup_gate.evidence.get("infrastructure_backup_record_id")
+                    and original.request.expected_artifact_id
+                    == promotion.artifact_identity.artifact_id
+                    and not original.result.deployment_record_id
+                    and original.result.post_deploy_status == "skipped"
+                    and original.result.destination_health_status == "skipped"
+                    and not odoo_release_wrote_production(original)
+                )
+            current = original
+    return False
 
 
 def qualify_odoo_continuation(
@@ -184,15 +268,17 @@ def qualify_odoo_continuation(
         instance="prod",
         promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
         backup_record_id=operation.request.infrastructure_backup_record_id,
+        active_promotion_record_id=promotion.record_id,
     )
     admission = admit_odoo_prod_promotion_run(
         control_plane_root=root,
         record_store=store,
         request=operation.request,
+        active_promotion_record_id=promotion.record_id,
     )
     if (
         admission.blocked_reason
-        or admission.inputs_result.artifact_id != operation.result.artifact_id
+        or admission.inputs_result.artifact_id != operation.request.expected_artifact_id
     ):
         raise ClientReleaseNotReady("promotion_not_ready")
     plan, baseline = qualified_current_odoo_target(store, root, operation, decision)
@@ -265,34 +351,18 @@ def require_continued_odoo_target(
 ) -> None:
     if operation.previous_attempt is None or odoo_release_wrote_production(operation):
         return
-    decision = store.read_release_review_decision_record(
-        product=operation.product,
-        record_id=operation.authorization.release_decision_record_id,
-    )
-    profile = store.read_product_profile_record(operation.product)
-    _require_current_release(store, root, profile, decision)
-    qualified_current_odoo_target(store, root, operation, decision)
-
-
-def continuation_replayed(
-    operation: OdooProdPromotionOperationRecord,
-    review: BackupContinuationReview,
-    actor: str,
-) -> bool:
-    if not review.apply or not review.expected_digest:
-        return False
-    while True:
-        previous = operation.previous_attempt
-        if previous is None:
-            return False
-        if operation.continuation_digest == review.expected_digest:
-            if (operation.continuation_actor, operation.continuation_reason) != (
-                actor,
-                review.reason,
-            ):
-                raise BackupContinuationRefused("backup_continuation_replay_conflict")
-            return True
-        operation = previous
+    try:
+        decision = store.read_release_review_decision_record(
+            product=operation.product,
+            record_id=operation.authorization.release_decision_record_id,
+        )
+        profile = store.read_product_profile_record(operation.product)
+        _require_current_release(store, root, profile, decision)
+        qualified_current_odoo_target(store, root, operation, decision)
+    except (ClientReleaseNotReady, FileNotFoundError, KeyError, ValueError) as error:
+        raise click.ClickException(
+            "Continued Odoo release no longer matches its accepted target."
+        ) from error
 
 
 def continue_release_odoo_promotion(
@@ -308,7 +378,7 @@ def continue_release_odoo_promotion(
     for operation in store.list_odoo_prod_promotion_operation_records(product=product):
         if (
             operation.authorization.release_decision_record_id == decision_record_id
-            and continuation_replayed(operation, review, actor)
+            and _has_continuation_receipt(operation, review, actor)
         ):
             return BackupContinuationResult(
                 trace_id=trace_id,
@@ -354,7 +424,7 @@ def continue_release_odoo_promotion(
             actor=actor,
         ):
             current = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
-            if not continuation_replayed(current, review, actor):
+            if not _has_continuation_receipt(current, review, actor):
                 raise BackupContinuationRefused("backup_continuation_review_changed")
             return BackupContinuationResult(
                 trace_id=trace_id,

@@ -31,6 +31,7 @@ from control_plane.provider_operations import build_provider_operation_key
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
+from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromotionOperationRecord
 from control_plane.guest_capture_credentials import guest_capture_metadata
 from control_plane.odoo_business_hours import BusinessHoursHeld, require_release_window
 from control_plane.storage.postgres import PostgresRecordStore
@@ -292,7 +293,7 @@ def require_continuable_backup(
 
 
 def _has_continuation_receipt(
-    operation: VeriReelProdBackupGateOperationRecord,
+    operation: VeriReelProdBackupGateOperationRecord | OdooProdPromotionOperationRecord,
     review: BackupContinuationReview,
     actor: str,
 ) -> bool:
