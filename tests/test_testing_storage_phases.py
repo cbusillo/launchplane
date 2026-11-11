@@ -455,6 +455,8 @@ class RestorePhaseConsumerTests(unittest.TestCase):
 
                 def mapped_path(value: str) -> Path:
                     path = Path(value)
+                    if path.is_relative_to(fixture.root):
+                        return path
                     if path.is_relative_to("/volumes/data"):
                         return fixture.data_backing / path.relative_to("/volumes/data")
                     return original_path(value)
