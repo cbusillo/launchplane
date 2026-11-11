@@ -2456,7 +2456,7 @@ def _build_preview_summary(
     anchor_repo = _profile_anchor_repo(profile)
     preview_records: tuple[PreviewRecord, ...] = ()
     if callable(list_previews):
-        preview_records = list_previews(
+        preview_records = cast(ProductEnvironmentReadModelStore, record_store).list_preview_records(
             context_name=profile.preview.context, anchor_repo=anchor_repo, limit=None
         )
     previews = tuple(
