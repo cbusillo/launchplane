@@ -157,7 +157,6 @@ class DependencyBotPolicyTests(unittest.TestCase):
                 ("b" * 40, "behind", "digest", "needs_review"),
                 ("b" * 40, "diverged", "digest", "needs_review"),
                 ("c" * 40, "ahead", "digest", "needs_review"),
-                # A version update carries digests nobody proved move forward.
                 ("b" * 40, "behind", "minor", "needs_review"),
             ):
                 with self.subTest(
