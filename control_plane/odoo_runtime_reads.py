@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections.abc import Mapping, Callable
 from dataclasses import dataclass, field
@@ -287,6 +288,39 @@ class OdooRuntimeEvidence(BaseModel):
     observed_at: str
 
 
+class RuntimeContainerObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    inventory_received_at: str | None = None
+    inspection_attempted_at: str | None = None
+    inspection_received_at: str | None = None
+    container_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{12,64}$")
+    selection: Literal["unknown", "unique", "missing", "ambiguous", "missing_or_unavailable"] = (
+        "unknown"
+    )
+    inventory_coverage: Literal["unknown", "complete", "invalid"] = "unknown"
+    exists: bool | None = None
+    existence_coverage: Literal["unknown", "observed"] = "unknown"
+    inspection_coverage: Literal["unknown", "observed", "invalid"] = "unknown"
+    config_valid: bool | None = None
+    state_valid: bool | None = None
+    running: bool | None = None
+    running_coverage: Literal["unknown", "observed"] = "unknown"
+    runtime_identity: Literal["not_reached", "unknown", "verified", "mismatch"] = "not_reached"
+    image_agreement: Literal["not_reached", "unknown", "verified", "mismatch"] = "not_reached"
+    stage: Literal[
+        "selection",
+        "target",
+        "inventory",
+        "inspection",
+        "container_state",
+        "container_binding",
+        "runtime_identity",
+        "image",
+        "complete",
+    ] = "selection"
+
+
 @dataclass(frozen=True)
 class OdooRuntimeConnection:
     selection: OdooRuntimeSelection
@@ -306,8 +340,12 @@ def connect_runtime(
     control_plane_root: Path,
     database_url: str | None,
     diagnostics: bool = False,
+    observation: RuntimeContainerObservation | None = None,
+    expected_target_id: str = "",
 ) -> OdooRuntimeConnection:
     assert_selection_current(store, selection)
+    if observation is not None:
+        observation.stage = "target"
     identity = selection.identity
     host, token = source.read_dokploy_config(
         control_plane_root=control_plane_root, database_url=database_url
@@ -344,6 +382,8 @@ def connect_runtime(
                 "unsupported_odoo_target", "Odoo runtime reads require a compose target.", 400
             )
         target_id, target_name = target_id_record.target_id, target_record.target_name
+    if expected_target_id and target_id != expected_target_id:
+        raise OdooRuntimeReadError("provider_target_mismatch", "The selected target changed.")
     payload = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=target_id
     )
@@ -359,24 +399,70 @@ def connect_runtime(
     query: dict[str, str | int] = {"appName": app_name, "appType": "docker-compose"}
     if server_id:
         query["serverId"] = server_id
+    if observation is not None:
+        observation.stage = "inventory"
     containers = api.dokploy_request(
         host=host, token=token, path="/api/docker.getContainersByAppNameMatch", query=query
     )
+    if observation is not None:
+        observation.inventory_received_at = utc_now_timestamp()
+        observation.inventory_coverage = "invalid"
+        if not isinstance(containers, list) or any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("containerId"), str)
+            or re.fullmatch(r"[a-f0-9]{12,64}", str(row["containerId"])) is None
+            or not isinstance(row.get("name"), str)
+            or re.fullmatch(r"/?[A-Za-z0-9][A-Za-z0-9_.-]*", str(row["name"])) is None
+            for row in containers
+        ):
+            raise OdooRuntimeReadError("container_unavailable", "Invalid container inventory.", 503)
+        observation.inventory_coverage = (
+            "complete"
+            if containers
+            and all(
+                re.fullmatch(
+                    rf"/?{re.escape(app_name)}([-_.])[A-Za-z0-9_-]+\1\d+",
+                    str(row["name"]),
+                    re.IGNORECASE,
+                )
+                for row in api.collect_dokploy_object_items(containers)
+            )
+            else "unknown"
+        )
     if not isinstance(containers, list):
         raise OdooRuntimeReadError(
             "container_unavailable", "Provider container inventory is unavailable.", 503
         )
-    container = api.select_dokploy_compose_container(
-        api.collect_dokploy_object_items(containers), app_name=app_name, service_name="web"
-    )
+    try:
+        container = api.select_dokploy_compose_container(
+            api.collect_dokploy_object_items(containers), app_name=app_name, service_name="web"
+        )
+    except api.DokployContainerSelectionError as error:
+        if observation is not None:
+            observation.selection = "ambiguous" if error.match_count else "missing"
+            if not error.match_count and observation.inventory_coverage != "complete":
+                observation.selection = "missing_or_unavailable"
+            elif not error.match_count:
+                observation.exists = False
+                observation.existence_coverage = "observed"
+        raise
     container_id = str(container.get("containerId") or "")
     if not container_id:
         raise OdooRuntimeReadError(
             "container_unavailable", "The Odoo web container is unavailable.", 503
         )
-    environment = inspect_runtime_container(
-        host, token, server_id, container_id, app_name, identity
-    )
+    if observation is not None:
+        observation.container_id = container_id
+        observation.selection = "unique"
+        observation.exists = True
+        observation.existence_coverage = "observed"
+        environment = inspect_runtime_container(
+            host, token, server_id, container_id, app_name, identity, observation=observation
+        )
+    else:
+        environment = inspect_runtime_container(
+            host, token, server_id, container_id, app_name, identity
+        )
     diagnostic_identity = None
     if diagnostics and not _production_runtime(selection):
         try:
@@ -523,17 +609,45 @@ def inspect_runtime_container(
     container_id: str,
     app_name: str,
     identity: RuntimeIdentity,
+    *,
+    observation: RuntimeContainerObservation | None = None,
 ) -> dict[str, str]:
     query: dict[str, str | int] = {"containerId": container_id}
     if server_id:
         query["serverId"] = server_id
+    if observation is not None:
+        observation.stage = "inspection"
+        observation.inspection_attempted_at = utc_now_timestamp()
     raw = api.dokploy_request(host=host, token=token, path="/api/docker.getConfig", query=query)
+    if observation is not None:
+        observation.inspection_received_at = utc_now_timestamp()
+        observation.inspection_coverage = "invalid"
     if isinstance(raw, str):
         raw = json.loads(raw)
     if isinstance(raw, list) and len(raw) == 1:
         raw = raw[0]
     config = raw.get("Config") if isinstance(raw, dict) else None
     state = raw.get("State") if isinstance(raw, dict) else None
+    if observation is not None:
+        if not isinstance(raw, dict) or not ({"Config", "State"} & raw.keys()):
+            raise OdooRuntimeReadError("container_unavailable", "Invalid inspection response.", 503)
+        inspected_id = raw.get("Id")
+        if (
+            not isinstance(inspected_id, str)
+            or re.fullmatch(r"[a-f0-9]{64}", inspected_id) is None
+            or not inspected_id.startswith(container_id)
+        ):
+            raise OdooRuntimeReadError("container_mismatch", "Inspection identity differs.")
+        observation.inspection_coverage = "observed"
+        observation.exists = True
+        observation.existence_coverage = "observed"
+        observation.config_valid = isinstance(config, dict)
+        observation.state_valid = isinstance(state, dict)
+        running = state.get("Running") if isinstance(state, dict) else None
+        if isinstance(running, bool):
+            observation.running = running
+            observation.running_coverage = "observed"
+        observation.stage = "container_state"
     if (
         not isinstance(config, dict)
         or not isinstance(state, dict)
@@ -542,6 +656,8 @@ def inspect_runtime_container(
         raise OdooRuntimeReadError(
             "container_unavailable", "The selected Odoo container is not running.", 503
         )
+    if observation is not None:
+        observation.stage = "container_binding"
     labels = config.get("Labels")
     if (
         not isinstance(labels, dict)
@@ -558,7 +674,16 @@ def inspect_runtime_container(
         else {}
     )
     observed = parse_runtime_identity_payload(environment.get(RUNTIME_IDENTITY_ENV_KEY))
+    if observation is not None:
+        observation.stage = "runtime_identity"
+        observation.runtime_identity = "mismatch" if observed is not None else "unknown"
     require_runtime_identity(identity, observed)
+    if observation is not None:
+        observation.runtime_identity = "verified"
+        observation.stage = "image"
+        observation.image_agreement = (
+            "mismatch" if "@sha256:" in identity.image_reference else "unknown"
+        )
     if (
         "@sha256:" not in identity.image_reference
         or config.get("Image") != identity.image_reference
@@ -566,6 +691,9 @@ def inspect_runtime_container(
         raise OdooRuntimeReadError(
             "runtime_image_mismatch", "The container image does not match the selected runtime."
         )
+    if observation is not None:
+        observation.image_agreement = "verified"
+        observation.stage = "complete"
     return environment
 
 
