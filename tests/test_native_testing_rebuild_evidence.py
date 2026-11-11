@@ -134,7 +134,16 @@ class NativeTestingEvidenceTests(unittest.TestCase):
         )
         self.rows: dict[tuple[str, str, str], LaunchplaneIdempotencyRecord] = {}
         self.identity = LocalOperatorIdentity(subject="fixture", token_label="fixture")
-        self.store = Mock(spec=PostgresRecordStore)
+        self.store = Mock(
+            spec=[
+                "read_idempotency_record",
+                "read_original_mutation_intent",
+                "compare_and_write_testing_rebuild_checkpoint",
+                "read_deployment_record",
+                "read_testing_candidate",
+                "read_odoo_stable_target_replacement_operation_record",
+            ]
+        )
         self.store.read_idempotency_record.side_effect = (
             lambda *, scope, route_path, idempotency_key: self.rows.get(
                 (scope, route_path, idempotency_key)
@@ -470,6 +479,7 @@ class NativeTestingEvidenceTests(unittest.TestCase):
         self,
     ) -> None:
         owner = replace(self.identity, director_agent=True)
+        self.store = Mock(spec=PostgresRecordStore, wraps=self.store)
         profile = LaunchplaneProductProfileRecord(
             product=self.operation.product,
             display_name="Fixture",
@@ -482,8 +492,8 @@ class NativeTestingEvidenceTests(unittest.TestCase):
             updated_at=self.operation.updated_at,
             source="fixture",
         )
-        self.store.read_product_profile_record.return_value = profile
-        self.store.list_product_profile_records.return_value = (profile,)
+        self.store.read_product_profile_record = Mock(return_value=profile)
+        self.store.list_product_profile_records = Mock(return_value=(profile,))
         self.operation.authorization = capture_director_testing_rebuild_authorization(
             identity=owner,
             request=self.operation.request,
@@ -516,6 +526,9 @@ class NativeTestingEvidenceTests(unittest.TestCase):
                     self.assertEqual(binding["operation_id"], self.operation.operation_id)
                     self.assertEqual(binding["execution_server_id"], self.intent["server_id"])
                     self.assertFalse(response.json()["recovery"]["safe_to_release"])
+                    ordinary = asyncio.run(request(self.app(authorized=False), "GET", path))
+                    self.assertEqual(ordinary.status_code, 200, ordinary.text)
+                    self.assertEqual(ordinary.json()["operation"], response.json()["operation"])
                 else:
                     self.store.read_original_mutation_intent.assert_not_called()
                     self.store.read_testing_candidate.assert_not_called()

@@ -555,11 +555,8 @@ def register_operation_status_read_routes(
                 code="not_found",
                 message=str(error),
             ) from error
-        full_record = (
-            isinstance(operation, OdooStableTargetReplacementOperationRecord)
-            and director_testing_rebuild_owner_allowed(
-                identity=identity, operation=operation, store=record_store
-            )
+        full_record = director_testing_rebuild_owner_allowed(
+            identity=identity, operation=operation, store=record_store
         ) or _operation_status_execute_allowed(
             dependencies=dependencies,
             identity=identity,

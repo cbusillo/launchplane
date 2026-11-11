@@ -200,11 +200,9 @@ remaining domain and storage removal is tracked in #2437.
     `include_native_execution_binding=true` separately selects the closed
     `NativeTestingExecutionBinding` private representation in
     `native_execution_binding`. It uses the same operation lookup and stored
-    full-record authority: the action that starts the operation on its stored
-    product/context/instance, or its recorded `director_testing_rebuild` caller
-    under the existing native testing-rebuild authority. An `operations.read`-only
-    caller receives 403 for this private representation before additional records
-    are read. Its existing public-safe views remain available. No identity or grant is added, and a
+    full-record authority described above. An `operations.read`-only caller
+    receives 403 for this private representation before additional records are
+    read. Its existing public-safe views remain available. No identity or grant is added, and a
     refusal is not permission to switch callers or request a new grant.
     It includes the public-safe `native_evidence` internally. The normal
     `native_evidence` and default responses gain no private fields. Selecting
