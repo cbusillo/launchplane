@@ -1791,7 +1791,11 @@ def _plan_product_config_runtime_environment(
         previous_retired_keys if retired_provider_keys is None else retired_provider_keys
     )
     if set(planned_retired_keys) & (current_values.keys() | env.keys()):
-        raise ProductConfigError("A provider key cannot be both configured and retired.")
+        raise ProductConfigError(
+            "A setting is a retired provider key on this lane. To set it, send schema_version 2 "
+            "with the lane's complete runtime_env.retired_provider_keys list without it.",
+            code="runtime_key_retired",
+        )
     if not current_values and not env:
         raise ProductConfigError("Provider key retirement requires existing runtime values.")
     changed_keys = sorted(

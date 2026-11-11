@@ -260,7 +260,11 @@ def product_config_service_error(
     error_code = error.code
     error_message = "Product config request failed validation."
     status_code = 400
-    if error_code in {"secret_copy_refused", "runtime_key_safety_target_required"}:
+    if error_code in {
+        "secret_copy_refused",
+        "runtime_key_safety_target_required",
+        "runtime_key_retired",
+    }:
         # These domain refusals use fixed messages with no caller input or secret data.
         error_message = str(error)
     if error_code == "secret_copy_source_changed":

@@ -17092,7 +17092,7 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code=product_config_error.code,
                 message=product_config_error.message,
-            )
+            ) from error
         retirement_summary = planned_driver_result.get("runtime_environment")
         retired_provider_keys = (
             retirement_summary.get("retired_provider_keys_after", [])
