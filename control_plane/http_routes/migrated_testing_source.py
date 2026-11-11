@@ -48,7 +48,6 @@ class MigratedUploadPrerequisites(BaseModel):
     model_config = ConfigDict(extra="forbid")
     candidate_phase: CandidateApplicationPhase
     restore_workflow_started: bool | None
-    original_caller: bool
     holds: list[CandidateUploadHold | Literal["original_caller_required"]]
 
 
@@ -179,21 +178,18 @@ def register_migrated_testing_source_routes(
             )
             application = resolved.allocation.application
             assert application is not None
-            holds: list[CandidateUploadHold | Literal["original_caller_required"]] = [
-                *migrated_upload_holds(application)
-            ]
-            if not resolved.original_caller:
-                holds.append("original_caller_required")
-            prerequisites = (
-                MigratedUploadPrerequisites(
+            prerequisites = None
+            if include_prerequisites:
+                holds: list[CandidateUploadHold | Literal["original_caller_required"]] = [
+                    *migrated_upload_holds(application)
+                ]
+                if not resolved.original_caller:
+                    holds.append("original_caller_required")
+                prerequisites = MigratedUploadPrerequisites(
                     candidate_phase=application.phase,
                     restore_workflow_started=application.restore_workflow_started,
-                    original_caller=resolved.original_caller,
                     holds=holds,
                 )
-                if include_prerequisites
-                else None
-            )
             return await run_in_worker_thread(
                 lambda: response(resolved.store, resolved.allocation, prerequisites)
             )
