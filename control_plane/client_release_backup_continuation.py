@@ -325,6 +325,18 @@ def continue_release_backup(
     except FileNotFoundError as error:
         raise BackupContinuationRefused("release_record_not_found") from error
     profile = store.read_product_profile_record(product)
+    if profile.driver_id == "odoo":
+        from control_plane.client_release_odoo_continuation import continue_release_odoo_promotion
+
+        return continue_release_odoo_promotion(
+            store=store,
+            root=root,
+            product=product,
+            decision_record_id=decision_record_id,
+            review=review,
+            actor=actor,
+            trace_id=trace_id,
+        )
     if decision.product != product or profile.driver_id != "generic-web":
         raise BackupContinuationRefused("backup_continuation_scope_invalid")
     steps = client_release_steps(decision.release_start)

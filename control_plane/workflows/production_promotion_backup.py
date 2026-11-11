@@ -123,7 +123,28 @@ class ProductionPromotionBackupStore(Protocol):
 
 
 def promotion_is_temporary_admission_refusal(promotion: PromotionRecord) -> bool:
-    return (
+    odoo_no_dispatch = (
+        promotion.deploy.status == "fail"
+        and not promotion.deployment_record_id
+        and not promotion.post_deploy_update.attempted
+        and promotion.post_deploy_update.status == "skipped"
+        and promotion.destination_health.status == "skipped"
+        and bool(promotion.context)
+        and promotion.from_instance == "testing"
+        and promotion.to_instance == "prod"
+        and bool(promotion.artifact_identity.artifact_id)
+        and bool(promotion.backup_record_id)
+        and promotion.backup_gate.required
+        and promotion.backup_gate.status == "pass"
+        and promotion.backup_gate.evidence.get("infrastructure_provider_effects_status")
+        == "not_started"
+        and promotion.backup_gate.evidence.get("infrastructure_source_lock_status") == "held"
+        and promotion.backup_gate.evidence.get("infrastructure_promotion_action")
+        == ODOO_PROMOTION_BACKUP_ACTION
+        and bool(promotion.backup_gate.evidence.get("infrastructure_backup_record_id"))
+        and bool(promotion.backup_gate.evidence.get("infrastructure_backup_operation_id"))
+    )
+    return odoo_no_dispatch or (
         promotion.deploy.status == "fail"
         and promotion.failure is not None
         and promotion.failure.code

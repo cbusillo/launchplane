@@ -13,6 +13,7 @@ from control_plane.contracts.durable_operation_authorization import (
     DurableOperationCancellation,
 )
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+from control_plane.contracts.promotion_record import PromotionRecord
 
 
 ODOO_PROD_PROMOTION_RUN_ACTION = "odoo_prod_promotion_run.execute"
@@ -173,6 +174,12 @@ class OdooProdPromotionOperationRecord(BaseModel):
     error_code: str = ""
     error_message: str = ""
     runner_trace_id: str = ""
+    previous_attempt: OdooProdPromotionOperationRecord | None = None
+    previous_promotion: PromotionRecord | None = None
+    continuation_digest: str = ""
+    continuation_actor: str = ""
+    continuation_reason: str = ""
+    continued_at: str = ""
 
     @model_validator(mode="after")
     def _validate_record(self) -> "OdooProdPromotionOperationRecord":
@@ -224,6 +231,50 @@ class OdooProdPromotionOperationRecord(BaseModel):
                 "Only the admin or a Client's release may queue an Odoo prod promotion."
             )
         validate_release_operation_state(self, label="Odoo prod promotion")
+        if self.previous_attempt is not None:
+            previous = self.previous_attempt
+            if (
+                previous.status != "fail"
+                or previous.result is None
+                or self.previous_promotion is None
+                or previous.result.promotion_record_id != self.previous_promotion.record_id
+                or any(
+                    getattr(previous, name) != getattr(self, name)
+                    for name in (
+                        "operation_id",
+                        "product",
+                        "context",
+                        "instance",
+                        "idempotency_key",
+                        "idempotency_scope",
+                        "request_fingerprint",
+                        "request",
+                        "authorization",
+                        "created_at",
+                        "runner_trace_id",
+                    )
+                )
+                or not all(
+                    (
+                        self.continuation_digest,
+                        self.continuation_actor,
+                        self.continuation_reason,
+                        self.continued_at,
+                    )
+                )
+            ):
+                raise ValueError(
+                    "Odoo continuation must retain its exact failed original and receipt."
+                )
+        elif self.previous_promotion is not None or any(
+            (
+                self.continuation_digest,
+                self.continuation_actor,
+                self.continuation_reason,
+                self.continued_at,
+            )
+        ):
+            raise ValueError("Odoo continuation receipt requires its failed original.")
         return self
 
 

@@ -211,7 +211,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         BACKUP_CONTINUATION_ROUTE,
-        "Review or requeue only a proved pre-capture failure under the original accepted release; retain failed history and unknown-effect fences.",
+        "Review or continue an unused generic-web backup or a proved pre-dispatch Odoo promotion under its original accepted release; retain failed history and unknown-effect fences.",
         ("service_api",),
         ("dry-run", "apply", "readback"),
         "body",

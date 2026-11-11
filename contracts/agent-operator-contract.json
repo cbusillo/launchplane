@@ -371,7 +371,7 @@
         ],
         "operation_id": "continue_backup_v1_products__product__releases__decision_record_id__backup_continuation_post",
         "path": "/v1/products/{product}/releases/{decision_record_id}/backup-continuation",
-        "purpose": "Review or requeue only a proved pre-capture failure under the original accepted release; retain failed history and unknown-effect fences.",
+        "purpose": "Review or continue an unused generic-web backup or a proved pre-dispatch Odoo promotion under its original accepted release; retain failed history and unknown-effect fences.",
         "response_statuses": [
           "200",
           "409",
@@ -1566,8 +1566,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "a9bd26b20353e40c298d81c131645ec6cb9002c1"
+    "source_commit_sha": "cd72b8bf3387563aaf49146601f01439d24f60a7"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "ea6d6b9856915edebeba0a1f8f5ab4e8c403fe8ab612f98d717fdf5dd72d1c2b"
+  "semantic_digest_sha256": "d9b1a86d7925c953f354789ab3780b33bc0cff784e1af2d660830d3687487759"
 }
