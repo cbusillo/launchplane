@@ -204,6 +204,7 @@ def _inventory_clear(
                     if refused("environment", environment_id):
                         return False
                 else:
+                    detail_reason = "inventory_environment_identity_unqualified"
                     try:
                         detail = api.as_json_object(
                             api.dokploy_request(
@@ -217,19 +218,29 @@ def _inventory_clear(
                         if references is None or isinstance(
                             error, native_copy_stream.NativeSourceAuthorizationDenied
                         ):
+                            if references is not None:
+                                refused(
+                                    "environment",
+                                    environment_id,
+                                    cause="inventory_acquisition_denied",
+                                )
                             raise
                         if isinstance(error, api.DokployRequestFailed) and error.status_code in {
                             401,
                             403,
                         }:
+                            refused(
+                                "environment", environment_id, cause="inventory_acquisition_denied"
+                            )
                             raise
                         detail = None
+                        detail_reason = "inventory_environment_acquisition_failed"
                     if (
                         detail is None
                         or detail.get("environmentId") != environment_id
                         or detail.get("projectId") != project_id
                     ):
-                        if refused("environment", environment_id):
+                        if refused("environment", environment_id, cause=detail_reason):
                             return False
                     else:
                         environment = {**environment, "env": detail.get("env")}
@@ -328,11 +339,13 @@ def _inventory_clear(
                     if target_type == "compose":
                         failures: list[str] | None = [] if references is not None else None
                         stage = "inventory_conversion_acquisition_failed"
+                        previous_failures = 0
                         try:
                             raw = compose.fetch_dokploy_converted_compose_file(
                                 host=host, token=token, compose_id=target_id
                             )
                             stage = "inventory_document_qualification_failed"
+                            previous_failures = len(failures or ())
                             documents = read_volume_documents(
                                 host=host,
                                 token=token,
@@ -344,6 +357,7 @@ def _inventory_clear(
                             )
                             for document in documents:
                                 stage = "inventory_volume_identity_unqualified"
+                                previous_failures = len(failures or ())
                                 try:
                                     names = compose_volume_names(
                                         document, payload if exact else {**payload, "env": ""}
@@ -374,7 +388,7 @@ def _inventory_clear(
                                     target_type, target_id, cause="inventory_acquisition_denied"
                                 )
                                 raise
-                            if refused(target_type, target_id, cause=stage):
+                            if refused(target_type, target_id, cause="" if failures else stage):
                                 return False
                             refused(
                                 target_type, target_id, cause="inventory_volume_resolution_skipped"
@@ -390,7 +404,13 @@ def _inventory_clear(
                         ) as error:
                             if isinstance(error, OSError) and references is None:
                                 raise
-                            if refused(target_type, target_id, cause="" if failures else stage):
+                            if refused(
+                                target_type,
+                                target_id,
+                                cause=""
+                                if failures and len(failures) > previous_failures
+                                else stage,
+                            ):
                                 return False
                             refused(
                                 target_type, target_id, cause="inventory_volume_resolution_skipped"

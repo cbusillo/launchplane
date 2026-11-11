@@ -11,8 +11,8 @@ import re
 import stat
 from typing import Any
 
-import yaml
 import click
+import yaml
 
 from control_plane.dokploy import native_copy_stream
 from control_plane.dokploy import api
@@ -35,6 +35,7 @@ SOURCE_ENV_BYTES = 1024 * 1024
 
 @contextmanager
 def _qualification(failures: list[str] | None, reason: str) -> Iterator[None]:
+    previous = len(failures or ())
     try:
         yield
     except (
@@ -46,10 +47,14 @@ def _qualification(failures: list[str] | None, reason: str) -> Iterator[None]:
         click.ClickException,
         yaml.YAMLError,
     ) as error:
-        if failures is not None:
+        if failures is not None and len(failures) == previous:
             denied = isinstance(error, native_copy_stream.NativeSourceAuthorizationDenied) or (
                 isinstance(error, api.DokployRequestFailed) and error.status_code in {401, 403}
             )
+            if reason == "inventory_source_acquisition_failed" and isinstance(
+                error, (ValueError, TypeError, KeyError, RecursionError, yaml.YAMLError)
+            ):
+                reason = "inventory_source_observation_unqualified"
             failures.append("inventory_acquisition_denied" if denied else reason)
         raise
 

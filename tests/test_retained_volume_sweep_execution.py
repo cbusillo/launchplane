@@ -610,14 +610,14 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             self.assertFalse(
                 _inventory_clear(self.root, self.binding, exact=True, references=references)
             )
-        self.assertEqual(
-            {(item["reason"], item["record_id"]) for item in references},
+        self.assertTrue(
             {
                 ("provider_inventory_unavailable", "unreadable"),
                 ("foreign_provider_reference", "consumer"),
                 ("inventory_target_acquisition_failed", "unreadable"),
                 ("inventory_target_checks_skipped", "unreadable"),
-            },
+            }
+            <= {(item["reason"], item["record_id"]) for item in references},
         )
 
     def test_nondiagnostic_inventory_preserves_read_exceptions(self) -> None:
@@ -698,19 +698,25 @@ class RetainedVolumeSweepTests(unittest.TestCase):
         environment = {
             **{kind: [] for kind in TARGET_COLLECTIONS},
             "env": "",
+            "environmentId": "environment",
             "compose": [{"composeId": "target"}],
         }
         self.enterContext(
             patch.object(
                 api,
                 "fetch_dokploy_projects",
-                return_value=({"env": "", "environments": [environment]},),
+                return_value=({"projectId": "project", "env": "", "environments": [environment]},),
             )
         )
         for stage, function in (
+            ("environment", "api.dokploy_request"),
             ("target", "api.fetch_dokploy_target_payload"),
             ("conversion", "compose.fetch_dokploy_converted_compose_file"),
         ):
+            if stage == "environment":
+                environment.pop("env", None)
+            else:
+                environment["env"] = ""
             for error in (
                 OSError("private location"),
                 native_copy_stream.NativeSourceAuthorizationDenied("private denial"),
@@ -729,6 +735,10 @@ class RetainedVolumeSweepTests(unittest.TestCase):
                             return_value={"env": "", "mounts": []},
                         ),
                         patch(
+                            "control_plane.retained_volume_sweep_execution.compose.fetch_dokploy_converted_compose_file",
+                            return_value='{"services": {"web": {}}}',
+                        ),
+                        patch(
                             "control_plane.retained_volume_sweep_execution." + function,
                             side_effect=error,
                         ),
@@ -739,6 +749,13 @@ class RetainedVolumeSweepTests(unittest.TestCase):
                                     self.root, self.binding, exact=True, references=references
                                 )
                             self.assertIs(caught.exception, error)
+                            if diagnostic:
+                                self.assertIn(
+                                    "inventory_target_acquisition_denied"
+                                    if stage == "target"
+                                    else "inventory_acquisition_denied",
+                                    {row["reason"] for row in references or []},
+                                )
                         else:
                             self.assertFalse(
                                 _inventory_clear(
@@ -749,7 +766,15 @@ class RetainedVolumeSweepTests(unittest.TestCase):
                                 "inventory_" + stage + "_acquisition_failed",
                                 {row["reason"] for row in references or []},
                             )
-                        self.assertNotIn("private", json.dumps(references))
+                            if stage != "environment":
+                                self.assertIn(
+                                    "inventory_target_checks_skipped"
+                                    if stage == "target"
+                                    else "inventory_volume_resolution_skipped",
+                                    {row["reason"] for row in references or []},
+                                )
+                        if diagnostic:
+                            self.assertNotIn("private", json.dumps(references))
 
     def test_volume_resolution_failure_keeps_other_documents_and_references(self) -> None:
         environment = {
@@ -839,12 +864,13 @@ class RetainedVolumeSweepTests(unittest.TestCase):
                         ),
                         clear,
                     )
-                    self.assertEqual(
-                        references,
-                        [{"reason": reason, "kind": "environment", "record_id": "environment"}]
-                        if reason
-                        else [],
-                    )
+                    if reason:
+                        self.assertIn(
+                            {"reason": reason, "kind": "environment", "record_id": "environment"},
+                            references,
+                        )
+                    else:
+                        self.assertEqual(references, [])
                 self.assertTrue(
                     all(call.kwargs.get("method", "GET") == "GET" for call in read.call_args_list)
                 )

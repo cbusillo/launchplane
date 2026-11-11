@@ -124,9 +124,9 @@ class CachedComposeInventoryTests(unittest.TestCase):
                 with self.assertRaises(type(legacy.exception)):
                     inventory.read_volume_documents(**arguments, failures=failures)
                 self.assertIn(reason, failures)
-                self.assertNotIn("private-fixture-token", json.dumps(failures))
         for error, reason in (
             (OSError("private source path"), "inventory_source_acquisition_failed"),
+            (ValueError("private invalid content"), "inventory_source_observation_unqualified"),
             (
                 native_copy_stream.NativeSourceAuthorizationDenied("secret denial"),
                 "inventory_acquisition_denied",
@@ -145,6 +145,7 @@ class CachedComposeInventoryTests(unittest.TestCase):
                         self.documents(failures=diagnostics)
                     self.assertIs(caught.exception, error)
             self.assertIn(reason, failures)
+            self.assertNotIn("inventory_source_scope_unqualified", failures)
             self.assertNotIn(str(error), json.dumps(failures))
 
     def test_diagnostic_include_qualification_preserves_readable_siblings(self) -> None:

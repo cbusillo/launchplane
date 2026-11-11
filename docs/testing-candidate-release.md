@@ -94,15 +94,13 @@ empty. Sibling retirement callers retain the same boolean inventory safety
 contract and stop on their first hold when no diagnostics are requested.
 
 Diagnostic references also retain fixed `inventory_*` reasons on the same safe
-identity. These distinguish target acquisition failure or denial, unqualified
-target identity, malformed environment, unavailable mounts, conversion acquisition
-failure, absent or malformed converted documents, unqualified source placement or
-scope, failed cached-source acquisition, unqualified included documents and
-unresolved volume identities. The original generic reason remains. Target checks
-skipped after acquisition failure and volume resolution skipped after conversion
-or qualification failure are explicit reasons, never evidence of absence.
-Readable targets and included documents remain inspectable after independent
-failures. Authorization denials still raise through the existing refusal path;
+identity for target/environment acquisition and Compose qualification failures.
+The original generic reason remains. Skipped dependent checks are explicit,
+never evidence of absence. Independently readable targets and already acquired
+included documents remain inspectable after qualification failures. Cached-source
+acquisition still requires a complete bounded observation: a missing or malformed
+file leaves that prerequisite unavailable, not partially qualified.
+Authorization denials still raise through the existing refusal path;
 recording a fixed denial reason does not turn a denial into a completed inspection.
 Exception text, source contents, environment values and source paths are never
 part of these references. Historical results without attribution remain unknown.
