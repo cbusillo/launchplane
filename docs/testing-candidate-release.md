@@ -27,7 +27,7 @@ Unselected siblings are listed from records without remote probes; their
 unobserved status remains unknown.
 Only the path candidate has `selected: true`. Optional `receiver_operation_id`
 identifies the restore whose remaining capacity should be measured. That receiver
-is excluded from release. Production originals and foreign contexts are rejected.
+is measured for capacity, and has no independent release hold. Production originals and foreign contexts are rejected.
 
 Three current protections apply:
 
@@ -51,8 +51,8 @@ The source archive and qualified database/filestore source pair are outside the
 candidate set. The request accepts an operation ID, never a path or volume name.
 Resources derive only from that candidate's `OdooTestingResources` namespace.
 The release program has no source archive/cache deletion operation, and cannot
-address the service's retained native-copy cache. The receiver candidate is also
-excluded when supplied. Successful-rebuild source cleanup remains a separate
+address the service's retained native-copy cache. A receiver candidate is kept when selected or serving, under the same
+rule as every candidate. Successful-rebuild source cleanup remains a separate
 existing path; release never calls it.
 
 Apply uses the dry run's `plan_sha256`, the same optional receiver and a bounded
@@ -75,7 +75,12 @@ Interrupted effects reconcile only their original receipts and never repeat a
 deletion blindly. The host retains the same operation key under
 `DockerRootDir/launchplane-state/testing-candidate-release`, so a lost reply can
 recover the terminal refusal or completed physical measurements. A refusal before
-any effect releases the service reservation; a definite host refusal settles held. Older unfinished custody-based receipts cannot dispatch this
+any effect releases the service reservation; a definite host refusal settles held.
+A completed nonzero Docker command settles held only after complete reinspection
+proves the same engine, unchanged surviving volume identities and no new candidate
+container identity or configuration. Already measured partial removals remain in
+the result. Timeouts, killed processes and changed/unreadable resources stay
+unknown under the original key. Older unfinished custody-based receipts cannot dispatch this
 new effect path. Preserve their original keys and evidence for reconciliation.
 
 ## Automatic release

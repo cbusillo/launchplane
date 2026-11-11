@@ -226,13 +226,12 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         self.assertTrue(all(row.status == "eligible" for row in item.resources))
         self.assertEqual([row.reason for row in item.references], ["physical_inventory_unknown"])
 
-    def test_restore_receiver_is_excluded_even_if_it_failed(self) -> None:
+    def test_capacity_receiver_is_not_an_independent_release_hold(self) -> None:
         self.request = self.request.model_copy(
             update={"receiver_operation_id": self.candidate.operation_id}
         )
         item = self.selected()
-        self.assertEqual(item.status, "held")
-        self.assertIn("receiver_candidate", item.reasons)
+        self.assertEqual(item.status, "eligible")
 
     def test_foreign_or_production_original_cannot_enter_candidate_plan(self) -> None:
         operation = self.store.read_odoo_stable_target_replacement_operation_record(

@@ -46,7 +46,6 @@ def candidate_record_refusals(
     *,
     product: str,
     context: str,
-    receiver_operation_id: str,
     selected_targets: tuple[str, ...],
 ) -> tuple[str, ...]:
     reasons = []
@@ -58,8 +57,6 @@ def candidate_record_refusals(
         operation.instance,
     ) != (product, context, product, context, "testing"):
         reasons.append("foreign_original")
-    if candidate.operation_id == receiver_operation_id:
-        reasons.append("receiver_candidate")
     if candidate.compose_id in selected_targets:
         reasons.append("candidate_release_selected")
     if operation.status != "fail":
@@ -165,25 +162,24 @@ def build_native_testing_sweep(
         usage_unavailable = require_lane_releasable(root, store, operation)
     except TestingCandidateReleaseRefused as error:
         lane_reason = error.code
-    operation = store.read_odoo_stable_target_replacement_operation_record(request.operation_id)
     for candidate in owned:
         selected = candidate.namespace in request.candidates
         if evidence is not None and not selected:
             continue
-        reasons = (
-            candidate_record_refusals(
+        reasons: tuple[str, ...] = ()
+        if selected:
+            original = store.read_odoo_stable_target_replacement_operation_record(
+                candidate.operation_id
+            )
+            reasons = candidate_record_refusals(
                 candidate,
-                operation,
+                original,
                 product=request.product,
                 context=request.context,
-                receiver_operation_id=receiver_id,
                 selected_targets=tuple(
                     row.target_id for row in store.list_dokploy_target_id_records()
                 ),
             )
-            if selected
-            else (("receiver_candidate",) if candidate.operation_id == receiver_id else ())
-        )
         if lane_reason:
             reasons = (*reasons, lane_reason)
         if selected:
@@ -370,12 +366,24 @@ class NativeTestingSweepAdapter:
         )
         if observed.get("release_status") == "held":
             reason = observed.get("reason_code", "release_refused")
+            statuses = {row["role"]: row["status"] for row in observed.get("volumes", ())}
             return candidate.model_copy(
                 update={
                     "status": "held",
                     "reasons": (reason,),
+                    "container_count": observed.get("container_count", candidate.container_count),
+                    "physical_readback": observed.get("physical_readback", {}),
                     "resources": tuple(
-                        row.model_copy(update={"status": "held", "reason": reason})
+                        row.model_copy(
+                            update={
+                                "status": "absent"
+                                if statuses.get(row.role) == "absent"
+                                else "held",
+                                "reason": "provider_absent"
+                                if statuses.get(row.role) == "absent"
+                                else reason,
+                            }
+                        )
                         for row in candidate.resources
                     ),
                 }

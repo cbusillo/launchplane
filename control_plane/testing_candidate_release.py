@@ -481,6 +481,7 @@ class TestingCandidateReleaseAdapter:
         status: TestingCandidateReleaseStatus = (
             "released"
             if selected.resources
+            and selected.container_count == 0
             and all(row.status in {"absent", "removed"} for row in selected.resources)
             else "held"
         )

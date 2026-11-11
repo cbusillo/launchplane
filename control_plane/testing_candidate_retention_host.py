@@ -24,8 +24,12 @@ spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 prefix=sys.argv[2]
 receipt_path=None
 effect_started=False
+created_receipt=False
 
 class Refused(ValueError):
+    pass
+
+class CommandRejected(RuntimeError):
     pass
 
 def save_receipt(result):
@@ -39,7 +43,7 @@ def save_receipt(result):
 def docker(*arguments):
     result=subprocess.run(retained_volume_docker_command(*arguments),capture_output=True,timeout=60,check=False)
     if result.returncode:
-        raise RuntimeError('docker_request_failed')
+        raise CommandRejected()
     return result.stdout.decode('utf-8',errors='strict')
 
 def load(*arguments):
@@ -49,7 +53,7 @@ def identifiers(*arguments):
     return docker(*arguments).splitlines()
 
 def inspect_candidate():
-    global receipt_path,effect_started
+    global receipt_path,effect_started,created_receipt
     resources=spec['resources']
     namespace=resources['namespace']
     if (resources['instance']!='testing' or re.fullmatch(r'lp-testing-[a-f0-9]{32}',namespace) is None
@@ -82,9 +86,10 @@ def inspect_candidate():
                 if saved.get('release_status') in {'held','released'}:
                     return saved
                 if mode=='apply':
-                    raise RuntimeError('original_release_requires_readback')
+                    return {'volumes':[],'capacity':[],'release_status':'unknown','reason_code':'original_release_requires_readback'}
             if mode=='apply':
                 save_receipt({'release_status':'active'})
+                created_receipt=True
     expected={'ODOO_DB_VOLUME':namespace+'-db','ODOO_DATA_VOLUME':namespace+'-data','ODOO_LOG_VOLUME':namespace+'-logs'}
     existing=set(identifiers('volume','ls','-q'))
     volumes=_batched_docker_inspect('volume',sorted(existing & set(expected.values())),load)
@@ -144,28 +149,46 @@ def inspect_candidate():
     if mode=='apply':
         before={tuple(row['backing']):row['free_bytes'] for row in result if 'backing' in row}
         effect_started=True
-        if own:
-            docker('stop',*own)
-            docker('rm',*own)
-        for row in sorted(result,key=lambda item:item['role']=='ODOO_DATA_VOLUME'):
-            if row['status']=='absent':
-                continue
-            path=Path(volumes[row['name']]['Mountpoint'])
-            docker('volume','rm',row['name'])
-            remaining=set(identifiers('volume','ls','-q'))
-            if row['name'] in remaining:
-                raise RuntimeError('volume_absence_unverified')
-            probe=path
-            while not probe.exists():
-                probe=probe.parent
-            space=os.statvfs(probe)
-            after=space.f_bavail*space.f_frsize
-            backing=tuple(row['backing'])
-            physical[row['identity']]={'before_bytes':before[backing],'after_bytes':after,
-                'observed_change_bytes':after-before[backing]}
-            before[backing]=after
-            row['status']='absent'
-            row['reason']='removed'
+        try:
+            if own:
+                docker('stop',*own)
+                docker('rm',*own)
+            for row in sorted(result,key=lambda item:item['role']=='ODOO_DATA_VOLUME'):
+                if row['status']=='absent':
+                    continue
+                path=Path(volumes[row['name']]['Mountpoint'])
+                docker('volume','rm',row['name'])
+                remaining=set(identifiers('volume','ls','-q'))
+                if row['name'] in remaining:
+                    raise RuntimeError('volume_absence_unverified')
+                probe=path
+                while not probe.exists():
+                    probe=probe.parent
+                space=os.statvfs(probe)
+                after=space.f_bavail*space.f_frsize
+                backing=tuple(row['backing'])
+                physical[row['identity']]={'before_bytes':before[backing],'after_bytes':after,
+                    'observed_change_bytes':after-before[backing]}
+                before[backing]=after
+                row['status']='absent'
+                row['reason']='removed'
+        except CommandRejected:
+            original_volumes={row['name']:row.get('identity') for row in result}
+            original_containers={hashlib.sha256(identifier.encode()).hexdigest():hashlib.sha256(json.dumps(
+                {key:row.get(key) for key in ('Config','Mounts')},sort_keys=True).encode()).hexdigest()
+                for identifier,row in own.items()}
+            spec['mode']='readback'
+            try:
+                current=inspect_candidate()
+                if (len(current['volumes'])!=3 or current.get('engine_sha256')!=hashlib.sha256(engine_id.encode()).hexdigest()
+                    or any(row['status']!='absent' and row.get('identity')!=original_volumes.get(row['name']) for row in current['volumes'])
+                    or any(original_containers.get(identifier)!=snapshot for identifier,snapshot in current.get('container_snapshots',{}).items())):
+                    raise RuntimeError('rejection_readback_unverified')
+            except Exception:
+                raise RuntimeError('rejection_readback_unverified') from None
+            current.update(release_status='held',reason_code='command_rejected',physical_readback=physical)
+            save_receipt(current)
+            return current
     projects={(row.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project') for row in own.values()}
     if len(projects)==1:
         spec['project']=next(iter(projects))
@@ -207,7 +230,11 @@ def inspect_candidate():
             capacity=[]
             capacity_refusal='receiver_backing_or_requirement_unknown'
     response={'volumes':result,'capacity':capacity,'capacity_refusal':capacity_refusal,
-        'physical_readback':physical,'serving':bool(serving),'container_count':0 if mode=='apply' else len(own)}
+        'physical_readback':physical,'serving':bool(serving),'container_count':0 if mode=='apply' else len(own),
+        'engine_sha256':hashlib.sha256(engine_id.encode()).hexdigest(),
+        'container_snapshots':{hashlib.sha256(identifier.encode()).hexdigest():hashlib.sha256(json.dumps(
+            {key:row.get(key) for key in ('Config','Mounts')},sort_keys=True).encode()).hexdigest()
+            for identifier,row in own.items()}}
     if mode=='apply':
         response['release_status']='released'
         save_receipt(response)
@@ -218,11 +245,12 @@ try:
 except Refused as error:
     response={'volumes':[],'capacity':[],'capacity_refusal':'physical_inventory_unknown',
         'release_status':'held','reason_code':str(error)}
-    save_receipt(response)
+    if created_receipt:
+        save_receipt(response)
 except Exception:
     response={'volumes':[],'capacity':[],'capacity_refusal':'physical_inventory_unknown',
-        'release_status':'unknown' if effect_started else 'held','reason_code':'host_read_unavailable'}
-    if not effect_started:
+        'release_status':'unknown' if effect_started or spec.get('mode')=='readback' else 'held','reason_code':'host_read_unavailable'}
+    if created_receipt and not effect_started:
         save_receipt(response)
 print(prefix+json.dumps({'type':'complete',**response},sort_keys=True),flush=True)
 """

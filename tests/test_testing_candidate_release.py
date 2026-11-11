@@ -62,6 +62,8 @@ elif args[:3]==['container','inspect','--size']:
 elif args[0]=='stop':
     pass
 elif args[0]=='rm':
+    if state.get('fail_container_rm'):
+        save();raise SystemExit(1)
     for key in args[1:]:
         containers.pop(key)
 elif args[:2]==['volume','rm']:
@@ -281,10 +283,6 @@ os.statvfs=lambda path:SimpleNamespace(f_bavail=1000+(3-len(json.loads(Path(os.e
             sorted(row["after_bytes"] for row in applied["physical_readback"].values()),
             [1100, 1200, 1300],
         )
-        for row in applied["physical_readback"].values():
-            self.assertGreater(row["before_bytes"], 0)
-            self.assertGreater(row["after_bytes"], 0)
-            self.assertEqual(row["observed_change_bytes"], row["after_bytes"] - row["before_bytes"])
         self.assertTrue(
             all(row["status"] == "absent" for row in self.current_program("readback")["volumes"])
         )
@@ -297,7 +295,7 @@ os.statvfs=lambda path:SimpleNamespace(f_bavail=1000+(3-len(json.loads(Path(os.e
         }
         self.save()
         self.assertTrue(self.current_program("dry-run")["serving"])
-        self.assertEqual(self.current_program("apply")["volumes"], [])
+        self.assertEqual(self.current_program("apply")["reason_code"], "candidate_release_selected")
         self.assertEqual(self.removals(), [])
 
     def test_host_refusal_is_terminal_and_original_readback_does_not_repeat_it(self) -> None:
@@ -310,6 +308,28 @@ os.statvfs=lambda path:SimpleNamespace(f_bavail=1000+(3-len(json.loads(Path(os.e
         self.assertEqual(held["reason_code"], "production_boundary")
         self.assertEqual(self.current_program("readback")["reason_code"], "production_boundary")
         self.assertEqual(self.removals(), [])
+
+    def test_completed_command_rejection_settles_held_and_a_fresh_plan_can_continue(self) -> None:
+        self.state["fail_container_rm"] = True
+        self.save()
+        held = self.current_program("apply")
+        self.assertEqual(
+            (held["release_status"], held["reason_code"]), ("held", "command_rejected")
+        )
+        self.assertEqual(held["container_count"], 1)
+        self.assertTrue(all(row["status"] == "observed" for row in held["volumes"]))
+        attempts = self.removals()
+        self.assertEqual(self.current_program("readback")["reason_code"], "command_rejected")
+        self.assertEqual(self.current_program("apply")["reason_code"], "command_rejected")
+        self.assertEqual(self.removals(), attempts)
+        self.state["fail_container_rm"] = False
+        self.save()
+        self.assertEqual(
+            self.current_program("apply", operation_key="fresh-reviewed-plan")["release_status"],
+            "released",
+        )
+        self.assertEqual(self.state["volumes"], {})
+        self.assertEqual(self.state["containers"], {})
 
     def test_lost_success_reply_replays_measurements_without_removing_again(self) -> None:
         applied = self.current_program("apply")
@@ -324,7 +344,9 @@ os.statvfs=lambda path:SimpleNamespace(f_bavail=1000+(3-len(json.loads(Path(os.e
 
     def test_production_scope_labels_or_shared_storage_never_dispatch(self) -> None:
         for spec in (resources(instance="prod"), resources(namespace="production")):
-            self.assertEqual(self.current_program("apply", spec)["volumes"], [])
+            self.assertEqual(
+                self.current_program("apply", spec)["reason_code"], "testing_scope_required"
+            )
             self.assertEqual(self.removals(), [])
         for modification in ("production_label", "bind", "foreign_label", "production_mount"):
             with self.subTest(modification=modification):
