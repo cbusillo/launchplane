@@ -106,7 +106,7 @@ def log_handled_error_cause(error: BaseException, trace_id: str, *, operation_id
                     for field, difference in cause.container_fields
                 ]
             native_programs.append(native)
-        cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
+        cause = cause.__cause__ or cause.__context__
     evidence: dict[str, object] = {
         "event": "handled_error_cause",
         "trace_id": trace_id,
