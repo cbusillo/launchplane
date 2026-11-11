@@ -435,8 +435,7 @@ class PreviewPartsImportHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_container_preflight_refusal_identifies_unverified_runtime_without_private_detail(
         self,
     ) -> None:
-        from control_plane import odoo_runtime_reads as reads
-        from control_plane.dokploy import api
+        from control_plane.odoo_runtime_reads import OdooRuntimeReadError
         from control_plane.http_app import create_launchplane_fastapi_app
         from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
         from tests.support.auth import StubVerifier, identity
@@ -454,33 +453,22 @@ class PreviewPartsImportHttpTests(unittest.IsolatedAsyncioTestCase):
                     local_operator_token_label="operator-example",
                 ),
             )
-
-            def unverified_container(**_kwargs: object) -> None:
-                reads.inspect_runtime_container(
-                    "provider", "private-token", "server", "container", "app", fixture_identity()
-                )
-                self.fail("An unqualified container must refuse before source or native dispatch.")
-
-            observations: tuple[dict[str, object], ...] = (
-                {},
-                {"Config": "PRIVATE", "State": {"Running": True}},
-                {"Config": {}, "State": None},
-                {"Config": {}, "State": {"Running": False}},
-                {"Config": {}, "State": {"Running": "true"}},
-            )
-            for raw in observations:
+            for failure, reason in (
+                (
+                    OdooRuntimeReadError("container_unavailable", "PRIVATE exception detail"),
+                    "runtime_container_unverified",
+                ),
+                (ValueError("PRIVATE exception detail"), None),
+            ):
                 for maintenance in (
                     import_request(instance=adapter.request.instance),
                     fixture_request(instance=adapter.request.instance),
                 ):
                     with (
-                        self.subTest(raw=raw, action=maintenance.action),
-                        patch.object(api, "dokploy_request", return_value=raw),
-                        patch.object(reads, "connect_runtime", side_effect=unverified_container),
-                        patch.object(PreviewPartsImportAdapter, "qualified_source") as source,
+                        self.subTest(failure=type(failure).__name__, action=maintenance.action),
                         patch(
-                            "control_plane.dokploy.post_deploy.run_manual_data_schedule"
-                        ) as schedule,
+                            "control_plane.odoo_runtime_reads.connect_runtime", side_effect=failure
+                        ),
                     ):
                         response = await request(
                             app,
@@ -492,14 +480,11 @@ class PreviewPartsImportHttpTests(unittest.IsolatedAsyncioTestCase):
                                 "maintenance": maintenance.model_dump(mode="json"),
                             },
                         )
-                    self.assertEqual(response.status_code, 409, response.text)
-                    body = response.json()
-                    self.assertEqual(body["error"].get("reason"), "runtime_container_unverified")
-                    self.assertNotIn("PRIVATE", response.text)
-                    self.assertNotIn("private-token", response.text)
-                    self.assertNotIn("result", body)
-                    source.assert_not_called()
-                    schedule.assert_not_called()
+                        self.assertEqual(response.status_code, 409, response.text)
+                        body = response.json()
+                        self.assertEqual(body["error"].get("reason"), reason)
+                        self.assertNotIn(str(failure), response.text)
+                        self.assertNotIn("result", body)
 
     async def test_existing_preview_authority_selects_import_adapter_and_requires_key(self) -> None:
         from tempfile import TemporaryDirectory

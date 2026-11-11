@@ -7641,6 +7641,13 @@ def create_launchplane_fastapi_app(
                     and error.code == "container_unavailable"
                 ):
                     reason = "runtime_container_unverified"
+                message = "Preview maintenance preflight is unavailable; no review was issued."
+                if fixture.mode != "dry-run":
+                    message = (
+                        "Preview import evidence is unavailable; preserve its original apply request, review and key."
+                        if isinstance(fixture, PreviewPartsImportRequest)
+                        else "Preview maintenance evidence is unavailable; inspect the original operation."
+                    )
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
@@ -7648,11 +7655,7 @@ def create_launchplane_fastapi_app(
                     if isinstance(fixture, PreviewPartsImportRequest)
                     else "preview_fixture_unavailable",
                     reason=reason,
-                    message="Preview import preflight is unavailable; no review was issued."
-                    if isinstance(fixture, PreviewPartsImportRequest) and fixture.mode == "dry-run"
-                    else "Preview import evidence is unavailable; preserve its original apply request, review and key."
-                    if isinstance(fixture, PreviewPartsImportRequest)
-                    else "Preview maintenance evidence is unavailable; inspect the original operation.",
+                    message=message,
                 ) from error
         try:
             product_profile = resolve_odoo_app_maintenance_product_route(

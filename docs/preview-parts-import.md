@@ -35,21 +35,8 @@ installed client's configured connection with fixed `SHOW GRANTS`, returning onl
 Raw grants and connection values never enter the receipt. Existing managed
 private-source TLS behavior is preserved; no new TLS choice is made.
 
-When runtime selection cannot establish an available container, the existing
-`preview_import_unavailable` response includes `reason: runtime_container_unverified`.
-The maintained transport retains it as `summary.error_reason`. This includes
-unavailable container inventory, a missing selected container ID, or inspection
-that does not return configuration and state objects with `Running: true`.
-It does not distinguish a stopped container from unavailable inspection evidence.
-No raw provider detail or exception text is returned. A refused dry run issues
-no review digest and requires no invented apply key.
-
-Checks after the failed prerequisite remain unavailable, not passed: container
-labels/image/runtime identity, exact database/ownership binding, preparation and
-current managed-source/password agreement, read-only allowance and native grants.
-Independent retained preparation and request-binding evidence can be assessed
-without replaying the plan, but cannot qualify current runtime or source facts.
-Apply still needs its separate current disposable/use/only-copy/isolation checks.
+Direct preflight container refusals use the shared
+[maintenance diagnostics](preview-fixtures.md#container-preflight-refusals).
 
 Dry run performs preflight without importing. Review its identity, source digest
 and qualification. Apply repeats preflight, obtains the native data-workflow lock
