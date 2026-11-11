@@ -468,6 +468,36 @@ class CandidateReleaseRouteTests(unittest.TestCase):
         self.assertEqual(observed.json()["plan_sha256"], reviewed)
         self.assertEqual(len(self.applied), 1)
 
+    def test_gate_bearing_data_volume_is_removed_last(self) -> None:
+        namespace = self.fixture.candidate.namespace
+        first = self.fixture.observation["volumes"][0]
+        self.fixture.observation["volumes"] = [
+            {**first, "role": role, "name": namespace + suffix, "identity": digit * 64}
+            for role, suffix, digit in (
+                ("ODOO_DB_VOLUME", "-db", "b"),
+                ("ODOO_DATA_VOLUME", "-data", "d"),
+                ("ODOO_LOG_VOLUME", "-logs", "e"),
+            )
+        ]
+        removed: list[str] = []
+        host = self.fixture.host.side_effect
+
+        def record(root: Path, binding: Any, mode: str, *args: Any, **kwargs: Any) -> Any:
+            if mode == "apply":
+                removed.append(binding.volume_name)
+            return host(root, binding, mode, *args, **kwargs)
+
+        self.fixture.host.side_effect = record
+        reviewed = self.post().json()["plan_sha256"]
+        applied = self.post(key="release", mode="apply", reviewed_plan_sha256=reviewed)
+        self.assertEqual(applied.json()["status"], "released", applied.text)
+        self.assertEqual(removed[-1], namespace + "-data")
+        self.assertEqual(len(removed), 3)
+        self.assertEqual(
+            [row["role"] for row in applied.json()["candidates"][0]["resources"]],
+            ["ODOO_DB_VOLUME", "ODOO_DATA_VOLUME", "ODOO_LOG_VOLUME"],
+        )
+
     def test_missing_receipt_and_foreign_receiver_do_not_dispatch(self) -> None:
         missing = self.post(key="missing", mode="readback", reviewed_plan_sha256="a" * 64)
         self.assertEqual(missing.status_code, 404, missing.text)

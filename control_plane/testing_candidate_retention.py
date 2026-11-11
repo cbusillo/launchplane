@@ -250,6 +250,12 @@ def candidate_authority(
     )
 
 
+def gate_volume_last(
+    resources: tuple[NativeTestingSweepResource, ...],
+) -> list[NativeTestingSweepResource]:
+    return sorted(resources, key=lambda item: item.role == "ODOO_DATA_VOLUME")
+
+
 def candidate_provider_snapshot(payload: dict[str, Any]) -> str:
     if payload.get("composeStatus") not in {"idle", "error", "done"}:
         raise ValueError("Candidate provider work is active or unknown.")
@@ -982,7 +988,7 @@ class NativeTestingSweepAdapter:
                 }
                 items = []
                 physical: dict[str, dict[str, Any]] = {}
-                for item in candidate.resources:
+                for item in gate_volume_last(candidate.resources):
                     if item.status != "eligible":
                         items.append(item)
                         continue
@@ -1065,6 +1071,8 @@ class NativeTestingSweepAdapter:
                         raise ProviderMutationUnknownError("Physical absence readback is unknown.")
                     physical[item.volume_identity_sha256] = observation
                     items.append(item.model_copy(update={"status": status, "reason": reason}))
+                roles = [item.role for item in candidate.resources]
+                items.sort(key=lambda item: roles.index(item.role))
                 candidates.append(
                     candidate.model_copy(
                         update={

@@ -69,7 +69,8 @@ runtime identity, data mount and its regular gate file; it has no route, since
 a routed or published candidate is refused. A missing web container still requires runtime identity on its
 remaining runner. The existing Compose stop and exact non-force container
 removal have durable receipts and absence readback. Only then may the existing
-volume sweep remove reviewed eligible volumes; its apply still refuses mounts.
+volume sweep remove reviewed eligible volumes, the data volume that holds the
+gate last; its apply still refuses mounts.
 
 Staged `.lp-native-*` source directories, completed/unknown copy gates, current
 lanes, only-needed data, original pairs and operation/failure/provider records
