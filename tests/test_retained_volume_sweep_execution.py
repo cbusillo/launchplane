@@ -617,6 +617,32 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             },
         )
 
+    def test_nondiagnostic_inventory_preserves_read_exceptions(self) -> None:
+        for detail_kind in ("environment", "target"):
+            environment: dict[str, object] = {kind: [] for kind in TARGET_COLLECTIONS}
+            environment["environmentId"] = "environment"
+            if detail_kind == "target":
+                environment.update(env="", applications=[{"applicationId": "target"}])
+            with (
+                self.subTest(detail_kind=detail_kind),
+                patch(
+                    "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_projects",
+                    return_value=(
+                        {"projectId": "project", "env": "", "environments": [environment]},
+                    ),
+                ),
+                patch(
+                    "control_plane.retained_volume_sweep_execution.api.dokploy_request",
+                    side_effect=ValueError("malformed detail"),
+                ),
+                patch(
+                    "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_target_payload",
+                    side_effect=ValueError("malformed detail"),
+                ),
+                self.assertRaises(ValueError),
+            ):
+                _inventory_clear(self.root, self.binding, exact=True)
+
     def test_exact_inventory_reads_environment_variables_from_complete_identity_bound_detail(
         self,
     ) -> None:

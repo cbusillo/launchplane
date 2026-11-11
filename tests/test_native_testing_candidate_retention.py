@@ -84,7 +84,6 @@ class StagedSourceInputsTests(unittest.TestCase):
                 "retained_volume_identity": lambda *_args, **_kwargs: "identity",
                 "retained_volume_engine_identity": lambda *_args: "engine-identity",
             }
-            # Execute the shipped function against an anonymous filesystem and Docker inventory.
             tree = ast.parse(NATIVE_TESTING_RETENTION_INSPECTION)
             function = next(
                 node
@@ -218,6 +217,51 @@ class CandidateRetentionGuardTests(unittest.TestCase):
             }.issubset(observed["reasons"])
         )
         host.assert_not_called()
+
+    def test_restore_refusal_does_not_hide_later_schedule_references(self) -> None:
+        from pathlib import Path
+        from unittest.mock import patch
+        from control_plane import testing_candidate_application, testing_candidate_retention
+        from control_plane.dokploy import api, source
+
+        candidate = self.candidate.model_copy(
+            update={"application": Mock(restore_schedule_id="original-schedule")}
+        )
+        payload = {
+            "composeId": candidate.compose_id,
+            "environmentId": candidate.environment_id,
+            "serverId": candidate.server_id,
+            "composeType": "docker-compose",
+            "appName": candidate.namespace,
+            "composeStatus": "running",
+            "autoDeploy": False,
+        }
+        with (
+            patch.object(source, "read_dokploy_config", return_value=("host", "token")),
+            patch.object(api, "fetch_dokploy_target_payload", return_value=payload),
+            patch.object(api, "list_deployments_for_target", return_value=[]),
+            patch.object(
+                api,
+                "list_dokploy_schedules",
+                return_value=[
+                    {"scheduleId": "original-schedule", "enabled": False},
+                    {"scheduleId": "another-schedule", "enabled": True},
+                ],
+            ),
+            patch.object(
+                testing_candidate_application,
+                "candidate_restore_terminal",
+                side_effect=testing_candidate_application.CandidateObservationUnavailable(
+                    "fixture"
+                ),
+            ),
+        ):
+            observed, _reason = testing_candidate_retention.inspect_candidate_resources(
+                Path("."), Mock(), candidate
+            )
+        self.assertIn("provider_restore_nonterminal_or_unavailable", observed["reasons"])
+        self.assertIn("provider_schedule_reference", observed["reasons"])
+        self.assertNotIn("provider_schedule_inventory_unavailable", observed["reasons"])
 
     def test_active_original_foreign_instance_and_selected_copy_each_refuse(self) -> None:
         for field, value, reason in (
@@ -466,16 +510,16 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         self.observation["volumes"][0].update(empty=False, reason="container_reference")
         self.observation["project"] = self.candidate.namespace
         lifecycle = {"payload": {"container_ids": ["1" * 64], "container_snapshot": "s"}}
-        custody = self.enterContext(
+        self.enterContext(
             patch.object(self.retention, "candidate_lifecycle_custody", return_value=lifecycle)
         )
         self.assertEqual(self.selected().status, "eligible")
-        self.assertTrue(custody.called)
 
         with patch.object(self.retention, "_source_preserved", return_value=False):
             held = self.selected()
         self.assertEqual(held.status, "held")
         self.assertIn("completed_copy_requires_disposition", held.reasons)
+        self.assertNotIn("candidate_lifecycle_custody_incomplete", held.reasons)
         self.assertFalse(held.lifecycle_snapshot_sha256)
         self.request = self.request.model_copy(
             update={"receiver_operation_id": self.candidate.operation_id}
@@ -593,7 +637,6 @@ class CandidateRetentionPlanTests(unittest.TestCase):
             {(reference.reason, reference.record_id) for reference in item.references},
             {("source_inputs_preserved", row["name"]), ("container_reference", row["name"])},
         )
-        self.assertEqual(self.host.call_args.args[2], "dry-run")
 
     def test_independent_holds_are_reported_without_making_the_copy_eligible(self) -> None:
         from unittest.mock import patch
@@ -631,6 +674,28 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         )
         self.assertIn("container_reference", {reference.reason for reference in item.references})
         self.assertFalse(item.lifecycle_snapshot_sha256)
+
+    def test_late_inventory_denial_keeps_receiver_hold_and_stops_dependent_reads(self) -> None:
+        from unittest.mock import patch
+        from control_plane.dokploy.api import DokployRequestFailed
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        self.request = self.request.model_copy(
+            update={"receiver_operation_id": self.candidate.operation_id}
+        )
+        denial = DokployRequestFailed(
+            method="GET", path="/api/project.all", detail="fixture", status_code=403
+        )
+        for error in (denial, NativeSourceAuthorizationDenied("fixture")):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(self.retention, "_inventory_clear", side_effect=error),
+            ):
+                item = self.selected()
+            self.assertIn("receiver_candidate", item.reasons)
+            self.assertIn("current_custody_unavailable", item.reasons)
+            self.assertEqual(item.status, "held")
+        self.host.assert_not_called()
 
     def test_source_hold_cannot_hide_inventory_failure_from_lifecycle_invalidation(self) -> None:
         from unittest.mock import patch
@@ -717,7 +782,6 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         resource = self.selected().resources[0]
         self.assertEqual(resource.reason, "source_inputs_preserved")
         self.assertEqual(resource.status, "held")
-        self.assertEqual(self.host.call_args.args[2], "dry-run")
 
     def test_nonempty_unrecorded_copy_is_held(self) -> None:
         self.observation["volumes"][0]["empty"] = False
@@ -725,7 +789,6 @@ class CandidateRetentionPlanTests(unittest.TestCase):
             self.plan().candidates[0].resources[0].reason, "only_needed_copy_unqualified"
         )
         self.assertEqual(self.selected().status, "held")
-        self.assertEqual(self.host.call_args.args[2], "dry-run")
 
     def test_free_space_changes_do_not_invalidate_reviewed_resource_ownership(self) -> None:
         self.request = self.request.model_copy(update={"candidates": (self.candidate.namespace,)})

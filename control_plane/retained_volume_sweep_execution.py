@@ -208,6 +208,10 @@ def _inventory_clear(
                             )
                         )
                     except (ValueError, OSError, click.ClickException) as error:
+                        if references is None or isinstance(
+                            error, native_copy_stream.NativeSourceAuthorizationDenied
+                        ):
+                            raise
                         if isinstance(error, api.DokployRequestFailed) and error.status_code in {
                             401,
                             403,
@@ -267,6 +271,10 @@ def _inventory_clear(
                                 continue
                             payload = database_payload
                     except (ValueError, OSError, click.ClickException) as error:
+                        if references is None or isinstance(
+                            error, native_copy_stream.NativeSourceAuthorizationDenied
+                        ):
+                            raise
                         if isinstance(error, api.DokployRequestFailed) and error.status_code in {
                             401,
                             403,

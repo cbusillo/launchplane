@@ -318,7 +318,9 @@ def inspect_candidate_resources(
         if any(not api.deployment_is_terminal(row) for row in deployments):
             reasons.append("provider_job_active_or_unknown")
     except (ValueError, OSError, click.ClickException) as error:
-        if isinstance(error, api.DokployRequestFailed) and error.status_code in {401, 403}:
+        if isinstance(error, native_copy_stream.NativeSourceAuthorizationDenied) or (
+            isinstance(error, api.DokployRequestFailed) and error.status_code in {401, 403}
+        ):
             raise
         reasons.append("provider_job_inventory_unavailable")
     try:
@@ -334,13 +336,21 @@ def inspect_candidate_resources(
             ):
                 reasons.append("provider_schedule_reference")
                 continue
-            from control_plane.testing_candidate_application import candidate_restore_terminal
-
-            candidate_restore_terminal(
-                host=host, token=token, record=candidate, require_success=False
+            from control_plane.testing_candidate_application import (
+                candidate_restore_terminal,
+                CandidateObservationUnavailable,
             )
+
+            try:
+                candidate_restore_terminal(
+                    host=host, token=token, record=candidate, require_success=False
+                )
+            except CandidateObservationUnavailable:
+                reasons.append("provider_restore_nonterminal_or_unavailable")
     except (ValueError, OSError, click.ClickException) as error:
-        if isinstance(error, api.DokployRequestFailed) and error.status_code in {401, 403}:
+        if isinstance(error, native_copy_stream.NativeSourceAuthorizationDenied) or (
+            isinstance(error, api.DokployRequestFailed) and error.status_code in {401, 403}
+        ):
             raise
         reasons.append("provider_schedule_inventory_unavailable")
     frames: list[dict[str, Any]] = []
@@ -384,7 +394,9 @@ def inspect_candidate_resources(
                 raise ValueError("Candidate provider changed during inspection.")
             observed = frames[0]
         except (ValueError, OSError, click.ClickException) as error:
-            if isinstance(error, api.DokployRequestFailed) and error.status_code in {401, 403}:
+            if isinstance(error, native_copy_stream.NativeSourceAuthorizationDenied) or (
+                isinstance(error, api.DokployRequestFailed) and error.status_code in {401, 403}
+            ):
                 raise
             reasons.append("current_custody_unavailable")
     return {
@@ -588,6 +600,7 @@ def build_native_testing_sweep(
         }
         references: tuple[NativeTestingSweepReference, ...] = ()
         resources: list[NativeTestingSweepResource] = []
+        reasons: tuple[str, ...] = ()
         try:
             ownership, reasons, references = candidate_authority(
                 store, request, candidate, allowed_provider_records
@@ -601,6 +614,7 @@ def build_native_testing_sweep(
                 require_candidate_target_custody(store, candidate)
             except ValueError:
                 readable_custody = False
+                reasons = (*reasons, "current_custody_unavailable")
             if readable_custody:
                 readback[ReadbackPredicate.FILES_READ] = "unavailable"
                 try:
@@ -633,6 +647,7 @@ def build_native_testing_sweep(
                 row.get("referenced") or row.get("reason") == "container_reference"
                 for row in observed["volumes"]
             ):
+                readback[ReadbackPredicate.CUSTODY] = "unavailable"
                 try:
                     lifecycle = candidate_lifecycle_custody(
                         root, store, candidate, observed.get("project", "")
@@ -643,7 +658,12 @@ def build_native_testing_sweep(
                         "unavailable" if error.unavailable else "fail"
                     )
                     readback[error.predicate] = "unavailable" if error.unavailable else "fail"
-                except (ValueError, OSError):
+                except (ValueError, OSError, click.ClickException) as error:
+                    if isinstance(error, native_copy_stream.NativeSourceAuthorizationDenied) or (
+                        isinstance(error, api.DokployRequestFailed)
+                        and error.status_code in {401, 403}
+                    ):
+                        raise
                     readback[ReadbackPredicate.CUSTODY] = "unavailable"
             resources = [
                 candidate_resource_observation(candidate, row) for row in observed["volumes"]
@@ -683,6 +703,14 @@ def build_native_testing_sweep(
                 elif row["status"] == "observed":
                     if not row["empty"] and not source_preserved:
                         holds.append("only_needed_copy_unqualified")
+                        references = (
+                            *references,
+                            NativeTestingSweepReference(
+                                reason="only_needed_copy_unqualified",
+                                kind="retained_volume",
+                                record_id=row["name"],
+                            ),
+                        )
                     if readable_custody:
                         binding = RetainedVolumeBinding(
                             volume_name=row["name"],
@@ -715,6 +743,10 @@ def build_native_testing_sweep(
                             ProviderMutationUnknownError,
                         ) as error:
                             if isinstance(
+                                error, native_copy_stream.NativeSourceAuthorizationDenied
+                            ):
+                                raise
+                            if isinstance(
                                 error, api.DokployRequestFailed
                             ) and error.status_code in {401, 403}:
                                 raise
@@ -725,15 +757,22 @@ def build_native_testing_sweep(
                                     "kind": "provider_inventory",
                                 }
                             )
+                        finally:
+                            for reference in inventory_references:
+                                item_reference = NativeTestingSweepReference.model_validate(
+                                    reference
+                                )
+                                if item_reference not in references:
+                                    references = (*references, item_reference)
                         if not inventory_clear:
                             inventory_holds = [item["reason"] for item in inventory_references] or [
                                 "provider_inventory_unavailable"
                             ]
                             holds.extend(inventory_holds)
                             resource_readback[ReadbackPredicate.STORAGE_CONSUMERS] = (
-                                "unavailable"
-                                if "provider_inventory_unavailable" in inventory_holds
-                                else "fail"
+                                "fail"
+                                if "foreign_provider_reference" in inventory_holds
+                                else "unavailable"
                             )
                         else:
                             resource_readback[ReadbackPredicate.STORAGE_CONSUMERS] = "pass"
@@ -769,12 +808,15 @@ def build_native_testing_sweep(
                             OSError,
                             click.ClickException,
                             ProviderMutationUnknownError,
-                        ):
+                        ) as error:
+                            if isinstance(
+                                error, native_copy_stream.NativeSourceAuthorizationDenied
+                            ) or (
+                                isinstance(error, api.DokployRequestFailed)
+                                and error.status_code in {401, 403}
+                            ):
+                                raise
                             holds.append("physical_ownership_unknown")
-                        for reference in inventory_references:
-                            item_reference = NativeTestingSweepReference.model_validate(reference)
-                            if item_reference not in references:
-                                references = (*references, item_reference)
                         bindings.append(
                             {"binding": binding.model_dump(mode="json"), "permit": permit}
                         )
@@ -800,7 +842,8 @@ def build_native_testing_sweep(
                 reasons = (*reasons, "physical_inventory_unknown")
             if lifecycle and lifecycle_blocked:
                 lifecycle = {}
-                reasons = (*reasons, "candidate_lifecycle_custody_incomplete")
+                if not reasons:
+                    reasons = ("candidate_lifecycle_custody_incomplete",)
                 resources = [
                     item.model_copy(
                         update={
@@ -845,7 +888,7 @@ def build_native_testing_sweep(
                 target_id=candidate.compose_id,
                 selected=selected,
                 status="held",
-                reasons=("current_custody_unavailable",),
+                reasons=tuple(dict.fromkeys((*reasons, "current_custody_unavailable"))),
                 ownership_sha256="",
                 resources=tuple(
                     resource.model_copy(update={"status": "held"}) for resource in resources

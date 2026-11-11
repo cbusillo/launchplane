@@ -65,9 +65,11 @@ acquisition. It remains `pass` when later resource checks invalidate that
 lifecycle and add `candidate_lifecycle_custody_incomplete`; the lifecycle digest
 and container count still describe only usable custody. A failed native
 lifecycle also projects its existing failed predicate.
+When a candidate-level hold already explains the refusal, successful lifecycle
+readback still clears its unusable digest without adding a second refusal reason.
 
 All safely readable holds remain in the existing candidate `references`, identifying
-the retained volume or provider owner, even when another hold determines the
+the retained volume or provider record, even when another hold determines the
 resource's primary `reason`. Native observations include simultaneous web use,
 published ports, staged source, container references and unknown web gates.
 Later lifecycle custody can qualify the candidate's own mounts; it cannot clear
@@ -86,7 +88,7 @@ holds on that identity-bound target. A real provider reference keeps
 `provider_inventory_unavailable`. The existing candidate `references` identifies
 the project, environment or target using only its safe ID or an identity digest.
 No provider environment contents or error prose are returned. Diagnostic inventory
-traversal keeps unreadable owners and continues through independently readable
+traversal keeps unreadable records and continues through independently readable
 siblings. It never drops an unknown project or treats an unreadable source as
 empty. Sibling retirement callers retain the same boolean inventory safety
 contract and stop on their first hold when no diagnostics are requested.
