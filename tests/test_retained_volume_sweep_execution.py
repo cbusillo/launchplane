@@ -34,6 +34,7 @@ from control_plane.retained_volume_sweep_execution import (
     compose_volume_names,
 )
 from control_plane.dokploy_inventory import TARGET_COLLECTIONS
+from control_plane.dokploy import api, native_copy_stream
 from control_plane.service_auth import LocalOperatorIdentity, TerminalAgentIdentity
 from control_plane.storage.postgres import (
     PostgresRecordStore,
@@ -609,12 +610,14 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             self.assertFalse(
                 _inventory_clear(self.root, self.binding, exact=True, references=references)
             )
-        self.assertEqual(
-            {(item["reason"], item["record_id"]) for item in references},
+        self.assertTrue(
             {
                 ("provider_inventory_unavailable", "unreadable"),
                 ("foreign_provider_reference", "consumer"),
-            },
+                ("inventory_target_acquisition_failed", "unreadable"),
+                ("inventory_target_checks_skipped", "unreadable"),
+            }
+            <= {(item["reason"], item["record_id"]) for item in references},
         )
 
     def test_nondiagnostic_inventory_preserves_read_exceptions(self) -> None:
@@ -642,6 +645,174 @@ class RetainedVolumeSweepTests(unittest.TestCase):
                 self.assertRaises(ValueError),
             ):
                 _inventory_clear(self.root, self.binding, exact=True)
+
+    def test_inventory_attributes_simultaneous_failures_without_losing_consumer(self) -> None:
+        environment = {
+            **{kind: [] for kind in TARGET_COLLECTIONS},
+            "env": "",
+            "compose": [{"composeId": "broken"}, {"composeId": "consumer"}],
+        }
+        references: list[dict[str, str]] = []
+        with (
+            patch(
+                "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_projects",
+                return_value=({"env": "", "environments": [environment]},),
+            ),
+            patch(
+                "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_target_payload",
+                side_effect=[
+                    {"composeId": "broken", "env": [], "mounts": None},
+                    {"composeId": "consumer", "env": "", "mounts": [], "private": "do-not-publish"},
+                ],
+            ),
+            patch(
+                "control_plane.retained_volume_sweep_execution.compose.fetch_dokploy_converted_compose_file",
+                side_effect=[
+                    "[malformed",
+                    json.dumps(
+                        {
+                            "services": {"web": {}},
+                            "volumes": {"data": {"name": self.binding.volume_name}},
+                        }
+                    ),
+                ],
+            ),
+        ):
+            self.assertFalse(
+                _inventory_clear(self.root, self.binding, exact=True, references=references)
+            )
+        found = {(row["reason"], row.get("record_id")) for row in references}
+        self.assertTrue(
+            {
+                ("provider_inventory_unavailable", "broken"),
+                ("inventory_environment_malformed", "broken"),
+                ("inventory_mounts_unavailable", "broken"),
+                ("inventory_converted_document_malformed", "broken"),
+                ("foreign_provider_reference", "consumer"),
+            }
+            <= found
+        )
+        self.assertNotIn("do-not-publish", json.dumps(references))
+
+    def test_inventory_acquisition_causes_keep_denials_and_legacy_exception_behavior(self) -> None:
+        environment = {
+            **{kind: [] for kind in TARGET_COLLECTIONS},
+            "env": "",
+            "environmentId": "environment",
+            "compose": [{"composeId": "target"}],
+        }
+        self.enterContext(
+            patch.object(
+                api,
+                "fetch_dokploy_projects",
+                return_value=({"projectId": "project", "env": "", "environments": [environment]},),
+            )
+        )
+        for stage, function in (
+            ("environment", "api.dokploy_request"),
+            ("target", "api.fetch_dokploy_target_payload"),
+            ("conversion", "compose.fetch_dokploy_converted_compose_file"),
+        ):
+            if stage == "environment":
+                environment.pop("env", None)
+            else:
+                environment["env"] = ""
+            for error in (
+                OSError("private location"),
+                native_copy_stream.NativeSourceAuthorizationDenied("private denial"),
+                api.DokployRequestFailed(
+                    method="GET", path="/private", detail="private response", status_code=403
+                ),
+            ):
+                denied = not isinstance(error, OSError)
+                for diagnostic in (False, True):
+                    references: list[dict[str, str]] | None = [] if diagnostic else None
+                    with (
+                        self.subTest(stage=stage, error=type(error), diagnostic=diagnostic),
+                        patch.object(
+                            api,
+                            "fetch_dokploy_target_payload",
+                            return_value={"env": "", "mounts": []},
+                        ),
+                        patch(
+                            "control_plane.retained_volume_sweep_execution.compose.fetch_dokploy_converted_compose_file",
+                            return_value='{"services": {"web": {}}}',
+                        ),
+                        patch(
+                            "control_plane.retained_volume_sweep_execution." + function,
+                            side_effect=error,
+                        ),
+                    ):
+                        if denied or not diagnostic:
+                            with self.assertRaises(type(error)) as caught:
+                                _inventory_clear(
+                                    self.root, self.binding, exact=True, references=references
+                                )
+                            self.assertIs(caught.exception, error)
+                            if diagnostic:
+                                self.assertIn(
+                                    "inventory_target_acquisition_denied"
+                                    if stage == "target"
+                                    else "inventory_acquisition_denied",
+                                    {row["reason"] for row in references or []},
+                                )
+                        else:
+                            self.assertFalse(
+                                _inventory_clear(
+                                    self.root, self.binding, exact=True, references=references
+                                )
+                            )
+                            self.assertIn(
+                                "inventory_" + stage + "_acquisition_failed",
+                                {row["reason"] for row in references or []},
+                            )
+                            if stage != "environment":
+                                self.assertIn(
+                                    "inventory_target_checks_skipped"
+                                    if stage == "target"
+                                    else "inventory_volume_resolution_skipped",
+                                    {row["reason"] for row in references or []},
+                                )
+                        if diagnostic:
+                            self.assertNotIn("private", json.dumps(references))
+
+    def test_volume_resolution_failure_keeps_other_documents_and_references(self) -> None:
+        environment = {
+            **{kind: [] for kind in TARGET_COLLECTIONS},
+            "env": "",
+            "compose": [{"composeId": "target"}],
+        }
+        documents = (
+            {"services": {"web": {}}, "volumes": {"bad": {"name": []}}},
+            {"services": {"web": {}}, "volumes": {"good": {"name": self.binding.volume_name}}},
+        )
+        with (
+            patch.object(
+                api,
+                "fetch_dokploy_projects",
+                return_value=({"env": "", "environments": [environment]},),
+            ),
+            patch.object(
+                api, "fetch_dokploy_target_payload", return_value={"env": "", "mounts": []}
+            ),
+            patch(
+                "control_plane.retained_volume_sweep_execution.compose.fetch_dokploy_converted_compose_file",
+                return_value="fixture",
+            ),
+            patch(
+                "control_plane.retained_volume_sweep_execution.read_volume_documents",
+                return_value=documents,
+            ),
+        ):
+            references: list[dict[str, str]] = []
+            self.assertFalse(
+                _inventory_clear(self.root, self.binding, exact=True, references=references)
+            )
+            self.assertTrue(
+                {"inventory_volume_identity_unqualified", "foreign_provider_reference"}
+                <= {row["reason"] for row in references}
+            )
+            self.assertFalse(_inventory_clear(self.root, self.binding, exact=True))
 
     def test_exact_inventory_reads_environment_variables_from_complete_identity_bound_detail(
         self,
@@ -693,12 +864,13 @@ class RetainedVolumeSweepTests(unittest.TestCase):
                         ),
                         clear,
                     )
-                    self.assertEqual(
-                        references,
-                        [{"reason": reason, "kind": "environment", "record_id": "environment"}]
-                        if reason
-                        else [],
-                    )
+                    if reason:
+                        self.assertIn(
+                            {"reason": reason, "kind": "environment", "record_id": "environment"},
+                            references,
+                        )
+                    else:
+                        self.assertEqual(references, [])
                 self.assertTrue(
                     all(call.kwargs.get("method", "GET") == "GET" for call in read.call_args_list)
                 )

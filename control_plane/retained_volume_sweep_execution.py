@@ -149,7 +149,9 @@ def _inventory_clear(
 ) -> bool:
     clear = True
 
-    def refused(reference_kind: str, identity: object = "", *, referenced: bool = False) -> bool:
+    def refused(
+        reference_kind: str, identity: object = "", *, referenced: bool = False, cause: str = ""
+    ) -> bool:
         nonlocal clear
         clear = False
         import re
@@ -171,6 +173,10 @@ def _inventory_clear(
                     )
             if row not in references:
                 references.append(row)
+            if cause:
+                attributed = {**row, "reason": cause}
+                if attributed not in references:
+                    references.append(attributed)
         return references is None
 
     host, token = source.read_dokploy_config(control_plane_root=root)
@@ -198,6 +204,7 @@ def _inventory_clear(
                     if refused("environment", environment_id):
                         return False
                 else:
+                    detail_reason = "inventory_environment_identity_unqualified"
                     try:
                         detail = api.as_json_object(
                             api.dokploy_request(
@@ -211,19 +218,29 @@ def _inventory_clear(
                         if references is None or isinstance(
                             error, native_copy_stream.NativeSourceAuthorizationDenied
                         ):
+                            if references is not None:
+                                refused(
+                                    "environment",
+                                    environment_id,
+                                    cause="inventory_acquisition_denied",
+                                )
                             raise
                         if isinstance(error, api.DokployRequestFailed) and error.status_code in {
                             401,
                             403,
                         }:
+                            refused(
+                                "environment", environment_id, cause="inventory_acquisition_denied"
+                            )
                             raise
                         detail = None
+                        detail_reason = "inventory_environment_acquisition_failed"
                     if (
                         detail is None
                         or detail.get("environmentId") != environment_id
                         or detail.get("projectId") != project_id
                     ):
-                        if refused("environment", environment_id):
+                        if refused("environment", environment_id, cause=detail_reason):
                             return False
                     else:
                         environment = {**environment, "env": detail.get("env")}
@@ -266,63 +283,116 @@ def _inventory_clear(
                                 database_payload is None
                                 or database_payload.get(identifier) != target_id
                             ):
-                                if refused(target_type, target_id):
+                                if refused(
+                                    target_type,
+                                    target_id,
+                                    cause="inventory_target_identity_unqualified",
+                                ):
                                     return False
+                                refused(
+                                    target_type, target_id, cause="inventory_target_checks_skipped"
+                                )
                                 continue
                             payload = database_payload
                     except (ValueError, OSError, click.ClickException) as error:
                         if references is None or isinstance(
                             error, native_copy_stream.NativeSourceAuthorizationDenied
                         ):
+                            if references is not None:
+                                refused(
+                                    target_type,
+                                    target_id,
+                                    cause="inventory_target_acquisition_denied",
+                                )
                             raise
                         if isinstance(error, api.DokployRequestFailed) and error.status_code in {
                             401,
                             403,
                         }:
+                            refused(
+                                target_type, target_id, cause="inventory_target_acquisition_denied"
+                            )
                             raise
-                        if refused(target_type, target_id):
+                        if refused(
+                            target_type, target_id, cause="inventory_target_acquisition_failed"
+                        ):
                             return False
+                        refused(target_type, target_id, cause="inventory_target_checks_skipped")
                         continue
                     if exact and _environment_referenced(binding.volume_name, payload):
                         if refused(
-                            target_type, target_id, referenced=isinstance(payload.get("env"), str)
+                            target_type,
+                            target_id,
+                            referenced=isinstance(payload.get("env"), str),
+                            cause="inventory_environment_malformed"
+                            if not isinstance(payload.get("env"), str)
+                            else "",
                         ):
                             return False
                     mounts = payload.get("mounts")
                     if not isinstance(mounts, list):
-                        if refused(target_type, target_id):
+                        if refused(target_type, target_id, cause="inventory_mounts_unavailable"):
                             return False
                     elif _volume_referenced(binding.volume_name, payload, exact=exact):
                         if refused(target_type, target_id, referenced=True):
                             return False
                     if target_type == "compose":
+                        failures: list[str] | None = [] if references is not None else None
+                        stage = "inventory_conversion_acquisition_failed"
+                        previous_failures = 0
                         try:
+                            raw = compose.fetch_dokploy_converted_compose_file(
+                                host=host, token=token, compose_id=target_id
+                            )
+                            stage = "inventory_document_qualification_failed"
+                            previous_failures = len(failures or ())
                             documents = read_volume_documents(
                                 host=host,
                                 token=token,
                                 payload=payload,
-                                raw=compose.fetch_dokploy_converted_compose_file(
-                                    host=host, token=token, compose_id=target_id
-                                ),
+                                raw=raw,
                                 server_id=binding.server_id,
                                 exact=exact,
+                                failures=failures,
                             )
                             for document in documents:
-                                names = compose_volume_names(
-                                    document, payload if exact else {**payload, "env": ""}
-                                )
+                                stage = "inventory_volume_identity_unqualified"
+                                previous_failures = len(failures or ())
+                                try:
+                                    names = compose_volume_names(
+                                        document, payload if exact else {**payload, "env": ""}
+                                    )
+                                except (
+                                    ValueError,
+                                    TypeError,
+                                    KeyError,
+                                    RecursionError,
+                                    click.ClickException,
+                                    yaml.YAMLError,
+                                ):
+                                    if references is None:
+                                        raise
+                                    refused(target_type, target_id, cause=stage)
+                                    names = ()
                                 if binding.volume_name in names or _volume_referenced(
                                     binding.volume_name, document, exact=exact
                                 ):
                                     if refused(target_type, target_id, referenced=True):
                                         return False
                         except native_copy_stream.NativeSourceAuthorizationDenied:
+                            refused(target_type, target_id, cause="inventory_acquisition_denied")
                             raise
                         except api.DokployRequestFailed as error:
                             if error.status_code in {401, 403}:
+                                refused(
+                                    target_type, target_id, cause="inventory_acquisition_denied"
+                                )
                                 raise
-                            if refused(target_type, target_id):
+                            if refused(target_type, target_id, cause="" if failures else stage):
                                 return False
+                            refused(
+                                target_type, target_id, cause="inventory_volume_resolution_skipped"
+                            )
                         except (
                             ValueError,
                             TypeError,
@@ -330,9 +400,24 @@ def _inventory_clear(
                             RecursionError,
                             click.ClickException,
                             yaml.YAMLError,
-                        ):
-                            if refused(target_type, target_id):
+                            OSError,
+                        ) as error:
+                            if isinstance(error, OSError) and references is None:
+                                raise
+                            if refused(
+                                target_type,
+                                target_id,
+                                cause=""
+                                if failures and len(failures) > previous_failures
+                                else stage,
+                            ):
                                 return False
+                            refused(
+                                target_type, target_id, cause="inventory_volume_resolution_skipped"
+                            )
+                        finally:
+                            for failure in failures or ():
+                                refused(target_type, target_id, cause=failure)
 
     return clear
 
