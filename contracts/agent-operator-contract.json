@@ -1231,7 +1231,8 @@
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
-          "service_api"
+          "service_api",
+          "generic_caller"
         ]
       },
       {
@@ -1566,8 +1567,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "a9bd26b20353e40c298d81c131645ec6cb9002c1"
+    "source_commit_sha": "bfbf9226bdb4b6e685b7bfab720a9349f646a7fe"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "ea6d6b9856915edebeba0a1f8f5ab4e8c403fe8ab612f98d717fdf5dd72d1c2b"
+  "semantic_digest_sha256": "83d5b8ae5ca346ad8988d975ab8a89f1984237387f54196a445f5f3d138c2120"
 }

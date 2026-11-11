@@ -473,7 +473,7 @@ OPERATION_SPECS = (
         "POST",
         "/v1/product-config/apply",
         "Dry-run or apply reviewed product configuration.",
-        ("agent_helper", "operator_ui", "service_api"),
+        ("agent_helper", "operator_ui", "service_api", "generic_caller"),
         ("dry-run", "apply"),
         "apply",
         ("reviewed_dry_run",),

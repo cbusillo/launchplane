@@ -22,6 +22,10 @@ retains its legacy request shape. The OpenAPI action schema selects the fields.
 from the same operation builder as the exported contract. A caller resolves its
 operation ID there and uses that operation's method and path from OpenAPI.
 The extension contains no runtime records or credentials.
+Operations whose `supported_surfaces` includes `generic_caller` have their
+review/apply enforcement in the service and may use the schema-driven caller.
+Other operations retain their existing clients until that qualification is
+complete. This describes caller coverage and grants no service authority.
 
 Response fields explicitly marked `x-launchplane-safe-output: true` may be
 printed by a generic caller. Marks authorize scalar values only; object and
