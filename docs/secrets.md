@@ -1275,13 +1275,22 @@ restricted to testing.
 
 A purpose with an existing binding or secret record cannot be rotated through
 this intent. Other existing purposes and all non-secret settings are preserved.
-Generation happens inside the service only after current qualification and a
-matching reviewed apply; plans and completed replays generate nothing. This
-uses the existing random generation, encryption, binding, audit and atomic
-publication paths. No person account is created and no credential is delivered
-to a runtime. Read names, IDs, version, scope and provenance through the existing
-secret metadata and product-environment read paths; values, ciphertext and value
-hashes are never review or response data.
+A binding scoped to the lane or to its product context counts as existing. A
+global binding the lane only inherits does not: the new exact-instance binding
+takes precedence for this lane alone under normal delivery, and the global
+record is not changed or read for its value. A global change between review and
+apply still invalidates the review. Generation happens inside the service only
+after current qualification and a matching reviewed apply; plans and completed
+replays generate nothing. This uses the existing random generation, encryption,
+binding, audit and atomic publication paths. No person account is created and no
+credential is delivered to a runtime. Read names, IDs, version, scope and
+provenance through the existing secret metadata and product-environment read
+paths; values, ciphertext and value hashes are never review or response data.
+
+A refused qualification keeps the same response for every cause. Its trace's
+`handled_error_cause` service log names the source location of the check that
+refused; a refused storage observation also carries the fixed program's line
+numbers and hash.
 
 ## Shared preview settings
 

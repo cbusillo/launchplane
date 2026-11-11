@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import inspect
 import subprocess
 import sys
 from collections.abc import Callable
@@ -16,7 +17,10 @@ from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_
 from control_plane.dokploy import api, native_copy_stream, source
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecord,
+    DokployTargetStaffTestingHold,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
@@ -406,6 +410,164 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
 
+    async def refused_with_cause(self, status_code: int) -> tuple[dict[str, Any], dict[str, Any]]:
+        with self.assertLogs("control_plane.http_error_evidence", "WARNING") as logged:
+            response = await self.post("runtime_credentials")
+        self.assertEqual(response.status_code, status_code, response.text)
+        body = response.json()
+        (event,) = (json.loads(record.getMessage()) for record in logged.records)
+        self.assertEqual(event["trace_id"], body["trace_id"])
+        for site in event["sites"]:
+            self.assertNotIn(str(site["module"]), response.text)
+        return {key: value for key, value in body.items() if key != "trace_id"}, event
+
+    async def test_each_refused_qualification_check_logs_its_own_site_behind_one_response(
+        self,
+    ) -> None:
+        held = self.target.model_copy(
+            update={
+                "policies": self.target.policies.model_copy(
+                    update={"staff_testing_hold": DokployTargetStaffTestingHold(reason="fixture")}
+                )
+            }
+        )
+        alias = self.target_id.model_copy(update={"context": "another", "instance": "testing"})
+        program_failure = native_copy_stream.NativeProgramFailed(
+            "fixture", program="first\nsecond\nthird", program_sites=[2]
+        )
+        refusals: dict[str, Callable[[], None]] = {
+            "live": lambda: self.store.write_product_profile_record(
+                self.profile.model_copy(update={"production_use": "live"})
+            ),
+            "historical": lambda: self.store.write_product_profile_record(
+                self.profile.model_copy(update={"historical_contexts": ("earlier-context",)})
+            ),
+            "staff_hold": lambda: self.store.write_dokploy_target_record(held),
+            "storage_program": lambda: setattr(self.probe, "side_effect", program_failure),
+            "target_alias": lambda: self.store.write_dokploy_target_id_record(alias),
+        }
+        bodies: list[dict[str, Any]] = []
+        first_empty_sites: list[tuple[object, ...]] = []
+        for name, refuse in refusals.items():
+            with self.subTest(refusal=name):
+                refuse()
+                body, event = await self.refused_with_cause(409)
+                bodies.append(body)
+                first_empty_sites.append(
+                    tuple(
+                        site["line"]
+                        for site in event["sites"]
+                        if site["module"] == "control_plane.odoo_first_empty_inputs"
+                    )
+                )
+                if name == "storage_program":
+                    self.assertEqual(event["native_programs"][0]["lines"], [2])
+                self.store.write_product_profile_record(self.profile)
+                self.store.write_dokploy_target_record(self.target)
+                self.store.write_dokploy_target_id_record(self.target_id)
+        self.assertEqual(len(set(map(json.dumps, bodies))), 1)
+        self.assertTrue(all(first_empty_sites))
+        self.assertEqual(len(set(first_empty_sites)), len(refusals))
+
+    async def test_refused_storage_read_logs_its_cause_behind_the_same_denial(self) -> None:
+        self.probe.side_effect = lambda **kwargs: kwargs["receive"]({"type": "denied"})
+        _, event = await self.refused_with_cause(403)
+        self.assertIn(
+            "control_plane.odoo_first_empty_inputs", {site["module"] for site in event["sites"]}
+        )
+
+    async def test_inherited_global_credentials_yield_to_exact_instance_generation(
+        self,
+    ) -> None:
+        inherited = ("ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD")
+        for key in inherited:
+            secrets.write_secret_value(
+                record_store=self.store,
+                scope="global",
+                integration="runtime_environment",
+                name=key,
+                plaintext_value=f"invented-global-{key}",
+                binding_key=key,
+                actor="fixture",
+            )
+        global_records = self.store.list_secret_records()
+        global_versions = tuple(
+            self.store.read_secret_version(record.current_version_id) for record in global_records
+        )
+        entries = [
+            {"binding_key": key, "generate": "odoo_first_empty", "secret_class": "prod_only"}
+            for key in inherited
+        ]
+        dry = await self.post("runtime_credentials", secrets=entries)
+        self.assertEqual(dry.status_code, 202, dry.text)
+        review = dry.json()["result"]["odoo_first_empty"]["plan_sha256"]
+        applied = await self.post(
+            "runtime_credentials",
+            secrets=entries,
+            mode="apply",
+            reviewed_plan_sha256=review,
+            key="inherited-original",
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        for record, version in zip(global_records, global_versions, strict=True):
+            self.assertEqual(self.store.read_secret_record(record.secret_id), record)
+            self.assertEqual(self.store.read_secret_version(version.version_id), version)
+        effective = secrets.resolve_effective_secret_bindings_from_store(
+            record_store=self.store,
+            integration="runtime_environment",
+            context_name=self.context,
+            instance_name="prod",
+        )
+        self.assertEqual(
+            {key: effective[key][1].scope for key in inherited},
+            dict.fromkeys(inherited, "context_instance"),
+        )
+
+    async def test_lane_or_context_credential_still_refuses_and_global_change_voids_review(
+        self,
+    ) -> None:
+        secrets.write_secret_value(
+            record_store=self.store,
+            scope="context",
+            integration="runtime_environment",
+            name="ODOO_ADMIN_PASSWORD",
+            plaintext_value="invented-context",
+            binding_key="ODOO_ADMIN_PASSWORD",
+            context_name=self.context,
+            actor="fixture",
+        )
+        refused = await self.post(
+            "runtime_credentials",
+            secrets=[
+                {
+                    "binding_key": "ODOO_ADMIN_PASSWORD",
+                    "generate": "odoo_first_empty",
+                    "secret_class": "prod_only",
+                }
+            ],
+        )
+        self.assertEqual(refused.status_code, 400, refused.text)
+        dry = await self.post("runtime_credentials")
+        self.assertEqual(dry.status_code, 202, dry.text)
+        before = self.store.list_secret_records()
+        secrets.write_secret_value(
+            record_store=self.store,
+            scope="global",
+            integration="runtime_environment",
+            name="ODOO_DB_PASSWORD",
+            plaintext_value="invented-global-after-review",
+            binding_key="ODOO_DB_PASSWORD",
+            actor="fixture",
+        )
+        stale = await self.post(
+            "runtime_credentials",
+            mode="apply",
+            reviewed_plan_sha256=dry.json()["result"]["odoo_first_empty"]["plan_sha256"],
+            key="stale-global",
+        )
+        self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(len(self.store.list_secret_records()), len(before) + 1)
+
     async def test_caller_values_testing_namespace_and_mixed_writes_cannot_enter_first_empty(
         self,
     ) -> None:
@@ -642,7 +804,7 @@ class FirstEmptyStorageTests(unittest.TestCase):
 
 
 class FirstEmptyProgramTests(unittest.TestCase):
-    def test_generated_program_batches_inventory_and_distinguishes_denied_from_unknown(
+    def test_generated_program_batches_inventory_and_reports_denied_or_its_failed_check(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary:
@@ -691,12 +853,11 @@ else:
             )
             executable.chmod(0o755)
             spec = {"project": "fictional-prod", "volumes": ["db", "data", "logs"]}
-            program = root / "observe.py"
-            program.write_text(first_empty_storage_program(compose_root=root / "compose"))
+            program = first_empty_storage_program(compose_root=root / "compose")
             for scenario, expected in (
                 ("empty", "complete"),
                 ("denied", "denied"),
-                ("unknown", "complete"),
+                ("unknown", "failed"),
             ):
                 with self.subTest(scenario=scenario):
                     state_path.write_text(
@@ -708,7 +869,8 @@ else:
                         [
                             sys.executable,
                             "-I",
-                            str(program),
+                            "-c",
+                            program,
                             base64.b64encode(json.dumps(spec).encode()).decode(),
                             "FRAME:",
                         ],
@@ -727,4 +889,12 @@ else:
                         self.assertEqual(len(frame["storage"]), 64)
                         self.assertLess(json.loads(state_path.read_text())["calls"], 40)
                     elif scenario == "unknown":
-                        self.assertEqual(frame["status"], "unknown")
+                        failure = native_copy_stream.NativeProgramFailed(
+                            "fixture", program=program, program_sites=frame["sites"]
+                        )
+                        self.assertEqual(failure.program_sites, tuple(frame["sites"]))
+                        failed_line = program.splitlines()[failure.program_sites[-1] - 1]
+                        self.assertIn(
+                            failed_line,
+                            inspect.getsource(first_empty_storage_snapshot).splitlines(),
+                        )

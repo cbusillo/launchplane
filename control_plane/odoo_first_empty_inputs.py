@@ -100,41 +100,43 @@ def resolve_first_empty_authority(
     )
     if lane is None:
         raise ValueError("The product has no original production lane in this context.")
+    protected_lane = "First-empty inputs require one unprotected original Odoo production lane."
     if (
         profile.driver_id != "odoo"
         or not profile.is_active
         or profile.production_use == "live"
-        or profile.historical_contexts
         or lane.odoo_data_policy.data_authority not in {"unknown", "resettable"}
         or lane.odoo_data_policy.upstream_source
-        or product_target_owner_products(
-            store.list_product_profile_records(), context=context, config_scopes=True
-        )
-        != frozenset({product})
     ):
-        raise ValueError(
-            "First-empty inputs require one unprotected original Odoo production lane."
-        )
+        raise ValueError(protected_lane)
+    if profile.historical_contexts:
+        raise ValueError(protected_lane)
+    if product_target_owner_products(
+        store.list_product_profile_records(), context=context, config_scopes=True
+    ) != frozenset({product}):
+        raise ValueError(protected_lane)
     target = store.read_dokploy_target_record(context_name=context, instance_name="prod")
     target_id = store.read_dokploy_target_id_record(context_name=context, instance_name="prod")
     provider = store.read_provider_target_record(context_name=context, instance_name="prod")
+    protected_target = "Original target ownership is ambiguous or protected."
+    if target.policies.staff_testing_hold is not None:
+        raise ValueError(protected_target)
     if (
         target.target_type != "compose"
-        or target.policies.staff_testing_hold is not None
         or provider.provider_id != "dokploy"
         or provider.target_category != "compose"
         or provider.target_id != target_id.target_id
         or provider.display_name != target.target_name
-        or any(
-            other.target_id == target_id.target_id and other != target_id
-            for other in store.list_dokploy_target_id_records()
-        )
-        or any(
-            other.target_id == provider.target_id and other != provider
-            for other in store.list_physical_provider_target_records()
-        )
     ):
-        raise ValueError("Original target ownership is ambiguous or protected.")
+        raise ValueError(protected_target)
+    if any(
+        other.target_id == target_id.target_id and other != target_id
+        for other in store.list_dokploy_target_id_records()
+    ) or any(
+        other.target_id == provider.target_id and other != provider
+        for other in store.list_physical_provider_target_records()
+    ):
+        raise ValueError(protected_target)
     safety = store.read_disposable_lane_safety(product=product, context=context, instance="prod")
     if safety is not None and (
         safety.usage == "in_use"
@@ -354,9 +356,14 @@ def validate_first_empty_generation(
         raise ValueError(
             "First-empty generation accepts only exact Odoo runtime credential purposes."
         )
+    product_deliveries = tuple(
+        delivery
+        for delivery in qualified.authority.bundle.secret_delivery_read_sets
+        if delivery.context == context
+    )
     if any(
         binding.binding_key in keys and delivery.includes(binding)
-        for delivery in qualified.authority.bundle.secret_delivery_read_sets
+        for delivery in product_deliveries
         for binding in delivery.bindings
     ):
         raise ValueError("Existing runtime credential bindings cannot be replaced.")
@@ -582,6 +589,7 @@ def first_empty_storage_program(*, compose_root: Path = Path("/etc/dokploy/compo
     return (
         "import base64,hashlib,json,re,subprocess,sys\nfrom pathlib import Path\n"
         "from typing import Any\nfrom collections.abc import Callable\n"
+        + f"NATIVE_PROGRAM_SOURCE_SITE_LIMIT={native_copy_stream.NATIVE_PROGRAM_SOURCE_SITE_LIMIT}\n"
         + inspect.getsource(docker_daemon_authorization_denied)
         + "\n"
         + inspect.getsource(single_local_swarm_node)
@@ -611,8 +619,13 @@ try:
     result = {'type':'complete', 'binding':digest(spec), 'storage':digest(before['selected'])}
 except PermissionError:
     result = {'type':'denied'}
-except Exception:
-    result = {'type':'complete', 'status':'unknown'}
+except Exception as error:
+    sites=[]
+    failure_traceback=error.__traceback__
+    while failure_traceback is not None:
+        if failure_traceback.tb_frame.f_code.co_filename=='<string>': sites.append(failure_traceback.tb_lineno)
+        failure_traceback=failure_traceback.tb_next
+    result = {'type':'failed', 'sites':sites[-NATIVE_PROGRAM_SOURCE_SITE_LIMIT:]}
 print(sys.argv[2] + json.dumps(result), flush=True)
 """
     )
