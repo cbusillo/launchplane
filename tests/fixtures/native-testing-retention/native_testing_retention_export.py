@@ -6,8 +6,13 @@ import json
 from pathlib import Path
 import shutil
 
+import yaml
+
 from control_plane.contracts.testing_candidate import testing_candidate_namespace
-from control_plane.dokploy.compose import _odoo_web_command
+from control_plane.dokploy.compose import (
+    held_odoo_web_container_command,
+    render_odoo_raw_compose_file,
+)
 from control_plane.dokploy.testing_retained_copy import (
     retained_container_snapshot,
     retained_copy_host_program,
@@ -47,13 +52,14 @@ def main() -> None:
         "failed_candidate": {
             "resources": resources.model_dump(mode="json"),
             "image": args.image,
-            "web_command": [
-                "/bin/sh",
-                "-lc",
-                _odoo_web_command(hold_until_integration_readback=True).replace("$$", "$"),
-            ],
+            "web_command": held_odoo_web_container_command(),
             "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
         },
+        "rendered_web_command": yaml.safe_load(
+            render_odoo_raw_compose_file(
+                image_reference=args.image, hold_web_until_integration_readback=True
+            )
+        )["services"]["web"]["command"],
         "inspection": NATIVE_TESTING_RETENTION_INSPECTION,
         "lifecycle": retained_copy_host_program(),
         "sweep": RETAINED_VOLUME_SWEEP_HOST_PROGRAM,

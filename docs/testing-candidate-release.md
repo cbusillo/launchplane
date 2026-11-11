@@ -62,9 +62,10 @@ original failed, and its source must be preserved. A completed copy without a
 preserved source stays held as `completed_copy_requires_disposition`. A stopped
 container alone is insufficient. Unknown web processes, execs, published ports,
 foreign mounts and changed IDs/configuration refuse. A web container still in
-the original integration-gate wait can qualify only with the exact command,
-runtime identity, data mount, absent gate and positive shell/sleep process
-evidence. A completed copy's serving web qualifies only with the exact command,
+the original integration-gate wait can qualify only with the exact command
+Compose created from the rendered held web command, runtime identity, data
+mount, absent gate and positive shell/sleep process evidence from `docker top`
+with its required PID column. A completed copy's serving web qualifies only with the exact command,
 runtime identity, data mount and its regular gate file; it has no route, since
 a routed or published candidate is refused. A missing web container still
 requires runtime identity on its remaining runner. The existing Compose stop and exact non-force container

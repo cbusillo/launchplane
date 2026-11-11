@@ -177,6 +177,15 @@ def _odoo_web_command(*, hold_until_integration_readback: bool) -> str:
     )
 
 
+def held_odoo_web_container_command() -> list[str]:
+    created_by_compose = (
+        _odoo_web_command(hold_until_integration_readback=True)
+        .replace(_ODOO_WEB_START_COMMAND, ODOO_WEB_START_COMMAND)
+        .replace("$$", "$")
+    )
+    return ["/bin/sh", "-lc", created_by_compose]
+
+
 def render_odoo_raw_compose_file(
     *,
     image_reference: str,
