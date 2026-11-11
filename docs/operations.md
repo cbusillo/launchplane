@@ -1157,6 +1157,10 @@ the full tracked domain set and the expected existing TLS/route settings. Set
 `allow_create`, `allow_update` and `allow_enable_disable` to false. The option is
 false when omitted, so ordinary dry runs keep their existing meaning. Maintained
 callers must support this option before using it; a raw caller is not a fallback.
+The option uses the existing `ingress_route.audit` projection permission, not
+ordinary planning permission. Opting in replaces historical authority with
+current observed evidence, including on lanes that already have an apply audit;
+an expired or differing observation cannot fall back to that older history.
 
 This uses the existing provider comparison, including ambiguity and shared-host
 checks. It captures and rechecks the exact tracked/provider target, target ID,

@@ -9,6 +9,7 @@ import click
 
 from control_plane import service_auth
 from control_plane.action_effects import ACTION_EFFECTS
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.npmplus import NpmplusProxyHost, NpmplusProxyHostPayload
 from control_plane.service_auth import (
@@ -36,7 +37,11 @@ from tests.test_http_app_ingress import (
     _instance_ingress_exact_host_payload,
     _instance_ingress_product_profile,
 )
-from tests.test_route_binding_record import _dokploy_target_record
+from tests.test_route_binding_record import (
+    _dokploy_target_record,
+    _dokploy_target_id_record,
+    _provider_target_record,
+)
 
 
 class _ReadOnlyIngressClient(_FakeNpmplusIngressClient):
@@ -89,6 +94,17 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
                 400,
             ),
             ("matching", {}, {}, 202),
+            (
+                "current-observation",
+                {},
+                {
+                    "mode": "dry-run",
+                    "verify_route_binding": True,
+                    "allow_update": False,
+                    "allow_enable_disable": False,
+                },
+                202,
+            ),
             ("missing", {}, {}, 400),
             ("upstream-drift", {"forward_port": 8443}, {}, 409),
             ("disabled", {"enabled": False}, {}, 409),
@@ -157,6 +173,29 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
                         )
                     )
                 store.write_product_profile_record(profile)
+                if name == "current-observation":
+                    lane = profile.lanes[0]
+                    store.write_provider_target_record(
+                        _provider_target_record(
+                            context=lane.context,
+                            instance=lane.instance,
+                            project_name=endpoint.server_name,
+                        )
+                    )
+                    store.write_dokploy_target_record(
+                        _dokploy_target_record(
+                            context=lane.context,
+                            instance=lane.instance,
+                            domains=host.domain_names,
+                            project_name=endpoint.server_name,
+                        )
+                    )
+                    store.write_dokploy_target_id_record(
+                        _dokploy_target_id_record(
+                            context=lane.context,
+                            instance=lane.instance,
+                        )
+                    )
                 if name == "shared-context":
                     store.write_product_profile_record(
                         profile.model_copy(update={"product": "other-product"})
@@ -240,6 +279,19 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertTrue(all(not op.requires_apply for op in records[0].operations))
                     self.assertEqual(ingress.proxy_hosts, [host])
+                    if name == "current-observation":
+                        self.assertIsNotNone(records[0].route_verification)
+                        self.assertEqual(records[0].mode, "dry-run")
+                        self.assertEqual(
+                            records[0].provider_route_sha256,
+                            canonical_json_sha256(host.model_dump(mode="json")),
+                        )
+                        self.assertTrue(
+                            any(
+                                event.action == "ingress_route.audit"
+                                for event in evaluations.events
+                            )
+                        )
                 elif name == "drift-after-preflight":
                     self.assertEqual(
                         response.json()["error"]["code"], "instance_scoped_ingress_changed"

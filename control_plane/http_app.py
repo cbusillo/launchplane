@@ -2917,6 +2917,9 @@ class _RouteBindingMutationStore(_RouteBindingReconcileStore, Protocol):
         replacement_record: EnvironmentRouteBindingRecord,
         mutation: DbOnlyMutationRequest,
         native_sources: TestingRouteRefreshSources | None = None,
+        reviewed_sources: control_plane_route_binding_reconcile.RouteBindingReviewSources
+        | None = None,
+        reviewed_product: str = "",
     ) -> RouteBindingReconcileWriteResult: ...
 
 
@@ -22187,6 +22190,7 @@ def create_launchplane_fastapi_app(
         idempotency_key: str,
         record_id: str = "",
         route_verification: IngressRouteVerification | None = None,
+        provider_route_sha256: str = "",
     ) -> IngressRouteAuditRecord:
         provider_host_id = result.proxy_host.id if result.proxy_host is not None else None
         certificate_id = (
@@ -22217,11 +22221,7 @@ def create_launchplane_fastapi_app(
             expected_host_id=request.expected_host_id,
             provider_host_id=provider_host_id,
             route_verification=route_verification,
-            provider_route_sha256=(
-                canonical_json_sha256(result.proxy_host.model_dump(mode="json"))
-                if route_verification is not None and result.proxy_host is not None
-                else ""
-            ),
+            provider_route_sha256=provider_route_sha256,
             operations=tuple(
                 IngressRouteAuditOperation.model_validate(operation.model_dump(mode="json"))
                 for operation in result.operations
@@ -23156,6 +23156,17 @@ def create_launchplane_fastapi_app(
                 control_plane_route_binding_reconcile.RouteBindingSourceChanged,
                 ProductContextOwnershipError,
             ) as error:
+                if (
+                    reconcile_plan.review_sources is not None
+                    and reconcile_plan.review_sources.ingress_audit.route_verification is not None
+                    and binding_request.browser_review is None
+                ):
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="ingress_verification_required",
+                        message="Current route sources changed or the observation expired before commit. Repeat ingress verification, then review the new reconcile plan.",
+                    ) from error
                 if director_evidence_refresh or reconcile_plan.native_review_sources is not None:
                     raise _launchplane_http_error(
                         status_code=409,
@@ -23571,30 +23582,54 @@ def create_launchplane_fastapi_app(
                     "result": outcome_payload,
                 }
                 renew_controller_reservation()
-                mutation_result = mutation_store.reconcile_route_binding_record(
-                    expected_record=reconcile_plan.current_record,
-                    replacement_record=reconcile_plan.record,
-                    native_sources=reconcile_plan.native_review_sources,
-                    mutation=DbOnlyMutationRequest(
-                        scope=idempotency_scope(identity),
-                        route_path=route_path,
-                        idempotency_key=binding_idempotency_key,
-                        request_fingerprint=idempotency_request_fingerprint(
+                review_kwargs: dict[str, Any] = {}
+                if (
+                    reconcile_plan.review_sources is not None
+                    and reconcile_plan.review_sources.ingress_audit.route_verification is not None
+                ):
+                    review_kwargs = {
+                        "reviewed_sources": reconcile_plan.review_sources,
+                        "reviewed_product": outcome.product,
+                    }
+                try:
+                    mutation_result = mutation_store.reconcile_route_binding_record(
+                        expected_record=reconcile_plan.current_record,
+                        replacement_record=reconcile_plan.record,
+                        native_sources=reconcile_plan.native_review_sources,
+                        **review_kwargs,
+                        mutation=DbOnlyMutationRequest(
+                            scope=idempotency_scope(identity),
                             route_path=route_path,
-                            payload={
-                                "controller_request_fingerprint": payload_fingerprint,
-                                "binding_key": binding_key,
-                                "current_record_sha256": outcome.current_record_sha256,
-                                "candidate_record_sha256": outcome.candidate_record_sha256,
-                            },
+                            idempotency_key=binding_idempotency_key,
+                            request_fingerprint=idempotency_request_fingerprint(
+                                route_path=route_path,
+                                payload={
+                                    "controller_request_fingerprint": payload_fingerprint,
+                                    "binding_key": binding_key,
+                                    "current_record_sha256": outcome.current_record_sha256,
+                                    "candidate_record_sha256": outcome.candidate_record_sha256,
+                                },
+                            ),
+                            lease_owner=f"{trace_id}:{binding_token}",
+                            response_status_code=202,
+                            response_trace_id=trace_id,
+                            response_payload=binding_response_payload,
+                            lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
                         ),
-                        lease_owner=f"{trace_id}:{binding_token}",
-                        response_status_code=202,
-                        response_trace_id=trace_id,
-                        response_payload=binding_response_payload,
-                        lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
-                    ),
-                )
+                    )
+                except (
+                    control_plane_route_binding_reconcile.RouteBindingSourceChanged,
+                    ProductContextOwnershipError,
+                ):
+                    outcome_payload["status"] = "conflict"
+                    outcome_payload["findings"] = [
+                        {
+                            "code": "ingress_verification_required",
+                            "detail": "Current route sources changed or the observation expired before commit. Repeat ingress verification before refresh.",
+                        }
+                    ]
+                    result_outcomes.append(outcome_payload)
+                    continue
                 if mutation_result.status == "refreshed":
                     outcome_payload["status"] = "refreshed"
                 elif mutation_result.status == "unchanged":
@@ -23734,6 +23769,8 @@ def create_launchplane_fastapi_app(
             if route_request.ingress.mode == "apply"
             else native_routes.native_driver_route_alternate_authz_action(apply_ingress_route)
         )
+        if route_request.ingress.verify_route_binding:
+            authz_action = "ingress_route.audit"
         instance_name = route_request.instance.strip()
         if route_request.ingress.verify_route_binding and not instance_name:
             raise _launchplane_http_error(
@@ -24246,6 +24283,11 @@ def create_launchplane_fastapi_app(
             result=response_ingress_result,
             idempotency_key=normalized_key,
             route_verification=route_verification,
+            provider_route_sha256=(
+                canonical_json_sha256(ingress_result.proxy_host.model_dump(mode="json"))
+                if route_verification is not None and ingress_result.proxy_host is not None
+                else ""
+            ),
         )
         response_records["ingress_route_audit_record_id"] = ingress_audit_record.record_id
         response = accepted_evidence_response(

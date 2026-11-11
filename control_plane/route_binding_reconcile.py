@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from collections.abc import Callable
 from typing import Literal, Protocol, cast
 from urllib.parse import urlsplit
 
@@ -179,11 +178,16 @@ def read_route_binding_verification_sources(
     endpoint_key: str,
 ) -> RouteBindingVerificationSources:
     def read(method: str, label: str, **kwargs: str) -> object:
-        reader = getattr(record_store, method, None)
+        try:
+            reader = getattr(record_store, method)
+        except AttributeError:
+            raise ValueError(
+                f"Current route verification needs the existing {label} reader."
+            ) from None
         if not callable(reader):
             raise ValueError(f"Current route verification needs the existing {label} reader.")
         try:
-            return cast(Callable[..., object], reader)(**kwargs)
+            return reader(**kwargs)
         except FileNotFoundError:
             raise ValueError(
                 f"Current route verification needs the current {label} record."
@@ -239,15 +243,18 @@ def read_route_binding_verification_sources(
         requested_domains=target.domains,
         tracked_targets=tracked_ingress_targets(record_store, profile),
     )
-    inventory_reader = getattr(record_store, "read_environment_inventory", None)
+    try:
+        inventory_reader = getattr(record_store, "read_environment_inventory")
+    except AttributeError:
+        raise ValueError(
+            "Current route verification needs the existing environment inventory reader."
+        ) from None
     if not callable(inventory_reader):
         raise ValueError(
             "Current route verification needs the existing environment inventory reader."
         )
     try:
-        inventory = EnvironmentInventory.model_validate(
-            cast(Callable[..., object], inventory_reader)(**scope)
-        )
+        inventory = EnvironmentInventory.model_validate(inventory_reader(**scope))
     except FileNotFoundError:
         inventory = None
     deployment = None

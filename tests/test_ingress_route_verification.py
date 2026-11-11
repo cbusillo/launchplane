@@ -84,11 +84,18 @@ class IngressRouteVerificationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def post(self, path: str, payload: dict[str, Any], *, key: str = "") -> Any:
-        headers = {"Authorization": "Bearer local-operator-token"}
+    async def post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        key: str = "",
+        token: str = "local-operator-token",
+    ) -> Any:
+        headers = {"Authorization": f"Bearer {token}"}
         if key:
             headers["Idempotency-Key"] = key
-        with patch("control_plane.http_app.utc_now_timestamp", return_value=self.now):
+        with patch("control_plane.http_app.utc_now_timestamp", side_effect=lambda: self.now):
             return await request(self.app, "POST", path, headers=headers, payload=payload)
 
     async def verify(self, **overrides: Any) -> Any:
@@ -97,7 +104,7 @@ class IngressRouteVerificationTests(unittest.IsolatedAsyncioTestCase):
             {
                 "product": "example-product",
                 "context": "example-testing",
-                "instance": "prod",
+                "instance": self.current.instance,
                 "ingress": {
                     "mode": "dry-run",
                     "expected_host_id": 79,
@@ -123,7 +130,7 @@ class IngressRouteVerificationTests(unittest.IsolatedAsyncioTestCase):
             {
                 "product": "example-product",
                 "context": "example-testing",
-                "instance": "prod",
+                "instance": self.current.instance,
                 "mode": mode,
                 "expected_current": {
                     "state": "present",
@@ -162,7 +169,9 @@ class IngressRouteVerificationTests(unittest.IsolatedAsyncioTestCase):
 
     def binding(self) -> Any:
         return self.store.read_route_binding_record(
-            product="example-product", context_name="example-testing", instance_name="prod"
+            product="example-product",
+            context_name="example-testing",
+            instance_name=self.current.instance,
         )
 
     async def apply_with_commit_change(self, change: Callable[[], object], key: str) -> Any:
@@ -421,4 +430,80 @@ class IngressRouteVerificationTests(unittest.IsolatedAsyncioTestCase):
             result = await self.verify()
         self.assertEqual(result.status_code, 409, result.text)
         self.assertEqual(self.store.list_ingress_route_audit_records(), ())
+        self.assertEqual(self.binding(), self.current)
+
+    async def test_controller_preserves_observation_source_cas(self) -> None:
+        from tests.support.auth import _identity, _StubVerifier
+        from tests.test_route_binding_refresh_controller import _controller_policy, _refresh_payload
+
+        self.store.delete_provider_target_record(
+            expected_record=_provider_target_record(instance="prod")
+        )
+        profile = self.store.read_product_profile_record("example-product")
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "driver_id": "odoo",
+                    "lanes": (profile.lanes[0].model_copy(update={"instance": "testing"}),),
+                }
+            )
+        )
+        self.store.write_provider_target_record(_provider_target_record(instance="testing"))
+        self.store.write_dokploy_target_record(_dokploy_target_record(instance="testing"))
+        self.store.write_dokploy_target_id_record(_dokploy_target_id_record(instance="testing"))
+        self.current = self.current.model_copy(update={"instance": "testing"})
+        self.store.write_route_binding_record(self.current)
+        self.assertEqual((await self.verify()).status_code, 202)
+        self.app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_controller_policy(mode="apply"),
+            record_store_factory=lambda: self.store,
+        )
+        original = self.store.reconcile_route_binding_record
+
+        def changed(**kwargs: Any) -> Any:
+            self.store.write_edge_endpoint_record(
+                _edge_endpoint_record().model_copy(update={"upstream_host": "192.0.2.99"})
+            )
+            return original(**kwargs)
+
+        with patch.object(self.store, "reconcile_route_binding_record", side_effect=changed):
+            response = await self.post(
+                "/v1/route-bindings/odoo-testing/controller/run-once",
+                _refresh_payload(mode="apply"),
+                key="controller-source-race",
+                token="valid-token",
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(
+            response.json()["result"]["outcomes"][0]["status"], "conflict", response.text
+        )
+        self.assertEqual(self.binding(), self.current)
+
+    async def test_slow_or_backward_observation_does_not_attest(self) -> None:
+        original = self.client.get_proxy_host
+        for timestamp in ("2026-11-11T09:59:59Z", "2026-11-11T10:02:01Z"):
+            with self.subTest(timestamp=timestamp):
+                self.now = "2026-11-11T10:00:00Z"
+
+                def delayed(host_id: int) -> Any:
+                    self.now = timestamp
+                    return original(host_id)
+
+                with patch.object(self.client, "get_proxy_host", side_effect=delayed):
+                    response = await self.verify()
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(self.store.list_ingress_route_audit_records(), ())
+
+    async def test_prior_apply_cannot_hide_new_observed_drift(self) -> None:
+        from tests.test_route_binding_record import _ingress_audit_record
+
+        self.store.write_ingress_route_audit_record(_ingress_audit_record(status="unchanged"))
+        self.client.proxy_hosts[0] = self.client.proxy_hosts[0].model_copy(
+            update={"forward_host": "192.0.2.99"}
+        )
+        response = await self.verify()
+        self.assertEqual(response.status_code, 202, response.text)
+        refused = await self.reconcile(mode="apply", key="observed-drift-after-apply")
+        self.assertEqual(refused.json()["result"]["status"], "blocked", refused.text)
         self.assertEqual(self.binding(), self.current)
