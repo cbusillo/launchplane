@@ -80,7 +80,7 @@ from control_plane.monitoring_authority_history import (
 from uuid import uuid4
 
 from collections.abc import Callable, Generator, Iterator, Sequence
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import closing, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -821,6 +821,12 @@ ExistingMutationReservationLookupStatus = Literal[
     "ambiguous",
     "hold_unknown",
 ]
+
+
+class RecoveryRecord(NamedTuple):
+    kind: str
+    record_id: str
+    payload: PayloadDict
 
 
 class ProductProfileCompareWriteResult(NamedTuple):
@@ -29554,23 +29560,68 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
 
     def retained_volume_recovery_payloads(self) -> Generator[PayloadDict, None, None]:
+        with closing(self.retained_volume_recovery_records()) as records:
+            for record in records:
+                yield record.payload
+
+    def retained_volume_recovery_records(self) -> Generator[RecoveryRecord, None, None]:
         from control_plane.application_state_volume import ROUTE, state_volume_allocation_names
 
         with self._session_factory() as session:
-            for row_type in (
-                LaunchplaneDisposableReplacementPreparationRow,
-                LaunchplaneDisposableTestingResourceAllocationRow,
-                LaunchplaneFreshOdooTestingGenerationRow,
-                LaunchplaneRetainedTestingGenerationRow,
-                LaunchplaneNativeTestingCopyCaptureRow,
-                LaunchplaneOdooUpgradeRehearsalRow,
-                LaunchplanePreviewGenerationRow,
-                LaunchplaneOdooStableTargetReplacementOperationRow,
-                LaunchplaneTestingCandidateRow,
+            for kind, row_type, keys in (
+                (
+                    "replacement_preparation",
+                    LaunchplaneDisposableReplacementPreparationRow,
+                    (LaunchplaneDisposableReplacementPreparationRow.operation_id,),
+                ),
+                (
+                    "testing_resource_allocation",
+                    LaunchplaneDisposableTestingResourceAllocationRow,
+                    (LaunchplaneDisposableTestingResourceAllocationRow.operation_id,),
+                ),
+                (
+                    "testing_generation",
+                    LaunchplaneFreshOdooTestingGenerationRow,
+                    (
+                        LaunchplaneFreshOdooTestingGenerationRow.product,
+                        LaunchplaneFreshOdooTestingGenerationRow.context,
+                    ),
+                ),
+                (
+                    "retained_testing_generation",
+                    LaunchplaneRetainedTestingGenerationRow,
+                    (LaunchplaneRetainedTestingGenerationRow.operation_id,),
+                ),
+                (
+                    "testing_copy_capture",
+                    LaunchplaneNativeTestingCopyCaptureRow,
+                    (LaunchplaneNativeTestingCopyCaptureRow.generation_binding_sha256,),
+                ),
+                (
+                    "upgrade_rehearsal",
+                    LaunchplaneOdooUpgradeRehearsalRow,
+                    (LaunchplaneOdooUpgradeRehearsalRow.rehearsal_id,),
+                ),
+                (
+                    "preview_generation",
+                    LaunchplanePreviewGenerationRow,
+                    (LaunchplanePreviewGenerationRow.generation_id,),
+                ),
+                (
+                    "testing_operation",
+                    LaunchplaneOdooStableTargetReplacementOperationRow,
+                    (LaunchplaneOdooStableTargetReplacementOperationRow.operation_id,),
+                ),
+                (
+                    "testing_candidate",
+                    LaunchplaneTestingCandidateRow,
+                    (LaunchplaneTestingCandidateRow.namespace,),
+                ),
             ):
-                yield from session.scalars(
-                    select(row_type.payload).execution_options(yield_per=1000)
-                )
+                for row in session.execute(
+                    select(*keys, row_type.payload).execution_options(yield_per=1000)
+                ):
+                    yield RecoveryRecord(kind, ":".join(row[:-1]), row[-1])
             allocations = session.scalars(
                 select(LaunchplaneIdempotencyRow.payload)
                 .where(LaunchplaneIdempotencyRow.route_path == ROUTE)
@@ -29587,7 +29638,9 @@ class PostgresRecordStore(HumanSessionStore):
                     plan_id = result.get("plan_id")
                     if not isinstance(plan_id, str):
                         raise ValueError("Retained allocation identity is unavailable.")
-                    yield state_volume_allocation_names(plan_id)
+                    yield RecoveryRecord(
+                        "state_volume_allocation", plan_id, state_volume_allocation_names(plan_id)
+                    )
 
     def write_product_retirement_record(self, record: ProductRetirementRecord) -> None:
         with self._session_factory() as session:

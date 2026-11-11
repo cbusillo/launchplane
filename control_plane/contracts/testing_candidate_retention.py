@@ -52,6 +52,15 @@ class NativeTestingSweepResource(RetainedVolumeSweepItem):
     free_bytes: int | None = Field(default=None, ge=0)
 
 
+class NativeTestingSweepReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str
+    kind: str
+    record_id: str = ""
+    record_sha256: str = ""
+
+
 class NativeTestingSweepCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -71,6 +80,11 @@ class NativeTestingSweepCandidate(BaseModel):
     container_count: int = Field(default=0, ge=0)
     resources: tuple[NativeTestingSweepResource, ...] = ()
     physical_readback: dict[str, dict[str, int | str]] = Field(default_factory=dict)
+    references: tuple[NativeTestingSweepReference, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class NativeTestingSweepResponse(BaseModel):
