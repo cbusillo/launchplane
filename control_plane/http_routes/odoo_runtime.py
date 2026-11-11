@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane import odoo_runtime_reads as reads
 from control_plane import odoo_parameter_presence as presence
+from control_plane import odoo_inventory_readback as inventory_readback
 from control_plane import odoo_copy_aggregates as aggregates
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.odoo_runtime_source_prerequisites import (
@@ -113,6 +114,14 @@ class OdooParameterPresenceResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     result: presence.ParameterPresenceResult
+
+
+class OdooInventoryReadbackResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    result: inventory_readback.InventoryReadResult
 
 
 class AggregateCountsResponse(BaseModel):
@@ -393,6 +402,36 @@ def register_odoo_runtime_read_routes(
             )
         return profile
 
+    def read_inventory(
+        product: str,
+        environment: str,
+        query: Annotated[inventory_readback.InventoryReadQuery, Query()],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        response: Response,
+    ) -> OdooInventoryReadbackResponse:
+        trace_id = common.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if environment != "testing":
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Inventory readback requires stable testing.",
+            )
+        with errors(trace_id):
+            profile = testing_profile(product, identity, record_store, trace_id, "inventory")
+            return OdooInventoryReadbackResponse(
+                trace_id=trace_id,
+                result=inventory_readback.read_inventory(
+                    store=cast(reads.OdooRuntimeReadStore, record_store),
+                    product=profile.product,
+                    query=query,
+                    control_plane_root=dependencies.control_plane_root,
+                    database_url=dependencies.database_url,
+                ),
+            )
+
     def read_parameter_presence(
         product: str,
         environment: str,
@@ -634,6 +673,13 @@ def register_odoo_runtime_read_routes(
     )
 
     for path, endpoint, model, operation_id, summary in (
+        (
+            inventory_readback.ROUTE,
+            read_inventory,
+            OdooInventoryReadbackResponse,
+            "read_odoo_inventory_readback",
+            "Read current stored inventory and bounded private witnesses on exact stable testing",
+        ),
         (
             presence.ROUTE,
             read_parameter_presence,
