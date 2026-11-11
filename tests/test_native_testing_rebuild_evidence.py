@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import asyncio
 import socket
@@ -9,6 +10,11 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+    ProductLaneProfile,
+)
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_mutation_reservation_id,
@@ -60,6 +66,10 @@ from control_plane.http_routes.drivers import (
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.service_auth import LocalOperatorIdentity
+from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_rebuild_authorization import (
+    capture_director_testing_rebuild_authorization,
+)
 from control_plane.testing_rebuild_storage import (
     REBUILD_CHECKPOINT_SCOPE,
     RebuildRecordStore,
@@ -123,6 +133,7 @@ class NativeTestingEvidenceTests(unittest.TestCase):
             attempt=12,
         )
         self.rows: dict[tuple[str, str, str], LaunchplaneIdempotencyRecord] = {}
+        self.identity = LocalOperatorIdentity(subject="fixture", token_label="fixture")
         self.store = Mock(
             spec=[
                 "read_idempotency_record",
@@ -464,6 +475,65 @@ class NativeTestingEvidenceTests(unittest.TestCase):
                 self.assertEqual(binding["failure_reference"]["availability"], "not_retained")
                 self.assertNotIn("native_evidence", response.json())
 
+    def test_private_binding_accepts_only_the_recorded_native_director_owner_without_grants(
+        self,
+    ) -> None:
+        owner = replace(self.identity, director_agent=True)
+        self.store = Mock(spec=PostgresRecordStore, wraps=self.store)
+        profile = LaunchplaneProductProfileRecord(
+            product=self.operation.product,
+            display_name="Fixture",
+            repository="example/fixture",
+            driver_id="odoo",
+            image=ProductImageProfile(repository="ghcr.io/example/fixture"),
+            runtime_port=8069,
+            health_path="/web/health",
+            lanes=(ProductLaneProfile(context=self.operation.context, instance="testing"),),
+            updated_at=self.operation.updated_at,
+            source="fixture",
+        )
+        self.store.read_product_profile_record = Mock(return_value=profile)
+        self.store.list_product_profile_records = Mock(return_value=(profile,))
+        self.operation.authorization = capture_director_testing_rebuild_authorization(
+            identity=owner,
+            request=self.operation.request,
+            context=self.operation.context,
+            store=self.store,
+            authorized_at=self.operation.created_at,
+        )
+        path = ODOO_STABLE_TARGET_REPLACEMENT_OPERATION_STATUS_ROUTE.format(
+            operation_id=self.operation.operation_id
+        )
+        for caller, expected in (
+            (owner, 200),
+            (replace(owner, subject="another-operator"), 403),
+            (replace(owner, token_label="another-token"), 403),
+            (replace(owner, director_agent=False), 403),
+        ):
+            with self.subTest(caller=caller):
+                self.identity = caller
+                self.store.reset_mock()
+                response = asyncio.run(
+                    request(
+                        self.app(authorized=False),
+                        "GET",
+                        path + "?include_native_execution_binding=true",
+                    )
+                )
+                self.assertEqual(response.status_code, expected, response.text)
+                if expected == 200:
+                    binding = response.json()["native_execution_binding"]
+                    self.assertEqual(binding["operation_id"], self.operation.operation_id)
+                    self.assertEqual(binding["execution_server_id"], self.intent["server_id"])
+                    self.assertFalse(response.json()["recovery"]["safe_to_release"])
+                    ordinary = asyncio.run(request(self.app(authorized=False), "GET", path))
+                    self.assertEqual(ordinary.status_code, 200, ordinary.text)
+                    self.assertEqual(ordinary.json()["operation"], response.json()["operation"])
+                else:
+                    self.store.read_original_mutation_intent.assert_not_called()
+                    self.store.read_testing_candidate.assert_not_called()
+                self.store.compare_and_write_testing_rebuild_checkpoint.assert_not_called()
+
     def test_failed_candidate_probe_survives_inverse_and_terminal_checkpoint(self) -> None:
         evidence = self.read().terminal_probe
         self.assertEqual(self.checkpoint.step, "failed")
@@ -656,7 +726,7 @@ class NativeTestingEvidenceTests(unittest.TestCase):
         app = FastAPI()
 
         def identity() -> LocalOperatorIdentity:
-            return LocalOperatorIdentity(subject="fixture", token_label="fixture")
+            return self.identity
 
         def error(**kwargs: Any) -> HTTPException:
             return HTTPException(kwargs["status_code"], detail=kwargs["code"])

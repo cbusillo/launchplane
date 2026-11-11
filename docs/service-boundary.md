@@ -136,8 +136,10 @@ remaining domain and storage removal is tracked in #2437.
     `GET /v1/odoo-prod-promotions/operations/{operation_id}` and
     `GET /v1/odoo-prod-rollbacks/operations/{operation_id}`. The action that
     starts the operation, on the stored operation's product, context and
-    instance, reads the full record. `operations.read` on the Launchplane
-    product for the operation's context and instance, the scope that reads
+    instance, reads the full record. Target-replacement reads also accept the
+    recorded `director_testing_rebuild` caller under its existing native authority.
+    `operations.read` on the Launchplane product for the operation's context and
+    instance, the scope that reads
     the context's recent deployments, reads its structured status: ids,
     statuses, phases, times, attempt, the error code and the env-key names the
     failure is about, marked `free_text_omitted`. It never carries the error
@@ -198,10 +200,9 @@ remaining domain and storage removal is tracked in #2437.
     `include_native_execution_binding=true` separately selects the closed
     `NativeTestingExecutionBinding` private representation in
     `native_execution_binding`. It uses the same operation lookup and stored
-    full-record authority: the action that starts the operation on its stored
-    product/context/instance. An `operations.read`-only caller receives 403 for
-    this private representation before additional records are read. Its existing
-    public-safe views remain available. No identity or grant is added, and a
+    full-record authority described above. An `operations.read`-only caller
+    receives 403 for this private representation before additional records are
+    read. Its existing public-safe views remain available. No identity or grant is added, and a
     refusal is not permission to switch callers or request a new grant.
     It includes the public-safe `native_evidence` internally. The normal
     `native_evidence` and default responses gain no private fields. Selecting
