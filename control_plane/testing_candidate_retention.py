@@ -16,8 +16,6 @@ from control_plane.contracts.canonical_json import (
 )
 from control_plane.contracts.candidate_custody_evidence import (
     CandidateCustodyEvidence,
-    Outcome,
-    Predicate,
     LifecycleEvidence,
     VolumeCustodyEvidence,
 )
@@ -476,8 +474,6 @@ def candidate_lifecycle_custody(
         if evidence is not None and observation:
             parsed = LifecycleEvidence.model_validate(observation)
             evidence.containers = parsed.containers
-            predicate: Predicate
-            outcome: Outcome
             for predicate, outcome in parsed.checks.items():
                 # Pydantic validates these keys; PyCharm widens their Literal on iteration.
                 # noinspection PyTypeChecker
