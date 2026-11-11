@@ -3474,6 +3474,71 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)
 
+    def test_failed_rebuild_ends_its_lease_then_releases_its_candidate_after_commit(
+        self,
+    ) -> None:
+        from control_plane.contracts.durable_operation_authorization import (
+            DurableOperationAuthorization,
+        )
+        from control_plane.workflows import odoo_stable_operation_worker as worker
+        from tests.support.durable_operations import (
+            durable_operation_authorization_payload,
+            durable_operation_policy_record,
+        )
+
+        self.empty_original_configuration()
+        authorization = durable_operation_authorization_payload(
+            action="odoo_target_replacement_apply.execute",
+            managed_rule_id="native-testing-fixture",
+            product=self.operation.product,
+            context=self.operation.context,
+        )
+        now = datetime.now(UTC)
+        operation = self.operation.model_copy(
+            update={
+                "schema_version": 2,
+                "authorization": DurableOperationAuthorization.model_validate(authorization),
+                "status": "running",
+                "phase": "running",
+                "lease_owner": "worker",
+                "started_at": now.isoformat(),
+                "lease_expires_at": (now + timedelta(minutes=5)).isoformat(),
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(operation)
+        seen: list[Any] = []
+
+        def release(store: Any, _root: Any, operation_id: str) -> None:
+            seen.append(store.read_odoo_stable_target_replacement_operation_record(operation_id))
+            raise RuntimeError("Fabricated release failure")
+
+        with (
+            patch.object(
+                worker,
+                "read_active_authz_policy_record",
+                return_value=durable_operation_policy_record(authorization),
+            ),
+            patch.object(worker, "release_failed_candidate", side_effect=release),
+            self.assertLogs(level="ERROR"),
+        ):
+            self.assertTrue(
+                worker._execute_target_replacement_operation(
+                    record_store=self.store,
+                    control_plane_root_path=self.root,
+                    operation=operation,
+                    lease_owner="worker",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+            )
+        failed = self.store.read_odoo_stable_target_replacement_operation_record(
+            operation.operation_id
+        )
+        self.assertEqual(seen, [failed])
+        self.assertEqual(failed.status, "fail")
+        self.assertTrue(failed.error_code and failed.error_message)
+        self.assertEqual(failed.lease_expires_at, failed.finished_at)
+
     def test_terminal_incomplete_storage_ends_admission_without_another_preparation(self) -> None:
         from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
         from control_plane import testing_candidate_allocation as allocation_service
