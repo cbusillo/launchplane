@@ -41,7 +41,6 @@ _PRODUCT_ENVIRONMENT_READ_MODEL_STORE_METHODS = (
     "list_promotion_records",
     "list_backup_gate_records",
     "list_preview_records",
-    "list_preview_summaries",
     "list_preview_desired_state_records",
     "list_preview_lifecycle_cleanup_records",
     "list_preview_pr_feedback_records",

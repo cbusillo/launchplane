@@ -79,6 +79,7 @@ from control_plane.service_auth import (
     director_agent_identity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_rebuild_authorization import director_testing_rebuild_owner_allowed
 from control_plane.contracts.testing_replacement_recovery import TestingReplacementRecoveryRead
 from control_plane.testing_replacement_recovery import (
     TestingRecoveryStore,
@@ -554,7 +555,9 @@ def register_operation_status_read_routes(
                 code="not_found",
                 message=str(error),
             ) from error
-        full_record = _operation_status_execute_allowed(
+        full_record = director_testing_rebuild_owner_allowed(
+            identity=identity, operation=operation, store=record_store
+        ) or _operation_status_execute_allowed(
             dependencies=dependencies,
             identity=identity,
             trace_id=trace_id,
