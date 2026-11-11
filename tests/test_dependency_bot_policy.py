@@ -141,29 +141,34 @@ class DependencyBotPolicyTests(unittest.TestCase):
                     expected,
                 )
 
-    def test_workspace_devkit_pins_need_forward_proof_of_the_pinned_commits(self) -> None:
-        old = "".join(
+    def test_workspace_pins_need_forward_proof_of_the_pinned_commits(self) -> None:
+        devkit = "".join(
             f'[repos.{slot}]\nrepository = "example/devkit"\nref = "' + "a" * 40 + '"\n'
             for slot in ("devkit", "runtime")
         )
-        for pinned, upstream_status, expected in (
-            ("b" * 40, "ahead", "patch_or_minor"),
-            ("b" * 40, "behind", "needs_review"),
-            ("b" * 40, "diverged", "needs_review"),
-            ("c" * 40, "ahead", "needs_review"),
-        ):
-            with self.subTest(pinned=pinned, upstream_status=upstream_status):
-                self.assertEqual(
-                    _digest_pin_class(
-                        filename="workspace.toml",
-                        old=old,
-                        new=old.replace("a" * 40, pinned),
-                        dep_name="example/devkit",
-                        current_value="main",
-                        upstream_status=upstream_status,
-                    ),
-                    expected,
-                )
+        shared = (
+            '[repos.devkit]\nrepository = "example/devkit"\nref = "' + "d" * 40 + '"\n'
+            '[repos.shared_addons]\nrepository = "example/shared"\nref = "' + "a" * 40 + '"\n'
+        )
+        for old, dep_name in ((devkit, "example/devkit"), (shared, "example/shared")):
+            for pinned, upstream_status, expected in (
+                ("b" * 40, "ahead", "patch_or_minor"),
+                ("b" * 40, "behind", "needs_review"),
+                ("b" * 40, "diverged", "needs_review"),
+                ("c" * 40, "ahead", "needs_review"),
+            ):
+                with self.subTest(dep_name=dep_name, pinned=pinned, status=upstream_status):
+                    self.assertEqual(
+                        _digest_pin_class(
+                            filename="workspace.toml",
+                            old=old,
+                            new=old.replace("a" * 40, pinned),
+                            dep_name=dep_name,
+                            current_value="main",
+                            upstream_status=upstream_status,
+                        ),
+                        expected,
+                    )
 
     def test_add_remove_identity_and_change_allowed_types_without_code_changes(self) -> None:
         identity = 711

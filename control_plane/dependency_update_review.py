@@ -215,10 +215,12 @@ def _workspace_pin_only(
             return False
     changed = False
     old, new = documents
-    for slot in ("devkit", "runtime"):
-        old_repos, new_repos = old.get("repos"), new.get("repos")
-        if not isinstance(old_repos, dict) or not isinstance(new_repos, dict):
-            return False
+    old_repos, new_repos = old.get("repos"), new.get("repos")
+    if not isinstance(old_repos, dict) or not isinstance(new_repos, dict):
+        return False
+    # Train admission proves each declared digest moves forward, so any pin may
+    # move. Client-note readers have no such proof and exempt only the devkit.
+    for slot in ("devkit", "runtime") if declared_updates is None else tuple(old_repos):
         old_repo = old_repos.get(slot)
         new_repo = new_repos.get(slot)
         if not isinstance(old_repo, dict) or not isinstance(new_repo, dict):
