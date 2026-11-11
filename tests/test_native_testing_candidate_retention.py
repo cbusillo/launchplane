@@ -103,9 +103,8 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         )
 
     def plan(self) -> Any:
-        return self.retention.build_native_testing_sweep(
-            self.store, self.root, self.request, "trace"
-        )[0]
+        request = self.request.model_copy(update={"candidates": (self.candidate.namespace,)})
+        return self.retention.build_native_testing_sweep(self.store, self.root, request, "trace")[0]
 
     def store_candidate(self, candidate: TestingCandidateAllocation) -> None:
         from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
@@ -196,9 +195,6 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         self,
     ) -> None:
         self.with_application(prepared=True)
-        self.observation["volumes"][0].update(
-            empty=False, reason="completed_or_unknown_web_gate", referenced=True
-        )
         later = self.candidate.model_copy(
             update={
                 "namespace": testing_candidate_namespace(

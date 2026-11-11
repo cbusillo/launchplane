@@ -12,7 +12,7 @@ from control_plane.retained_volume_capture import (
 
 NATIVE_TESTING_RETENTION_INSPECTION = (
     "from collections.abc import Callable,Mapping,Sequence\nfrom typing import Any\n"
-    "import base64,hashlib,json,os,re,subprocess,sys,time\nfrom pathlib import Path\n"
+    "import base64,hashlib,json,os,re,subprocess,sys,tempfile,time\nfrom pathlib import Path\n"
     + inspect.getsource(_batched_docker_inspect)
     + inspect.getsource(retained_volume_docker_command)
     + inspect.getsource(retained_volume_identity)
@@ -22,6 +22,19 @@ NATIVE_TESTING_RETENTION_INSPECTION = (
     + r"""
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 prefix=sys.argv[2]
+receipt_path=None
+effect_started=False
+
+class Refused(ValueError):
+    pass
+
+def save_receipt(result):
+    if receipt_path is None:
+        return
+    with tempfile.NamedTemporaryFile(mode='w',dir=receipt_path.parent,delete=False) as output:
+        json.dump(result,output,sort_keys=True)
+        temporary=Path(output.name)
+    os.replace(temporary,receipt_path)
 
 def docker(*arguments):
     result=subprocess.run(retained_volume_docker_command(*arguments),capture_output=True,timeout=60,check=False)
@@ -36,15 +49,42 @@ def identifiers(*arguments):
     return docker(*arguments).splitlines()
 
 def inspect_candidate():
+    global receipt_path,effect_started
     resources=spec['resources']
     namespace=resources['namespace']
     if (resources['instance']!='testing' or re.fullmatch(r'lp-testing-[a-f0-9]{32}',namespace) is None
         or spec.get('mode','dry-run') not in {'dry-run','apply','readback'}):
-        raise ValueError('testing ownership required')
+        raise Refused('testing_scope_required')
     digest=hashlib.sha256(json.dumps(resources,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     engine=load('info','--format','{{json .}}')
     engine_id=engine['ID']
     root=Path(engine['DockerRootDir'])
+    if not root.is_absolute() or root.resolve(strict=True)!=root:
+        raise Refused('production_boundary')
+    mode=spec.get('mode','dry-run')
+    if mode!='dry-run':
+        key=spec.get('operation_key')
+        if not isinstance(key,str) or not key:
+            raise Refused('release_key_required')
+        directory=root/'launchplane-state'/'testing-candidate-release'
+        if directory.is_symlink() or directory.parent.is_symlink():
+            raise Refused('release_receipt_boundary')
+        if mode=='apply':
+            directory.mkdir(mode=0o700,parents=True,exist_ok=True)
+        if directory.exists():
+            if directory.is_symlink() or directory.parent.is_symlink():
+                raise Refused('release_receipt_boundary')
+            receipt_path=directory/hashlib.sha256((digest+'\n'+key).encode()).hexdigest()
+            if receipt_path.exists():
+                if receipt_path.is_symlink():
+                    raise Refused('release_receipt_boundary')
+                saved=json.loads(receipt_path.read_text())
+                if saved.get('release_status') in {'held','released'}:
+                    return saved
+                if mode=='apply':
+                    raise RuntimeError('original_release_requires_readback')
+            if mode=='apply':
+                save_receipt({'release_status':'active'})
     expected={'ODOO_DB_VOLUME':namespace+'-db','ODOO_DATA_VOLUME':namespace+'-data','ODOO_LOG_VOLUME':namespace+'-logs'}
     existing=set(identifiers('volume','ls','-q'))
     volumes=_batched_docker_inspect('volume',sorted(existing & set(expected.values())),load)
@@ -54,7 +94,7 @@ def inspect_candidate():
         if project.fullmatch(str((row.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project','')))}
     serving=any(row.get('HostConfig',{}).get('PortBindings') for row in own.values())
     if serving and spec.get('mode')=='apply':
-        raise ValueError('candidate is serving')
+        raise Refused('candidate_release_selected')
     result=[]
     pools=storage_backing_pools()
     for role,name in expected.items():
@@ -69,7 +109,7 @@ def inspect_candidate():
             or labels.get('io.launchplane.testing-resource-role')!=role
             or 'io.launchplane.production-recipient' in labels
             or path!=root/'volumes'/name/'_data' or path.resolve(strict=True)!=path or not path.is_dir()):
-            raise ValueError('testing resource boundary mismatch')
+            raise Refused('production_boundary')
         metadata=path.stat();space=os.statvfs(path)
         result.append({'role':role,'name':name,'status':'observed','reason':'',
             'identity':retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino,backing_filesystem_id=space.f_fsid if space.f_fsid>0 else None),
@@ -81,6 +121,8 @@ def inspect_candidate():
         if identifier in own:
             continue
         for mount in container.get('Mounts') or ():
+            if mount.get('Name') in volumes:
+                raise Refused('production_boundary')
             if mount.get('Type')=='tmpfs' or mount.get('RW') is False:
                 continue
             source=mount.get('Source')
@@ -88,19 +130,20 @@ def inspect_candidate():
                 continue
             source=Path(source).resolve()
             if any(source==path or source in path.parents or path in source.parents for path in paths):
-                raise ValueError('testing storage has a foreign writer')
+                raise Refused('production_boundary')
     for container in own.values():
         if 'io.launchplane.production-recipient' in (container.get('Config',{}).get('Labels') or {}):
-            raise ValueError('production container')
+            raise Refused('production_boundary')
         for mount in container.get('Mounts') or ():
             if mount.get('Type')=='tmpfs' or mount.get('RW') is False:
                 continue
             if mount.get('Type')!='volume' or mount.get('Name') not in volumes:
-                raise ValueError('container writes outside testing volumes')
+                raise Refused('production_boundary')
     mode=spec.get('mode','dry-run')
     physical={}
     if mode=='apply':
-        before={row['name']:row.get('free_bytes') for row in result}
+        before={tuple(row['backing']):row['free_bytes'] for row in result if 'backing' in row}
+        effect_started=True
         if own:
             docker('stop',*own)
             docker('rm',*own)
@@ -117,8 +160,10 @@ def inspect_candidate():
                 probe=probe.parent
             space=os.statvfs(probe)
             after=space.f_bavail*space.f_frsize
-            physical[row['identity']]={'before_bytes':before[row['name']],'after_bytes':after,
-                'observed_change_bytes':after-before[row['name']]}
+            backing=tuple(row['backing'])
+            physical[row['identity']]={'before_bytes':before[backing],'after_bytes':after,
+                'observed_change_bytes':after-before[backing]}
+            before[backing]=after
             row['status']='absent'
             row['reason']='removed'
     projects={(row.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project') for row in own.values()}
@@ -161,12 +206,24 @@ def inspect_candidate():
         except (KeyError,ValueError,RuntimeError,OSError):
             capacity=[]
             capacity_refusal='receiver_backing_or_requirement_unknown'
-    return {'volumes':result,'capacity':capacity,'capacity_refusal':capacity_refusal,'physical_readback':physical,'serving':bool(serving)}
+    response={'volumes':result,'capacity':capacity,'capacity_refusal':capacity_refusal,
+        'physical_readback':physical,'serving':bool(serving),'container_count':0 if mode=='apply' else len(own)}
+    if mode=='apply':
+        response['release_status']='released'
+        save_receipt(response)
+    return response
 
 try:
-    print(prefix+json.dumps({'type':'complete',**inspect_candidate()},sort_keys=True),flush=True)
+    response=inspect_candidate()
+except Refused as error:
+    response={'volumes':[],'capacity':[],'capacity_refusal':'physical_inventory_unknown',
+        'release_status':'held','reason_code':str(error)}
+    save_receipt(response)
 except Exception:
-    print(prefix+json.dumps({'type':'complete','volumes':[],'capacity':[],
-        'capacity_refusal':'physical_inventory_unknown'}),flush=True)
+    response={'volumes':[],'capacity':[],'capacity_refusal':'physical_inventory_unknown',
+        'release_status':'unknown' if effect_started else 'held','reason_code':'host_read_unavailable'}
+    if not effect_started:
+        save_receipt(response)
+print(prefix+json.dumps({'type':'complete',**response},sort_keys=True),flush=True)
 """
 )

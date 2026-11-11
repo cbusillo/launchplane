@@ -23,6 +23,8 @@ identifies the failed original whose candidate is selected for release. This
 selection is different from the lane's selected serving target.
 
 The dry run lists recorded candidates in that exact product/testing context.
+Unselected siblings are listed from records without remote probes; their
+unobserved status remains unknown.
 Only the path candidate has `selected: true`. Optional `receiver_operation_id`
 identifies the restore whose remaining capacity should be measured. That receiver
 is excluded from release. Production originals and foreign contexts are rejected.
@@ -70,7 +72,10 @@ claim.
 
 Readback uses the original request, digest and key. Completed receipts replay.
 Interrupted effects reconcile only their original receipts and never repeat a
-deletion blindly. Older unfinished custody-based receipts cannot dispatch this
+deletion blindly. The host retains the same operation key under
+`DockerRootDir/launchplane-state/testing-candidate-release`, so a lost reply can
+recover the terminal refusal or completed physical measurements. A refusal before
+any effect releases the service reservation; a definite host refusal settles held. Older unfinished custody-based receipts cannot dispatch this
 new effect path. Preserve their original keys and evidence for reconciliation.
 
 ## Automatic release

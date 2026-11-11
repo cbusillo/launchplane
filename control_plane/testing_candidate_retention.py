@@ -61,7 +61,7 @@ def candidate_record_refusals(
     if candidate.operation_id == receiver_operation_id:
         reasons.append("receiver_candidate")
     if candidate.compose_id in selected_targets:
-        reasons.append("selected_target")
+        reasons.append("candidate_release_selected")
     if operation.status != "fail":
         reasons.append("original_not_failed")
     return tuple(reasons)
@@ -74,12 +74,12 @@ def inspect_candidate_resources(
     *,
     mode: str = "dry-run",
     dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
+    operation_key: str = "",
 ) -> tuple[dict[str, Any], str]:
     host, token = source.read_dokploy_config(
         control_plane_root=root, database_url=store.database_url
     )
     frames: list[dict[str, Any]] = []
-    database_name = ""
     try:
         provider = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=candidate.compose_id
@@ -103,6 +103,7 @@ def inspect_candidate_resources(
         program=NATIVE_TESTING_RETENTION_INSPECTION,
         payload={
             "mode": mode,
+            "operation_key": operation_key,
             "resources": candidate_resources(candidate).model_dump(mode="json"),
             "project": candidate.namespace,
             "generation": generation.model_dump(mode="json") if generation else None,
@@ -123,16 +124,15 @@ def build_native_testing_sweep(
     root: Path,
     request: NativeTestingSweepRequest,
     trace_id: str,
-    allowed_provider_records: frozenset[str] = frozenset(),
     *,
     evidence: list[CandidateCustodyEvidence] | None = None,
 ) -> tuple[NativeTestingSweepResponse, dict[str, Any]]:
-    del allowed_provider_records
     receiver_id = (
         request.operation_id
         if request.receiver_operation_id is None
         else request.receiver_operation_id
     )
+    operation = store.read_odoo_stable_target_replacement_operation_record(request.operation_id)
     for identifier in {request.operation_id, receiver_id} - {""}:
         operation = store.read_odoo_stable_target_replacement_operation_record(identifier)
         if (operation.product, operation.context, operation.instance) != (
@@ -145,6 +145,7 @@ def build_native_testing_sweep(
         candidate
         for candidate in store.list_testing_candidates()
         if (candidate.product, candidate.context) == (request.product, request.context)
+        and candidate.compose_id
     ]
     if set(request.candidates) - {candidate.namespace for candidate in owned}:
         raise ValueError("A selected candidate has foreign or unknown original custody.")
@@ -158,27 +159,38 @@ def build_native_testing_sweep(
         require_lane_releasable,
     )
 
+    usage_unavailable = ""
+    lane_reason = ""
+    try:
+        usage_unavailable = require_lane_releasable(root, store, operation)
+    except TestingCandidateReleaseRefused as error:
+        lane_reason = error.code
+    operation = store.read_odoo_stable_target_replacement_operation_record(request.operation_id)
     for candidate in owned:
         selected = candidate.namespace in request.candidates
         if evidence is not None and not selected:
             continue
-        operation = store.read_odoo_stable_target_replacement_operation_record(
-            candidate.operation_id
+        reasons = (
+            candidate_record_refusals(
+                candidate,
+                operation,
+                product=request.product,
+                context=request.context,
+                receiver_operation_id=receiver_id,
+                selected_targets=tuple(
+                    row.target_id for row in store.list_dokploy_target_id_records()
+                ),
+            )
+            if selected
+            else (("receiver_candidate",) if candidate.operation_id == receiver_id else ())
         )
-        reasons = candidate_record_refusals(
-            candidate,
-            operation,
-            product=request.product,
-            context=request.context,
-            receiver_operation_id=receiver_id,
-            selected_targets=tuple(row.target_id for row in store.list_dokploy_target_id_records()),
-        )
-        usage_unavailable = ""
-        try:
-            require_candidate_unselected(root, store, candidate)
-            usage_unavailable = require_lane_releasable(root, store, operation)
-        except TestingCandidateReleaseRefused as error:
-            reasons = (*reasons, error.code)
+        if lane_reason:
+            reasons = (*reasons, lane_reason)
+        if selected:
+            try:
+                require_candidate_unselected(root, store, candidate)
+            except TestingCandidateReleaseRefused as error:
+                reasons = (*reasons, error.code)
         observed: dict[str, Any] = {"volumes": [], "capacity": []}
         references: list[NativeTestingSweepReference] = []
         if usage_unavailable:
@@ -188,15 +200,22 @@ def build_native_testing_sweep(
                 )
             )
         try:
-            observed, unavailable = inspect_candidate_resources(root, store, candidate)
+            unavailable = ""
+            if selected or candidate.operation_id == receiver_id:
+                observed, unavailable = inspect_candidate_resources(root, store, candidate)
         except (ValueError, OSError, click.ClickException) as error:
             if isinstance(error, native_copy_stream.NativeSourceAuthorizationDenied) or (
                 isinstance(error, api.DokployRequestFailed) and error.status_code in {401, 403}
             ):
                 raise
             unavailable = "physical_inventory_unknown"
-        if observed.get("serving") is True:
+        if observed.get("serving"):
             reasons = (*reasons, "candidate_release_selected")
+        if observed.get("release_status") == "held" and observed.get("reason_code") in {
+            "production_boundary",
+            "candidate_release_selected",
+        }:
+            reasons = (*reasons, observed["reason_code"])
         if unavailable:
             references.append(NativeTestingSweepReference(reason=unavailable, kind="observation"))
         if candidate.operation_id == receiver_id:
@@ -209,15 +228,16 @@ def build_native_testing_sweep(
             resources.append(
                 NativeTestingSweepResource(
                     role=role,
-                    volume_identity_sha256=row.get("identity")
-                    or canonical_json_sha256({"server": candidate.server_id, "volume": name}),
+                    volume_identity_sha256=row.get("identity") or "",
                     backing_sha256=canonical_json_sha256(
                         {"server": candidate.server_id, "backing": row["backing"]}
                     )
                     if "backing" in row
                     else "",
                     free_bytes=row.get("free_bytes"),
-                    status="held"
+                    status="unknown"
+                    if not selected and not reasons
+                    else "held"
                     if reasons
                     else "absent"
                     if row.get("status") == "absent"
@@ -236,13 +256,17 @@ def build_native_testing_sweep(
             context=candidate.context,
             target_id=candidate.compose_id,
             selected=selected,
-            status="held"
+            status="unknown"
+            if not selected and not reasons
+            else "held"
             if reasons
             else "absent"
             if all(row.status == "absent" for row in resources)
+            and not observed.get("container_count")
             else "eligible",
             reasons=tuple(dict.fromkeys(reasons)),
             ownership_sha256=ownership,
+            container_count=observed.get("container_count", 0),
             resources=tuple(resources),
             references=tuple(references),
         )
@@ -330,24 +354,52 @@ class NativeTestingSweepAdapter:
         candidate: NativeTestingSweepCandidate,
         mode: str,
         dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
+        operation_key: str = "",
     ) -> NativeTestingSweepCandidate:
         saved = self.private[candidate.namespace]
         if saved.get("release_rule") != "current-testing-use":
             raise ProviderMutationUnknownError("Preserve the original retention receipt.")
         allocation = TestingCandidateAllocation.model_validate(saved["allocation"])
         observed, unavailable = inspect_candidate_resources(
-            self.root, self.store, allocation, mode=mode, dispatch_guard=dispatch_guard
+            self.root,
+            self.store,
+            allocation,
+            mode=mode,
+            dispatch_guard=dispatch_guard,
+            operation_key=operation_key,
         )
-        if unavailable or not all(row.get("status") == "absent" for row in observed["volumes"]):
+        if observed.get("release_status") == "held":
+            reason = observed.get("reason_code", "release_refused")
+            return candidate.model_copy(
+                update={
+                    "status": "held",
+                    "reasons": (reason,),
+                    "resources": tuple(
+                        row.model_copy(update={"status": "held", "reason": reason})
+                        for row in candidate.resources
+                    ),
+                }
+            )
+        if (
+            unavailable
+            or observed.get("container_count")
+            or not all(row.get("status") == "absent" for row in observed["volumes"])
+        ):
             raise ProviderMutationUnknownError("Candidate removal needs its original readback.")
         return candidate.model_copy(
             update={
                 "status": "absent",
+                "container_count": 0,
                 "resources": tuple(
                     row.model_copy(update={"status": "absent", "reason": "removed"})
                     for row in candidate.resources
                 ),
-                "physical_readback": observed.get("physical_readback", {}),
+                "physical_readback": observed.get("physical_readback")
+                or {
+                    row.volume_identity_sha256: {"reason": "backing_readback_unknown"}
+                    for row in candidate.resources
+                    if row.volume_identity_sha256
+                },
             }
         )
 
@@ -383,8 +435,10 @@ class NativeTestingSweepAdapter:
     ) -> ProviderObservation:
         if reconciliation_key != self.reconciliation_key():
             return ProviderObservation("unknown")
+        if not provider_effect_phase:
+            return ProviderObservation("absent", retry_safe=True)
         candidates = [
-            self._observe_candidate(candidate, "readback")
+            self._observe_candidate(candidate, "readback", operation_key=provider_operation_key)
             if candidate.selected and candidate.status == "eligible"
             else candidate
             for candidate in self.plan.candidates
@@ -397,52 +451,54 @@ class NativeTestingSweepAdapter:
         if self.plan.plan_sha256 != self.request.reviewed_plan_sha256:
             raise ProviderMutationRejectedError(ValueError("The reviewed candidate changed."))
         candidates = []
+        dispatched = False
         performed = False
-        for candidate in self.plan.candidates:
-            if not candidate.selected or candidate.status != "eligible":
-                candidates.append(candidate)
-                continue
-            with self.store.testing_candidate_retention_guard(candidate.operation_id) as check:
-                original = TestingCandidateAllocation.model_validate(
-                    self.private[candidate.namespace]["allocation"]
-                )
-
-                def guard() -> None:
-                    check()
-                    from control_plane.testing_candidate_release import (
-                        require_failed_testing_operation,
-                        require_candidate_unselected,
-                        require_lane_releasable,
+        try:
+            for candidate in self.plan.candidates:
+                if not candidate.selected or candidate.status != "eligible":
+                    candidates.append(candidate)
+                    continue
+                with self.store.testing_candidate_retention_guard(candidate.operation_id) as check:
+                    original = TestingCandidateAllocation.model_validate(
+                        self.private[candidate.namespace]["allocation"]
                     )
 
-                    operation = self.store.read_odoo_stable_target_replacement_operation_record(
-                        candidate.operation_id
-                    )
-                    require_failed_testing_operation(operation, self.request.product)
-                    if self.store.read_testing_candidate(candidate.namespace) != original:
-                        raise ValueError("Candidate resource addressing changed.")
-                    require_candidate_unselected(self.root, self.store, original)
-                    require_lane_releasable(self.root, self.store, operation)
-                    if self.check_current_use is not None:
-                        self.check_current_use(original)
+                    def guard() -> None:
+                        check()
+                        if self.store.read_testing_candidate(candidate.namespace) != original:
+                            raise ValueError("Candidate resource addressing changed.")
+                        if self.check_current_use is not None:
+                            self.check_current_use(original)
 
-                def dispatch(effect: Callable[[], None]) -> None:
+                    def dispatch(effect: Callable[[], None]) -> None:
+                        nonlocal dispatched
+                        guard()
+                        lease.checkpoint_effect("release_failed_testing_copy")
+                        dispatched = True
+                        effect()
+
                     guard()
-                    lease.checkpoint_effect("release_failed_testing_copy")
-                    effect()
-
-                guard()
-                if isinstance(lease, ProviderEvidenceLease):
-                    with self.store.provider_evidence_guard(
-                        lease.evidence_reservation, effect_admission_checkpoint=guard
-                    ):
-                        result = self._observe_candidate(candidate, "apply", dispatch)
-                else:
-                    result = self._observe_candidate(candidate, "apply", dispatch)
-                candidates.append(result)
-                performed = True
+                    if isinstance(lease, ProviderEvidenceLease):
+                        with self.store.provider_evidence_guard(
+                            lease.evidence_reservation, effect_admission_checkpoint=guard
+                        ):
+                            result = self._observe_candidate(
+                                candidate, "apply", dispatch, provider_operation_key
+                            )
+                    else:
+                        result = self._observe_candidate(
+                            candidate, "apply", dispatch, provider_operation_key
+                        )
+                    candidates.append(result)
+                    performed = True
+        except (ValueError, OSError, click.ClickException, ProviderMutationUnknownError) as error:
+            if dispatched:
+                raise ProviderMutationUnknownError(
+                    "Read back the original candidate release."
+                ) from error
+            raise ProviderMutationRejectedError(error) from error
         return ProviderMutationOutcome(
-            202, self._result(candidates), provider_effect_performed=performed
+            202, self._result(candidates), provider_effect_performed=performed and dispatched
         )
 
 

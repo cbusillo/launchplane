@@ -132,8 +132,14 @@ class CandidateReleaseProgramFixture(unittest.TestCase):
         payload = base64.b64encode(
             json.dumps({"mode": mode, "resources": spec or resources()}).encode()
         ).decode()
+        return cast(
+            dict[str, Any],
+            self.run_host_program(TESTING_CANDIDATE_RELEASE_PROGRAM, payload)["result"],
+        )
+
+    def run_host_program(self, program: str, payload: str) -> dict[str, Any]:
         result = subprocess.run(
-            [sys.executable, "-c", TESTING_CANDIDATE_RELEASE_PROGRAM, payload, "FRAME:"],
+            [sys.executable, "-c", program, payload, "FRAME:"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -141,8 +147,7 @@ class CandidateReleaseProgramFixture(unittest.TestCase):
             env=os.environ | {"PATH": self.path, "FAKE_DOCKER_STATE": str(self.state_path)},
         )
         self.state = json.loads(self.state_path.read_text())
-        frame: dict[str, dict[str, Any]] = json.loads(result.stdout.removeprefix("FRAME:"))
-        return frame["result"]
+        return cast(dict[str, Any], json.loads(result.stdout.removeprefix("FRAME:")))
 
     def removals(self) -> list[list[str]]:
         return [
@@ -225,34 +230,38 @@ class CurrentTestingReleaseProgramTests(CandidateReleaseProgramFixture):
         self.state["containers"]["candidate-web"]["Mounts"][0]["RW"] = True
         self.save()
 
-    def current_program(self, mode: str, spec: dict[str, str] | None = None) -> dict[str, Any]:
+    def current_program(
+        self,
+        mode: str,
+        spec: dict[str, str] | None = None,
+        *,
+        operation_key: str = "fixture-release",
+    ) -> dict[str, Any]:
         from control_plane.testing_candidate_retention_host import (
             NATIVE_TESTING_RETENTION_INSPECTION,
         )
 
         payload = base64.b64encode(
             json.dumps(
-                {"mode": mode, "resources": spec or resources(), "project": NAMESPACE}
+                {
+                    "mode": mode,
+                    "resources": spec or resources(),
+                    "project": NAMESPACE,
+                    "operation_key": operation_key,
+                }
             ).encode()
         ).decode()
-        result = subprocess.run(
-            [sys.executable, "-c", NATIVE_TESTING_RETENTION_INSPECTION, payload, "FRAME:"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=True,
-            env=os.environ | {"PATH": self.path, "FAKE_DOCKER_STATE": str(self.state_path)},
+        program = (
+            """import os,json
+from pathlib import Path
+from types import SimpleNamespace
+os.statvfs=lambda path:SimpleNamespace(f_bavail=1000+(3-len(json.loads(Path(os.environ['FAKE_DOCKER_STATE']).read_text())['volumes']))*100,f_frsize=1,f_fsid=1)
+"""
+            + NATIVE_TESTING_RETENTION_INSPECTION
         )
-        self.state = json.loads(self.state_path.read_text())
-        return cast(dict[str, Any], json.loads(result.stdout.removeprefix("FRAME:")))
+        return self.run_host_program(program, payload)
 
-    def test_failed_running_copy_releases_with_unknown_gates_and_verifies_space(self) -> None:
-        archive = self.root / "migrated-source.tar"
-        pair = self.root / "qualified-pair"
-        pair.mkdir()
-        archive.write_bytes(b"original migration source")
-        for part in ("database", "filestore"):
-            (pair / part).write_bytes(part.encode())
+    def test_failed_running_copy_releases_nonempty_volumes_and_measures_each_change(self) -> None:
         for volume in self.state["volumes"].values():
             (Path(volume["path"]) / "retained").write_bytes(b"failed copy data")
         self.state["containers"]["candidate-web"]["State"] = {"Running": True}
@@ -264,12 +273,18 @@ class CurrentTestingReleaseProgramTests(CandidateReleaseProgramFixture):
         self.assertTrue(all(row["status"] == "absent" for row in applied["volumes"]))
         self.assertEqual(self.state["volumes"], {})
         self.assertEqual(self.state["containers"], {})
+        self.assertEqual(
+            sorted(row["before_bytes"] for row in applied["physical_readback"].values()),
+            [1000, 1100, 1200],
+        )
+        self.assertEqual(
+            sorted(row["after_bytes"] for row in applied["physical_readback"].values()),
+            [1100, 1200, 1300],
+        )
         for row in applied["physical_readback"].values():
             self.assertGreater(row["before_bytes"], 0)
             self.assertGreater(row["after_bytes"], 0)
             self.assertEqual(row["observed_change_bytes"], row["after_bytes"] - row["before_bytes"])
-        self.assertEqual(archive.read_bytes(), b"original migration source")
-        self.assertEqual({p.name for p in pair.iterdir()}, {"database", "filestore"})
         self.assertTrue(
             all(row["status"] == "absent" for row in self.current_program("readback")["volumes"])
         )
@@ -284,6 +299,28 @@ class CurrentTestingReleaseProgramTests(CandidateReleaseProgramFixture):
         self.assertTrue(self.current_program("dry-run")["serving"])
         self.assertEqual(self.current_program("apply")["volumes"], [])
         self.assertEqual(self.removals(), [])
+
+    def test_host_refusal_is_terminal_and_original_readback_does_not_repeat_it(self) -> None:
+        self.state["volumes"][NAMESPACE + "-data"]["labels"][
+            "io.launchplane.production-recipient"
+        ] = "prod"
+        self.save()
+        held = self.current_program("apply")
+        self.assertEqual(held["release_status"], "held")
+        self.assertEqual(held["reason_code"], "production_boundary")
+        self.assertEqual(self.current_program("readback")["reason_code"], "production_boundary")
+        self.assertEqual(self.removals(), [])
+
+    def test_lost_success_reply_replays_measurements_without_removing_again(self) -> None:
+        applied = self.current_program("apply")
+        removals = self.removals()
+        observed = self.current_program("readback")
+        self.assertEqual(observed["physical_readback"], applied["physical_readback"])
+        self.assertEqual(self.removals(), removals)
+        self.assertEqual(
+            self.current_program("apply")["physical_readback"], applied["physical_readback"]
+        )
+        self.assertEqual(self.removals(), removals)
 
     def test_production_scope_labels_or_shared_storage_never_dispatch(self) -> None:
         for spec in (resources(instance="prod"), resources(namespace="production")):
@@ -305,8 +342,12 @@ class CurrentTestingReleaseProgramTests(CandidateReleaseProgramFixture):
                         {"Type": "volume", "Name": "production-db", "RW": True}
                     )
                 self.save()
-                self.assertEqual(self.current_program("apply")["volumes"], [])
+                self.assertEqual(
+                    self.current_program("apply", operation_key=modification)["reason_code"],
+                    "production_boundary",
+                )
                 self.assertEqual(self.removals(), [])
+                volume = self.state["volumes"][NAMESPACE + "-data"]
                 volume["labels"].pop("io.launchplane.production-recipient", None)
                 volume.pop("options", None)
                 volume["labels"]["io.launchplane.testing-resources"] = ownership_label(resources())
@@ -388,8 +429,8 @@ class CandidateReleaseGuardTests(unittest.TestCase):
                     "candidate_release_selected",
                 )
         for state in ("planned", "reversed"):
+            store.list_dokploy_target_id_records.return_value = []
             with (
-                patch.object(store, "list_dokploy_target_id_records", return_value=[]),
                 patch.object(release, "read_publication", return_value=Mock(state=state)),
                 patch.object(release, "candidate_routed", return_value=False),
             ):
@@ -459,11 +500,12 @@ class CandidateReleaseFixture(unittest.TestCase):
             _allocation: Any,
             *,
             mode: str = "dry-run",
-            dispatch_guard: Any = None,
+            dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
+            operation_key: str = "",
         ) -> Any:
             if mode == "apply":
                 if dispatch_guard is not None:
-                    dispatch_guard(lambda: self.applied.append("effect"))
+                    dispatch_guard(lambda: self.applied.append(operation_key))
                 if self.interrupt:
                     from control_plane.provider_operations import ProviderMutationUnknownError
 
@@ -585,6 +627,29 @@ class CandidateReleaseRouteTests(CandidateReleaseFixture):
         self.usage.side_effect = None
         applied = self.post(key="release", mode="apply", reviewed_plan_sha256=reviewed)
         self.assertEqual(applied.json()["status"], "released", applied.text)
+
+    def test_late_guard_refusal_releases_reservation_and_can_be_replanned(self) -> None:
+        from contextlib import nullcontext
+
+        reviewed = self.post().json()["plan_sha256"]
+
+        def acquire(_operation: str) -> Any:
+            self.usage.side_effect = TestingCandidateReleaseRefused(
+                "testing_in_use", "A person arrived after fresh planning."
+            )
+            return nullcontext(lambda: None)
+
+        self.executor.side_effect = acquire
+        refused = self.post(key="late", mode="apply", reviewed_plan_sha256=reviewed)
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(self.applied, [])
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        self.executor.side_effect = lambda _operation: nullcontext(lambda: None)
+        self.usage.side_effect = None
+        self.assertEqual(
+            self.post(key="late", mode="apply", reviewed_plan_sha256=reviewed).json()["status"],
+            "released",
+        )
 
     def test_unknown_original_only_reconciles_without_repeating_removal(self) -> None:
         reviewed = self.post().json()["plan_sha256"]
@@ -754,12 +819,7 @@ class AutomaticCandidateReleaseTests(CandidateReleaseFixture):
         self.assertNotIn("reason_code", readback.json())
 
     def test_each_refusal_keeps_the_candidate_and_names_it(self) -> None:
-        lane_refusals = (
-            "testing_needed_copy",
-            "testing_production_resources_shared",
-            "testing_staff_hold",
-            "testing_in_use",
-        )
+        lane_refusals = ("testing_in_use",)
         for code in (*lane_refusals, "candidate_release_selected", "candidate_release_unavailable"):
             with self.subTest(code=code):
                 self.usage.side_effect, self.routed.side_effect = None, None

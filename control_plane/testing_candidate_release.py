@@ -36,7 +36,6 @@ from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_usage import read_odoo_testing_usage
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
-    ProviderEvidenceLease,
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
     ProviderMutationUnknownError,
@@ -274,7 +273,7 @@ def require_lane_releasable(
         record_store=store,
         product=operation.product,
     )
-    if usage.recent_signins is True:
+    if usage.recent_signins:
         raise TestingCandidateReleaseRefused(
             "testing_in_use", "This testing lane has a sign-in within the recent-use window."
         )
@@ -329,7 +328,6 @@ def build_candidate_release(
     product: str,
     operation_id: str,
     receiver_operation_id: str | None = None,
-    allowed_provider_records: frozenset[str] = frozenset(),
     *,
     include_evidence: bool = False,
 ) -> CandidateRelease:
@@ -360,35 +358,8 @@ def build_candidate_release(
         root,
         request,
         "candidate-release-plan",
-        allowed_provider_records,
         **({"evidence": packets} if include_evidence else {}),
     )
-    try:
-        require_failed_testing_operation(operation, product)
-        require_candidate_unselected(root, store, allocation)
-        require_lane_releasable(root, store, operation)
-    except TestingCandidateReleaseRefused as error:
-        observed = observed.model_copy(
-            update={
-                "candidates": tuple(
-                    item.model_copy(
-                        update={
-                            "status": "held",
-                            "reasons": (*item.reasons, error.code),
-                            "resources": tuple(
-                                row.model_copy(update={"status": "held", "reason": error.code})
-                                if row.status == "eligible"
-                                else row
-                                for row in item.resources
-                            ),
-                        }
-                    )
-                    if item.selected
-                    else item
-                    for item in observed.candidates
-                )
-            }
-        )
     candidate = next(item for item in observed.candidates if item.selected)
     status: TestingCandidateReleaseStatus = (
         "eligible"
@@ -510,10 +481,7 @@ class TestingCandidateReleaseAdapter:
         status: TestingCandidateReleaseStatus = (
             "released"
             if selected.resources
-            and all(
-                row.status in {"absent", "removed"} or row.reason == "source_inputs_preserved"
-                for row in selected.resources
-            )
+            and all(row.status in {"absent", "removed"} for row in selected.resources)
             else "held"
         )
         return release_response(
@@ -567,9 +535,6 @@ class TestingCandidateReleaseAdapter:
                 self.release.plan.product,
                 self.release.plan.operation_id,
                 self.release.request.receiver_operation_id if self.release.request else None,
-                allowed_provider_records=frozenset({lease.evidence_reservation().record_id})
-                if isinstance(lease, ProviderEvidenceLease)
-                else frozenset(),
             )
         except RELEASE_PLAN_ERRORS as error:
             raise ProviderMutationRejectedError(error) from error
