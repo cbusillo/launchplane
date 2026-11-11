@@ -21,6 +21,17 @@ Predicate = Literal[
     "input_precedence",
     "default_absence",
     "stable_documents",
+    "conversion_parse",
+    "root_path",
+    "include_paths",
+    "document_shape",
+    "default_inputs",
+    "default_acquisition",
+    "environment_identity",
+    "compose_identity_present",
+    "application_identity",
+    "schedules_acquisition",
+    "own_candidate_excluded",
     "source_fields_present",
     "source_fields_empty",
     "source_type",
@@ -63,9 +74,6 @@ Predicate = Literal[
     "web_process",
     "container_inventory",
     "container_qualification",
-    "resource_binding",
-    "backing_binding",
-    "snapshot",
     "foreign_reference",
 ]
 
@@ -80,16 +88,18 @@ class QualificationEvidence(EvidenceModel):
 
 class VolumeResolutionEvidence(QualificationEvidence):
     alias_sha256: Digest
+    name_source: Literal["explicit", "external_alias", "project_prefix", "unavailable"] = (
+        "unavailable"
+    )
     resolved_name_sha256: Digest | None = None
 
 
 class VolumeDocumentEvidence(QualificationEvidence):
     document_sha256: Digest | None = None
-    resolved_document_sha256: Digest | None = None
+    resolution_index: int | None = Field(default=None, ge=0)
     path_sha256: Digest | None = None
     input_sha256: Digest | None = None
     resolved_name_sha256: tuple[Digest, ...] = ()
-    include_count: int | None = Field(default=None, ge=0)
     volumes: list[VolumeResolutionEvidence] = Field(default_factory=list)
 
 
@@ -117,7 +127,10 @@ class ConsumerEvidence(QualificationEvidence):
     source_path_shape: Shape = "missing"
     include_shape: Shape = "missing"
     include_count: int | None = Field(default=None, ge=0)
-    source_type: Literal["missing", "null", "raw", "git", "other"] = "missing"
+    source_type: Literal[
+        "missing", "null", "empty", "raw", "git", "github", "gitlab", "bitbucket", "gitea", "other"
+    ] = "missing"
+    cached_endpoint_sha256: Digest | None = None
     documents: list[VolumeDocumentEvidence] = Field(default_factory=list)
 
 
@@ -144,6 +157,8 @@ class VolumeCustodyEvidence(QualificationEvidence):
     engine_sha256: Digest | None = None
     backing_sha256: Digest | None = None
     planned_removal_sha256: Digest | None = None
+    planned_snapshot_sha256: Digest | None = None
+    planned_container_sha256: tuple[Digest, ...] = ()
     referenced: bool | None = None
     empty: bool | None = None
     source_inputs: bool | None = None
@@ -154,6 +169,7 @@ class VolumeCustodyEvidence(QualificationEvidence):
 class CandidateCustodyEvidence(QualificationEvidence):
     version: Literal[1] = 1
     observed_at: datetime
+    completed_at: datetime | None = None
     candidate_sha256: Digest
     server_sha256: Digest
     endpoint_sha256: Digest | None = None

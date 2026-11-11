@@ -76,9 +76,12 @@ COMPOSE_SOURCE_FIELDS = (
 )
 
 
+EMPTY_TARGET_SOURCE_TYPES = (None, "", "github", "git", "raw")
+
+
 def require_empty_target_source(payload: JsonObject) -> None:
     """An unconfigured provider default is not a partial repository or image source."""
-    if payload.get("sourceType") not in (None, "", "github", "git", "raw"):
+    if payload.get("sourceType") not in EMPTY_TARGET_SOURCE_TYPES:
         raise ValueError("Target already has a different source type.")
     # A provider's default sourceType/composePath is not a configured source.
     # Reject partial source and credential bindings as well as complete sources.

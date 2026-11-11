@@ -1,6 +1,7 @@
 """Release a failed native testing candidate's private containers and volumes."""
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 import hashlib
 import inspect
 import json
@@ -432,6 +433,7 @@ def build_candidate_release(
     packet = packets[0] if packets else None
     if packet is not None:
         packet.plan_sha256 = plan.digest()
+        packet.completed_at = datetime.now(timezone.utc)
         packet.packet_sha256 = canonical_json_sha256(
             packet.model_dump(mode="json", exclude={"packet_sha256"}, exclude_none=True)
         )

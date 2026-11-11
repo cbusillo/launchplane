@@ -1,10 +1,14 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Literal
 
-from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.canonical_json import (
+    canonical_json_sha256,
+    nonvalidating_compact_sorted_json_sha256,
+)
 from control_plane.contracts.candidate_custody_evidence import (
     ConsumerEvidence,
+    Outcome,
     Predicate,
     QualificationEvidence,
     Shape,
@@ -48,7 +52,7 @@ def placement(evidence: ConsumerEvidence | None, payload: dict[str, Any], host: 
     if evidence is None:
         return
     value = payload.get("serverId")
-    evidence.payload_sha256 = canonical_json_sha256(payload)
+    evidence.payload_sha256 = nonvalidating_compact_sorted_json_sha256(payload)
     evidence.server_identity = (
         "missing"
         if "serverId" not in payload
@@ -67,7 +71,13 @@ def placement(evidence: ConsumerEvidence | None, payload: dict[str, Any], host: 
         if "sourceType" not in payload
         else "null"
         if source is None
+        else "empty"
+        if source == ""
         else source
-        if source in ("raw", "git")
+        if source in ("raw", "git", "github", "gitlab", "bitbucket", "gitea")
         else "other"
     )
+
+
+def readback_outcome(value: Literal["pass", "fail", "unavailable", "skipped"]) -> Outcome:
+    return "not_reached" if value == "skipped" else value

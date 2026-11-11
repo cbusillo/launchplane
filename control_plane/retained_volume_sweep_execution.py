@@ -2,6 +2,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing
 from datetime import datetime, timezone
 import json
+import hashlib
 
 import click
 import yaml
@@ -9,7 +10,10 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from control_plane.candidate_custody_evidence import acquiring, check, placement
-from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.canonical_json import (
+    canonical_json_sha256,
+    nonvalidating_compact_sorted_json_sha256,
+)
 from control_plane.contracts.candidate_custody_evidence import (
     ConsumerEvidence,
     VolumeDocumentEvidence,
@@ -109,11 +113,10 @@ def compose_volume_names(
     volumes = document.get("volumes", {})
     if not check(evidence, "volume_definitions", isinstance(volumes, dict)):
         raise ValueError("Compose volume inventory is unavailable.")
-    assert isinstance(volumes, dict)
     standard_environment = standard_compose_environment(payload)
     names = []
     if evidence is not None:
-        evidence.input_sha256 = canonical_json_sha256(
+        evidence.input_sha256 = nonvalidating_compact_sorted_json_sha256(
             {
                 "environment": payload.get("env"),
                 "standard": standard_environment,
@@ -125,7 +128,8 @@ def compose_volume_names(
     for alias, definition in volumes.items():
         resolution = (
             VolumeResolutionEvidence(
-                alias_sha256=canonical_json_sha256(alias), checks={"resolution": "unavailable"}
+                alias_sha256=hashlib.sha256(repr(alias).encode()).hexdigest(),
+                checks={"resolution": "unavailable"},
             )
             if evidence is not None
             else None
@@ -139,11 +143,14 @@ def compose_volume_names(
                 isinstance(alias, str) and isinstance(definition, dict | type(None)),
             ):
                 raise ValueError("Compose volume definition is unavailable.")
-            assert isinstance(definition, dict | type(None))
             declared = definition or {}
             actual = declared.get("name")
             if actual is None:
                 project = payload.get("appName") if standard_environment else None
+                if resolution is not None:
+                    resolution.name_source = (
+                        "external_alias" if declared.get("external") else "project_prefix"
+                    )
                 actual = (
                     alias
                     if declared.get("external")
@@ -151,9 +158,12 @@ def compose_volume_names(
                     if isinstance(project, str) and project
                     else None
                 )
-            if not check(resolution, "volume_identity", isinstance(actual, str)):
+            elif resolution is not None:
+                resolution.name_source = "explicit"
+            if not isinstance(actual, str):
+                check(resolution, "volume_identity", False)
                 raise ValueError("Compose volume identity is unavailable.")
-            assert isinstance(actual, str)
+            check(resolution, "volume_identity", True)
             if "$" in actual:
                 keys = compose_interpolation_keys(actual)
                 if not check(
@@ -220,7 +230,6 @@ def _inventory_clear(
         nonlocal clear
         clear = False
         import re
-        from control_plane.contracts.canonical_json import canonical_json_sha256
 
         if references is not None:
             row = {
@@ -261,11 +270,12 @@ def _inventory_clear(
         project_id = project.get("projectId")
         project_evidence = consumer("project", project_id)
         check(project_evidence, "env_shape", isinstance(project.get("env"), str))
-        check(
-            project_evidence,
-            "environment_reference",
-            not _environment_referenced(binding.volume_name, project),
-        )
+        if project_evidence is not None:
+            check(
+                project_evidence,
+                "environment_reference",
+                not _environment_referenced(binding.volume_name, project),
+            )
         if exact and not isinstance(project.get("env"), str):
             if refused("project", project_id):
                 return False
@@ -337,11 +347,12 @@ def _inventory_clear(
                 if refused("environment", environment_id, referenced=True):
                     return False
             check(environment_evidence, "env_shape", isinstance(environment.get("env"), str))
-            check(
-                environment_evidence,
-                "environment_reference",
-                not _environment_referenced(binding.volume_name, environment),
-            )
+            if environment_evidence is not None:
+                check(
+                    environment_evidence,
+                    "environment_reference",
+                    not _environment_referenced(binding.volume_name, environment),
+                )
             for kind, (target_type, identifier) in TARGET_COLLECTIONS.items():
                 targets = environment.get(kind)
                 if not isinstance(targets, list):
@@ -359,15 +370,20 @@ def _inventory_clear(
                         continue
                     target_id = target[identifier]
                     assert isinstance(target_id, str)
-                    if target_type == "compose" and target_id == ignored_compose_id:
-                        continue
                     item_evidence = consumer(target_type, target_id)
+                    if target_type == "compose" and target_id == ignored_compose_id:
+                        check(item_evidence, "own_candidate_excluded", True)
+                        continue
                     if item_evidence is not None:
                         item_evidence.checks.update(
                             {
                                 "target_acquisition": "unavailable",
-                                "conversion_acquisition": "not_reached",
-                                "resolution": "not_reached",
+                                "conversion_acquisition": "not_reached"
+                                if target_type == "compose"
+                                else "not_applicable",
+                                "resolution": "not_reached"
+                                if target_type == "compose"
+                                else "not_applicable",
                             }
                         )
                     try:
@@ -427,11 +443,12 @@ def _inventory_clear(
                     check(item_evidence, "target_acquisition", True)
                     placement(item_evidence, payload, host)
                     check(item_evidence, "identity", payload.get(identifier) == target_id)
-                    check(
-                        item_evidence,
-                        "environment_reference",
-                        not _environment_referenced(binding.volume_name, payload),
-                    )
+                    if item_evidence is not None:
+                        check(
+                            item_evidence,
+                            "environment_reference",
+                            not _environment_referenced(binding.volume_name, payload),
+                        )
                     if exact and _environment_referenced(binding.volume_name, payload):
                         if refused(
                             target_type,
@@ -444,11 +461,12 @@ def _inventory_clear(
                             return False
                     mounts = payload.get("mounts")
                     check(item_evidence, "mounts_shape", isinstance(mounts, list))
-                    check(
-                        item_evidence,
-                        "mount_reference",
-                        not _volume_referenced(binding.volume_name, payload, exact=exact),
-                    )
+                    if item_evidence is not None:
+                        check(
+                            item_evidence,
+                            "mount_reference",
+                            not _volume_referenced(binding.volume_name, payload, exact=exact),
+                        )
                     if not isinstance(mounts, list):
                         if refused(target_type, target_id, cause="inventory_mounts_unavailable"):
                             return False
@@ -479,14 +497,13 @@ def _inventory_clear(
                                 ),
                             )
                             stage = "inventory_volume_identity_unqualified"
-                            for document in documents:
+                            for document_index, document in enumerate(documents):
                                 document_evidence = (
                                     next(
                                         (
                                             entry
                                             for entry in item_evidence.documents
-                                            if entry.resolved_document_sha256
-                                            == canonical_json_sha256(document)
+                                            if entry.resolution_index == document_index
                                         ),
                                         None,
                                     )
@@ -495,7 +512,7 @@ def _inventory_clear(
                                 )
                                 if item_evidence is not None and document_evidence is None:
                                     document_evidence = VolumeDocumentEvidence(
-                                        document_sha256=canonical_json_sha256(document)
+                                        resolution_index=document_index
                                     )
                                     item_evidence.documents.append(document_evidence)
                                 if document_evidence is not None:
@@ -576,9 +593,10 @@ def _inventory_clear(
                         finally:
                             if item_evidence is not None:
                                 item_evidence.checks["resolution"] = (
-                                    "pass"
-                                    if stage == "inventory_volume_identity_unqualified"
-                                    and not failures
+                                    "not_reached"
+                                    if stage != "inventory_volume_identity_unqualified"
+                                    else "pass"
+                                    if not failures
                                     and all(
                                         row.checks.get("resolution", "pass") == "pass"
                                         for row in item_evidence.documents

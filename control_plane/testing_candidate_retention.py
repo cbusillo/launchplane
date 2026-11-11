@@ -8,7 +8,12 @@ from typing import Any, NamedTuple, Literal, cast
 
 import click
 
-from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.candidate_custody_evidence import readback_outcome
+
+from control_plane.contracts.canonical_json import (
+    canonical_json_sha256,
+    nonvalidating_compact_sorted_json_sha256,
+)
 from control_plane.contracts.candidate_custody_evidence import (
     CandidateCustodyEvidence,
     Outcome,
@@ -471,8 +476,12 @@ def candidate_lifecycle_custody(
         if evidence is not None and observation:
             parsed = LifecycleEvidence.model_validate(observation)
             evidence.containers = parsed.containers
+            predicate: Predicate
+            outcome: Outcome
             for predicate, outcome in parsed.checks.items():
-                evidence.checks[cast(Predicate, predicate)] = cast(Outcome, outcome)
+                # Pydantic validates these keys; PyCharm widens their Literal on iteration.
+                # noinspection PyTypeChecker
+                evidence.checks[predicate] = outcome
     if evidence is not None:
         evidence.snapshot_sha256 = proof.get("container_snapshot")
         evidence.resource_binding_sha256 = proof.get("resource_binding")
@@ -639,7 +648,9 @@ def build_native_testing_sweep(
         packet = (
             CandidateCustodyEvidence(
                 observed_at=datetime.now(timezone.utc),
-                candidate_sha256=canonical_json_sha256(candidate.model_dump(mode="json")),
+                candidate_sha256=nonvalidating_compact_sorted_json_sha256(
+                    candidate.model_dump(mode="json")
+                ),
                 server_sha256=canonical_json_sha256({"server": candidate.server_id}),
                 checks={"native_inventory": "not_reached", "source_preserved": "not_reached"},
                 lifecycle=LifecycleEvidence(
@@ -709,7 +720,9 @@ def build_native_testing_sweep(
                 reasons = (*reasons, "completed_copy_requires_disposition")
             readback[ReadbackPredicate.NATIVE_READ] = "unavailable"
             if packet is not None:
-                packet.checks["source_preserved"] = "pass" if source_preserved else "unavailable"
+                packet.checks["source_preserved"] = readback_outcome(
+                    readback[ReadbackPredicate.FILES_READ]
+                )
                 packet.checks["native_inventory"] = "unavailable"
             observed, provider_reason = inspect_candidate_resources(
                 root, store, candidate, **({"evidence": packet} if packet is not None else {})
@@ -749,6 +762,10 @@ def build_native_testing_sweep(
                         "unavailable" if error.unavailable else "fail"
                     )
                     readback[error.predicate] = "unavailable" if error.unavailable else "fail"
+                    if packet is not None:
+                        packet.lifecycle.checks["lifecycle_acquisition"] = readback[
+                            ReadbackPredicate.CUSTODY
+                        ]
                 except (ValueError, OSError, click.ClickException) as error:
                     if isinstance(error, native_copy_stream.NativeSourceAuthorizationDenied) or (
                         isinstance(error, api.DokployRequestFailed)
@@ -881,10 +898,6 @@ def build_native_testing_sweep(
                                 )
                                 if item_reference not in references:
                                     references = (*references, item_reference)
-                        if volume_evidence is not None:
-                            volume_evidence.checks["provider_inventory"] = (
-                                "pass" if inventory_clear else "unavailable"
-                            )
                         if not inventory_clear:
                             inventory_holds = [item["reason"] for item in inventory_references] or [
                                 "provider_inventory_unavailable"
@@ -899,17 +912,24 @@ def build_native_testing_sweep(
                             resource_readback[ReadbackPredicate.STORAGE_CONSUMERS] = "pass"
                         resource_readback[ReadbackPredicate.RESOURCES] = "unavailable"
                         if volume_evidence is not None:
+                            volume_evidence.checks["provider_inventory"] = readback_outcome(
+                                resource_readback[ReadbackPredicate.STORAGE_CONSUMERS]
+                            )
                             volume_evidence.checks["physical"] = "unavailable"
-                            volume_evidence.planned_removal_sha256 = (
-                                canonical_json_sha256(
+                            if lifecycle:
+                                volume_evidence.planned_snapshot_sha256 = lifecycle["payload"][
+                                    "container_snapshot"
+                                ]
+                                volume_evidence.planned_container_sha256 = tuple(
+                                    canonical_json_sha256(identifier)
+                                    for identifier in lifecycle["payload"]["container_ids"]
+                                )
+                                volume_evidence.planned_removal_sha256 = canonical_json_sha256(
                                     {
-                                        "ids": lifecycle["payload"]["container_ids"],
-                                        "snapshot": lifecycle["payload"]["container_snapshot"],
+                                        "ids": volume_evidence.planned_container_sha256,
+                                        "snapshot": volume_evidence.planned_snapshot_sha256,
                                     }
                                 )
-                                if lifecycle
-                                else None
-                            )
                         try:
                             physical_status, physical_reason = _host_result(
                                 root,
@@ -932,12 +952,8 @@ def build_native_testing_sweep(
                                 else "fail"
                             )
                             if volume_evidence is not None:
-                                volume_evidence.checks["physical"] = (
-                                    "pass"
-                                    if physical_status in {"eligible", "absent"}
-                                    else "unavailable"
-                                    if physical_status == "unknown"
-                                    else "fail"
+                                volume_evidence.checks["physical"] = readback_outcome(
+                                    resource_readback[ReadbackPredicate.RESOURCES]
                                 )
                             if physical_status not in {"eligible", "absent"}:
                                 holds.append(physical_reason or "physical_ownership_unknown")
@@ -1002,7 +1018,7 @@ def build_native_testing_sweep(
                     if lifecycle
                     else "fail"
                     if packet.lifecycle.checks.get("lifecycle_acquisition") == "pass"
-                    else "unavailable"
+                    else packet.lifecycle.checks["lifecycle_acquisition"]
                 )
             item = NativeTestingSweepCandidate(
                 namespace=candidate.namespace,

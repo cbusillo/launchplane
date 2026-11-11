@@ -273,6 +273,92 @@ class CachedComposeInventoryTests(unittest.TestCase):
         )
         self.assertEqual(evidence.checks["resolution"], "fail")
 
+    def test_packet_does_not_hold_readable_numeric_or_date_documents(self) -> None:
+        from datetime import date
+
+        self.child_document["services"]["web"].update(cpus=0.5)
+        self.child_document["volumes"]["data"]["name"] = self.default_name
+        self.child_document["x-built"] = date(2026, 1, 2)
+        self.payload["cpuLimit"] = 0.5
+        self.child.write_text(yaml.safe_dump(self.child_document))
+        for raw in (yaml.safe_dump(self.child_document), json.dumps(self.wrapper)):
+            with self.subTest(raw=raw):
+                args: dict[str, Any] = dict(
+                    host="provider",
+                    token="private",
+                    payload=self.payload,
+                    raw=raw,
+                    server_id="selected-server",
+                    exact=True,
+                )
+                expected = inventory.read_volume_documents(**args)
+                evidence = ConsumerEvidence(kind="compose")
+                actual = inventory.read_volume_documents(**args, evidence=evidence)
+                self.assertEqual(actual, expected)
+                self.assertEqual(evidence.checks["conversion_parse"], "pass")
+                self.assertTrue(evidence.payload_sha256)
+                for index, document in enumerate(actual):
+                    entry = next(row for row in evidence.documents if row.resolution_index == index)
+                    self.assertEqual(
+                        compose_volume_names(document, self.payload, evidence=entry),
+                        compose_volume_names(document, self.payload),
+                    )
+
+    def test_packet_does_not_confuse_parsing_paths_or_inputs_with_source_proof(self) -> None:
+        for raw, payload in (
+            ("null", {**self.payload, "serverId": None}),
+            (json.dumps(self.wrapper), {**self.payload, "serverId": "elsewhere"}),
+        ):
+            evidence = ConsumerEvidence(kind="compose")
+            with self.assertRaises(ValueError):
+                inventory.read_volume_documents(
+                    host="provider",
+                    token="private",
+                    payload=payload,
+                    raw=raw,
+                    server_id="selected-server",
+                    exact=True,
+                    evidence=evidence,
+                )
+            self.assertEqual(evidence.checks["conversion_parse"], "pass")
+            self.assertNotEqual(evidence.checks["root"], "pass")
+            self.assertNotEqual(evidence.checks["default_absence"], "pass")
+            self.assertEqual(evidence.checks["source_fields_empty"], "fail")
+            self.assertEqual(evidence.checks["command_empty"], "pass")
+            self.assertIsNone(evidence.cached_endpoint_sha256)
+            if raw == "null":
+                self.assertEqual(evidence.checks["source_scope"], "not_reached")
+            else:
+                self.assertEqual(evidence.checks["source_scope"], "pass")
+                self.assertEqual(evidence.checks["includes"], "pass")
+        evidence = ConsumerEvidence(kind="compose")
+        original = inventory.read_cached_compose_source
+        calls = 0
+
+        def read(**kwargs: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("private failed proof")
+            return original(**kwargs)
+
+        with (
+            patch.object(inventory, "read_cached_compose_source", side_effect=read),
+            self.assertRaises(OSError),
+        ):
+            inventory.read_volume_documents(
+                host="provider",
+                token="private",
+                payload=self.payload,
+                raw=json.dumps(self.wrapper),
+                server_id="selected-server",
+                exact=True,
+                evidence=evidence,
+            )
+        self.assertEqual(evidence.checks["default_acquisition"], "unavailable")
+        self.assertNotEqual(evidence.checks["default_absence"], "pass")
+        self.assertEqual(evidence.documents[1].checks["default_inputs"], "pass")
+
     def test_diagnostics_distinguish_conversion_source_and_acquisition_without_replacing_errors(
         self,
     ) -> None:

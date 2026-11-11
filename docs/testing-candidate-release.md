@@ -49,9 +49,9 @@ query selector, stored inventory or removal permission.
 
 The optional `evidence` packet is private and the response is `Cache-Control:
 no-store`. Its closed schema lives in `contracts/candidate_custody_evidence.py`.
-It carries the observation time, candidate/server/endpoint commitments, release
+It carries the observation start/completion times, candidate/server/provider-endpoint commitments, release
 plan digest, and a digest of the packet excluding `packet_sha256` and null
-fields. The outer response supplies the request trace. Digests bind the facts
+fields. The outer response supplies the request trace. The packet spans sequential bounded reads, not one atomic physical snapshot. `cached_endpoint_sha256` is present only when the existing cached reader was entered and binds its provider endpoint and server routing identity. Digests bind the facts
 observed in this pass; they do not prove that later state is unchanged.
 
 Each volume retains native identity, engine/backing and planned-removal
@@ -61,7 +61,7 @@ malformed server identity. Different server commitments never prove physical
 separation. Compose evidence records conversion type, source scope, root and
 include coverage, cached document digests, input precedence, default absence,
 and each empty-project prerequisite independently. Unreadable documents and
-failed volume definitions remain present alongside readable siblings. Resolved
+failed volume definitions remain present alongside readable siblings. Each resolved name states whether it came from an explicit name, external alias or project prefix. Document commitments hash raw acquired bytes; resolved-document indexes distinguish identical includes. Resolved
 names and source paths are hashed; source, environments, commands, credentials,
 private settings and provider exception prose never appear in the packet.
 
@@ -70,7 +70,7 @@ packet retains the acquired container snapshot, resource and physical binding,
 per-container role/state, mount commitments and volume roles, web gate/process
 checks, and foreign references even when later inventory holds invalidate
 usable custody. Missing snapshots remain unavailable. A physical pass is bound
-to the planned container-removal snapshot; it cannot substitute for complete
+to `planned_snapshot_sha256` and the same hashed container IDs carried by lifecycle evidence; it cannot substitute for complete
 exclusive consumer inventory. The existing candidate/resource `references`
 remain the full hold list. No standalone stop or removal follows from this
 packet.
