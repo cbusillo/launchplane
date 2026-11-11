@@ -54,6 +54,34 @@ def _verified_preview_retirement_digest(
         or not preview.destroyed_at
     ):
         return ""
+    try:
+        request = store.read_product_reconcile_request(
+            product_reconcile_target_key(
+                product=profile.product, target_kind="preview", pull_request_number=number
+            )
+        )
+    except FileNotFoundError:
+        request = None
+    if request is not None and (request.last_error or request.last_plan.get("held") is True):
+        timing = request.last_plan.get("timing")
+        decided_at = timing.get("planning_finished_at") if isinstance(timing, dict) else None
+        if not isinstance(decided_at, str) or not decided_at.strip():
+            decided_at = request.updated_at if request.state in {"done", "failed"} else ""
+        if not decided_at or _timestamp(decided_at) >= _timestamp(preview.destroyed_at):
+            return ""
+    if request is not None and request.last_plan.get("last_failed_error_summary"):
+        failed_at = preview_failure_observed_at(request)
+        if not failed_at or _timestamp(failed_at) >= _timestamp(preview.destroyed_at):
+            return ""
+    if any(
+        feedback.product == profile.product
+        and feedback.anchor_pr_number == number
+        and feedback.repository.casefold() == profile.repository.casefold()
+        and feedback.status not in {"destroyed", "cleared", "pending"}
+        and _timestamp(feedback.requested_at) >= _timestamp(preview.destroyed_at)
+        for feedback in store.list_preview_pr_feedback_records(context_name=profile.preview.context)
+    ):
+        return ""
     originals = store.list_odoo_preview_originals(product=profile.product, number=number)
     for reservation in originals:
         if reservation.state != "completed" or reservation.response_status_code != 202:
@@ -98,36 +126,6 @@ def _verified_preview_retirement_digest(
             and other.provider_target_key == reservation.provider_target_key
             and _timestamp(other.created_at) >= _timestamp(preview.destroyed_at)
             for other in originals
-        ):
-            return ""
-        try:
-            request = store.read_product_reconcile_request(
-                product_reconcile_target_key(
-                    product=profile.product, target_kind="preview", pull_request_number=number
-                )
-            )
-        except FileNotFoundError:
-            request = None
-        if request is not None and (request.last_error or request.last_plan.get("held") is True):
-            timing = request.last_plan.get("timing")
-            decided_at = timing.get("planning_finished_at") if isinstance(timing, dict) else None
-            if not isinstance(decided_at, str) or not decided_at.strip():
-                decided_at = request.updated_at if request.state in {"done", "failed"} else ""
-            if not decided_at or _timestamp(decided_at) >= _timestamp(preview.destroyed_at):
-                return ""
-        if request is not None and request.last_plan.get("last_failed_error_summary"):
-            failed_at = preview_failure_observed_at(request)
-            if not failed_at or _timestamp(failed_at) >= _timestamp(preview.destroyed_at):
-                return ""
-        if any(
-            feedback.product == profile.product
-            and feedback.anchor_pr_number == number
-            and feedback.repository.casefold() == profile.repository.casefold()
-            and feedback.status not in {"destroyed", "cleared", "pending"}
-            and _timestamp(feedback.requested_at) >= _timestamp(preview.destroyed_at)
-            for feedback in store.list_preview_pr_feedback_records(
-                context_name=profile.preview.context
-            )
         ):
             return ""
         return nonvalidating_compact_sorted_json_sha256(
