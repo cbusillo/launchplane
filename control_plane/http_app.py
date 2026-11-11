@@ -27168,6 +27168,22 @@ def create_launchplane_fastapi_app(
             and bool(lane_owner)
             and database_store.read_product_profile_record(lane_owner).production_use != "live"
         )
+        empty_automation_setup = (
+            setup_request.operation == "disable-empty-compose-auto-deploy"
+            and director_agent_identity(identity)
+            and setup_request.instance == "prod"
+            and bool(lane_owner)
+        )
+        if (
+            setup_request.operation == "disable-empty-compose-auto-deploy"
+            and not empty_automation_setup
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Original empty setup correction requires the existing Director-agent identity.",
+            )
         director_source_completion = (
             director_agent_identity(identity)
             and setup_request.operation == "complete-compose-source"
@@ -27187,6 +27203,7 @@ def create_launchplane_fastapi_app(
             and not disposable_rebuild_setup
             and not first_testing_setup
             and not first_production_setup
+            and not empty_automation_setup
             and not director_source_completion
             and not director_testing_domain
             and not native_onboarding
@@ -27235,6 +27252,7 @@ def create_launchplane_fastapi_app(
             or disposable_rebuild_setup
             or first_testing_setup
             or first_production_setup
+            or empty_automation_setup
             or director_source_completion
             or director_testing_domain
             or native_onboarding
@@ -27472,6 +27490,85 @@ def create_launchplane_fastapi_app(
                     code="invalid_dokploy_target_setup",
                     message=str(error),
                 ) from error
+        if setup_request.operation == "disable-empty-compose-auto-deploy":
+            from control_plane.dokploy_empty_automation import EmptyAutomationAdapter
+            from control_plane.dokploy_inventory import InventoryUnavailable
+
+            automation_adapter = EmptyAutomationAdapter(
+                resolved_control_plane_root,
+                database_store,
+                setup_request,
+                lane_owner,
+                idempotency_scope(identity),
+                idempotency_key.strip(),
+                trace_id,
+            )
+            try:
+                if setup_request.mode == "dry-run":
+                    return accepted_evidence_response(
+                        trace_id=trace_id,
+                        records={},
+                        result=await run_in_threadpool(automation_adapter.plan_result),
+                    )
+                if setup_request.mode == "readback":
+                    prior = database_store.read_idempotency_record(
+                        scope=idempotency_scope(identity),
+                        route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                        idempotency_key=idempotency_key.strip(),
+                    )
+                    if (
+                        prior is None
+                        or prior.reconciliation_key != automation_adapter.reconciliation_key()
+                    ):
+                        raise ValueError(
+                            "Readback requires the exact original correction request and key."
+                        )
+
+                def automation_operation(
+                    store: PostgresRecordStore,
+                ) -> DurableProviderOperationResult:
+                    return run_durable_provider_operation(
+                        store=store,
+                        scope=idempotency_scope(identity),
+                        route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                        idempotency_key=idempotency_key.strip(),
+                        request_fingerprint=automation_adapter.reconciliation_key(),
+                        lease_owner=trace_id,
+                        response_trace_id=trace_id,
+                        adapter=automation_adapter,
+                        original_intent=automation_adapter.intent(),
+                        allow_mutation=setup_request.mode == "apply",
+                    )
+
+                return await run_provider_operation_http(
+                    record_store=database_store,
+                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                    trace_id=trace_id,
+                    operation=automation_operation,
+                    in_progress_message="The original setup correction is running.",
+                    reconcile_message="Preserve the original correction request and key; readback reconciles without another provider write.",
+                )
+            except NativeSourceAuthorizationDenied:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="The existing provider identity denied original setup observation.",
+                ) from None
+            except (OSError, InventoryUnavailable, click.ClickException):
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="dokploy_target_evidence_unavailable",
+                    message="Original setup observation is unavailable; preserve the original operation.",
+                ) from None
+            except (ValueError, FileNotFoundError):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="invalid_dokploy_target_setup",
+                    message="The original setup correction is unqualified, stale or changed. Preserve any original request and key.",
+                ) from None
         ordinary_allocation = (
             setup_request.operation == "create-application"
             and setup_request.instance == "testing"
