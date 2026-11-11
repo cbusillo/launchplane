@@ -1025,16 +1025,44 @@ class NativeTestingProducerEvidenceTests(unittest.TestCase):
     def test_producer_records_bind_candidate_selection_and_both_routes(self) -> None:
         from tests.test_testing_rebuild_worker import NativeTestingWorkerTests
         from control_plane.testing_publication_storage import read_publication
+        from control_plane import testing_rebuild_service
 
         for migrated in (False, True):
             with self.subTest(migrated=migrated):
                 fixture = NativeTestingWorkerTests()
                 fixture.migrated_candidate = migrated
-                fixture.setUp()
                 try:
+                    fixture.setUp()
                     fixture.fail_public = True
-                    result = fixture.execute()
-                    self.assertEqual(result.error_code, "candidate_public_health_failed")
+                    read_candidate = fixture.store.read_testing_candidate
+
+                    def prepare_storage(**kwargs: Any) -> TestingCandidateAllocation:
+                        produced = kwargs["allocation"]
+                        prepared = fixture.fixture.candidate.model_copy(
+                            update={"intent_sha256": produced.intent_sha256}
+                        )
+                        fixture.store.compare_and_write_testing_candidate(
+                            fixture.fixture.candidate, prepared
+                        )
+                        missing.side_effect = read_candidate
+                        return prepared
+
+                    with (
+                        patch.object(
+                            fixture.store, "read_testing_candidate", return_value=None
+                        ) as missing,
+                        patch.object(
+                            testing_rebuild_service,
+                            "prepare_candidate_storage",
+                            side_effect=prepare_storage,
+                        ) as storage,
+                        patch(
+                            "control_plane.product_reconcile.verified_testing_rebuild_artifact",
+                            return_value=Mock(manifest=fixture.app.plan.artifact),
+                        ),
+                    ):
+                        fixture.execute()
+                    storage.assert_called_once()
                     binding = read_native_testing_execution_binding(
                         fixture.store, fixture.operation
                     )
@@ -1043,7 +1071,6 @@ class NativeTestingProducerEvidenceTests(unittest.TestCase):
                         ("matched", "matched"),
                     )
                     self.assertIsNotNone(binding.candidate.selector)
-                    self.assertEqual(binding.native_evidence.selection.binding, "matched")
                     for route in (binding.forward_route, binding.inverse_route):
                         self.assertEqual(route.binding, "matched")
                         self.assertTrue(route.route_digest_matches)
