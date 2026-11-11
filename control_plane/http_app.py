@@ -7523,6 +7523,7 @@ def create_launchplane_fastapi_app(
             maintenance_request.maintenance, (PreviewFixtureRequest, PreviewPartsImportRequest)
         ):
             from control_plane.preview_fixture import PreviewFixtureAdapter
+            from control_plane.odoo_runtime_reads import OdooRuntimeReadError
             from control_plane.contracts.preview_execution import preview_execution_lock_name
             from control_plane.http_routes.support import run_in_worker_thread
 
@@ -7634,16 +7635,27 @@ def create_launchplane_fastapi_app(
                     error.structured_detail["reason"] = adapter.failure_reason
                 raise
             except (ValueError, FileNotFoundError, click.ClickException) as error:
+                reason = adapter.failure_reason
+                if (
+                    isinstance(error, OdooRuntimeReadError)
+                    and error.code == "container_unavailable"
+                ):
+                    reason = "runtime_container_unverified"
+                message = "Preview maintenance preflight is unavailable; no review was issued."
+                if fixture.mode != "dry-run":
+                    message = (
+                        "Preview import evidence is unavailable; preserve its original apply request, review and key."
+                        if isinstance(fixture, PreviewPartsImportRequest)
+                        else "Preview maintenance evidence is unavailable; inspect the original operation."
+                    )
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
                     code="preview_import_unavailable"
                     if isinstance(fixture, PreviewPartsImportRequest)
                     else "preview_fixture_unavailable",
-                    reason=adapter.failure_reason,
-                    message="Preview import evidence is unavailable; preserve its original apply request, review and key."
-                    if isinstance(fixture, PreviewPartsImportRequest)
-                    else "Preview maintenance evidence is unavailable; inspect the original operation.",
+                    reason=reason,
+                    message=message,
                 ) from error
         try:
             product_profile = resolve_odoo_app_maintenance_product_route(
