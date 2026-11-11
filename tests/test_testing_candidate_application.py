@@ -1325,7 +1325,7 @@ class CandidateApplicationTests(unittest.TestCase):
                 )
                 executor = Mock(allocation=prepared)
                 executor.run.return_value = completed
-                lease = cast(ProviderOperationLease, Mock(spec=ProviderEvidenceLease))
+                lease = cast(ProviderOperationLease, cast(object, Mock(spec=ProviderEvidenceLease)))
                 remove = shutil.rmtree
 
                 def lost_cleanup(path: Any) -> None:
