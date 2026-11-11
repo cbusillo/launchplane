@@ -19,8 +19,10 @@ def read_inventory(cursor, spec):
     tables = {name: columns(cursor, name) for name in (
         'external_id','external_system','product_template','product_product','product_supplierinfo',
         'stock_quant','stock_location','stock_move','cm_product_import_conflict','res_users','res_partner',
-        'ir_model_data','ir_module_module','res_groups_users_rel')}
+        'ir_model_data','ir_module_module','res_groups_users_rel','ir_config_parameter')}
     bound = {'system_id','resource','res_model','res_id','external_id'} <= tables['external_id'] and 'code' in tables['external_system']
+    if bound:
+        bound = scalar(cursor, "SELECT count(*) FROM external_system WHERE code='fishbowl'") == 1
     parts_available = bound and 'id' in tables['product_template']
     part_ids = []
     if parts_available:
@@ -49,15 +51,15 @@ def read_inventory(cursor, spec):
         facts['listing_bindings'] = scalar(cursor,
             "SELECT count(*) FROM external_id e JOIN external_system s ON s.id=e.system_id "
             "WHERE s.code='fishbowl' AND e.resource='product' AND e.res_model IN ('product.template','product.product')")
-    suppliers_available = bound and {'id','company_id','product_tmpl_id','partner_id','price','currency_id','uom_id','product_code'} <= tables['product_supplierinfo']
+    suppliers_available = bound and {'id','company_id'} <= tables['product_supplierinfo']
     if suppliers_available:
         facts['supplier_cost_rows'] = scalar(cursor,
             "SELECT count(DISTINCT p.id) FROM product_supplierinfo p JOIN external_id e ON e.res_id=p.id "
             "JOIN external_system s ON s.id=e.system_id WHERE s.code='fishbowl' AND e.resource='vendorparts' "
             "AND e.res_model='product.supplierinfo' AND p.company_id=%s", (company,))
-    if {'product_id','source','company_id'} <= tables['cm_product_import_conflict'] and parts_available:
+    if {'source','company_id'} <= tables['cm_product_import_conflict']:
         facts['current_conflicts'] = scalar(cursor,
-            "SELECT count(*) FROM cm_product_import_conflict WHERE source='fishbowl' AND company_id=%s AND product_id=ANY(%s)", (company,part_ids))
+            "SELECT count(*) FROM cm_product_import_conflict WHERE source='fishbowl' AND company_id=%s", (company,))
     stock_available = (parts_available and {'id','product_tmpl_id'} <= tables['product_product']
         and {'product_id','location_id','company_id','quantity'} <= tables['stock_quant']
         and {'id','usage'} <= tables['stock_location'])
@@ -89,7 +91,8 @@ def read_inventory(cursor, spec):
                         witness['barcode'],witness['cost'],witness['part_number'] = variants[0]
                 if stock_available:
                     witness['internal_quantity'] = scalar(cursor,quantity_sql,(company,[template]))
-                if suppliers_available and {'id','name'} <= tables['res_partner']:
+                if (suppliers_available and {'product_tmpl_id','partner_id','price','currency_id','uom_id','product_code'} <= tables['product_supplierinfo']
+                    and {'id','name'} <= tables['res_partner']):
                     suppliers = rows(cursor, "SELECT p.partner_id,r.name,p.product_code,p.price::text,p.currency_id,p.uom_id "
                         "FROM product_supplierinfo p JOIN res_partner r ON r.id=p.partner_id "
                         "WHERE p.product_tmpl_id=%s AND p.company_id=%s AND EXISTS (SELECT 1 FROM external_id e "
@@ -121,7 +124,14 @@ def read_inventory(cursor, spec):
                 purchaser['group_xmlids'] = [row[0] for row in groups]
                 purchaser['groups_without_xmlid'] = scalar(cursor, "SELECT count(DISTINCT g.gid) FROM res_groups_users_rel g WHERE g.uid=%s "
                     "AND NOT EXISTS (SELECT 1 FROM ir_model_data d WHERE d.res_id=g.gid AND d.model='res.groups')", (users[0][0],))
-    return {'runtime':'verified','company_id':company,'facts':facts,'parts':witnesses,'purchaser':purchaser}
+    database_uuid = None
+    if {'key','value'} <= tables['ir_config_parameter']:
+        values = rows(cursor, "SELECT value FROM ir_config_parameter WHERE key='database.uuid' LIMIT 2")
+        if len(values)>1:
+            raise ValueError()
+        database_uuid = values[0][0] if values else None
+    return {'runtime':'verified','company_id':company,'facts':facts,'parts':witnesses,'purchaser':purchaser,
+        'database_uuid':database_uuid,'database_snapshot':scalar(cursor,'SELECT pg_current_snapshot()::text')}
 """
 
 CONTAINER_PROGRAM = (
@@ -146,7 +156,7 @@ try:
     database=os.environ.get('ODOO_DB_NAME')
     if not database or options.get('db_name')!=database or options.get('db_host')!='database':
         raise ValueError()
-    stage='applied_parameters'
+    stage='application_read'
     if options.get('db_port','5432')!='5432':
         raise ValueError()
     connection=psycopg2.connect(host='database',hostaddr=spec['database_address'],port='5432',

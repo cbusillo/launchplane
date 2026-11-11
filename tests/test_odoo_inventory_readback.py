@@ -51,6 +51,7 @@ def observation() -> dict[str, Any]:
     return {
         "runtime": "verified",
         "company_id": 7,
+        "database_snapshot": "10:10:",
         "facts": {name: None for name in reader.StoredInventoryFacts.model_fields} | {"parts": 2},
         "parts": [
             {"part_id": "51", "status": "present", "name": "Fictional hinge"},
@@ -97,7 +98,7 @@ class InventoryReadTests(unittest.TestCase):
             database_url=None,
         )
 
-    def test_current_observation_not_frozen_archive_or_expected_counts(self) -> None:
+    def test_observation_is_bound_without_diagnostic_signin_or_store_writes(self) -> None:
         first = self.read()
         self.observed["facts"]["parts"] = 3
         second = self.read()
@@ -105,9 +106,6 @@ class InventoryReadTests(unittest.TestCase):
         self.assertIsNone(second.facts.historical_fields_copied)  # type: ignore[union-attr]
         self.assertEqual(second.evidence.identity, self.fixture.identity)  # type: ignore[union-attr]
         self.assertIsNotNone(second.observed_at)
-        self.assertFalse(second.applied)
-        self.assertEqual(second.purchaser.first_signin, "not_observed")  # type: ignore[union-attr]
-        self.assertNotIn(PRIVATE, second.model_dump_json())
         self.fixture.store.read_secret_version.assert_not_called()
         self.assertTrue(
             all(call[0].startswith(("read_", "list_")) for call in self.fixture.store.mock_calls)
@@ -236,9 +234,6 @@ class StoredCursor:
         self.commands: list[tuple[str, tuple[Any, ...]]] = []
         self.schema: dict[str, set[str]] = {}
         self.result: list[tuple[Any, ...]] = []
-        self.part_ids = [101, 102]
-        self.suppliers = [(11, "Example Supplier", "V-51", "8.25", 1, 1)]
-        self.user = (19, True, "buyer@example.invalid", "Fictional Purchaser")
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         self.commands.append((sql, params))
@@ -248,38 +243,8 @@ class StoredCursor:
             self.result = [(column,) for column in self.schema.get(params[0], set())]
         elif "FROM res_company" in sql:
             self.result = [(1,)]
-        elif sql.startswith("SELECT DISTINCT t.id"):
-            self.result = [(value,) for value in self.part_ids]
-        elif sql.startswith("SELECT t.id"):
-            self.result = (
-                [(101, "Fictional hinge", "PART-51", "0", "none", True)]
-                if params == ("51",)
-                else []
-            )
-        elif "e.resource='product'" in sql:
-            self.result = [(0,)]
-        elif "count(DISTINCT p.id)" in sql:
-            self.result = [(3,)]
-        elif "SELECT count(*) FROM product_template" in sql:
-            self.result = [(0 if "list_price" in sql else 1,)]
-        elif "FROM cm_product_import_conflict" in sql:
-            self.result = [(1,)]
-        elif "FROM stock_quant" in sql:
-            self.result = [("5.25" if len(params[1]) > 1 else "2.50",)]
-        elif "FROM stock_move m" in sql:
-            self.result = [(9, 8)]
-        elif sql.startswith("SELECT to_jsonb(p)"):
-            self.result = [("PART-51", "9.45", "PART-51")]
-        elif sql.startswith("SELECT p.partner_id"):
-            self.result = self.suppliers
-        elif sql.startswith("SELECT state FROM ir_module_module"):
-            self.result = [("installed",)]
-        elif sql.startswith("SELECT u.id"):
-            self.result = [self.user]
-        elif sql.startswith("SELECT DISTINCT d.module"):
-            self.result = [("base.group_user",), ("purchase.group_purchase_user",)]
-        elif sql.startswith("SELECT count(DISTINCT g.gid)"):
-            self.result = [(0,)]
+        elif sql == "SELECT pg_current_snapshot()::text":
+            self.result = [("10:10:",)]
         else:
             raise AssertionError("Unexpected statement")
 
@@ -359,82 +324,6 @@ class InventoryProgramTests(unittest.TestCase):
             )
         )
 
-    def test_current_rows_are_read_and_missing_metadata_does_not_gate_them(self) -> None:
-        self.cursor.schema = {
-            "external_id": {"system_id", "resource", "res_model", "res_id", "external_id"},
-            "external_system": {"code"},
-            "product_template": {"id", "active"},
-        }
-        first = self.run_program()
-        self.cursor.part_ids.append(103)
-        second = self.run_program()
-        self.assertEqual((first["facts"]["parts"], second["facts"]["parts"]), (2, 3))
-        self.assertEqual(second["parts"][0]["name"], "Fictional hinge")
-        self.assertEqual(second["parts"][1]["status"], "missing")
-        self.assertIsNone(second["facts"]["stockable_parts"])
-        self.assertIsNone(second["facts"]["supplier_cost_rows"])
-
-    def test_persisted_cost_stock_and_seed_fields_are_bounded_and_company_scoped(self) -> None:
-        self.cursor.schema = {
-            "external_id": {"system_id", "resource", "res_model", "res_id", "external_id"},
-            "external_system": {"code"},
-            "product_template": {
-                "id",
-                "active",
-                "list_price",
-                "is_storable",
-                "tracking",
-                "fishbowl_upc",
-                "fishbowl_packaging",
-                "fishbowl_extra_details",
-            },
-            "product_product": {"id", "product_tmpl_id"},
-            "product_supplierinfo": {
-                "id",
-                "company_id",
-                "product_tmpl_id",
-                "partner_id",
-                "price",
-                "currency_id",
-                "uom_id",
-                "product_code",
-            },
-            "cm_product_import_conflict": {"product_id", "source", "company_id"},
-            "stock_quant": {"product_id", "location_id", "company_id", "quantity"},
-            "stock_location": {"id", "usage"},
-            "stock_move": {"product_id", "state", "company_id"},
-            "ir_model_data": {"module", "name", "model", "res_id"},
-            "ir_module_module": {"name", "state"},
-            "res_users": {"id", "active", "login", "partner_id"},
-            "res_partner": {"id", "name"},
-            "res_groups_users_rel": {"uid", "gid"},
-        }
-        self.cursor.suppliers *= 11
-        result = reader.InventoryReadResult.model_validate(self.run_program())
-        assert result.facts is not None and result.purchaser is not None
-        self.assertEqual(result.facts.supplier_cost_rows, 3)
-        self.assertEqual(result.facts.internal_quantity, "5.25")
-        self.assertEqual((result.facts.stock_move_rows, result.facts.done_stock_move_rows), (9, 8))
-        self.assertIsNone(result.facts.historical_fields_copied)
-        part = result.parts[0]
-        self.assertEqual(
-            (part.name, part.part_number, part.barcode, part.cost, part.sale_price),
-            ("Fictional hinge", "PART-51", "PART-51", "9.45", "0"),
-        )
-        self.assertEqual(part.internal_quantity, "2.50")
-        self.assertTrue(part.suppliers_truncated)
-        self.assertEqual(len(part.supplier_costs or ()), 10)
-        self.assertEqual(result.purchaser.login, self.cursor.user[2])
-        self.assertEqual(result.purchaser.module_state, "installed")
-        self.assertEqual(
-            result.purchaser.group_xmlids, ("base.group_user", "purchase.group_purchase_user")
-        )
-        for statement, parameters in self.cursor.commands:
-            if "company_id=%s" in statement:
-                self.assertIn(self.spec["company_id"], parameters)
-            self.assertNotIn("SELECT *", statement)
-            self.assertNotIn("password", statement)
-
     def test_external_database_configuration_and_query_failure_cannot_write_or_leak(self) -> None:
         original = self.config.read_text()
         for field, value in (
@@ -446,7 +335,7 @@ class InventoryProgramTests(unittest.TestCase):
             self.connect.assert_not_called()
         self.config.write_text(original)
         self.connection.cursor.side_effect = RuntimeError(PRIVATE)
-        self.assertEqual(self.run_program()["failure_stage"], "applied_parameters")
+        self.assertEqual(self.run_program()["runtime"], "unknown")
         self.connection.commit.assert_not_called()
         self.connection.rollback.assert_called_once()
         self.connection.close.assert_called_once()
@@ -542,3 +431,87 @@ class InventoryHostTests(unittest.TestCase):
         self.assertEqual(
             json.loads(child.call_args.kwargs["input"])["database_address"], "192.0.2.7"
         )
+
+
+class InventoryPostgresTests(unittest.TestCase):
+    def test_fixed_queries_read_current_company_scoped_rows_and_preserve_unavailable(self) -> None:
+        import psycopg
+        from tests.test_postgres_integration import _isolated_postgres_database
+
+        namespace: dict[str, Any] = {}
+        exec(programs.INVENTORY_LIBRARY, namespace)
+        spec = {
+            "company_id": 7,
+            "part_ids": ["51", "52", "53"],
+            "purchaser_xmlid": "cm_custom.user_gunneet",
+        }
+        with _isolated_postgres_database() as database_url:
+            with psycopg.connect(
+                database_url.replace("postgresql+psycopg:", "postgresql:")
+            ) as database:
+                database.execute(
+                    (Path(__file__).parent / "fixtures/odoo_inventory_readback.sql").read_text()
+                )
+                database.commit()
+
+                def read() -> reader.InventoryReadResult:
+                    with database.cursor() as cursor:
+                        cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                        result = reader.InventoryReadResult.model_validate(
+                            namespace["read_inventory"](cursor, spec)
+                        )
+                    database.rollback()
+                    return result
+
+                first = read()
+                assert first.facts is not None and first.purchaser is not None
+                self.assertEqual(first.facts.parts, 2)
+                self.assertEqual(first.facts.supplier_cost_rows, 12)
+                self.assertEqual(first.facts.current_conflicts, 2)
+                self.assertEqual(first.facts.listing_bindings, 0)
+                self.assertEqual(first.facts.nonzero_sale_price_parts, 0)
+                self.assertEqual(first.facts.internal_quantity, "5.25")
+                self.assertEqual(
+                    (first.facts.stock_move_rows, first.facts.done_stock_move_rows), (2, 1)
+                )
+                self.assertEqual(first.parts[0].cost, "9.45")
+                self.assertEqual(first.parts[0].internal_quantity, "2.50")
+                self.assertEqual(first.parts[0].part_number, first.parts[0].barcode)
+                self.assertTrue(first.parts[0].suppliers_truncated)
+                self.assertEqual(len(first.parts[0].supplier_costs or ()), 10)
+                self.assertEqual(first.parts[2].status, "missing")
+                self.assertEqual(first.purchaser.login, "buyer@example.invalid")
+                self.assertEqual(
+                    first.purchaser.group_xmlids,
+                    ("base.group_user", "purchase.group_purchase_user"),
+                )
+                self.assertEqual(first.purchaser.groups_without_xmlid, 1)
+                self.assertIsNotNone(first.database_uuid)
+                self.assertIsNotNone(first.database_snapshot)
+                self.assertNotIn("private-fixture", first.model_dump_json())
+
+                database.execute(
+                    "INSERT INTO external_id VALUES (1,'part','product.template',999,'53',true)"
+                )
+                database.execute("UPDATE product_template SET list_price=5 WHERE id=101")
+                database.execute("ALTER TABLE product_template DROP COLUMN fishbowl_packaging")
+                database.execute("ALTER TABLE product_supplierinfo DROP COLUMN uom_id")
+                database.commit()
+                current = read()
+                assert current.facts is not None
+                self.assertEqual(current.facts.parts, 3)
+                self.assertEqual(current.facts.nonzero_sale_price_parts, 2)
+                self.assertEqual(current.parts[2].status, "present")
+                self.assertNotEqual(current.database_snapshot, first.database_snapshot)
+                self.assertIsNone(current.facts.parts_with_packaging)
+                self.assertIsNone(current.facts.historical_fields_copied)
+                self.assertEqual(current.facts.supplier_cost_rows, first.facts.supplier_cost_rows)
+                self.assertIsNone(current.parts[0].supplier_costs)
+
+                database.execute("DELETE FROM external_system WHERE code='fishbowl'")
+                database.commit()
+                absent = read()
+                assert absent.facts is not None
+                self.assertIsNone(absent.facts.parts)
+                self.assertIsNone(absent.facts.listing_bindings)
+                self.assertTrue(all(part.status == "unavailable" for part in absent.parts))

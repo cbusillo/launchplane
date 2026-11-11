@@ -119,6 +119,7 @@ class OdooParameterPresenceResponse(BaseModel):
 class OdooInventoryReadbackResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    status: Literal["ok"] = "ok"
     trace_id: str
     result: inventory_readback.InventoryReadResult
 

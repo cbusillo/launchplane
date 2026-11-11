@@ -12,7 +12,9 @@ from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH
 from control_plane.dokploy.native_copy_stream import _read_remote
 from control_plane.odoo_inventory_readback_program import CONTAINER_PROGRAM, HOST_PROGRAM
 from control_plane.odoo_source_prerequisite_programs import FailureStage
-from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.timestamps import utc_now_timestamp
+
+InventoryFailureStage = FailureStage | Literal["application_read"]
 
 ROUTE = "/v1/products/{product}/environments/{environment}/odoo-inventory-readback"
 Identifier = Annotated[str, Field(min_length=1, max_length=256, pattern=r"^[a-zA-Z0-9_.:-]+$")]
@@ -121,11 +123,15 @@ class InventoryReadResult(BaseModel):
     runtime: Literal["verified", "unknown"] = "unknown"
     evidence: reads.OdooRuntimeEvidence | None = None
     observed_at: str | None = None
+    database_snapshot: str | None = Field(
+        default=None, max_length=4096, pattern=r"^[0-9]+:[0-9]+:[0-9,]*$"
+    )
+    database_uuid: str | None = Field(default=None, pattern=r"^[a-f0-9-]{36}$")
     company_id: Count | None = None
     facts: StoredInventoryFacts | None = None
     parts: tuple[PartWitness, ...] = Field(default=(), max_length=10)
     purchaser: PurchaserWitness | None = None
-    failure_stage: FailureStage | None = None
+    failure_stage: InventoryFailureStage | None = None
     applied: Literal[False] = False
     scope: Literal["current_database_stored_facts"] = "current_database_stored_facts"
 
@@ -138,7 +144,7 @@ def read_inventory(
     control_plane_root: Path,
     database_url: str | None,
 ) -> InventoryReadResult:
-    stage: FailureStage = "runtime_selection"
+    stage: InventoryFailureStage = "runtime_selection"
     # noinspection PyBroadException
     try:
         profile = store.read_product_profile_record(product)
@@ -207,6 +213,7 @@ def read_inventory(
             or result.observed_at is not None
             or result.failure_stage is not None
             or result.facts is None
+            or result.database_snapshot is None
             or result.company_id != query.company_id
             or tuple(part.part_id for part in result.parts) != query.part_ids
             or result.purchaser is None
