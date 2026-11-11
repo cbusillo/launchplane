@@ -1292,30 +1292,16 @@ A refused qualification keeps the same response for every cause. Its trace's
 refused; a refused storage observation also carries the fixed program's line
 numbers and hash.
 
-Read that trace through the supported service-log reader and map its location
-to the installed source revision. `_provider_projection` has separate refusal
-sites for each missing provider field, mismatched target identity, invalid
-project name, populated environment, populated compose source, mounts, enabled
-automatic deployment and unverified automatic-deployment state. The registered
-remote-server validator supplies its own site. During replacement, environment
-and compose drift from the original executor's staged inputs have separate
-sites. The first refusal stops qualification; later checks remain unverified.
-Neither the response nor the evidence includes provider values.
-
-A missing field requires a complete supported provider observation; it does not
-prove an empty value. Identity or project/server failures require target-binding
-qualification. Environment, source or mount failures require ownership and
-existing-input qualification before choosing a configuration or storage action;
-never clear them merely to pass this check. An enabled auto-deploy result requires
-the supported setup path to establish disabled auto-deploy before qualification;
-an absent or nonboolean result requires observation-contract repair first.
-Raw compose creation does not explicitly set or verify auto-deploy. The separate
-generic-web repository-source setup disables it, but is not an Odoo production
-setup route. If the selected Odoo setup cannot establish that prerequisite,
-route that concrete setup gap to its source issue; do not accept a provider
-default or substitute the generic-web writer. Staged-input drift stays with the
-original replacement operation for reconciliation. None of these diagnostics
-authorizes a write, credential generation or replacement.
+Use the supported [service-log reader](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/service-log-reader.md)
+and map the trace's location to the installed source revision. Each missing or
+conflicting provider fact has a distinct site. Missing fields require a complete
+provider observation, not an empty-state assumption. Identity failures need
+target-binding qualification; populated environment, source or mounts need
+existing-input ownership qualification before selecting an action. Enabled
+auto-deploy needs the supported setup path to establish disabled state;
+unverified auto-deploy needs observation-contract repair. If setup cannot meet
+the prerequisite, route that concrete source gap without accepting a default.
+The first refusal stops qualification; later checks remain unverified.
 
 ## Shared preview settings
 

@@ -479,10 +479,19 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
     async def test_provider_refusals_identify_each_missing_or_conflicting_fact_without_values(
         self,
     ) -> None:
+        self.provider_payload["name"] = "Example display name"
         original = dict(self.provider_payload)
         refusals = {
             f"missing_{field}": {key: value for key, value in original.items() if key != field}
-            for field in original
+            for field in (
+                "composeId",
+                "appName",
+                "serverId",
+                "env",
+                "composeFile",
+                "mounts",
+                "autoDeploy",
+            )
         }
         sentinel = "private-provider-sentinel"
         conflicts: dict[str, tuple[str, Any]] = {
