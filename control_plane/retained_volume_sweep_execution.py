@@ -147,7 +147,7 @@ def _inventory_clear(
     exact: bool = False,
     references: list[dict[str, str]] | None = None,
 ) -> bool:
-    def refused(kind: str, identity: object = "", *, referenced: bool = False) -> bool:
+    def refused(reference_kind: str, identity: object = "", *, referenced: bool = False) -> bool:
         import re
         from control_plane.contracts.canonical_json import canonical_json_sha256
 
@@ -156,13 +156,15 @@ def _inventory_clear(
                 "reason": "foreign_provider_reference"
                 if referenced
                 else "provider_inventory_unavailable",
-                "kind": kind,
+                "kind": reference_kind,
             }
             if isinstance(identity, str) and identity:
                 if re.fullmatch(r"[A-Za-z0-9_-]{1,200}", identity):
                     row["record_id"] = identity
                 else:
-                    row["record_sha256"] = canonical_json_sha256({"kind": kind, "id": identity})
+                    row["record_sha256"] = canonical_json_sha256(
+                        {"kind": reference_kind, "id": identity}
+                    )
             references.append(row)
         return False
 

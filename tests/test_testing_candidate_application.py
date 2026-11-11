@@ -6,7 +6,7 @@ import base64
 import shutil
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock
 import unittest
 from unittest.mock import patch
@@ -1325,7 +1325,7 @@ class CandidateApplicationTests(unittest.TestCase):
                 )
                 executor = Mock(allocation=prepared)
                 executor.run.return_value = completed
-                lease = Mock(spec=ProviderEvidenceLease)
+                lease = cast(ProviderOperationLease, Mock(spec=ProviderEvidenceLease))
                 remove = shutil.rmtree
 
                 def lost_cleanup(path: Any) -> None:

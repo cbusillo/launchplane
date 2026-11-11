@@ -42,6 +42,7 @@ from control_plane.odoo_testing_restore import (
 from control_plane.contracts.odoo_testing_source import (
     NativeOdooTestingSource,
     MigratedOdooTestingSource,
+    NativeTestingCopyCapture,
 )
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
@@ -552,7 +553,7 @@ def execute_odoo_post_deploy(
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
         native_preparer = None
-        native_capture = None
+        native_capture: NativeTestingCopyCapture | None = None
         if (
             fresh_testing_generation is not None
             and fresh_testing_generation.source_mode == "container-export"

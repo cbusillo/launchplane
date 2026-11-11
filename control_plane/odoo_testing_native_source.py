@@ -38,6 +38,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.contracts.canonical_json import canonical_json_sha256
 
 if TYPE_CHECKING:
+    from control_plane.contracts.testing_candidate import TestingCandidateAllocation
     from control_plane.storage.postgres import PostgresRecordStore
     from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 
@@ -567,7 +568,7 @@ def remove_completed_native_capture_cache(
     if not callable(candidates):
         return
     checkpoints = RecordTestingRebuildStore(cast(RebuildRecordStore, store))
-    for candidate in candidates():
+    for candidate in cast("Callable[[], tuple[TestingCandidateAllocation, ...]]", candidates)():
         app = candidate.application
         generation = app.plan.generation if app else None
         if generation is None or generation.source_mode != "container-export":
