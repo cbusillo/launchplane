@@ -186,7 +186,7 @@ class InventoryRouteTests(unittest.IsolatedAsyncioTestCase):
             error_response_model=reader.InventoryReadResult,
         )
         register_odoo_runtime_read_routes(
-            cast(ApiRouteRegistrar, app),
+            cast(ApiRouteRegistrar, cast(object, app)),
             dependencies=OdooRuntimeReadDependencies(
                 common=common, control_plane_root=Path("fixture"), database_url=None
             ),
@@ -368,7 +368,7 @@ class InventoryHostTests(unittest.TestCase):
             "NetworkSettings": {"Networks": {"fictional-private": {}, "dokploy-network": {}}}
         }
 
-        def docker(arguments: list[str], **kwargs: Any) -> SimpleNamespace:
+        def docker(arguments: list[str], **_kwargs: Any) -> SimpleNamespace:
             if arguments[1] == "ps":
                 output = database["Id"]
             elif arguments[1] == "inspect":
@@ -450,7 +450,7 @@ class InventoryPostgresTests(unittest.TestCase):
                 database_url.replace("postgresql+psycopg:", "postgresql:")
             ) as database:
                 database.execute(
-                    (Path(__file__).parent / "fixtures/odoo_inventory_readback.sql").read_text()
+                    (Path(__file__).parent / "fixtures/odoo_inventory_readback.sql").read_bytes()
                 )
                 database.commit()
 
