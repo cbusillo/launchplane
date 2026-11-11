@@ -17088,6 +17088,13 @@ def create_launchplane_fastapi_app(
             if product_config_request.reads_lane_provider_env() and product_config_request.instance:
                 if live_provider_adoption:
                     try:
+                        secret_selection = SecretDeliverySetExpectation(
+                            integration="runtime_environment",
+                            context=product_config_request.context,
+                            instance=product_config_request.instance,
+                            records=(),
+                            bindings=(),
+                        )
                         adoption_authority = ProductAuthorityBundle(
                             expected_product_profiles=(config_profile,)
                             if config_profile is not None
@@ -17128,15 +17135,21 @@ def create_launchplane_fastapi_app(
                                     integration="runtime_environment",
                                     context=product_config_request.context,
                                     instance=product_config_request.instance,
-                                    records=database_store.list_secret_records(
-                                        integration="runtime_environment",
-                                        context_name=product_config_request.context,
-                                        limit=None,
+                                    records=tuple(
+                                        record
+                                        for record in database_store.list_secret_records(
+                                            integration="runtime_environment",
+                                            context_name=product_config_request.context,
+                                        )
+                                        if secret_selection.includes(record)
                                     ),
-                                    bindings=database_store.list_secret_bindings(
-                                        integration="runtime_environment",
-                                        context_name=product_config_request.context,
-                                        limit=None,
+                                    bindings=tuple(
+                                        binding
+                                        for binding in database_store.list_secret_bindings(
+                                            integration="runtime_environment",
+                                            context_name=product_config_request.context,
+                                        )
+                                        if secret_selection.includes(binding)
                                     ),
                                 ),
                             ),
@@ -17179,13 +17192,14 @@ def create_launchplane_fastapi_app(
             )
             if (
                 adoption_authority is not None
+                and lane_provider_env_reader is not None
                 and product_config_plan_only_records_provider_settings(planned_driver_result)
             ):
                 adoption_review_digest = build_request_fingerprint(
                     {
                         "authority": adoption_authority.model_dump(mode="json"),
                         "provider_values": {
-                            key: lane_provider_env.env[key]
+                            key: lane_provider_env_reader().env[key]
                             for key in cast(
                                 tuple[str, ...],
                                 cast(dict[str, object], request_payload["runtime_env"])[
@@ -17438,7 +17452,9 @@ def create_launchplane_fastapi_app(
                     code="matching_dry_run_required"
                     if adoption_review_digest
                     else "public_hosts_target_changed",
-                    message="The product-config target changed. Review a fresh dry-run.",
+                    message="The product-config target changed. Review a fresh dry-run."
+                    if adoption_review_digest
+                    else "The public-host target changed. Review a fresh dry-run.",
                 ) from error
             except ServiceIdentityAuthorityError as error:
                 raise _launchplane_http_error(

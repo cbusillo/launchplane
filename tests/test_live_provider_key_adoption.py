@@ -24,7 +24,11 @@ from tests.http_app_test_support import (
 from tests.support.auth import _local_operator_policy, scoped_agent_transport
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from tests.support.profiles import _generic_site_profile_payload
-from tests.support.stores import _seed_tracked_target_records, _sqlite_database_url
+from tests.support.stores import (
+    _seed_tracked_target_records,
+    _sqlite_database_url,
+    _write_runtime_key_safety_policy,
+)
 
 
 class LiveProviderKeyAdoptionTests(unittest.IsolatedAsyncioTestCase):
@@ -216,9 +220,7 @@ class LiveProviderKeyAdoptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_secret_bindings(), (self.binding,))
         self.provider_write.assert_not_called()
 
-    async def test_values_retirement_and_secret_changes_cannot_use_record_only_review(self) -> None:
-        review = await self._post("dry-run")
-        self.assertEqual(review.status_code, 202, review.text)
+    async def test_reviewed_values_and_retirement_cannot_use_record_only_exception(self) -> None:
         for changes in (
             {
                 "runtime_env": {
@@ -234,19 +236,13 @@ class LiveProviderKeyAdoptionTests(unittest.IsolatedAsyncioTestCase):
                     "retired_provider_keys": ["APP_COLOR"],
                 }
             },
-            {"secrets": [{"binding_key": "EXISTING_CREDENTIAL", "value": "arbitrary-new-secret"}]},
-            {
-                "disable_secret_bindings": [
-                    {
-                        "binding_key": "EXISTING_CREDENTIAL",
-                        "expected_version_id": "fictional-version",
-                    }
-                ]
-            },
         ):
             with self.subTest(changes=changes):
+                review = await self._post("dry-run", **changes)
+                self.assertEqual(review.status_code, 202, review.text)
                 response = await self._post("apply", "unsafe-request", **changes)
-                self.assertIn(response.status_code, (400, 403, 409), response.text)
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(response.json()["error"]["code"], "live_product_requires_operator")
                 self._assert_original()
 
     async def test_changed_provider_fact_or_review_never_records_an_unreviewed_value(self) -> None:
@@ -262,7 +258,31 @@ class LiveProviderKeyAdoptionTests(unittest.IsolatedAsyncioTestCase):
             "apply", "changed-request", runtime_env={"adopt_provider_keys": ["APP_LABEL"]}
         )
         self.assertEqual(changed_request.status_code, 409, changed_request.text)
+        self.assertEqual(changed_request.json()["error"]["code"], "matching_dry_run_required")
         self._assert_original()
+
+    async def test_matching_mixed_review_cannot_admit_a_credential_write(self) -> None:
+        _write_runtime_key_safety_policy(
+            database_url=self.database_url, context_name="example-site"
+        )
+        secrets = [{"binding_key": "SMTP_PASSWORD", "value": "fictional-new-password"}]
+        review = await self._post("dry-run", secrets=secrets)
+        self.assertEqual(review.status_code, 202, review.text)
+        response = await self._post("apply", "mixed-credential", secrets=secrets)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "live_product_requires_operator")
+        self._assert_original()
+
+    async def test_testing_secret_metadata_does_not_invalidate_production_review(self) -> None:
+        review = await self._post("dry-run")
+        self.assertEqual(review.status_code, 202, review.text)
+        self.store.write_secret_record(
+            self.secret.model_copy(
+                update={"secret_id": "fictional-testing-secret", "instance": "testing"}
+            )
+        )
+        applied = await self._post("apply", "unrelated-testing-metadata")
+        self.assertEqual(applied.status_code, 202, applied.text)
 
     async def test_missing_review_or_action_and_scoped_actor_cannot_borrow_this_path(self) -> None:
         unreviewed = await self._post("apply", "unreviewed")
