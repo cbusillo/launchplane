@@ -44,13 +44,17 @@ state.setdefault('calls',[]).append(args)
 def save():
     state_path.write_text(json.dumps(state))
 volumes=state['volumes'];containers=state['containers']
-if args==['volume','ls','--format','{{.Name}}']:
+if args in (['volume','ls','--format','{{.Name}}'],['volume','ls','-q']):
     print('\n'.join(volumes))
+elif args[:2]==['info','--format']:
+    print(json.dumps({'ID':'fixture-engine','DockerRootDir':state['root']}))
 elif args[:2]==['volume','inspect']:
     item=volumes[args[2]]
     print(json.dumps([{'Name':args[2],'Driver':'local','Labels':item['labels'],'Mountpoint':item['path'],'Options':item.get('options')}]))
 elif args==['ps','-aq','--no-trunc']:
     print('\n'.join(containers))
+elif args[:3]==['inspect','--type','volume']:
+    print(json.dumps([{'Name':key,'Driver':'local','Labels':volumes[key]['labels'],'Mountpoint':volumes[key]['path'],'Options':volumes[key].get('options')} for key in args[3:]]))
 elif args[:3]==['inspect','--type','container']:
     print(json.dumps([{'Id':key,**containers[key]} for key in args[3:]]))
 elif args[:3]==['container','inspect','--size']:
@@ -58,6 +62,8 @@ elif args[:3]==['container','inspect','--size']:
 elif args[0]=='stop':
     pass
 elif args[0]=='rm':
+    if state.get('fail_container_rm'):
+        save();raise SystemExit(1)
     for key in args[1:]:
         containers.pop(key)
 elif args[:2]==['volume','rm']:
@@ -88,7 +94,7 @@ def ownership_label(spec: dict[str, str]) -> str:
     ).hexdigest()
 
 
-class CandidateReleaseProgramTests(unittest.TestCase):
+class CandidateReleaseProgramFixture(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -128,8 +134,14 @@ class CandidateReleaseProgramTests(unittest.TestCase):
         payload = base64.b64encode(
             json.dumps({"mode": mode, "resources": spec or resources()}).encode()
         ).decode()
+        return cast(
+            dict[str, Any],
+            self.run_host_program(TESTING_CANDIDATE_RELEASE_PROGRAM, payload)["result"],
+        )
+
+    def run_host_program(self, program: str, payload: str) -> dict[str, Any]:
         result = subprocess.run(
-            [sys.executable, "-c", TESTING_CANDIDATE_RELEASE_PROGRAM, payload, "FRAME:"],
+            [sys.executable, "-c", program, payload, "FRAME:"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -137,8 +149,7 @@ class CandidateReleaseProgramTests(unittest.TestCase):
             env=os.environ | {"PATH": self.path, "FAKE_DOCKER_STATE": str(self.state_path)},
         )
         self.state = json.loads(self.state_path.read_text())
-        frame: dict[str, dict[str, Any]] = json.loads(result.stdout.removeprefix("FRAME:"))
-        return frame["result"]
+        return cast(dict[str, Any], json.loads(result.stdout.removeprefix("FRAME:")))
 
     def removals(self) -> list[list[str]]:
         return [
@@ -147,6 +158,8 @@ class CandidateReleaseProgramTests(unittest.TestCase):
             if call[0] == "rm" or call[:2] == ["volume", "rm"]
         ]
 
+
+class CandidateReleaseProgramTests(CandidateReleaseProgramFixture):
     def test_legacy_observation_reports_remaining_resources_and_removes_nothing(self) -> None:
         self.assertEqual(
             self.run_program("dry-run"), {"status": "eligible", "reclaimable_bytes": None}
@@ -204,6 +217,164 @@ class CandidateReleaseProgramTests(unittest.TestCase):
         self.assertEqual(self.removals(), [])
 
 
+class CurrentTestingReleaseProgramTests(CandidateReleaseProgramFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.state["root"] = str(self.root)
+        for role, name in (
+            ("ODOO_DB_VOLUME", "db"),
+            ("ODOO_DATA_VOLUME", "data"),
+            ("ODOO_LOG_VOLUME", "logs"),
+        ):
+            self.state["volumes"][NAMESPACE + "-" + name]["labels"][
+                "io.launchplane.testing-resource-role"
+            ] = role
+        self.state["containers"]["candidate-web"]["Mounts"][0]["RW"] = True
+        self.save()
+
+    def current_program(
+        self,
+        mode: str,
+        spec: dict[str, str] | None = None,
+        *,
+        operation_key: str = "fixture-release",
+    ) -> dict[str, Any]:
+        from control_plane.testing_candidate_retention_host import (
+            NATIVE_TESTING_RETENTION_INSPECTION,
+        )
+
+        payload = base64.b64encode(
+            json.dumps(
+                {
+                    "mode": mode,
+                    "resources": spec or resources(),
+                    "project": NAMESPACE,
+                    "operation_key": operation_key,
+                }
+            ).encode()
+        ).decode()
+        program = (
+            """import os,json
+from pathlib import Path
+from types import SimpleNamespace
+os.statvfs=lambda path:SimpleNamespace(f_bavail=1000+(3-len(json.loads(Path(os.environ['FAKE_DOCKER_STATE']).read_text())['volumes']))*100,f_frsize=1,f_fsid=1)
+"""
+            + NATIVE_TESTING_RETENTION_INSPECTION
+        )
+        return self.run_host_program(program, payload)
+
+    def test_failed_running_copy_releases_nonempty_volumes_and_measures_each_change(self) -> None:
+        for volume in self.state["volumes"].values():
+            (Path(volume["path"]) / "retained").write_bytes(b"failed copy data")
+        self.state["containers"]["candidate-web"]["State"] = {"Running": True}
+        self.save()
+        dry = self.current_program("dry-run")
+        self.assertTrue(all(row["status"] == "observed" for row in dry["volumes"]))
+        self.assertEqual(self.removals(), [])
+        applied = self.current_program("apply")
+        self.assertTrue(all(row["status"] == "absent" for row in applied["volumes"]))
+        self.assertEqual(self.state["volumes"], {})
+        self.assertEqual(self.state["containers"], {})
+        self.assertEqual(
+            sorted(row["before_bytes"] for row in applied["physical_readback"].values()),
+            [1000, 1100, 1200],
+        )
+        self.assertEqual(
+            sorted(row["after_bytes"] for row in applied["physical_readback"].values()),
+            [1100, 1200, 1300],
+        )
+        self.assertTrue(
+            all(row["status"] == "absent" for row in self.current_program("readback")["volumes"])
+        )
+        removed = [call[2] for call in self.removals() if call[:2] == ["volume", "rm"]]
+        self.assertEqual(removed[-1], NAMESPACE + "-data")
+
+    def test_published_candidate_is_serving_and_never_released(self) -> None:
+        self.state["containers"]["candidate-web"]["HostConfig"] = {
+            "PortBindings": {"80/tcp": [{"HostPort": "8080"}]}
+        }
+        self.save()
+        self.assertTrue(self.current_program("dry-run")["serving"])
+        self.assertEqual(self.current_program("apply")["reason_code"], "candidate_release_selected")
+        self.assertEqual(self.removals(), [])
+
+    def test_host_refusal_is_terminal_and_original_readback_does_not_repeat_it(self) -> None:
+        self.state["volumes"][NAMESPACE + "-data"]["labels"][
+            "io.launchplane.production-recipient"
+        ] = "prod"
+        self.save()
+        held = self.current_program("apply")
+        self.assertEqual(held["release_status"], "held")
+        self.assertEqual(held["reason_code"], "production_boundary")
+        self.assertEqual(self.current_program("readback")["reason_code"], "production_boundary")
+        self.assertEqual(self.removals(), [])
+
+    def test_completed_command_rejection_settles_held_and_a_fresh_plan_can_continue(self) -> None:
+        self.state["fail_container_rm"] = True
+        self.save()
+        held = self.current_program("apply")
+        self.assertEqual(
+            (held["release_status"], held["reason_code"]), ("held", "command_rejected")
+        )
+        self.assertEqual(held["container_count"], 1)
+        self.assertTrue(all(row["status"] == "observed" for row in held["volumes"]))
+        attempts = self.removals()
+        self.assertEqual(self.current_program("readback")["reason_code"], "command_rejected")
+        self.assertEqual(self.current_program("apply")["reason_code"], "command_rejected")
+        self.assertEqual(self.removals(), attempts)
+        self.state["fail_container_rm"] = False
+        self.save()
+        self.assertEqual(
+            self.current_program("apply", operation_key="fresh-reviewed-plan")["release_status"],
+            "released",
+        )
+        self.assertEqual(self.state["volumes"], {})
+        self.assertEqual(self.state["containers"], {})
+
+    def test_lost_success_reply_replays_measurements_without_removing_again(self) -> None:
+        applied = self.current_program("apply")
+        removals = self.removals()
+        observed = self.current_program("readback")
+        self.assertEqual(observed["physical_readback"], applied["physical_readback"])
+        self.assertEqual(self.removals(), removals)
+        self.assertEqual(
+            self.current_program("apply")["physical_readback"], applied["physical_readback"]
+        )
+        self.assertEqual(self.removals(), removals)
+
+    def test_production_scope_labels_or_shared_storage_never_dispatch(self) -> None:
+        for spec in (resources(instance="prod"), resources(namespace="production")):
+            self.assertEqual(
+                self.current_program("apply", spec)["reason_code"], "testing_scope_required"
+            )
+            self.assertEqual(self.removals(), [])
+        for modification in ("production_label", "bind", "foreign_label", "production_mount"):
+            with self.subTest(modification=modification):
+                volume = self.state["volumes"][NAMESPACE + "-data"]
+                if modification == "production_label":
+                    volume["labels"]["io.launchplane.production-recipient"] = "prod"
+                elif modification == "bind":
+                    volume["options"] = {"o": "bind", "device": "/production"}
+                elif modification == "foreign_label":
+                    volume["labels"]["io.launchplane.testing-resources"] = ownership_label(
+                        resources(instance="prod")
+                    )
+                else:
+                    self.state["containers"]["candidate-web"]["Mounts"].append(
+                        {"Type": "volume", "Name": "production-db", "RW": True}
+                    )
+                self.save()
+                self.assertEqual(
+                    self.current_program("apply", operation_key=modification)["reason_code"],
+                    "production_boundary",
+                )
+                self.assertEqual(self.removals(), [])
+                volume = self.state["volumes"][NAMESPACE + "-data"]
+                volume["labels"].pop("io.launchplane.production-recipient", None)
+                volume.pop("options", None)
+                volume["labels"]["io.launchplane.testing-resources"] = ownership_label(resources())
+
+
 def failed_operation(**changes: object) -> Mock:
     values = {
         "product": "fixture",
@@ -258,74 +429,54 @@ class CandidateReleaseGuardTests(unittest.TestCase):
 
     def test_selected_or_routed_candidate_is_kept(self) -> None:
         allocation = Mock(product="fixture", context="fixture-testing", operation_id="operation-1")
-        cases = (
-            ({"custody": ValueError("lane target names it")}, "candidate_release_selected"),
-            ({"publication": Mock(state="applied")}, "candidate_release_selected"),
-            ({"routed": True}, "candidate_release_selected"),
-        )
-        for case, code in cases:
+        for selected, publication, routed in (
+            (True, None, False),
+            (False, Mock(state="applied"), False),
+            (False, None, True),
+        ):
+            store = Mock()
+            store.list_dokploy_target_id_records.return_value = (
+                [Mock(target_id=allocation.compose_id)] if selected else []
+            )
             with (
-                self.subTest(case=case),
-                patch.object(
-                    release, "require_candidate_target_custody", side_effect=case.get("custody")
-                ),
-                patch.object(release, "read_publication", return_value=case.get("publication")),
-                patch.object(release, "candidate_routed", return_value=case.get("routed", False)),
+                patch.object(release, "read_publication", return_value=publication),
+                patch.object(release, "candidate_routed", return_value=routed),
             ):
                 self.assertEqual(
                     self.refusal(
                         lambda: release.require_candidate_unselected(
-                            Path("/unused"), Mock(), allocation
+                            Path("/unused"), store, allocation
                         )
                     ),
-                    code,
+                    "candidate_release_selected",
                 )
         for state in ("planned", "reversed"):
+            store.list_dokploy_target_id_records.return_value = []
             with (
-                patch.object(release, "require_candidate_target_custody"),
                 patch.object(release, "read_publication", return_value=Mock(state=state)),
                 patch.object(release, "candidate_routed", return_value=False),
             ):
-                release.require_candidate_unselected(Path("/unused"), Mock(), allocation)
+                release.require_candidate_unselected(Path("/unused"), store, allocation)
 
-    def lane_refusal(
-        self,
-        *,
-        only_copy: bool = False,
-        shared: bool = False,
-        protected: bool = False,
-        reason: str = "usage_protected",
-    ) -> str | None:
-        store = Mock()
-        store.read_disposable_lane_safety.return_value = None
-        with (
-            patch.object(
-                release,
-                "recorded_lane_protection",
-                return_value=Mock(only_copy=only_copy, shared=shared),
-            ),
-            patch.object(release, "read_odoo_testing_usage", return_value=Mock(usage="unknown")),
-            patch.object(
-                release,
-                "evaluate_lane_usage",
-                return_value=Mock(protected=protected, reason=reason),
-            ) as usage,
-        ):
-            try:
-                release.require_lane_releasable(Path("/unused"), store, failed_operation())
-            except TestingCandidateReleaseRefused as error:
-                return error.code
-        self.assertFalse(usage.call_args.kwargs["require_unused"])
-        return None
-
-    def test_needed_copy_shared_resources_or_lane_use_keep_the_candidate(self) -> None:
-        self.assertEqual(self.lane_refusal(only_copy=True), "testing_needed_copy")
-        self.assertEqual(self.lane_refusal(shared=True), "testing_production_resources_shared")
-        self.assertEqual(self.lane_refusal(protected=True), "testing_in_use")
-        self.assertEqual(
-            self.lane_refusal(protected=True, reason="staff_testing_hold"), "testing_staff_hold"
-        )
-        self.assertIsNone(self.lane_refusal())
+    def test_recent_signin_keeps_the_lane_and_unknown_use_proceeds(self) -> None:
+        for recent in (True, False, None):
+            with (
+                self.subTest(recent=recent),
+                patch.object(
+                    release, "read_odoo_testing_usage", return_value=Mock(recent_signins=recent)
+                ),
+            ):
+                if recent is True:
+                    self.assertEqual(
+                        self.refusal(
+                            lambda: release.require_lane_releasable(
+                                Path("/unused"), Mock(), failed_operation()
+                            )
+                        ),
+                        "testing_in_use",
+                    )
+                else:
+                    release.require_lane_releasable(Path("/unused"), Mock(), failed_operation())
 
 
 class CandidateReleaseFixture(unittest.TestCase):
@@ -356,33 +507,41 @@ class CandidateReleaseFixture(unittest.TestCase):
         self.routed = self.enterContext(
             patch.object(release, "candidate_routed", return_value=False)
         )
-        self.usage = self.enterContext(patch.object(release, "require_lane_releasable"))
+        self.usage = self.enterContext(
+            patch.object(release, "require_lane_releasable", return_value="")
+        )
         self.applied: list[str] = []
         self.interrupt = False
         self.uncertain = True
 
+        observation = self.fixture.observation
+
         def host(
             _root: Path,
-            _binding: Any,
-            mode: str,
-            key: str,
-            lease: ProviderOperationLease | None = None,
-            **kwargs: Any,
-        ) -> tuple[str, str]:
+            _store: Any,
+            _allocation: Any,
+            *,
+            mode: str = "dry-run",
+            dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
+            operation_key: str = "",
+        ) -> Any:
             if mode == "apply":
-                assert lease is not None
-                lease.checkpoint_effect("release-fixture-volume")
-                self.applied.append(key)
-                return ("unknown", "effect_unknown") if self.interrupt else ("removed", "removed")
-            if mode == "readback":
-                return (
-                    ("unknown", "effect_unknown")
-                    if self.interrupt and self.uncertain
-                    else ("absent", "removed")
-                )
-            return "eligible", "qualified"
+                if dispatch_guard is not None:
+                    dispatch_guard(lambda: self.applied.append(operation_key))
+                if self.interrupt:
+                    from control_plane.provider_operations import ProviderMutationUnknownError
 
-        self.fixture.host.side_effect = host
+                    raise ProviderMutationUnknownError("effect unknown")
+            if mode in {"apply", "readback"}:
+                if self.interrupt and self.uncertain:
+                    return {"volumes": [], "capacity": []}, "effect_unknown"
+                return {
+                    **observation,
+                    "volumes": [{**row, "status": "absent"} for row in observation["volumes"]],
+                }, ""
+            return observation, ""
+
+        self.fixture.inspect.side_effect = host
 
     def post(
         self, director: bool = True, key: str = "", operation: str | None = None, **body: object
@@ -491,6 +650,29 @@ class CandidateReleaseRouteTests(CandidateReleaseFixture):
         applied = self.post(key="release", mode="apply", reviewed_plan_sha256=reviewed)
         self.assertEqual(applied.json()["status"], "released", applied.text)
 
+    def test_late_guard_refusal_releases_reservation_and_can_be_replanned(self) -> None:
+        from contextlib import nullcontext
+
+        reviewed = self.post().json()["plan_sha256"]
+
+        def acquire(_operation: str) -> Any:
+            self.usage.side_effect = TestingCandidateReleaseRefused(
+                "testing_in_use", "A person arrived after fresh planning."
+            )
+            return nullcontext(lambda: None)
+
+        self.executor.side_effect = acquire
+        refused = self.post(key="late", mode="apply", reviewed_plan_sha256=reviewed)
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(self.applied, [])
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        self.executor.side_effect = lambda _operation: nullcontext(lambda: None)
+        self.usage.side_effect = None
+        self.assertEqual(
+            self.post(key="late", mode="apply", reviewed_plan_sha256=reviewed).json()["status"],
+            "released",
+        )
+
     def test_unknown_original_only_reconciles_without_repeating_removal(self) -> None:
         reviewed = self.post().json()["plan_sha256"]
         self.interrupt = True
@@ -507,36 +689,6 @@ class CandidateReleaseRouteTests(CandidateReleaseFixture):
         self.assertEqual(observed.json()["status"], "released", observed.text)
         self.assertEqual(observed.json()["plan_sha256"], reviewed)
         self.assertEqual(len(self.applied), 1)
-
-    def test_gate_bearing_data_volume_is_removed_last(self) -> None:
-        namespace = self.fixture.candidate.namespace
-        first = self.fixture.observation["volumes"][0]
-        self.fixture.observation["volumes"] = [
-            {**first, "role": role, "name": namespace + suffix, "identity": digit * 64}
-            for role, suffix, digit in (
-                ("ODOO_DB_VOLUME", "-db", "b"),
-                ("ODOO_DATA_VOLUME", "-data", "d"),
-                ("ODOO_LOG_VOLUME", "-logs", "e"),
-            )
-        ]
-        removed: list[str] = []
-        host = self.fixture.host.side_effect
-
-        def record(root: Path, binding: Any, mode: str, *args: Any, **kwargs: Any) -> Any:
-            if mode == "apply":
-                removed.append(binding.volume_name)
-            return host(root, binding, mode, *args, **kwargs)
-
-        self.fixture.host.side_effect = record
-        reviewed = self.post().json()["plan_sha256"]
-        applied = self.post(key="release", mode="apply", reviewed_plan_sha256=reviewed)
-        self.assertEqual(applied.json()["status"], "released", applied.text)
-        self.assertEqual(removed[-1], namespace + "-data")
-        self.assertEqual(len(removed), 3)
-        self.assertEqual(
-            [row["role"] for row in applied.json()["candidates"][0]["resources"]],
-            ["ODOO_DB_VOLUME", "ODOO_DATA_VOLUME", "ODOO_LOG_VOLUME"],
-        )
 
     def test_missing_receipt_and_foreign_receiver_do_not_dispatch(self) -> None:
         missing = self.post(key="missing", mode="readback", reviewed_plan_sha256="a" * 64)
@@ -689,12 +841,7 @@ class AutomaticCandidateReleaseTests(CandidateReleaseFixture):
         self.assertNotIn("reason_code", readback.json())
 
     def test_each_refusal_keeps_the_candidate_and_names_it(self) -> None:
-        lane_refusals = (
-            "testing_needed_copy",
-            "testing_production_resources_shared",
-            "testing_staff_hold",
-            "testing_in_use",
-        )
+        lane_refusals = ("testing_in_use",)
         for code in (*lane_refusals, "candidate_release_selected", "candidate_release_unavailable"):
             with self.subTest(code=code):
                 self.usage.side_effect, self.routed.side_effect = None, None
@@ -722,7 +869,7 @@ class AutomaticCandidateReleaseTests(CandidateReleaseFixture):
         self.release_failed()
         view = self.view()
         self.assertEqual(view.status, "held")
-        self.assertEqual(view.reasons[:2], ("candidate_release_held", "testing_in_use"))
+        self.assertIn("testing_in_use", view.reasons)
         self.assertEqual(self.applied, [])
 
     def test_selection_after_planning_reports_the_fresh_protection(self) -> None:
@@ -749,7 +896,7 @@ class AutomaticCandidateReleaseTests(CandidateReleaseFixture):
             self.release_failed()
         view = self.view()
         self.assertEqual(view.status, "held")
-        self.assertIn("selected_target", view.reasons)
+        self.assertIn("candidate_release_selected", view.reasons)
         self.assertEqual(self.applied, [])
 
     def test_concurrent_executor_settles_held_without_effect(self) -> None:
@@ -810,7 +957,7 @@ class AutomaticCandidateReleaseTests(CandidateReleaseFixture):
             ):
                 self.release_failed()
                 self.assertIsNone(self.view())
-                self.fixture.host.assert_not_called()
+                self.assertEqual(self.applied, [])
 
 
 if __name__ == "__main__":

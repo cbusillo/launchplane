@@ -478,9 +478,6 @@ class MigratedArtifactConsumptionTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.fixture.consume(capture, mode="cleanup")
         self.assertEqual(list(self.staging.iterdir()), [])
-        from control_plane.testing_candidate_retention_host import staged_source_inputs
-
-        self.assertFalse(staged_source_inputs(self.staging.parent))
         self.assertFalse(self.filestore.exists())
 
     def test_metadata_extraction_preserves_space_before_and_during_writes(self) -> None:

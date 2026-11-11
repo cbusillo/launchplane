@@ -1241,110 +1241,100 @@ class CandidateApplicationTests(unittest.TestCase):
             ):
                 self.compiled = self.inputs(prepared, "production")
                 self.assertEqual(self.prepare_application(), prepared)
-            from control_plane import testing_candidate_retention as retention
+            from tests.test_testing_rebuild import rebuild_plan, TestingProvider
+            from control_plane.contracts.testing_rebuild import TestingRebuildRecord
+            from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+            from control_plane.workflows.testing_rebuild import execute_testing_rebuild
 
-            with patch.object(retention, "_cache_directory", return_value=cache):
-                proof: dict[str, Any] = {}
-                self.assertTrue(retention._source_preserved(self.store, prepared, proof))
-                self.assertTrue(proof)
-                with patch.object(retention, "recorded_native_testing_capture", return_value=None):
-                    self.assertFalse(retention._source_preserved(self.store, prepared, {}))
-                from tests.test_testing_rebuild import rebuild_plan, TestingProvider
-                from control_plane.contracts.testing_rebuild import TestingRebuildRecord
-                from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
-                from control_plane.workflows.testing_rebuild import execute_testing_rebuild
-
-                plan = rebuild_plan().model_copy(
-                    update={
-                        "product": prepared.product,
-                        "context": prepared.context,
-                        "operation_id": prepared.operation_id,
-                    }
-                )
-                plan = plan.model_copy(
-                    update={
-                        "new": plan.new.model_copy(
-                            update={
-                                "copy_id": prepared.namespace,
-                                "target_id": prepared.compose_id,
-                            }
-                        )
-                    }
-                )
-                plan = plan.model_copy(
-                    update={
-                        name: getattr(plan, name).model_copy(
-                            update={
-                                "runtime_identity": getattr(plan, name).runtime_identity.model_copy(
-                                    update={
-                                        "product": prepared.product,
-                                        "context": prepared.context,
-                                    }
-                                )
-                            }
-                        )
-                        for name in ("old", "new")
-                    }
-                )
-                provider = TestingProvider(plan)
-                checkpoints = RecordTestingRebuildStore(self.store)
-                checkpoints.save(
-                    TestingRebuildRecord(plan=plan, began_at=provider.now, updated_at=provider.now)
-                )
+            plan = rebuild_plan().model_copy(
+                update={
+                    "product": prepared.product,
+                    "context": prepared.context,
+                    "operation_id": prepared.operation_id,
+                }
+            )
+            plan = plan.model_copy(
+                update={
+                    "new": plan.new.model_copy(
+                        update={
+                            "copy_id": prepared.namespace,
+                            "target_id": prepared.compose_id,
+                        }
+                    )
+                }
+            )
+            plan = plan.model_copy(
+                update={
+                    name: getattr(plan, name).model_copy(
+                        update={
+                            "runtime_identity": getattr(plan, name).runtime_identity.model_copy(
+                                update={
+                                    "product": prepared.product,
+                                    "context": prepared.context,
+                                }
+                            )
+                        }
+                    )
+                    for name in ("old", "new")
+                }
+            )
+            provider = TestingProvider(plan)
+            checkpoints = RecordTestingRebuildStore(self.store)
+            checkpoints.save(
+                TestingRebuildRecord(plan=plan, began_at=provider.now, updated_at=provider.now)
+            )
+            application.remove_prepared_candidate_source_cache(self.store, prepared)
+            self.assertTrue(directory.exists())
+            completed = execute_testing_rebuild(
+                plan,
+                checkpoints,
+                provider,
+                clock=lambda: provider.now,
+            )
+            self.assertEqual(completed.step, "complete")
+            with patch.object(
+                RecordTestingRebuildStore,
+                "load_operation",
+                return_value=completed.model_copy(
+                    update={"error": "candidate_public_health_failed"}
+                ),
+            ):
                 application.remove_prepared_candidate_source_cache(self.store, prepared)
-                self.assertTrue(directory.exists())
-                completed = execute_testing_rebuild(
-                    plan,
-                    checkpoints,
-                    provider,
-                    clock=lambda: provider.now,
-                )
-                self.assertEqual(completed.step, "complete")
-                with patch.object(
-                    RecordTestingRebuildStore,
-                    "load_operation",
-                    return_value=completed.model_copy(
-                        update={"error": "candidate_public_health_failed"}
-                    ),
-                ):
-                    application.remove_prepared_candidate_source_cache(self.store, prepared)
-                self.assertTrue(directory.exists())
-                from control_plane import testing_rebuild_service as service
-                from control_plane.provider_operations import ProviderEvidenceLease
+            self.assertTrue(directory.exists())
+            from control_plane import testing_rebuild_service as service
+            from control_plane.provider_operations import ProviderEvidenceLease
 
-                adapter = service.NativeTestingRebuildAdapter(
-                    self.root,
-                    self.store,
-                    Mock(
-                        product=prepared.product,
-                        context=prepared.context,
-                        operation_id=prepared.operation_id,
-                    ),
-                    Mock(),
-                    Mock(),
-                )
-                executor = Mock(allocation=prepared)
-                executor.run.return_value = completed
-                lease = cast(ProviderOperationLease, cast(object, Mock(spec=ProviderEvidenceLease)))
-                remove = shutil.rmtree
+            adapter = service.NativeTestingRebuildAdapter(
+                self.root,
+                self.store,
+                Mock(
+                    product=prepared.product,
+                    context=prepared.context,
+                    operation_id=prepared.operation_id,
+                ),
+                Mock(),
+                Mock(),
+            )
+            executor = Mock(allocation=prepared)
+            executor.run.return_value = completed
+            lease = cast(ProviderOperationLease, cast(object, Mock(spec=ProviderEvidenceLease)))
+            remove = shutil.rmtree
 
-                def lost_cleanup(path: Any) -> None:
-                    remove(path)
-                    raise TimeoutError("Fixture lost cleanup reply")
+            def lost_cleanup(path: Any) -> None:
+                remove(path)
+                raise TimeoutError("Fixture lost cleanup reply")
 
-                with (
-                    patch.object(service, "NativeTestingRebuildExecution", return_value=executor),
-                    patch.object(shutil, "rmtree", side_effect=lost_cleanup),
-                ):
-                    result = adapter.apply("completed-original", lease)
-                    response = result.response_payload["result"]
-                    assert isinstance(response, dict)
-                    self.assertEqual(response["deploy_status"], "pass")
-                with patch.object(service, "NativeTestingRebuildExecution", return_value=executor):
-                    adapter.apply("completed-original", lease)
-                self.assertFalse(directory.exists())
-                with self.assertRaises(FileNotFoundError):
-                    retention._source_preserved(self.store, prepared, {})
+            with (
+                patch.object(service, "NativeTestingRebuildExecution", return_value=executor),
+                patch.object(shutil, "rmtree", side_effect=lost_cleanup),
+            ):
+                result = adapter.apply("completed-original", lease)
+                response = result.response_payload["result"]
+                assert isinstance(response, dict)
+                self.assertEqual(response["deploy_status"], "pass")
+            with patch.object(service, "NativeTestingRebuildExecution", return_value=executor):
+                adapter.apply("completed-original", lease)
+            self.assertFalse(directory.exists())
 
         self.assertEqual(
             self.store.read_native_testing_copy_capture(generation_binding(generation)), capture

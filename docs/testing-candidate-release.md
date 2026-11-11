@@ -2,247 +2,97 @@
 title: Testing candidate storage
 ---
 
-A native testing rebuild builds each copy in a private candidate: a Dokploy
-compose target with three Docker volumes, `lp-testing-<id>-db`, `-data` and
-`-logs`, labeled with the digest of the candidate's resource record. A failed
-rebuild keeps them. This page covers how admission avoids filling that storage
-and how a failed candidate's storage is released.
+A native testing rebuild creates a private Dokploy candidate with three local
+Docker volumes, `lp-testing-<id>-db`, `-data` and `-logs`. Each volume has the
+candidate resource digest and its role label. This route releases failed copies
+under the Director's disposable testing rule.
 
-## Admission refuses a migrated restore that cannot fit
+## Admission
 
-Before a migrated restore is queued, the rebuild preflight reads the testing
-server's free space for Docker volumes, container writable layers and, when
-clean snapshots are on, the clean-snapshot directory, grouping paths that share
-a ZFS pool or device. It charges the same terms the receiver checks before delivery: the database
-budget, the filestore budget plus the whole staged pair, the runner's copy of
-the database, the clean snapshot when enabled, and the reserve once per
-backing. The migrated budget comes from `migrated_storage_budget`, which the
-candidate's generation also uses. A shortfall refuses with
-`testing_storage_capacity_insufficient` and the missing bytes; an unreadable
-backing refuses with `testing_storage_capacity_unavailable`. No operation or
-candidate is created.
+Migrated restore admission reads the testing server's free space and groups paths
+that share a backing. It charges the database, filestore, staged pair, runner copy,
+optional clean snapshot and reserve using `migrated_storage_budget`. A shortfall
+returns `testing_storage_capacity_insufficient`; unavailable backing information
+returns `testing_storage_capacity_unavailable`. Neither creates a candidate.
 
-## Inspecting and releasing a failed candidate
+## Release a failed copy
 
 `POST /v1/products/{product}/testing-rebuild/{operation_id}/candidate-release`
 uses the existing signed-in admin or Director service-agent boundary. The path
-original identifies the selected candidate. Optional `receiver_operation_id`
-identifies a different original in the same product/testing context whose
-remaining capacity is measured. It is included unchanged in dry-run, apply and
-readback; neither original is edited or resumed.
+identifies the failed original whose candidate is selected for release. This
+selection is different from the lane's selected serving target.
 
-A dry run lists every recorded candidate in that exact context in `candidates`,
-including concrete per-resource refusal reasons. Only the path candidate has
-`selected: true`. Repeat the same public route with another candidate's original
-to select it. This is complete recorded-candidate enumeration, not adoption of
-unbound provider objects. Each item exposes original, product/context/testing,
-namespace/target, ownership/source/provider/lifecycle digests, container count,
-resource identities and backing groups. Top-level `status` is `eligible`, `held`
-or `absent`. An active original may be inspected, but cannot be released.
+The dry run lists recorded candidates in that exact product/testing context.
+Unselected siblings are listed from records without remote probes; their
+unobserved status remains unknown.
+Only the path candidate has `selected: true`. Optional `receiver_operation_id`
+identifies the restore whose remaining capacity should be measured. That receiver
+is measured for capacity, and has no independent release hold. Production originals and foreign contexts are rejected.
 
-For a finite custody investigation, the same dry-run request accepts
-`include_evidence: true`, without a receiver. This inspects only the selected
-candidate while retaining the complete consumer inventory for each of its
-three volumes. Apply and readback reject this option. Defaults keep the existing
-context-wide result and release contract. This option adds no read authority,
-query selector, stored inventory or removal permission.
+Three current protections apply:
 
-The optional `evidence` packet is private and the response is `Cache-Control:
-no-store`. Its closed schema lives in `contracts/candidate_custody_evidence.py`.
-It carries the observation start/completion times, candidate/server/provider-endpoint commitments, release
-plan digest, and a digest of the packet excluding `packet_sha256` and null
-fields. The outer response supplies the request trace. The packet spans sequential bounded reads, not one atomic physical snapshot. `cached_endpoint_sha256` is present only when the existing cached reader was entered and binds its provider endpoint and server routing identity. Digests bind the facts
-observed in this pass; they do not prove that later state is unchanged.
+- A selected or serving target is kept. The route reads lane target IDs,
+  publication and public routes. The host also keeps a candidate with published
+  ports.
+- A lane with a sign-in inside the existing usage probe's 24-hour window is
+  untouched. Unknown sign-in observations remain unknown and are reported.
+- Effects address only the recorded candidate's testing server, namespace and
+  three local volumes. Ownership/role labels, ordinary Docker backing, mount
+  paths and writable container mounts keep production storage unreachable.
 
-Each volume retains native identity, engine/backing and planned-removal
-commitments, physical outcomes and every consumer's acquisition and resolution
-coverage. Placement distinguishes explicit local null, remote, missing and
-malformed server identity. Different server commitments never prove physical
-separation. Compose evidence records conversion type, source scope, root and
-include coverage, cached document digests, input precedence, default absence,
-and each empty-project prerequisite independently. Unreadable documents and
-failed volume definitions remain present alongside readable siblings. Each resolved name states whether it came from an explicit name, external alias or project prefix. Document commitments hash raw acquired bytes; resolved-document indexes distinguish identical includes. Resolved
-names and source paths are hashed; source, environments, commands, credentials,
-private settings and provider exception prose never appear in the packet.
+Historical record references, missing custody receipts, provider inventory,
+container state, web gates, copy completion and unavailable source proof do not
+hold a failed copy. An unavailable storage observation is listed in `references`
+without changing eligibility. Optional `include_evidence: true` retains a private,
+`Cache-Control: no-store` observation packet for the selected candidate; it is not
+an approval step and does not reintroduce custody requirements.
 
-Lifecycle acquisition and final usable custody are separate outcomes. The
-packet retains the acquired container snapshot, resource and physical binding,
-per-container role/state, mount commitments and volume roles, web gate/process
-checks, and foreign references even when later inventory holds invalidate
-usable custody. Missing snapshots remain unavailable. A physical pass is bound
-to `planned_snapshot_sha256` and the same hashed container IDs carried by lifecycle evidence; it cannot substitute for complete
-exclusive consumer inventory. The existing candidate/resource `references`
-remain the full hold list. No standalone stop or removal follows from this
-packet.
+The source archive and qualified database/filestore source pair are outside the
+candidate set. The request accepts an operation ID, never a path or volume name.
+Resources derive only from that candidate's `OdooTestingResources` namespace.
+The release program has no source archive/cache deletion operation, and cannot
+address the service's retained native-copy cache. A receiver candidate is kept when selected or serving, under the same
+rule as every candidate. Successful-rebuild source cleanup remains a separate
+existing path; release never calls it.
 
-Checks use `pass`, `fail`, `unavailable`, `not_reached` and `not_applicable`.
-Acquired bytes and parsed-document shape are separate facts. Deterministic
-qualification failures are `fail`; failed reads are `unavailable`. Source
-`complete` passes only after the full document set qualifies. Empty-source
-prerequisites are inapplicable to non-null conversions. The data-volume gate
-observation is absent when unread, and never copied to DB or logs.
-Missing or unreached evidence never means absence. A reference check passes
-only when the corresponding qualified observation excludes that reference;
-partial resolution cannot establish that. Omitted optional commitments mean
-unavailable, not an empty or matching identity. The packet is evidence for a
-subsequent bounded diagnosis, not an eligible release or reclaimed capacity.
+Apply uses the dry run's `plan_sha256`, the same optional receiver and a bounded
+`Idempotency-Key`. It rechecks current selection and sign-ins under the original
+executor exclusion and durable provider effect admission. The host stops and
+removes only the candidate's containers, then removes its volumes with the data
+volume last. Docker removal errors are reported as unknown effects, not converted
+to success or retried with force.
 
-Apply uses the saved eligible dry run's `plan_sha256`, the same optional receiver
-and a bounded `Idempotency-Key`. It rechecks selected/current references, active
-originals and leases, publication, public domains, people use and only-needed
-copies, then verifies exact container and physical volume custody before each
-effect. Missing historical journals or a legacy release flag alone do not veto
-current positive qualification. No new grant or assertion of empty data is used.
-The executor exclusion and original row lock stay held; the product-authority
-lock covers only effect admission, not remote work.
+After apply, the route verifies physical volume absence. `physical_readback`
+reports actual filesystem `before_bytes`, `after_bytes` and signed
+`observed_change_bytes`, keyed by volume identity. These measurements include
+concurrent filesystem activity. Optional receiver `capacity` uses actual backing
+observations and the existing migrated-data calculation; unqualified requirements
+remain explicit in `capacity_refusal`. `reclaimable_bytes` is not a freed-space
+claim.
 
-A candidate's own record and its original operation record are its custody and
-failure evidence. They stay stored and never hold its storage. Any other record
-that names the candidate's namespace, target or volumes holds it, and the
-candidate's `references` list each one with its `reason`, `kind`, and
-`record_id` or, for current records, `record_sha256`. `references` is omitted
-when nothing else names the candidate.
+Readback uses the original request, digest and key. Completed receipts replay.
+Interrupted effects reconcile only their original receipts and never repeat a
+deletion blindly. The host retains the same operation key under
+`DockerRootDir/launchplane-state/testing-candidate-release`, so a lost reply can
+recover the terminal refusal or completed physical measurements. A refusal before
+any effect releases the service reservation; a definite host refusal settles held.
+A completed nonzero Docker command settles held only after complete reinspection
+proves the same engine, unchanged surviving volume identities and no new candidate
+container identity or configuration. Already measured partial removals remain in
+the result. Timeouts, killed processes and changed/unreadable resources stay
+unknown under the original key. Older unfinished custody-based receipts cannot dispatch this
+new effect path. Preserve their original keys and evidence for reconciliation.
 
-Candidate and resource rows also expose optional `readback` maps, using the
-existing `ReadbackPredicate` keys and `pass`, `fail`, `unavailable`, or `skipped`.
-A skipped check supplies no evidence. Candidate `copy_native_files_readable`
-reports independent source verification; a missing receipt or file is unavailable,
-and an invalid or changed file fails. `copy_custody_matches` reports lifecycle
-acquisition. It remains `pass` when later resource checks invalidate that
-lifecycle and add `candidate_lifecycle_custody_incomplete`; the lifecycle digest
-and container count still describe only usable custody. A failed native
-lifecycle also projects its existing failed predicate.
-When a candidate-level hold already explains the refusal, successful lifecycle
-readback still clears its unusable digest without adding a second refusal reason.
+## Automatic release
 
-All safely readable holds remain in the existing candidate `references`, identifying
-the retained volume or provider record, even when another hold determines the
-resource's primary `reason`. Native observations include simultaneous web use,
-published ports, staged source, container references and unknown web gates.
-Later lifecycle custody can qualify the candidate's own mounts; it cannot clear
-another hold. Lifecycle invalidation considers every hold, including holds on
-a volume whose primary reason is `source_inputs_preserved`.
-`native_inspection_complete` reports resource observation coverage. `storage_consumers_exclusive`
-reports the provider-wide inventory check, and `resources_qualified` reports
-the independent physical sweep check. An earlier hold does not skip independent
-reads: a failed source check can coexist with lifecycle acquisition, and an
-unavailable provider inventory can coexist with physical holds. Reads whose own
-identity or custody prerequisites are missing remain skipped or unavailable;
-no observation grants removal authority. An active provider snapshot still
-prevents host inspection but does not hide readable public-use, job or schedule
-holds on that identity-bound target. A real provider reference keeps
-`foreign_provider_reference`; incomplete provider inventory reports
-`provider_inventory_unavailable`. The existing candidate `references` identifies
-the project, environment or target using only its safe ID or an identity digest.
-No provider environment contents or error prose are returned. Diagnostic inventory
-traversal keeps unreadable records and continues through independently readable
-siblings. It never drops an unknown project or treats an unreadable source as
-empty. Sibling retirement callers retain the same boolean inventory safety
-contract and stop on their first hold when no diagnostics are requested.
+After the worker commits a native testing rebuild as failed with an `error_code`,
+it plans and applies this same route once with the key `automatic`, outside the
+execution lock. Other outcomes and production do not reach the host. Existing
+automatic receipts are never reapplied.
 
-Diagnostic references also retain fixed `inventory_*` reasons on the same safe
-identity for target/environment acquisition and Compose qualification failures.
-The original generic reason remains. Skipped dependent checks are explicit,
-never evidence of absence. Independently readable targets and already acquired
-included documents remain inspectable after qualification failures. Cached-source
-acquisition still requires a complete bounded observation: a missing or malformed
-file leaves that prerequisite unavailable, not partially qualified.
-Authorization denials still raise through the existing refusal path;
-recording a fixed denial reason does not turn a denial into a completed inspection.
-Exception text, source contents, environment values and source paths are never
-part of these references. Historical results without attribution remain unknown.
-
-Mounted storage qualifies only through the existing native retained-copy
-lifecycle. The candidate must be terminally abandoned, or a completed copy whose
-original failed, and its source must be preserved. A completed copy without a
-preserved source stays held as `completed_copy_requires_disposition`. A stopped
-container alone is insufficient. Unknown web processes, execs, published ports,
-foreign mounts and changed IDs/configuration refuse. A web container still in
-the original integration-gate wait can qualify only with the exact command
-Compose created from the rendered held web command, runtime identity, data
-mount, absent gate and positive shell/sleep process evidence from `docker top`
-with its required PID column. A completed copy's serving web qualifies only with the exact command,
-runtime identity, data mount and its regular gate file; it has no route, since
-a routed or published candidate is refused. A missing web container still
-requires runtime identity on its remaining runner. The existing Compose stop and exact non-force container
-removal have durable receipts and absence readback. Only then may the existing
-volume sweep remove reviewed eligible volumes, the data volume that holds the
-gate last; its apply still refuses mounts.
-
-Staged `.lp-native-*` source contents, unknown copy gates, completed copies
-without a preserved source, current lanes, only-needed data, original pairs and
-operation/failure/provider records stay protected. Production labels, wrong ownership, aliases and unknown backings
-refuse. There is no compose-target deletion or resize. `released` means the
-reviewed eligible resources are absent; explicitly preserved source resources
-remain listed, not falsely reported as deleted.
-
-A canonical, unchanged, genuinely empty `.lp-native-<32 hex characters>` directory
-left by migrated cleanup is not source contents. Files, partials, links, aliases,
-noncanonical names and unreadable contents still hold. This does not classify
-the surrounding volume as empty or waive its other checks.
-
-Preparation and prepared resume retain the private source cache until the
-original rebuild completes without error. The existing completion path then
-performs cleanup; failed or uncertain candidates retain their original inputs.
-Cleanup, including ordinary post-deploy cleanup, checks other candidates sharing
-the cache binding. Migrated generations share their original source binding;
-any pending, failed or unknown candidate keeps those bytes. Successful cleanup
-remains repeatable after a lost reply. A retained receipt alone never satisfies
-source proof, and no source is recaptured or replaced. A cleanup failure after
-completed success is reported without reversing the completed rebuild. Failed
-originals' source pairs remain protected even after candidate volume release;
-volume release does not authorize original-source deletion.
-
-Readback uses the original request, digest and key and does not plan again.
-Completed receipts replay their stored result. Unknown/interrupted effects only
-reconcile their original receipts and never blindly repeat a deletion. A definite
-refusal or fully observed incomplete lifecycle settles as `held`, with its reasons;
-a new eligible plan is needed for another attempt. Pre-convergence completed
-receipts remain replayable, and incomplete older receipts retain read-only absence
-reconciliation. They cannot dispatch the removed less-bound host effect path.
-`mutation_reconciliation_required` means preserve that original key and evidence.
-
-## Automatic release after a failed rebuild
-
-When the worker commits a native testing rebuild as `fail` with an
-`error_code`, the failed record's lease ends at its finish time. After that
-commit, and outside the execution lock, the worker plans this same release and
-applies it once under the route's scope with the key `automatic`; an existing
-automatic receipt is never planned or applied again. The fresh checks,
-effects and physical readback are the route's. A plan that is held or absent,
-or a fresh check that refuses before any effect, settles as a `held` (or
-`absent`) receipt naming its reasons, and nothing is removed. The operation's
-status, cause and evidence are never changed. Other outcomes, other instances
-and production never reach the host.
-
-`GET .../testing-rebuild/operations/{operation_id}` reports that receipt as
-`candidate_release`: `status` (`released`, `absent`, `held` or `unknown`),
-bounded `reasons`, `plan_sha256` and `idempotency_key`. It is omitted when no
-automatic receipt exists, including when the worker stops between the failed
-commit and the release; the candidate then stays in place for the route.
-Failures committed before this behavior shipped are not released automatically. `unknown` means an effect's outcome is unproven. Its
-original receipt is only observed: route readback with the `automatic` key and
-that `plan_sha256` reconciles it, and apply with that key always refuses
-`idempotency_key_reused`. A later attempt is a new reviewed plan with a new key.
-The release response's optional `reason_code` names a refusal no candidate row
-carries.
-
-`capacity` groups the optional receiver's actual backing observations, reporting
-`backing_sha256`, `free_bytes`, `required_additional_bytes`, `reserve_bytes` and
-`deficit_bytes`. It uses the receiver's existing migrated-data calculation,
-including already populated filestore, remaining staged pair and any configured
-clean-snapshot capture, with reserve once per backing. It does not turn configured
-budgets into a new universal minimum. Missing/unqualified requirements remain
-explicit in `capacity_refusal`; a non-migrated receiver is currently unqualified.
-
-Each candidate's `physical_readback` maps volume identity to actual `before_bytes`,
-`after_bytes` and signed `observed_change_bytes`; each resource names its backing. These values
-include concurrent filesystem activity. Legacy `reclaimable_bytes` remains
-optional/null and is never claimed as freed space. Apply/readback preserve the
-reviewed plan digest even when physical free space changes.
-
-The tracked exporter and workloads in `tests/fixtures/native-testing-retention/`
-freeze current host programs for the catalog locked heavy-run entrypoint. Protocol
-fixtures prove fabricated Docker protocol plus filesystem/subprocess behavior;
-the separate QEMU engine fixture needs retained qualified images. Neither proves
-real product eligibility. Unavailable intake and unknown effects retain evidence.
+`GET .../testing-rebuild/operations/{operation_id}` exposes the automatic receipt
+as `candidate_release`, including status, bounded reasons, plan digest and key.
+A held plan reports its protection; an unknown effect keeps
+`mutation_reconciliation_required`. Readback can reconcile that original effect;
+manual apply with the `automatic` key remains refused. Failures committed before
+this behavior shipped are not released automatically.
