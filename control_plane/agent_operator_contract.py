@@ -148,7 +148,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "GET",
         "/v1/products/{product}/preview-evidence",
-        "Read exact original intent, retained provider history and optional exact serving-generation probes without admission publication or effect settlement.",
+        "Read exact original evidence, or opt into bounded current container observations without broad qualification, provider history, publication or effects.",
         ("service_api",),
         ("read",),
         "none",

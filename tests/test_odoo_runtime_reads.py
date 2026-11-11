@@ -28,6 +28,7 @@ from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RUNTIME_IDENTITY_ENV_KEY
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.odoo_runtime_reads import _NoRedirects, OdooRuntimeReadError
+from control_plane.dokploy import api
 from control_plane.tracked_target_logs import build_tracked_target_logs_payload
 from control_plane.odoo_diagnostic_identity import (
     DIAGNOSTIC_SECRET_INTEGRATION,
@@ -49,6 +50,72 @@ from tests.support.http import request
 
 
 class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
+    def test_container_observation_keeps_independent_facts_after_inspection_refusal(self) -> None:
+        from control_plane import odoo_runtime_reads as reads
+
+        for config, state, valid_config, valid_state, running in (
+            ({}, {"Running": False}, True, True, False),
+            (None, {"Running": True}, False, True, True),
+            ({}, None, True, False, None),
+            ({}, {}, True, True, None),
+            ({}, {"Running": "false"}, True, True, None),
+        ):
+            with self.subTest(config=config, state=state):
+                observation = reads.RuntimeContainerObservation()
+                with patch.object(
+                    api, "dokploy_request", return_value={"Config": config, "State": state}
+                ):
+                    with self.assertRaises(OdooRuntimeReadError):
+                        reads.inspect_runtime_container(
+                            "https://provider.invalid",
+                            "secret",
+                            "server",
+                            "a" * 64,
+                            "selected-compose",
+                            self.preview_identity,
+                            observation=observation,
+                        )
+                self.assertTrue(observation.exists)
+                self.assertEqual(observation.config_valid, valid_config)
+                self.assertEqual(observation.state_valid, valid_state)
+                self.assertIs(observation.running, running)
+                self.assertEqual(
+                    observation.running_coverage, "observed" if running is not None else "unknown"
+                )
+                self.assertEqual(observation.runtime_identity, "not_reached")
+                self.assertEqual(observation.image_agreement, "not_reached")
+                self.assertIsNotNone(observation.inspected_at)
+
+    def test_container_observation_keeps_selected_id_when_provider_inspection_fails(self) -> None:
+        from control_plane import odoo_runtime_reads as reads
+
+        observation = reads.RuntimeContainerObservation()
+        provider = self.provider
+
+        def unavailable(**kwargs: object) -> object:
+            if kwargs["path"] == "/api/docker.getConfig":
+                raise OSError("private credential and provider body")
+            return provider(**kwargs)
+
+        with patch.object(api, "dokploy_request", side_effect=unavailable):
+            with self.assertRaises(OSError):
+                reads.connect_runtime(
+                    store=self.store,
+                    selection=reads.select_preview_runtime(self.store, self.preview),
+                    control_plane_root=self.root,
+                    database_url=None,
+                    observation=observation,
+                    expected_target_id="preview-target",
+                )
+        self.assertEqual(observation.container_id, "123456abcdef")
+        self.assertTrue(observation.exists)
+        self.assertEqual(observation.existence_coverage, "observed")
+        self.assertIsNone(observation.config_valid)
+        self.assertIsNone(observation.running)
+        self.assertIsNone(observation.inspected_at)
+        self.assertNotIn("private", observation.model_dump_json())
+        self.assertFalse(self.rpc_calls)
+
     def setUp(self) -> None:
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -947,6 +947,12 @@ def fetch_dokploy_deployment_logs(
     return lines[-normalized_line_count:]
 
 
+class DokployContainerSelectionError(click.ClickException):
+    def __init__(self, message: str, *, match_count: int) -> None:
+        self.match_count = match_count
+        super().__init__(message)
+
+
 def _select_compose_log_container(
     containers: list[JsonObject],
     *,
@@ -966,8 +972,9 @@ def _select_compose_log_container(
         ]
         if len(service_matches) != 1:
             qualifier = "not found" if not service_matches else "ambiguous"
-            raise click.ClickException(
-                f"Dokploy compose log service {normalized_service_name!r} is {qualifier}."
+            raise DokployContainerSelectionError(
+                f"Dokploy compose log service {normalized_service_name!r} is {qualifier}.",
+                match_count=len(service_matches),
             )
         return service_matches[0]
     for container in containers:

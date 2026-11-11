@@ -55,6 +55,245 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
     identity: RuntimeIdentity
     production: dict[str, str]
 
+    def container_provider(self, **kwargs: Any) -> object:
+        from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
+
+        if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
+            return [{"containerId": "a" * 12, "name": "preview-project-web-1"}]
+        if kwargs["path"] == "/api/docker.getConfig":
+            return {
+                "Id": "a" * 64,
+                "Config": {
+                    "Labels": {
+                        "com.docker.compose.project": "preview-project",
+                        "com.docker.compose.service": "web",
+                    },
+                    "Image": self.identity.image_reference,
+                    "Env": [
+                        f"{RUNTIME_IDENTITY_ENV_KEY}={self.identity.model_dump_json()}",
+                        "PRIVATE_PASSWORD=withheld",
+                    ],
+                },
+                "State": {"Running": True, "Private": "withheld"},
+            }
+        raise AssertionError(f"Unexpected provider call: {kwargs['path']}")
+
+    async def container_evidence(self, **changes: str) -> Any:
+        from control_plane import odoo_runtime_reads as reads, preview_evidence
+        from control_plane.contracts.odoo_preview_runtime_plan import (
+            OdooPreviewRuntimeTargetEvidence,
+        )
+
+        with (
+            patch.object(
+                reads,
+                "discover_odoo_preview_target",
+                return_value=OdooPreviewRuntimeTargetEvidence(
+                    target_id="preview-target",
+                    target_name=self.identity.instance,
+                    context=self.identity.context,
+                    instance=self.identity.instance,
+                    environment_kind="preview",
+                ),
+            ),
+            patch.object(
+                preview_evidence,
+                "read_odoo_preview_qualification",
+                side_effect=AssertionError("broad qualification"),
+            ),
+            patch.object(
+                preview_evidence,
+                "read_preview_provider_history",
+                side_effect=AssertionError("history"),
+            ),
+            patch.object(self.store, "reserve_mutation", side_effect=AssertionError("mutation")),
+            patch.object(
+                self.store,
+                "publish_collected_disposable_lane_safety",
+                side_effect=AssertionError("publication"),
+            ),
+        ):
+            return await self.evidence(
+                **{"mode": "container_observation", "target_id": "preview-target", **changes},
+            )
+
+    async def test_container_observation_uses_only_current_inventory_and_inspection(self) -> None:
+        from control_plane.dokploy import api
+
+        with patch.object(api, "dokploy_request", side_effect=self.container_provider) as provider:
+            response = await self.container_evidence()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        result = response.json()["result"]
+        self.assertTrue(response.json()["trace_id"])
+        self.assertEqual(result["current_binding"], "current")
+        self.assertEqual(result["runtime_verification"], "not_performed")
+        self.assertEqual(result["import_eligibility"], "not_evaluated")
+        self.assertIsNone(result["failure"])
+        observed = result["observation"]
+        self.assertEqual(observed["selection"], "unique")
+        self.assertTrue(observed["exists"])
+        self.assertTrue(observed["config_valid"])
+        self.assertTrue(observed["state_valid"])
+        self.assertTrue(observed["running"])
+        self.assertEqual(observed["image_agreement"], "verified")
+        self.assertEqual(observed["runtime_identity"], "verified")
+        self.assertTrue(observed["inspected_at"])
+        self.assertEqual(len(provider.call_args_list), 2)
+        self.remote.assert_not_called()
+        self.assertEqual(
+            self.store.read_idempotency_record_by_id(self.original.record_id), self.original
+        )
+        for private in (
+            "withheld",
+            "PRIVATE_PASSWORD",
+            "Env",
+            "Config",
+            "State",
+            "private-provider-token",
+        ):
+            self.assertNotIn(private, response.text)
+
+    async def test_container_observation_keeps_provider_failure_and_partial_facts_distinct(
+        self,
+    ) -> None:
+        from control_plane.dokploy import api
+
+        for raw, config, state, running, coverage in (
+            ({"Config": None, "State": {"Running": False}}, False, True, False, "observed"),
+            ({"Config": {}, "State": None}, True, False, None, "observed"),
+            ({"Config": {}, "State": {"Running": 0}}, True, True, None, "observed"),
+            ({"Config": {}, "State": {}}, True, True, None, "observed"),
+            ({}, None, None, None, "invalid"),
+            ({"Id": "b" * 64, "Config": {}, "State": {}}, None, None, None, "invalid"),
+            ([], None, None, None, "invalid"),
+            ("invalid private JSON", None, None, None, "invalid"),
+            (OSError("withheld provider detail"), None, None, None, "unknown"),
+        ):
+
+            def provider(**kwargs: Any) -> object:
+                if kwargs["path"] != "/api/docker.getConfig":
+                    return self.container_provider(**kwargs)
+                if isinstance(raw, Exception):
+                    raise raw
+                return raw
+
+            with self.subTest(raw=raw), patch.object(api, "dokploy_request", side_effect=provider):
+                response = await self.container_evidence()
+            self.assertEqual(response.status_code, 200, response.text)
+            observed = response.json()["result"]["observation"]
+            self.assertEqual(observed["container_id"], "a" * 12)
+            self.assertTrue(observed["exists"])
+            self.assertIs(observed["config_valid"], config)
+            self.assertIs(observed["state_valid"], state)
+            self.assertIs(observed["running"], running)
+            self.assertEqual(observed["inspection_coverage"], coverage)
+            self.assertEqual(observed["image_agreement"], "not_reached")
+            self.assertNotIn("withheld", response.text)
+            self.assertNotIn("private JSON", response.text)
+
+    async def test_container_inventory_requires_qualified_coverage_for_absence(self) -> None:
+        from control_plane.dokploy import api
+
+        web = {"containerId": "a" * 12, "name": "preview-project-web-1"}
+        for rows, selected, exists, coverage in (
+            ([], "missing_or_unavailable", None, "unknown"),
+            (
+                [{"containerId": "b" * 12, "name": "preview-project-db-1"}],
+                "missing",
+                False,
+                "complete",
+            ),
+            ([web, {**web, "containerId": "c" * 12}], "ambiguous", None, "complete"),
+            ([web, {}], "unknown", None, "invalid"),
+            ([{**web, "name": "No container name"}], "unknown", None, "invalid"),
+            ({"items": [web]}, "unknown", None, "invalid"),
+        ):
+            with (
+                self.subTest(rows=rows),
+                patch.object(api, "dokploy_request", return_value=rows) as provider,
+            ):
+                response = await self.container_evidence()
+            self.assertEqual(response.status_code, 200, response.text)
+            observed = response.json()["result"]["observation"]
+            self.assertEqual(observed["selection"], selected)
+            self.assertIs(observed["exists"], exists)
+            self.assertEqual(observed["inventory_coverage"], coverage)
+            self.assertIsNone(observed["running"])
+            self.assertIsNone(observed["container_id"])
+            self.assertEqual(len(provider.call_args_list), 1)
+
+    async def test_container_observation_rejects_stale_selection_and_preserves_drift(self) -> None:
+        from control_plane.dokploy import api
+
+        for change in (
+            {"generation_id": "stale"},
+            {"source_git_ref": "f" * 40},
+            {"image_digest": "sha256:" + "f" * 64},
+            {"target_id": "foreign-target"},
+        ):
+            with self.subTest(change=change), patch.object(api, "dokploy_request") as provider:
+                response = await self.container_evidence(**change)
+            self.assertEqual(response.status_code, 409, response.text)
+            provider.assert_not_called()
+
+        def drift(**kwargs: Any) -> object:
+            value = self.container_provider(**kwargs)
+            if kwargs["path"] == "/api/docker.getConfig":
+                self.store.write_preview_record(
+                    self.preview.model_copy(update={"serving_generation_id": "changed"})
+                )
+            return value
+
+        with patch.object(api, "dokploy_request", side_effect=drift):
+            response = await self.container_evidence()
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["result"]
+        self.assertNotEqual(result["current_binding"], "current")
+        self.assertEqual(result["observation"]["container_id"], "a" * 12)
+        self.assertEqual(result["runtime_verification"], "not_performed")
+
+    async def test_container_observation_keeps_auth_and_target_boundaries(self) -> None:
+        from control_plane.dokploy import api
+
+        for change in (
+            {"target_id": ""},
+            {"generation_id": ""},
+            {"command": "private-command"},
+            {"url": "https://private.invalid"},
+            {"sql": "private-query"},
+        ):
+            with self.subTest(change=change), patch.object(api, "dokploy_request") as provider:
+                response = await self.container_evidence(**change)
+            self.assertEqual(response.status_code, 422, response.text)
+            provider.assert_not_called()
+        with scoped_agent_transport(), patch.object(api, "dokploy_request") as provider:
+            response = await self.container_evidence()
+        self.assertEqual(response.status_code, 403, response.text)
+        provider.assert_not_called()
+        with patch.object(
+            api,
+            "dokploy_request",
+            side_effect=DokployRequestFailed(
+                method="GET", path="/api/docker.getConfig", detail="withheld", status_code=403
+            ),
+        ):
+            response = await self.container_evidence()
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertNotIn("withheld", response.text)
+        with (
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={"name": "foreign", "appName": "foreign"},
+            ),
+            patch.object(api, "dokploy_request") as provider,
+        ):
+            response = await self.container_evidence()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["result"]["observation"]["stage"], "target")
+        provider.assert_not_called()
+
     def remove_registered_production(self) -> None:
         self.profile = self.profile.model_copy(
             update={"lanes": tuple(lane for lane in self.profile.lanes if lane.instance != "prod")}

@@ -171,7 +171,7 @@
         ],
         "operation_id": "read_exact_preview_evidence",
         "path": "/v1/products/{product}/preview-evidence",
-        "purpose": "Read exact original intent, retained provider history and optional exact serving-generation probes without admission publication or effect settlement.",
+        "purpose": "Read exact original evidence, or opt into bounded current container observations without broad qualification, provider history, publication or effects.",
         "response_statuses": [
           "200",
           "401",
@@ -181,7 +181,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "d899140bf84d30358fa154b1a93571c721a3bc79bf7f27421c6b74a4d1d90f6d",
+        "schema_fingerprint_sha256": "35ca9175e9b83376fd74f16384e341d43e13139a970625fb36cb9d4ff8c9952c",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1538,8 +1538,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "4b295e285559c02384d632591f5173a587371933"
+    "source_commit_sha": "a71028cd188dafeeb822af4b1af24f950b2ceeca"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "96244dedf17729db0e87b5a4e1f5701f009b69a328942a5af16c3bc999a6bdf8"
+  "semantic_digest_sha256": "d2f604294a13d71ef70ef10e0516fb9c96f55bfd9cd5e1d2cb3e540bc2b971f8"
 }

@@ -14,8 +14,14 @@ from control_plane.odoo_preview_qualification import (
     PreviewQualificationMissing,
     read_odoo_preview_qualification,
     read_preview_inspection_authority,
+    PreviewInspectionAuthority,
 )
-from control_plane.odoo_runtime_reads import OdooRuntimeReadError, assert_selection_current
+from control_plane.odoo_runtime_reads import (
+    OdooRuntimeReadError,
+    RuntimeContainerObservation,
+    assert_selection_current,
+    connect_runtime,
+)
 from control_plane.preview_reservation_recovery import (
     original_preview_intent,
     preview_reservation_reference,
@@ -24,7 +30,10 @@ from control_plane.product_reconcile import reconcile_reservation_scope
 from control_plane.preview_source import PreviewSourceDecision
 from control_plane.provider_operations import build_provider_operation_key, provider_operation_title
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
+from control_plane.workflows.odoo_preview_runtime import (
+    OdooPreviewDokployApplyResult,
+    OdooPreviewTargetDiscoveryAmbiguousError,
+)
 
 
 class PreviewEvidenceQuery(BaseModel):
@@ -41,6 +50,8 @@ class PreviewEvidenceQuery(BaseModel):
     )
     preview_id: str = Field(default="", max_length=256)
     generation_id: str = Field(default="", max_length=256)
+    mode: Literal["qualification", "container_observation"] = "qualification"
+    target_id: str = Field(default="", max_length=256, pattern=r"^[A-Za-z0-9_-]*$")
 
     @model_validator(mode="after")
     def require_exact_selection(self) -> "PreviewEvidenceQuery":
@@ -48,7 +59,38 @@ class PreviewEvidenceQuery(BaseModel):
             raise ValueError("Select one original reservation or controller plan.")
         if bool(self.preview_id) != bool(self.generation_id):
             raise ValueError("Current probes require both preview and generation ids.")
+        if self.mode == "container_observation" and (not self.preview_id or not self.target_id):
+            raise ValueError("Container observation requires exact preview, generation and target.")
+        if self.mode != "container_observation" and self.target_id:
+            raise ValueError("Target selection requires container observation mode.")
         return self
+
+
+class PreviewContainerBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+    pr_number: int
+    source_git_ref: str
+    image_digest: str
+    artifact_id: str
+    preview_id: str
+    generation_id: str
+    target_id: str
+    original_reservation_id: str
+
+
+class PreviewContainerEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["container_observation"] = "container_observation"
+    read_only: Literal[True] = True
+    binding: PreviewContainerBinding
+    current_binding: Literal["current", "changed", "unavailable"]
+    observation: RuntimeContainerObservation
+    failure: Literal["unavailable", "invalid", "refused"] | None = None
+    runtime_verification: Literal["not_performed"] = "not_performed"
+    import_eligibility: Literal["not_evaluated"] = "not_evaluated"
 
 
 class PreviewEvidenceResponse(BaseModel):
@@ -56,7 +98,84 @@ class PreviewEvidenceResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     trace_id: str
-    result: dict[str, object]
+    result: PreviewContainerEvidence | dict[str, object]
+
+
+def read_container_evidence(
+    store: PostgresRecordStore,
+    *,
+    query: PreviewEvidenceQuery,
+    root: Path,
+    authority: PreviewInspectionAuthority,
+    reservation: LaunchplaneIdempotencyRecord,
+    reference: str,
+) -> dict[str, object]:
+    selection = authority.selection
+    if authority.target_id.target_id != query.target_id:
+        raise OdooRuntimeReadError("preview_target_mismatch", "The selected target differs.")
+    assert_selection_current(store, selection)
+    observation = RuntimeContainerObservation()
+    failure: Literal["unavailable", "invalid", "refused"] | None = None
+    try:
+        connect_runtime(
+            store=store,
+            selection=selection,
+            control_plane_root=root,
+            database_url=store.database_url,
+            observation=observation,
+            expected_target_id=query.target_id,
+        )
+    except api.DokployRequestFailed as error:
+        if error.status_code in {401, 403}:
+            raise NativeSourceAuthorizationDenied(
+                "Provider refused container observation."
+            ) from None
+        failure = "unavailable"
+    except OdooPreviewTargetDiscoveryAmbiguousError:
+        observation.selection = "ambiguous"
+        failure = "refused"
+    except OdooRuntimeReadError:
+        failure = "refused"
+    except ValueError:
+        failure = "invalid"
+    except (OSError, click.ClickException):
+        failure = "unavailable"
+    binding: Literal["current", "changed", "unavailable"] = "current"
+    try:
+        assert_selection_current(store, selection)
+        if (
+            read_preview_inspection_authority(store, store.read_preview_record(query.preview_id))
+            != authority
+        ):
+            binding = "changed"
+        after = store.read_idempotency_record_by_id(reservation.record_id)
+        if (
+            after is None
+            or preview_reservation_reference(after, store.read_original_mutation_intent(after))
+            != reference
+        ):
+            binding = "changed"
+    except OdooRuntimeReadError:
+        binding = "changed"
+    except (FileNotFoundError, ValueError):
+        binding = "unavailable"
+    identity = selection.identity
+    return PreviewContainerEvidence(
+        binding=PreviewContainerBinding(
+            product=identity.product,
+            pr_number=query.pr_number,
+            source_git_ref=identity.source_git_ref,
+            image_digest=query.image_digest,
+            artifact_id=identity.artifact_id,
+            preview_id=query.preview_id,
+            generation_id=query.generation_id,
+            target_id=query.target_id,
+            original_reservation_id=reservation.record_id,
+        ),
+        current_binding=binding,
+        observation=observation,
+        failure=failure,
+    ).model_dump(mode="json")
 
 
 def unavailable_history() -> dict[str, object]:
@@ -247,6 +366,15 @@ def read_preview_evidence(
                 "preview_original_binding_mismatch", "The generation belongs to another original."
             )
         sequence = store.read_preview_generation_record(query.generation_id).sequence
+        if query.mode == "container_observation":
+            return read_container_evidence(
+                store,
+                query=query,
+                root=root,
+                authority=authority,
+                reservation=reservation,
+                reference=reference,
+            )
         try:
             qualification = read_odoo_preview_qualification(store, preview=preview, root=root)
             current.update(
