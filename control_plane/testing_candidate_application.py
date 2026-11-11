@@ -336,7 +336,6 @@ def prepare_candidate_application(
             inputs=inputs,
             deployment_id=app.deployment_id,
         )
-        remove_prepared_candidate_source_cache(store, record)
         return record
 
     def payload() -> api.JsonObject:
@@ -566,7 +565,6 @@ def prepare_candidate_application(
         host=host, token=token, allocation=record, inputs=inputs, deployment_id=app.deployment_id
     )
     save(phase="prepared", prepared=prepared)
-    remove_prepared_candidate_source_cache(store, record)
     return record
 
 

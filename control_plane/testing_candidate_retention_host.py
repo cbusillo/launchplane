@@ -152,8 +152,6 @@ def inspect_candidate():
             'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
             'monotonic_deadline':time.monotonic()+300})
     for row in result:
-        if row['status']=='observed':
-            row['gate_unexpected']=not row['empty'] and gate_unexpected
         if row['status']=='observed' and not row['empty'] and gate_unexpected and row['reason'] in ('','container_reference'):
             row['reason']='completed_or_unknown_web_gate'
     capacity=[]

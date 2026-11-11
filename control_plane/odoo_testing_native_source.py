@@ -555,46 +555,45 @@ def prepare_native_testing_delivery(
 
 
 def remove_completed_native_capture_cache(
-    capture: NativeTestingCopyCapture, *, store: object | None = None
+    capture: NativeTestingCopyCapture, *, store: object
 ) -> None:
-    if store is not None:
-        from control_plane.odoo_testing_restore import generation_binding
-        from control_plane.testing_rebuild_storage import (
-            RecordTestingRebuildStore,
-            RebuildRecordStore,
-        )
+    from control_plane.odoo_testing_restore import generation_binding
+    from control_plane.testing_rebuild_storage import (
+        RecordTestingRebuildStore,
+        RebuildRecordStore,
+    )
 
-        candidates = getattr(store, "list_testing_candidates", None)
-        if not callable(candidates):
-            return
-        checkpoints = RecordTestingRebuildStore(cast(RebuildRecordStore, store))
-        for candidate in candidates():
-            app = candidate.application
-            generation = app.plan.generation if app else None
-            if generation is None or generation.source_mode != "container-export":
-                continue
-            binding = (
-                generation.source_binding_sha256
-                if generation.migrated_source
-                else generation_binding(generation)
+    candidates = getattr(store, "list_testing_candidates", None)
+    if not callable(candidates):
+        return
+    checkpoints = RecordTestingRebuildStore(cast(RebuildRecordStore, store))
+    for candidate in candidates():
+        app = candidate.application
+        generation = app.plan.generation if app else None
+        if generation is None or generation.source_mode != "container-export":
+            continue
+        binding = (
+            generation.source_binding_sha256
+            if generation.migrated_source
+            else generation_binding(generation)
+        )
+        if binding != capture_cache_binding(capture):
+            continue
+        try:
+            checkpoint = checkpoints.load_operation(
+                product=candidate.product,
+                context=candidate.context,
+                operation_id=candidate.operation_id,
             )
-            if binding != capture_cache_binding(capture):
-                continue
-            try:
-                checkpoint = checkpoints.load_operation(
-                    product=candidate.product,
-                    context=candidate.context,
-                    operation_id=candidate.operation_id,
-                )
-            except FileNotFoundError:
-                return
-            if (
-                checkpoint.step != "complete"
-                or checkpoint.error
-                or checkpoint.plan.new.copy_id != candidate.namespace
-                or checkpoint.plan.new.target_id != candidate.compose_id
-            ):
-                return
+        except (OSError, ValueError):
+            return
+        if (
+            checkpoint.step != "complete"
+            or checkpoint.error
+            or checkpoint.plan.new.copy_id != candidate.namespace
+            or checkpoint.plan.new.target_id != candidate.compose_id
+        ):
+            return
     root = _cache_directory(capture_cache_binding(capture), create=False)
     if root.exists():
         shutil.rmtree(root)

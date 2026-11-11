@@ -899,10 +899,11 @@ class NativeCopyCustodyTests(unittest.TestCase):
         witness = retained / "original"
         witness.write_bytes(self.data["filestore"])
         (root / "outside-link").symlink_to(retained, target_is_directory=True)
-        remove_completed_native_capture_cache(capture)
+        self.store.list_testing_candidates.return_value = []
+        remove_completed_native_capture_cache(capture, store=self.store)
         self.assertFalse(root.exists())
         self.assertEqual(witness.read_bytes(), self.data["filestore"])
-        remove_completed_native_capture_cache(capture)
+        remove_completed_native_capture_cache(capture, store=self.store)
         self.assertFalse(root.exists())
         self.assertEqual(witness.read_bytes(), self.data["filestore"])
 

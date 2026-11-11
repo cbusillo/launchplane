@@ -181,10 +181,6 @@ def _inventory_clear(
                 return refused("project", project_id)
             environment_id = environment.get("environmentId")
             if exact and "env" not in environment:
-                environment_id, project_id = (
-                    environment.get("environmentId"),
-                    project.get("projectId"),
-                )
                 if not isinstance(environment_id, str) or not isinstance(project_id, str):
                     return refused("environment", environment_id)
                 detail = api.as_json_object(

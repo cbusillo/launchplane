@@ -445,7 +445,7 @@ def _source_preserved(
         return False
     capture = recorded_native_testing_capture(store, generation)
     if capture is None:
-        raise FileNotFoundError("The generation has no preserved native capture.")
+        return False
     directory = _cache_directory(capture_cache_binding(capture), create=False) / capture.capture_id
     paths = [directory / part for part in ("database", "filestore")]
 
@@ -503,14 +503,6 @@ def candidate_resource_observation(
         ReadbackPredicate.STORAGE_CONSUMERS: "skipped",
         ReadbackPredicate.RESOURCES: "skipped",
     }
-    for key, predicate in (
-        ("source_inputs", ReadbackPredicate.FILES_READ),
-        ("referenced", ReadbackPredicate.MOUNTS),
-        ("gate_unexpected", ReadbackPredicate.WEB_GATE),
-    ):
-        resource_readback[predicate] = (
-            "fail" if row.get(key) is True else "pass" if row.get(key) is False else "skipped"
-        )
     return NativeTestingSweepResource(
         role=row["role"],
         backing_sha256=canonical_json_sha256(
@@ -633,6 +625,20 @@ def build_native_testing_sweep(
             resources = [
                 candidate_resource_observation(candidate, row) for row in observed["volumes"]
             ]
+            references = (
+                *references,
+                *(
+                    NativeTestingSweepReference(
+                        reason=reason, kind="retained_volume", record_id=row["name"]
+                    )
+                    for row in observed["volumes"]
+                    for flag, reason in (
+                        ("source_inputs", "source_inputs_preserved"),
+                        ("referenced", "container_reference"),
+                    )
+                    if row.get(flag) is True
+                ),
+            )
             bindings = []
             for index, row in enumerate(observed["volumes"]):
                 resource_readback = resources[index].readback

@@ -437,9 +437,19 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         self.assertEqual(held.resources[1].readback[ReadbackPredicate.STORAGE_CONSUMERS], "skipped")
         for resource in held.resources:
             self.assertEqual(resource.status, "held")
-            self.assertEqual(resource.readback[ReadbackPredicate.FILES_READ], "pass")
-            self.assertEqual(resource.readback[ReadbackPredicate.MOUNTS], "pass")
+            self.assertEqual(resource.readback[ReadbackPredicate.NATIVE_READ], "pass")
             self.assertEqual(resource.readback[ReadbackPredicate.RESOURCES], "skipped")
+        self.host.assert_not_called()
+
+    def test_staged_source_and_container_reference_both_survive_the_primary_hold(self) -> None:
+        row = self.observation["volumes"][0]
+        row.update(source_inputs=True, referenced=True, reason="source_inputs_preserved")
+        item = self.selected()
+        self.assertEqual(item.status, "held")
+        self.assertEqual(
+            {(reference.reason, reference.record_id) for reference in item.references},
+            {("source_inputs_preserved", row["name"]), ("container_reference", row["name"])},
+        )
         self.host.assert_not_called()
 
     def test_completed_copy_lifecycle_is_bound_to_its_serving_web(self) -> None:

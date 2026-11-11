@@ -263,14 +263,12 @@ class MigratedUploadTests(unittest.TestCase):
         )
         self.store.list_testing_candidates.return_value = [other]
         self.store.read_idempotency_record.return_value = None
-        with patch.object(native, "_cache_directory", return_value=self.directory) as cache:
+        with patch.object(native, "_cache_directory", return_value=self.directory):
             native.remove_completed_native_capture_cache(capture, store=self.store)
             self.assertEqual((self.directory / "database").read_bytes(), b"database")
-            cache.assert_not_called()
             self.store.list_testing_candidates.return_value = []
             native.remove_completed_native_capture_cache(capture, store=self.store)
             self.assertFalse(self.directory.exists())
-            cache.assert_called_once_with(self.source.binding_sha256, create=False)
 
     def test_lost_receipt_commit_reply_reuses_the_original_pair_and_timestamp(self) -> None:
         from control_plane.migrated_testing_source import finish_migrated_upload

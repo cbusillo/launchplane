@@ -66,8 +66,11 @@ lifecycle and add `candidate_lifecycle_custody_incomplete`; the lifecycle digest
 and container count still describe only usable custody. A failed native
 lifecycle also projects its existing failed predicate.
 
-Resource readback retains the evaluated staging, mount and gate observations
-even when an earlier hold determines `reason`. `storage_consumers_exclusive`
+Evaluated staging and mount holds remain in the existing candidate `references`
+as `source_inputs_preserved` and `container_reference`, identifying the retained
+volume, even when another hold determines its primary `reason`. These are native
+observations; later lifecycle custody can qualify the candidate's own mounts.
+`native_inspection_complete` reports resource observation coverage. `storage_consumers_exclusive`
 reports the provider-wide inventory check, and `resources_qualified` reports
 the subsequent physical sweep check. They remain skipped when an earlier guard
 prevents those reads. A real provider reference keeps
@@ -112,7 +115,10 @@ Cleanup, including ordinary post-deploy cleanup, checks other candidates sharing
 the cache binding. Migrated generations share their original source binding;
 any pending, failed or unknown candidate keeps those bytes. Successful cleanup
 remains repeatable after a lost reply. A retained receipt alone never satisfies
-source proof, and no source is recaptured or replaced.
+source proof, and no source is recaptured or replaced. A cleanup failure after
+completed success is reported without reversing the completed rebuild. Failed
+originals' source pairs remain protected even after candidate volume release;
+volume release does not authorize original-source deletion.
 
 Readback uses the original request, digest and key and does not plan again.
 Completed receipts replay their stored result. Unknown/interrupted effects only
