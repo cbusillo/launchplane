@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import uvicorn
 
+from control_plane.agent_operator_contract import OPERATION_SPECS
 from control_plane import service as control_plane_service
 from control_plane import service_bootstrap
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -278,6 +279,17 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
         assert managed_apply_response is not None
         assert authorized_config_response is not None
         self.assertEqual(fastapi_response.status_code, 200)
+        description = fastapi_response.json()
+        self.assertEqual(
+            {
+                entry["operation_id"]
+                for entry in description["x-launchplane-agent-contract"]["operations"]
+            },
+            {
+                description["paths"][spec.path][spec.method.lower()]["operationId"]
+                for spec in OPERATION_SPECS
+            },
+        )
         self.assertIn(
             "/v1/products/{product}/environments/{environment}/config-status",
             fastapi_response.json()["paths"],

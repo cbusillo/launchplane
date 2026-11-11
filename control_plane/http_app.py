@@ -3782,7 +3782,8 @@ def _openapi_model_schema(
 
 
 class _LaunchplaneFastAPI(FastAPI):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, publish_agent_contract: bool = False, **kwargs: Any) -> None:
+        self._publish_agent_contract = publish_agent_contract
         self._launchplane_error_response_model_registered = False
         super().__init__(*args, **kwargs)
         self.router.route_class = PreparedAPIRoute
@@ -3833,6 +3834,12 @@ class _LaunchplaneFastAPI(FastAPI):
                 responses = operation.get("responses")
                 if isinstance(responses, dict):
                     responses.pop("422", None)
+        if self._publish_agent_contract and "x-launchplane-agent-contract" not in schema:
+            from control_plane.agent_operator_contract import agent_operations
+
+            schema["x-launchplane-agent-contract"] = {
+                "operations": agent_operations(schema, self),
+            }
         return schema
 
     def _response_media_type(self, kwargs: dict[str, Any]) -> str:
@@ -4323,7 +4330,10 @@ def create_launchplane_fastapi_app(
                 shared_record_store.close()
 
     app = _LaunchplaneFastAPI(
-        title="Launchplane API", version=distribution_version("launchplane"), lifespan=lifespan
+        publish_agent_contract=True,
+        title="Launchplane API",
+        version=distribution_version("launchplane"),
+        lifespan=lifespan,
     )
     app.state.authz_policy_runtime = resolved_authz_policy_runtime
     app.add_middleware(BoundedRequestBodyMiddleware)
