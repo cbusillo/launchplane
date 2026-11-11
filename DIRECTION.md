@@ -116,12 +116,6 @@ fits this file.
   workflow, grant, or build setting referenced by its repository; ends if a
   Launchplane change forces a product repository change, or a product change
   needs a new Launchplane grant.
-- `CM website live through Launchplane` proves the journey once: Client
-  acceptance at release is built, and three changes in a row that Justin opens
-  as issues reach production with no act by Justin beyond opening the issue
-  and accepting, and none by the Director; ends if Justin has to use GitHub
-  for anything beyond opening an issue, the Director touches Launchplane by
-  hand, or the old approval code still decides a merge.
 - `Merge train that just works` proves an agent's merge lands in one pass
   without a wedge, a hand merge, or main going red on its own, and a Ready
   change runs on testing within 30 minutes; ends if the friction log gains
