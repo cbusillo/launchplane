@@ -279,7 +279,7 @@ def inspect_candidate_resources(
         candidate_compose_project_matches,
     )
     from control_plane.odoo_testing_restore import generation_binding
-    from control_plane.dokploy.compose import _odoo_web_command
+    from control_plane.dokploy.compose import held_odoo_web_container_command
     from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
     if (
@@ -312,11 +312,7 @@ def inspect_candidate_resources(
             "identity": app.plan.runtime_identity.model_dump(mode="json") if app else None,
             "failed_candidate": {
                 "resources": candidate_resources(candidate).model_dump(mode="json"),
-                "web_command": [
-                    "/bin/sh",
-                    "-lc",
-                    _odoo_web_command(hold_until_integration_readback=True).replace("$$", "$"),
-                ],
+                "web_command": held_odoo_web_container_command(),
                 "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
                 **({"completed": True} if completed_copy(candidate) else {}),
             },
@@ -380,7 +376,7 @@ def candidate_lifecycle_custody(
     project: str,
 ) -> dict[str, Any]:
     from control_plane.dokploy.testing_retained_copy import retained_copy_operation
-    from control_plane.dokploy.compose import _odoo_web_command
+    from control_plane.dokploy.compose import held_odoo_web_container_command
     from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
     app = candidate.application
@@ -395,11 +391,7 @@ def candidate_lifecycle_custody(
         "failed_candidate": {
             "resources": candidate_resources(candidate).model_dump(mode="json"),
             "image": app.plan.image_reference,
-            "web_command": [
-                "/bin/sh",
-                "-lc",
-                _odoo_web_command(hold_until_integration_readback=True).replace("$$", "$"),
-            ],
+            "web_command": held_odoo_web_container_command(),
             "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
             **({"completed": True} if completed_copy(candidate) else {}),
         },

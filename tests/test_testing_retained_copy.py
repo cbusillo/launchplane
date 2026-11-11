@@ -23,6 +23,25 @@ from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KE
 from control_plane.copy_readback_diagnostics import CopyReadbackRefused, ReadbackPredicate
 
 
+def compose_created_web_command() -> list[str]:
+    import re
+    import yaml
+    from control_plane.dokploy.compose import render_odoo_raw_compose_file
+
+    rendered = yaml.safe_load(
+        render_odoo_raw_compose_file(
+            image_reference="ghcr.io/example/odoo@sha256:" + "a" * 64,
+            hold_web_until_integration_readback=True,
+        )
+    )
+    # https://docs.docker.com/reference/compose-file/interpolation/
+    interpolation = re.compile(r"\$\$|\$\{[A-Z_]+:-([^}]*)}")
+    return [
+        interpolation.sub(lambda match: "$" if match[0] == "$$" else match[1], value)
+        for value in rendered["services"]["web"]["command"]
+    ]
+
+
 class RetainedTestingCopyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
@@ -35,6 +54,7 @@ class RetainedTestingCopyTests(unittest.TestCase):
             "health_path": "/launchplane/health",
         }
         self.identity = {"context": "example", "instance": "testing", "artifact_id": "old-build"}
+        self.web_processes: list[str] = []
         self.containers: list[dict[str, Any]] = []
         for service, destination in (
             ("web", "/volumes/data"),
@@ -156,6 +176,61 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.assertEqual(readback["availability"], "absent")
         self.assertFalse(any("rm" in command for command in commands))
 
+    def test_held_failed_candidate_web_created_by_compose_qualifies_only_while_waiting(
+        self,
+    ) -> None:
+        from control_plane.dokploy.compose import held_odoo_web_container_command
+        from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
+        from control_plane.odoo_testing_resources import OdooTestingResources
+        from control_plane.contracts.testing_candidate import testing_candidate_namespace
+
+        namespace = testing_candidate_namespace("fixture", "example", "failed-original")
+        resources = OdooTestingResources(
+            product="fixture",
+            context="example",
+            operation_id="failed-original",
+            target_id="failed-compose",
+            namespace=namespace,
+        )
+        self.spec = {
+            **self.spec,
+            "project": namespace,
+            "failed_candidate": {
+                "resources": resources.model_dump(mode="json"),
+                "image": "fixture@sha256:" + "a" * 64,
+                "web_command": held_odoo_web_container_command(),
+                "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
+            },
+        }
+        for position, row in enumerate(self.containers):
+            role = row["Config"]["Labels"]["com.docker.compose.service"]
+            mount = row["Mounts"][0]
+            mount["Name"] = resources.volumes[
+                "ODOO_DATA_VOLUME" if role == "web" else "ODOO_DB_VOLUME"
+            ]
+            destination = self.root / mount["Name"]
+            Path(mount["Source"]).rename(destination)
+            mount["Source"] = str(destination.resolve())
+            row.update(
+                {
+                    "Id": str(position + 1) * 64,
+                    "Image": "sha256:" + "b" * 64,
+                    "HostConfig": {"PortBindings": {}},
+                    "State": {"Status": "running", "StartedAt": "fixture-start"},
+                    "ExecIDs": None,
+                }
+            )
+            row["Config"]["Image"] = self.spec["failed_candidate"]["image"]
+            row["Config"]["Labels"]["com.docker.compose.project"] = namespace
+        self.containers[0]["Config"]["Cmd"] = compose_created_web_command()
+
+        self.web_processes = ["sh", "sleep"]
+        waiting, _ = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(waiting["type"], "complete", waiting)
+        self.web_processes = ["sh", "python3"]
+        serving, _ = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(serving["type"], "failed")
+
     def test_failed_candidate_without_web_keeps_exact_original_runtime_custody(self) -> None:
         from control_plane.odoo_testing_resources import OdooTestingResources
         from control_plane.contracts.testing_candidate import testing_candidate_namespace
@@ -200,22 +275,18 @@ class RetainedTestingCopyTests(unittest.TestCase):
     def own_web_spec(
         self, **failed_candidate: object
     ) -> tuple[dict[str, Any], dict[str, Any], Path]:
-        from control_plane.dokploy.compose import _odoo_web_command
+        from control_plane.dokploy.compose import held_odoo_web_container_command
         from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
         web = self.containers[0]
-        web["Config"]["Cmd"] = [
-            "/bin/sh",
-            "-lc",
-            _odoo_web_command(hold_until_integration_readback=True).replace("$$", "$"),
-        ]
+        web["Config"]["Cmd"] = compose_created_web_command()
         web["Mounts"][0]["Name"] = "fixture-data"
         web["Mounts"][0]["Source"] = str(Path(web["Mounts"][0]["Source"]).resolve())
         spec = {
             "identity": self.identity,
             "failed_candidate": {
                 "resources": {"namespace": "fixture"},
-                "web_command": web["Config"]["Cmd"],
+                "web_command": held_odoo_web_container_command(),
                 "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
                 **failed_candidate,
             },
@@ -421,6 +492,18 @@ class RetainedTestingCopyTests(unittest.TestCase):
                             if payload.get("failed_candidate")
                             else {},
                         }
+                    ]
+                ).encode()
+            elif command[1] == "top":
+                if "pid" not in command[-1].split(","):
+                    return subprocess.CompletedProcess(
+                        command, 1, stdout=b"", stderr=b"Couldn't find PID field in ps output"
+                    )
+                output = "\n".join(
+                    ["PID                 COMMAND"]
+                    + [
+                        f"{100 + index}                 {name}"
+                        for index, name in enumerate(self.web_processes)
                     ]
                 ).encode()
             elif command[1] == "rm":

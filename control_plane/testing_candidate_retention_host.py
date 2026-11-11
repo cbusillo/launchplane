@@ -1,6 +1,7 @@
 import inspect
 from control_plane.dokploy.testing_retained_copy import (
     failed_candidate_own_web,
+    read_container_processes,
     web_gate_unexpected,
 )
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
@@ -23,6 +24,7 @@ NATIVE_TESTING_RETENTION_INSPECTION = (
     + inspect.getsource(retained_volume_identity)
     + inspect.getsource(retained_volume_engine_identity)
     + inspect.getsource(web_gate_unexpected)
+    + inspect.getsource(read_container_processes)
     + inspect.getsource(failed_candidate_own_web)
     + CLEAN_TESTING_SNAPSHOT_LIBRARY
     + STORAGE_MAINTENANCE_LIBRARY
@@ -71,7 +73,7 @@ def inspect_candidate():
     for container in all_containers.values():
         labels=container.get('Config',{}).get('Labels') or {}
         if labels.get('com.docker.compose.project')==spec['project']:
-            if labels.get('com.docker.compose.service')=='web' and container.get('State',{}).get('Running') is not False and not failed_candidate_own_web(container,spec,lambda identifier:docker('top',identifier,'-eo','comm').splitlines()[1:]):
+            if labels.get('com.docker.compose.service')=='web' and container.get('State',{}).get('Running') is not False and not failed_candidate_own_web(container,spec,lambda identifier:read_container_processes(docker,identifier)):
                 use_reason='candidate_web_active_or_unknown'
             if container.get('HostConfig',{}).get('PortBindings'):
                 use_reason='candidate_published_ports'
