@@ -81,7 +81,9 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             }
         raise AssertionError(f"Unexpected provider call: {kwargs['path']}")
 
-    async def container_evidence(self, **changes: str) -> Any:
+    async def container_evidence(
+        self, *, discovered_target_id: str = "preview-target", **changes: str
+    ) -> Any:
         from control_plane import odoo_runtime_reads as reads, preview_evidence
         from control_plane.contracts.odoo_preview_runtime_plan import (
             OdooPreviewRuntimeTargetEvidence,
@@ -92,7 +94,7 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
                 reads,
                 "discover_odoo_preview_target",
                 return_value=OdooPreviewRuntimeTargetEvidence(
-                    target_id="preview-target",
+                    target_id=discovered_target_id,
                     target_name=self.identity.instance,
                     context=self.identity.context,
                     instance=self.identity.instance,
@@ -129,6 +131,7 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         self.assertEqual(response.headers["cache-control"], "no-store")
         result = response.json()["result"]
         self.assertTrue(response.json()["trace_id"])
+        self.assertTrue(result["observed_at"])
         self.assertEqual(result["current_binding"], "current")
         self.assertEqual(result["runtime_verification"], "not_performed")
         self.assertEqual(result["import_eligibility"], "not_evaluated")
@@ -138,6 +141,11 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         self.assertTrue(observed["config_valid"])
         self.assertTrue(observed["state_valid"])
         self.assertTrue(observed["running"])
+        self.assertEqual(observed["existence_coverage"], "observed")
+        self.assertEqual(observed["running_coverage"], "observed")
+        self.assertEqual(observed["stage"], "complete")
+        self.assertTrue(observed["inventory_received_at"])
+        self.assertTrue(observed["inspection_attempted_at"])
         self.assertEqual(observed["image_agreement"], "verified")
         self.assertEqual(observed["runtime_identity"], "verified")
         self.assertTrue(observed["inspection_received_at"])
@@ -189,10 +197,50 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             self.assertIs(observed["config_valid"], config)
             self.assertIs(observed["state_valid"], state)
             self.assertIs(observed["running"], running)
+            self.assertEqual(observed["existence_coverage"], "observed")
+            self.assertEqual(
+                observed["running_coverage"], "unknown" if running is None else "observed"
+            )
             self.assertEqual(observed["inspection_coverage"], coverage)
             self.assertEqual(observed["image_agreement"], "not_reached")
             self.assertNotIn("withheld", response.text)
             self.assertNotIn("private JSON", response.text)
+
+    async def test_container_agreement_requires_matching_labels_identity_and_image(self) -> None:
+        from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
+        from control_plane.dokploy import api
+
+        other = self.identity.model_copy(update={"source_git_ref": "f" * 40})
+        for change, identity, image, stage in (
+            ({"Labels": {}}, "not_reached", "not_reached", "container_binding"),
+            ({"Env": []}, "unknown", "not_reached", "runtime_identity"),
+            (
+                {"Env": [f"{RUNTIME_IDENTITY_ENV_KEY}={other.model_dump_json()}"]},
+                "mismatch",
+                "not_reached",
+                "runtime_identity",
+            ),
+            ({"Image": "other@sha256:" + "b" * 64}, "verified", "mismatch", "image"),
+        ):
+
+            def provider(**kwargs: Any) -> object:
+                raw = self.container_provider(**kwargs)
+                if kwargs["path"] == "/api/docker.getConfig":
+                    assert isinstance(raw, dict)
+                    raw["Config"].update(change)
+                return raw
+
+            with (
+                self.subTest(change=change),
+                patch.object(api, "dokploy_request", side_effect=provider),
+            ):
+                response = await self.container_evidence()
+            self.assertEqual(response.status_code, 200, response.text)
+            observed = response.json()["result"]["observation"]
+            self.assertEqual(observed["runtime_identity"], identity)
+            self.assertEqual(observed["image_agreement"], image)
+            self.assertEqual(observed["stage"], stage)
+            self.assertIs(observed["running"], True)
 
     async def test_container_inventory_requires_qualified_coverage_for_absence(self) -> None:
         from control_plane.dokploy import api
@@ -209,6 +257,13 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             ([web, {**web, "containerId": "c" * 12}], "ambiguous", None, "complete"),
             ([web, {}], "unknown", None, "invalid"),
             ([{**web, "name": "No container name"}], "unknown", None, "invalid"),
+            (
+                [{**web, "name": "renamed_preview-project-web-1"}],
+                "missing_or_unavailable",
+                None,
+                "unknown",
+            ),
+            ([{**web, "name": "custom-web"}], "missing_or_unavailable", None, "unknown"),
             ({"items": [web]}, "unknown", None, "invalid"),
         ):
             with (
@@ -220,6 +275,9 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             observed = response.json()["result"]["observation"]
             self.assertEqual(observed["selection"], selected)
             self.assertIs(observed["exists"], exists)
+            self.assertEqual(
+                observed["existence_coverage"], "unknown" if exists is None else "observed"
+            )
             self.assertEqual(observed["inventory_coverage"], coverage)
             self.assertIsNone(observed["running"])
             self.assertIsNone(observed["container_id"])
@@ -283,10 +341,24 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
                 "unavailable",
             ),
         ):
+            inspected = False
+
+            def observe_binding(**kwargs: Any) -> object:
+                nonlocal inspected
+                if kwargs["path"] == "/api/docker.getConfig":
+                    inspected = True
+                return self.container_provider(**kwargs)
+
+            def read_binding(*_args: Any, **_kwargs: Any) -> object:
+                value = values[1] if inspected else values[0]
+                if isinstance(value, Exception):
+                    raise value
+                return value
+
             with (
                 self.subTest(reader=reader, expected=expected),
-                patch.object(preview_evidence, reader, side_effect=values),
-                patch.object(api, "dokploy_request", side_effect=self.container_provider),
+                patch.object(preview_evidence, reader, side_effect=read_binding),
+                patch.object(api, "dokploy_request", side_effect=observe_binding),
             ):
                 response = await self.container_evidence()
             self.assertEqual(response.status_code, 200, response.text)
@@ -301,6 +373,8 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         for change in (
             {"target_id": ""},
             {"generation_id": ""},
+            {"preview_id": "", "generation_id": ""},
+            {"mode": "qualification"},
             {"command": "private-command"},
         ):
             with self.subTest(change=change), patch.object(api, "dokploy_request") as provider:
@@ -332,6 +406,12 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             response = await self.container_evidence()
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["result"]["observation"]["stage"], "target")
+        provider.assert_not_called()
+        with patch.object(api, "dokploy_request") as provider:
+            response = await self.container_evidence(discovered_target_id="replaced-target")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["result"]["observation"]["stage"], "target")
+        self.assertTrue(response.json()["result"]["observed_at"])
         provider.assert_not_called()
 
     def remove_registered_production(self) -> None:

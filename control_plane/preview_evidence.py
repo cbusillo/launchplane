@@ -85,6 +85,7 @@ class PreviewContainerEvidence(BaseModel):
 
     mode: Literal["container_observation"] = "container_observation"
     read_only: Literal[True] = True
+    observed_at: str
     binding: PreviewContainerBinding
     current_binding: Literal["current", "changed", "unavailable"]
     observation: RuntimeContainerObservation
@@ -140,6 +141,7 @@ def read_container_evidence(
         binding = "unavailable"
     identity = selection.identity
     return PreviewContainerEvidence(
+        observed_at=datetime.now(timezone.utc).isoformat(),
         binding=PreviewContainerBinding(
             product=identity.product,
             pr_number=query.pr_number,

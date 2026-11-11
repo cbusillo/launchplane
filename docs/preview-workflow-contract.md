@@ -446,22 +446,28 @@ safety observation, starts no schedule and changes no runtime or import record.
 It requires no prior import plan or apply.
 
 The closed `PreviewContainerEvidence` result contains the exact binding and
-independent inventory/inspection response-received timestamps, selected container ID, existence,
+the response observation time, inventory/inspection response-received times,
+selected container ID, existence,
 Config-object validity, State-object validity and strictly boolean Running.
 Timestamps say when a response arrived, even if its coverage is invalid.
-Null and `unknown` mean no qualified observation; missing or nonboolean Running is never
-false. A failed inspection preserves facts established by the inventory. No
+Null and `unknown` mean no qualified observation; missing or nonboolean Running
+is never false. A failed inspection preserves facts established by the inventory. No
 Config/State bodies, environment, provider error text or credentials are returned.
 The outer trace identifies this read, not the original deployment.
 
 An empty provider inventory is `missing_or_unavailable`, because Dokploy's
 [inventory implementation](https://github.com/Dokploy/dokploy/blob/canary/packages/server/src/services/docker.ts)
-also returns an empty list on command failure. Only a fully parsed nonempty
-inventory with no matching web service establishes absence. Malformed inventories
+also returns an empty list on command failure. Only a nonempty inventory whose
+every name identifies a Compose project, service and replica, with no matching
+web service, establishes absence. Renamed or custom names leave absence unknown.
+Malformed inventories
 remain invalid, and multiple matches remain ambiguous. The stage identifies
 whether ambiguity concerns the target or its web containers. A uniquely selected
 container can be observed even when its State or Config is malformed. Identity
-and image agreement remain `not_reached` if earlier inspection checks fail.
+and image agreement remain `not_reached` if earlier inspection checks fail;
+missing identity or an unpinned expected image leaves that agreement unknown.
+The inspection response must include an ID matching the selected container
+before its Config, State or Running facts are accepted.
 
 Selection, creation authority and original reference are checked before and
 after observation. `current_binding=changed` or `unavailable` retains the bounded

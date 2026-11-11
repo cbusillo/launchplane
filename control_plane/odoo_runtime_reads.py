@@ -306,8 +306,8 @@ class RuntimeContainerObservation(BaseModel):
     state_valid: bool | None = None
     running: bool | None = None
     running_coverage: Literal["unknown", "observed"] = "unknown"
-    runtime_identity: Literal["not_reached", "verified", "mismatch"] = "not_reached"
-    image_agreement: Literal["not_reached", "verified", "mismatch"] = "not_reached"
+    runtime_identity: Literal["not_reached", "unknown", "verified", "mismatch"] = "not_reached"
+    image_agreement: Literal["not_reached", "unknown", "verified", "mismatch"] = "not_reached"
     stage: Literal[
         "selection",
         "target",
@@ -416,7 +416,19 @@ def connect_runtime(
             for row in containers
         ):
             raise OdooRuntimeReadError("container_unavailable", "Invalid container inventory.", 503)
-        observation.inventory_coverage = "complete" if containers else "unknown"
+        observation.inventory_coverage = (
+            "complete"
+            if containers
+            and all(
+                re.fullmatch(
+                    rf"/?{re.escape(app_name)}([-_.])[A-Za-z0-9_-]+\1\d+",
+                    str(row["name"]),
+                    re.IGNORECASE,
+                )
+                for row in api.collect_dokploy_object_items(containers)
+            )
+            else "unknown"
+        )
     if not isinstance(containers, list):
         raise OdooRuntimeReadError(
             "container_unavailable", "Provider container inventory is unavailable.", 503
@@ -428,7 +440,7 @@ def connect_runtime(
     except api.DokployContainerSelectionError as error:
         if observation is not None:
             observation.selection = "ambiguous" if error.match_count else "missing"
-            if not containers:
+            if not error.match_count and observation.inventory_coverage != "complete":
                 observation.selection = "missing_or_unavailable"
             elif not error.match_count:
                 observation.exists = False
@@ -664,12 +676,14 @@ def inspect_runtime_container(
     observed = parse_runtime_identity_payload(environment.get(RUNTIME_IDENTITY_ENV_KEY))
     if observation is not None:
         observation.stage = "runtime_identity"
-        observation.runtime_identity = "mismatch"
+        observation.runtime_identity = "mismatch" if observed is not None else "unknown"
     require_runtime_identity(identity, observed)
     if observation is not None:
         observation.runtime_identity = "verified"
         observation.stage = "image"
-        observation.image_agreement = "mismatch"
+        observation.image_agreement = (
+            "mismatch" if "@sha256:" in identity.image_reference else "unknown"
+        )
     if (
         "@sha256:" not in identity.image_reference
         or config.get("Image") != identity.image_reference
