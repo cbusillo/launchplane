@@ -197,8 +197,9 @@ class RetainedTestingCopyTests(unittest.TestCase):
         refused, _ = self.run_host(extra={"allow_unavailable": True})
         self.assertEqual(refused["type"], "failed")
 
-    def test_waiting_web_requires_original_command_processes_and_absent_gate(self) -> None:
-        from control_plane.dokploy.testing_retained_copy import failed_testing_web_wait
+    def own_web_spec(
+        self, **failed_candidate: object
+    ) -> tuple[dict[str, Any], dict[str, Any], Path]:
         from control_plane.dokploy.compose import _odoo_web_command
         from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
@@ -216,13 +217,40 @@ class RetainedTestingCopyTests(unittest.TestCase):
                 "resources": {"namespace": "fixture"},
                 "web_command": web["Config"]["Cmd"],
                 "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
+                **failed_candidate,
             },
         }
-        self.assertTrue(failed_testing_web_wait(web, spec, lambda _: ["sh", "sleep"]))
-        self.assertFalse(failed_testing_web_wait(web, spec, lambda _: ["sh", "odoo"]))
         gate = Path(web["Mounts"][0]["Source"]) / Path(INTEGRATION_READBACK_PASSED_PATH).name
+        return web, spec, gate
+
+    def test_waiting_web_requires_original_command_processes_and_absent_gate(self) -> None:
+        from control_plane.dokploy.testing_retained_copy import failed_candidate_own_web
+
+        web, spec, gate = self.own_web_spec()
+        self.assertTrue(failed_candidate_own_web(web, spec, lambda _: ["sh", "sleep"]))
+        self.assertFalse(failed_candidate_own_web(web, spec, lambda _: ["sh", "odoo"]))
         gate.write_text("completed-copy-evidence")
-        self.assertFalse(failed_testing_web_wait(web, spec, lambda _: ["sh", "sleep"]))
+        self.assertFalse(failed_candidate_own_web(web, spec, lambda _: ["sh", "sleep"]))
+
+    def test_completed_copy_web_qualifies_only_with_its_own_identity_mount_and_gate(self) -> None:
+        from control_plane.dokploy.testing_retained_copy import failed_candidate_own_web
+
+        web, spec, gate = self.own_web_spec(completed=True)
+
+        def serving(_: str) -> list[str]:
+            return ["sh", "python3"]
+
+        self.assertFalse(failed_candidate_own_web(web, spec, serving))
+        gate.write_text("completed-copy-evidence")
+        self.assertTrue(failed_candidate_own_web(web, spec, serving))
+        foreign = {**spec, "identity": {**self.identity, "artifact_id": "foreign"}}
+        self.assertFalse(failed_candidate_own_web(web, foreign, serving))
+        web["Mounts"][0]["Name"] = "foreign-data"
+        self.assertFalse(failed_candidate_own_web(web, spec, serving))
+        web["Mounts"][0]["Name"] = "fixture-data"
+        gate.unlink()
+        gate.symlink_to(web["Mounts"][0]["Source"])
+        self.assertFalse(failed_candidate_own_web(web, spec, serving))
 
     def test_all_services_must_be_stopped_and_restarts_keep_the_same_data_custody(self) -> None:
         read = qualify_retained_copy(self.containers, self.spec)
