@@ -2805,7 +2805,29 @@ An explicit start at offset zero with the empty-prefix digest restarts only an
 incomplete part under its existing lock; completed originals cannot be reset.
 The receiver hashes and fsyncs each completed upload. A reused completed pair is
 size-checked before its generation receipt and fully rehashed before delivery. GET never commits a receipt. The original caller,
-product, candidate custody and unstarted restore remain required.
+product, candidate custody and unstarted restore remain required for writes.
+
+The existing GET accepts `include_prerequisites=true` to add a closed
+`prerequisites` object: `candidate_phase`, nullable `restore_workflow_started`,
+`original_caller`, and `holds`. The phase comes from the recorded candidate;
+`holds` reuses the write guard's current `candidate_prepared`,
+`candidate_abandoned` and `restore_started` reasons, plus
+`original_caller_required` when the reader differs from the original write scope.
+Multiple reasons are retained. The existing authorized read boundary permits a
+reader outside that original scope; it does not confer write authority. Without
+the opt-in, GET and WebSocket responses keep their existing representation.
+
+A null restore-start fact means unavailable evidence, never false. Missing,
+invalid, unauthorized or source-unbound records retain the existing HTTP refusal
+and provide no prerequisite projection. These are current observations, not an
+explanation of a historical refusal or an atomic snapshot across records and
+files. An empty `holds` list is not upload eligibility or retry clearance. Actual
+writes still perform their fresh authorization, candidate/source, storage,
+prefix/digest and receipt checks. GET performs no upload, receipt reconciliation,
+operation write or provider action. Part sizes/completion come from retained file
+metadata, or from the existing receipt when present; neither establishes physical
+no-effects, verified retained bytes, restore success or safe release. A complete
+pair without a receipt stays that way until a separately authorized write.
 
 Migrated uploads reuse one private content cache for the same product and source
 binding across candidate attempts. Each generation still has its own immutable

@@ -700,17 +700,95 @@ class MigratedUploadRouteTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         assert identity is not None
-        self.operation = SimpleNamespace(
-            product="fixture",
-            context="fixture",
+        from datetime import UTC, datetime
+        from control_plane.contracts.artifact_identity import (
+            ArtifactIdentityManifest,
+            ArtifactImageReference,
+        )
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+        from control_plane.contracts.testing_candidate import (
+            TestingCandidateAllocation,
+            testing_candidate_namespace,
+        )
+        from control_plane.contracts.testing_candidate_application import (
+            TestingCandidateApplication,
+            TestingCandidateApplicationPlan,
+        )
+        from control_plane.contracts.odoo_stable_target_replacement_operation import (
+            OdooStableTargetReplacementOperationRecord,
+        )
+
+        source = self.fixture.source
+        operation_id = "original"
+        namespace = testing_candidate_namespace(source.product, source.context, operation_id)
+        generation = self.fixture.generation.model_copy(
+            update={"operation_id": operation_id, "namespace": namespace}
+        )
+        artifact = ArtifactIdentityManifest(
+            artifact_id="fixture-build",
+            source_commit="a" * 40,
+            enterprise_base_digest=source.target_image,
+            image=ArtifactImageReference(
+                repository="example.invalid/fixture", digest=source.target_image
+            ),
+        )
+        plan = TestingCandidateApplicationPlan(
+            product=source.product,
+            context=source.context,
+            operation_id=operation_id,
+            namespace=namespace,
+            target_id=generation.target_id,
+            base_url="https://" + generation.domain_host,
+            artifact=artifact,
+            runtime_identity=RuntimeIdentity(
+                product=source.product,
+                context=source.context,
+                instance="testing",
+                deployment_record_id="fixture-deployment",
+                artifact_id=artifact.artifact_id,
+                source_git_ref=artifact.source_commit,
+                image_digest=artifact.image.digest,
+                image_reference=f"{artifact.image.repository}@{artifact.image.digest}",
+            ),
+            source="migrated",
+            generation=generation,
+            native_source=source,
+            authority_sha256="a" * 64,
+            credential_bindings_sha256="b" * 64,
+        )
+        self.allocation = TestingCandidateAllocation(
+            namespace=namespace,
+            product=source.product,
+            context=source.context,
+            operation_id=operation_id,
+            intent_sha256="c" * 64,
+            serving_target_id="serving",
+            server_id="server",
+            project_id="project",
+            environment_id="environment",
+            compose_id=generation.target_id,
+            resources_binding_sha256=generation.resources_binding_sha256,
+            created_at=datetime.now(UTC),
+            application=TestingCandidateApplication(plan=plan),
+        )
+        self.fixture.allocation = self.allocation
+        self.operation = OdooStableTargetReplacementOperationRecord(
+            operation_id=operation_id,
+            product=source.product,
+            context=source.context,
+            instance="testing",
             request=MigratedTestingRequestTests().request(),
             idempotency_scope=idempotency_scope(identity),
+            idempotency_key="fixture-original",
+            request_fingerprint="fixture-fingerprint",
+            created_at=datetime.now(UTC).isoformat(),
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        self.store.read_testing_candidate.side_effect = lambda key: (
+            self.allocation if key == self.allocation.namespace else None
         )
         self.store.read_odoo_stable_target_replacement_operation_record.return_value = (
             self.operation
-        )
-        self.enterContext(
-            patch.object(routes, "migrated_candidate", return_value=self.fixture.allocation)
         )
         self.policy = self.enterContext(
             patch.object(routes, "read_active_authz_policy_record", return_value=SimpleNamespace())
@@ -838,3 +916,225 @@ class MigratedUploadRouteTests(unittest.IsolatedAsyncioTestCase):
         sent = await self.websocket(self.url + "/database", self.frames(data, offset=4))
         self.assertEqual(sent[-1]["code"], 1000, sent)
         self.assertEqual((self.fixture.directory / "database").read_bytes(), data)
+
+    async def test_opt_in_reads_prerequisites_without_changing_default_upload_response(
+        self,
+    ) -> None:
+        from tests.support.http import request
+
+        default = await request(self.app, "GET", self.url)
+        projected = await request(self.app, "GET", self.url + "?include_prerequisites=true")
+        self.assertEqual(projected.status_code, 200, projected.text)
+        fields = projected.json()
+        prerequisites = fields.pop("prerequisites")
+        self.assertEqual(fields, default.json())
+        assert self.allocation.application is not None
+        self.assertEqual(prerequisites["candidate_phase"], self.allocation.application.phase)
+        self.assertIsNone(prerequisites["restore_workflow_started"])
+        self.assertTrue(prerequisites["original_caller"])
+        self.assertEqual(fields["operation_id"], self.operation.operation_id)
+        self.assertEqual(fields["source_binding_sha256"], self.fixture.source.binding_sha256)
+
+    async def test_authorized_foreign_reader_does_not_become_original_upload_caller(self) -> None:
+        from tests.support.http import request
+
+        self.operation.idempotency_scope = "foreign-caller"
+        read = await request(self.app, "GET", self.url + "?include_prerequisites=true")
+        self.assertEqual(read.status_code, 200, read.text)
+        self.assertFalse(read.json()["prerequisites"]["original_caller"])
+        self.assertEqual(read.json()["prerequisites"]["holds"], ["original_caller_required"])
+        sent = await self.websocket(self.url + "/database", self.frames(b"database"))
+        self.assertEqual(sent[0]["type"], "websocket.close")
+        self.assertEqual(sent[0]["code"], 1008)
+        self.assertFalse(list(self.fixture.directory.iterdir()))
+
+    async def test_terminal_and_started_candidates_remain_readable_but_refuse_upload(self) -> None:
+        from datetime import UTC, datetime
+        from control_plane.contracts.testing_candidate_application import (
+            TestingCandidateApplication,
+            TestingCandidatePrepared,
+        )
+        from tests.support.http import request
+
+        initial = await request(self.app, "GET", self.url + "?include_prerequisites=true")
+        self.assertEqual(initial.status_code, 200)
+        self.assertFalse(initial.json()["prerequisites"]["holds"])
+        original = self.allocation
+        assert original.application is not None
+        plan = original.application.plan
+        prepared = TestingCandidatePrepared(
+            plan_sha256=plan.digest,
+            runtime_identity=plan.runtime_identity,
+            private_endpoint="http://candidate.invalid",
+            deployment_id="deployment",
+            source_witness="fixture-source",
+            integration_isolation_verified=True,
+            credentials_verified=True,
+            observed_at=datetime.now(UTC),
+        )
+        for changes in (
+            {"phase": "restoring", "deployment_id": "deployment", "restore_workflow_started": None},
+            {
+                "phase": "restoring",
+                "deployment_id": "deployment",
+                "restore_workflow_started": False,
+            },
+            {"phase": "restoring", "deployment_id": "deployment", "restore_workflow_started": True},
+            {"phase": "prepared", "deployment_id": "deployment", "prepared": prepared},
+            {"phase": "abandoned", "abandonment_evidence": "fixture-custody"},
+            {
+                "phase": "abandoned",
+                "abandonment_evidence": "fixture-custody",
+                "restore_workflow_started": True,
+            },
+        ):
+            application = TestingCandidateApplication.model_validate({"plan": plan, **changes})
+            self.allocation = original.model_copy(update={"application": application})
+            with self.subTest(
+                phase=application.phase, started=application.restore_workflow_started
+            ):
+                read = await request(self.app, "GET", self.url + "?include_prerequisites=true")
+                self.assertEqual(read.status_code, 200, read.text)
+                evidence = read.json()["prerequisites"]
+                self.assertEqual(evidence["candidate_phase"], application.phase)
+                self.assertIs(
+                    evidence["restore_workflow_started"], application.restore_workflow_started
+                )
+                if application.phase == "abandoned":
+                    self.assertIn("candidate_abandoned", evidence["holds"])
+                if application.phase == "prepared":
+                    self.assertIn("candidate_prepared", evidence["holds"])
+                if application.restore_workflow_started:
+                    self.assertIn("restore_started", evidence["holds"])
+                if (
+                    application.phase in {"prepared", "abandoned"}
+                    or application.restore_workflow_started
+                ):
+                    sent = await self.websocket(self.url + "/database", self.frames(b"database"))
+                    self.assertEqual(sent[0]["type"], "websocket.close")
+                    self.assertEqual(sent[0]["code"], 1008)
+        self.assertFalse(list(self.fixture.directory.iterdir()))
+        self.store.write_native_testing_copy_capture.assert_not_called()
+
+    async def test_missing_unbound_and_refused_reads_supply_no_prerequisite_claim(self) -> None:
+        from tests.support.http import request
+
+        for url, expected_status in (
+            (self.url.replace("/fixture/", "/foreign/"), 403),
+            (self.url.replace("/original/", "/foreign/"), 409),
+        ):
+            read = await request(self.app, "GET", url + "?include_prerequisites=true")
+            self.assertEqual(read.status_code, expected_status, read.text)
+            self.assertNotIn("prerequisites", read.json())
+        self.allowed.return_value = False
+        read = await request(self.app, "GET", self.url + "?include_prerequisites=true")
+        self.assertEqual(read.status_code, 403)
+        self.allowed.return_value = True
+        reader = self.store.read_testing_candidate
+        original_read = reader.side_effect
+        reader.side_effect = None
+        for candidate in (None, self.allocation.model_copy(update={"application": None})):
+            reader.return_value = candidate
+            read = await request(self.app, "GET", self.url + "?include_prerequisites=true")
+            self.assertEqual(read.status_code, 409, read.text)
+            self.assertNotIn("prerequisites", read.json())
+        from control_plane.contracts.testing_candidate import TestingCandidateAllocation
+
+        incomplete = self.allocation.model_dump(mode="json")
+        incomplete["application"]["phase"] = "unknown-phase"
+        reader.side_effect = lambda _key: TestingCandidateAllocation.model_validate(incomplete)
+        read = await request(self.app, "GET", self.url + "?include_prerequisites=true")
+        self.assertEqual(read.status_code, 409, read.text)
+        self.assertNotIn("prerequisites", read.json())
+        reader.side_effect = original_read
+        self.policy.side_effect = LookupError("unavailable")
+        read = await request(self.app, "GET", self.url + "?include_prerequisites=true")
+        self.assertEqual(read.status_code, 503)
+        self.assertNotIn("prerequisites", read.json())
+        self.policy.side_effect = None
+        self.operation.request = MigratedTestingRequestTests().request(
+            migrated_source=self.fixture.source.model_copy(
+                update={"producer_run": "different-source"}
+            )
+        )
+        read = await request(self.app, "GET", self.url + "?include_prerequisites=true")
+        self.assertEqual(read.status_code, 409, read.text)
+        self.assertNotIn("source_binding_sha256", read.json())
+        self.store.write_native_testing_copy_capture.assert_not_called()
+
+    async def test_parts_and_receipt_reads_have_no_upload_reconciliation_or_record_writes(
+        self,
+    ) -> None:
+        from unittest.mock import patch
+        from control_plane.http_routes import migrated_testing_source as routes
+        from control_plane.contracts.odoo_testing_source import NativeTestingCopyCapture
+        from control_plane.odoo_testing_restore import generation_binding
+        from tests.support.http import request
+
+        assert self.allocation.application is not None
+        generation = self.allocation.application.plan.generation
+        assert generation is not None
+        source = self.fixture.source
+        with (
+            patch.object(
+                routes, "receive_migrated_part", side_effect=AssertionError("read invoked receiver")
+            ),
+            patch.object(
+                routes,
+                "finish_migrated_upload",
+                side_effect=AssertionError("read reconciled receipt"),
+            ),
+        ):
+            for database, filestore, receipt in (
+                (b"data", None, False),
+                (b"database", None, False),
+                (b"database", b"store", False),
+                (b"database", b"store", True),
+            ):
+                for part, data in (("database", database), ("filestore", filestore)):
+                    if data is not None:
+                        name = (
+                            part if len(data) == getattr(source, part).size else part + ".partial"
+                        )
+                        (self.fixture.directory / name).write_bytes(data)
+                if receipt:
+                    self.store.read_native_testing_copy_capture.return_value = (
+                        NativeTestingCopyCapture(
+                            product=source.product,
+                            context=source.context,
+                            generation_binding_sha256=generation_binding(generation),
+                            source_binding_sha256=source.binding_sha256,
+                            capture_id="c" * 32,
+                            database=source.database,
+                            filestore=source.filestore,
+                            captured_at="2026-11-01T00:00:00Z",
+                            source_observation=source,
+                        )
+                    )
+                before = {path.name: path.read_bytes() for path in self.fixture.directory.iterdir()}
+                self.store.reset_mock()
+                read = await request(self.app, "GET", self.url + "?include_prerequisites=true")
+                self.assertEqual(read.status_code, 200, read.text)
+                payload = read.json()
+                self.assertIs(payload["receipt_recorded"], receipt)
+                for part, data in (("database", database), ("filestore", filestore)):
+                    self.assertEqual(
+                        payload["parts"][part],
+                        {
+                            "complete": data is not None
+                            and len(data) == getattr(source, part).size,
+                            "size": len(data) if data is not None else 0,
+                        },
+                    )
+                self.assertEqual(
+                    before,
+                    {path.name: path.read_bytes() for path in self.fixture.directory.iterdir()},
+                )
+                self.assertLessEqual(
+                    {call[0] for call in self.store.mock_calls},
+                    {
+                        "read_odoo_stable_target_replacement_operation_record",
+                        "read_testing_candidate",
+                        "read_native_testing_copy_capture",
+                    },
+                )

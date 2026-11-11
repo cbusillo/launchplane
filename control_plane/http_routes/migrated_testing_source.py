@@ -1,15 +1,17 @@
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 from typing import Annotated, Any, Literal, NoReturn, Protocol
 
-from fastapi import Depends, HTTPException, Path, WebSocket, WebSocketDisconnect
+from fastapi import Depends, HTTPException, Path, Query, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.odoo_testing_source import MigratedOdooTestingSource
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
+from control_plane.contracts.testing_candidate_application import CandidateApplicationPhase
 from control_plane.durable_operation_authorization import read_active_authz_policy_record
 from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane.http_routes.support import (
@@ -18,7 +20,9 @@ from control_plane.http_routes.support import (
     run_in_worker_thread,
 )
 from control_plane.migrated_testing_source import (
+    CandidateUploadHold,
     MigratedUpload,
+    migrated_upload_holds,
     migrated_candidate,
     receive_migrated_part,
     upload_state,
@@ -40,6 +44,21 @@ class MigratedUploadStart(BaseModel):
     prefix_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class MigratedUploadPrerequisites(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    candidate_phase: CandidateApplicationPhase
+    restore_workflow_started: bool | None
+    original_caller: bool
+    holds: list[CandidateUploadHold | Literal["original_caller_required"]]
+
+
+@dataclass(frozen=True)
+class MigratedUploadContext:
+    store: PostgresRecordStore
+    allocation: TestingCandidateAllocation
+    original_caller: bool
+
+
 class MigratedSourceUploadResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     product: str
@@ -47,6 +66,11 @@ class MigratedSourceUploadResponse(BaseModel):
     source_binding_sha256: str
     receipt_recorded: bool
     parts: dict[str, dict[str, object]]
+    prerequisites: MigratedUploadPrerequisites | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 def register_migrated_testing_source_routes(
@@ -62,7 +86,7 @@ def register_migrated_testing_source_routes(
         operation_id: str,
         *,
         read_only: bool = False,
-    ) -> tuple[PostgresRecordStore, TestingCandidateAllocation]:
+    ) -> MigratedUploadContext:
         trace = dependencies.next_trace_id()
         if not isinstance(store, PostgresRecordStore):
             raise dependencies.http_error(
@@ -93,21 +117,24 @@ def register_migrated_testing_source_routes(
         )
         if isinstance(identity, GitHubHumanIdentity):
             allowed = policy.policy.names_administrator(identity)
-        if (
-            not allowed
-            or operation.product != product
-            or (not read_only and operation.idempotency_scope != idempotency_scope(identity))
-        ):
+        original_caller = operation.idempotency_scope == idempotency_scope(identity)
+        if not allowed or operation.product != product or (not read_only and not original_caller):
             raise dependencies.http_error(
                 status_code=403,
                 trace_id=trace,
                 code="authorization_denied",
                 message="Use the original authorized testing caller for this upload.",
             )
-        return store, migrated_candidate(store, product, operation_id, allow_complete=read_only)
+        return MigratedUploadContext(
+            store,
+            migrated_candidate(store, product, operation_id, allow_complete=read_only),
+            original_caller,
+        )
 
     def response(
-        store: PostgresRecordStore, allocation: TestingCandidateAllocation
+        store: PostgresRecordStore,
+        allocation: TestingCandidateAllocation,
+        prerequisites: MigratedUploadPrerequisites | None = None,
     ) -> MigratedSourceUploadResponse:
         assert (
             allocation.application is not None
@@ -122,6 +149,7 @@ def register_migrated_testing_source_routes(
             operation_id=allocation.operation_id,
             source_binding_sha256=source.binding_sha256,
             receipt_recorded=receipt is not None,
+            prerequisites=prerequisites,
             parts={
                 part: {"complete": True, "size": getattr(receipt, part).size}
                 for part in ("database", "filestore")
@@ -143,12 +171,32 @@ def register_migrated_testing_source_routes(
         operation_id: Annotated[str, Path(min_length=1)],
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        include_prerequisites: Annotated[bool, Query()] = False,
     ) -> MigratedSourceUploadResponse:
         try:
-            store, allocation = await run_in_worker_thread(
+            resolved = await run_in_worker_thread(
                 lambda: context(record_store, identity, product, operation_id, read_only=True)
             )
-            return await run_in_worker_thread(lambda: response(store, allocation))
+            application = resolved.allocation.application
+            assert application is not None
+            holds: list[CandidateUploadHold | Literal["original_caller_required"]] = [
+                *migrated_upload_holds(application)
+            ]
+            if not resolved.original_caller:
+                holds.append("original_caller_required")
+            prerequisites = (
+                MigratedUploadPrerequisites(
+                    candidate_phase=application.phase,
+                    restore_workflow_started=application.restore_workflow_started,
+                    original_caller=resolved.original_caller,
+                    holds=holds,
+                )
+                if include_prerequisites
+                else None
+            )
+            return await run_in_worker_thread(
+                lambda: response(resolved.store, resolved.allocation, prerequisites)
+            )
         except (ValueError, OSError) as error:
             refuse(error)
 
@@ -165,9 +213,10 @@ def register_migrated_testing_source_routes(
             )
             if identity is None:
                 raise ValueError("An authenticated bearer caller is required")
-            store, allocation = await run_in_worker_thread(
+            resolved = await run_in_worker_thread(
                 lambda: context(record_store, identity, product, operation_id)
             )
+            store, allocation = resolved.store, resolved.allocation
             assert allocation.application is not None
             await websocket.accept()
             start = MigratedUploadStart.model_validate(await websocket.receive_json())
