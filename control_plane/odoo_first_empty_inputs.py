@@ -226,23 +226,48 @@ def _provider_projection(
     staged_environment: str | None = None,
     staged_compose: str | None = None,
 ) -> dict[str, object]:
-    if (
-        not {"composeId", "appName", "serverId", "env", "composeFile", "mounts", "autoDeploy"}
-        <= payload.keys()
-        or payload.get("composeId") != authority.target_id.target_id
-        or not isinstance(payload.get("appName"), str)
-        or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", str(payload["appName"]))
-        or payload.get("env")
-        not in ((None, "") if staged_environment is None else (staged_environment,))
-        or payload.get("composeFile")
-        not in ((None, "") if staged_compose is None else (staged_compose,))
-        or payload.get("mounts") not in (None, [])
-        or payload.get("autoDeploy") is not False
-    ):
-        raise ValueError("Original provider target is not an unstarted empty configuration.")
+    if "composeId" not in payload:
+        raise ValueError("Provider response omitted the compose identity.")
+    if "appName" not in payload:
+        raise ValueError("Provider response omitted the project name.")
+    if "serverId" not in payload:
+        raise ValueError("Provider response omitted the server identity.")
+    if "env" not in payload:
+        raise ValueError("Provider response omitted the environment.")
+    if "composeFile" not in payload:
+        raise ValueError("Provider response omitted the compose source.")
+    if "mounts" not in payload:
+        raise ValueError("Provider response omitted the mounts.")
+    if "autoDeploy" not in payload:
+        raise ValueError("Provider response omitted automatic deployment state.")
+    if payload["composeId"] != authority.target_id.target_id:
+        raise ValueError("Provider compose identity differs from the original target.")
+    project = payload["appName"]
+    if not isinstance(project, str):
+        raise ValueError("Provider project name is not a string.")
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", project):
+        raise ValueError("Provider project name is not a supported storage project identity.")
+    if staged_environment is None:
+        if payload["env"] not in (None, ""):
+            raise ValueError("Original provider environment is not empty.")
+    elif payload["env"] != staged_environment:
+        raise ValueError("Provider environment differs from the original executor's staged input.")
+    if staged_compose is None:
+        if payload["composeFile"] not in (None, ""):
+            raise ValueError("Original provider compose source is not empty.")
+    elif payload["composeFile"] != staged_compose:
+        raise ValueError(
+            "Provider compose source differs from the original executor's staged input."
+        )
+    if payload["mounts"] not in (None, []):
+        raise ValueError("Original provider mounts are not empty.")
+    if payload["autoDeploy"] is True:
+        raise ValueError("Original provider automatic deployment is enabled.")
+    if payload["autoDeploy"] is not False:
+        raise ValueError("Provider automatic deployment state is not a verified boolean.")
     return {
         "target_id": authority.target_id.target_id,
-        "project": payload["appName"],
+        "project": project,
         "server": native_copy_stream.require_registered_remote_server(payload.get("serverId")),
         "volumes": authority.volumes,
     }

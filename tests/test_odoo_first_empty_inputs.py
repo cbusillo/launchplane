@@ -476,6 +476,52 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
             "control_plane.odoo_first_empty_inputs", {site["module"] for site in event["sites"]}
         )
 
+    async def test_provider_refusals_identify_each_missing_or_conflicting_fact_without_values(
+        self,
+    ) -> None:
+        original = dict(self.provider_payload)
+        refusals = {
+            f"missing_{field}": {key: value for key, value in original.items() if key != field}
+            for field in original
+        }
+        sentinel = "private-provider-sentinel"
+        conflicts: dict[str, tuple[str, Any]] = {
+            "identity": ("composeId", sentinel),
+            "project_type": ("appName", [sentinel]),
+            "project_name": ("appName", f"/{sentinel}"),
+            "environment": ("env", f"PASSWORD={sentinel}"),
+            "compose": ("composeFile", sentinel),
+            "mounts": ("mounts", [{"source": sentinel}]),
+            "auto_deploy_enabled": ("autoDeploy", True),
+            "auto_deploy_unknown": ("autoDeploy", None),
+            "server": ("serverId", f"/{sentinel}"),
+        }
+        refusals.update(
+            {name: {**original, field: value} for name, (field, value) in conflicts.items()}
+        )
+        bodies: list[dict[str, Any]] = []
+        sites: list[str] = []
+        for name, payload in refusals.items():
+            with self.subTest(refusal=name):
+                self.provider_payload = payload
+                body, event = await self.refused_with_cause(409)
+                bodies.append(body)
+                self.assertTrue(event["sites"])
+                sites.append(json.dumps(event["sites"], sort_keys=True))
+                self.assertNotIn(sentinel, json.dumps([body, event]))
+        self.assertEqual(len(set(map(json.dumps, bodies))), 1)
+        self.assertEqual(len(set(sites)), len(refusals))
+        self.probe.assert_not_called()
+        self.assertFalse(self.store.list_secret_records())
+
+    async def test_empty_provider_values_keep_their_qualification(self) -> None:
+        for empty in (None, ""):
+            with self.subTest(empty=empty):
+                self.provider_payload.update(env=empty, composeFile=empty, mounts=None)
+                response = await self.post("runtime_credentials")
+                self.assertEqual(response.status_code, 202, response.text)
+        self.assertFalse(self.store.list_secret_records())
+
     async def test_inherited_global_credentials_yield_to_exact_instance_generation(
         self,
     ) -> None:
