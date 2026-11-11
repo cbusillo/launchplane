@@ -475,7 +475,6 @@ def candidate_lifecycle_custody(
             parsed = LifecycleEvidence.model_validate(observation)
             evidence.containers = parsed.containers
             for predicate, outcome in parsed.checks.items():
-                # Pydantic validates these keys; PyCharm widens their Literal on iteration.
                 # noinspection PyTypeChecker
                 evidence.checks[predicate] = outcome
     if evidence is not None:

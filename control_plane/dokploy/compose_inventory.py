@@ -416,7 +416,6 @@ def _record_empty_source(
     evidence: ConsumerEvidence, payload: dict[str, Any], *, applicable: bool = True
 ) -> None:
     for predicate, passed in _empty_source_checks(payload).items():
-        # PyCharm widens this Literal dictionary key; mypy preserves Predicate.
         # noinspection PyTypeChecker
         evidence.checks[predicate] = (
             ("pass" if passed else "fail") if applicable else "not_applicable"
