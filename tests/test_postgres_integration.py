@@ -15901,7 +15901,7 @@ class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
             patch.object(TestingCandidateTests, "database_url", url),
         ):
             case = CandidateApplicationTests(
-                "test_prepared_native_copy_removes_raw_cache_and_recovers_a_lost_cleanup_reply"
+                "test_prepared_native_copy_keeps_source_proof_through_prepared_resume"
             )
             result = unittest.TestResult()
             case.run(result)
