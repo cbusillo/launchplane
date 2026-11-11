@@ -67,48 +67,31 @@ class EmptyAutomationTests(FirstEmptyInputsFixture, unittest.IsolatedAsyncioTest
         return []
 
     async def post(self, mode: str = "dry-run", key: str = "", **extra: Any) -> Any:
+        payload = self.payload(mode=mode, **extra)
         return await request(
             self.app,
             "POST",
             "/v1/dokploy-targets/setup",
             headers={"Authorization": "Bearer local-operator-token", "Idempotency-Key": key},
-            payload={
-                "operation": "disable-empty-compose-auto-deploy",
-                "context": self.context,
-                "instance": "prod",
-                "target_id": self.target_id.target_id,
-                "project_id": "project-original",
-                "environment_id": "environment-original",
-                "server_id": "server-original",
-                "expected_current_provider_target": self.provider.to_deployed_target_reference().model_dump(
-                    mode="json"
-                ),
-                "reason": "Disable automatic deployment on original empty setup",
-                "mode": mode,
-                **extra,
-            },
+            payload=payload,
         )
 
-    async def test_existing_original_target_can_review_only_automatic_deployment(self) -> None:
-        response = await self.post()
-        body = response.json()
-        self.assertEqual(response.status_code, 202, body)
-        self.assertIs(body["result"]["setup"]["automation_review"]["observed_auto_deploy"], True)
-
-    def test_existing_target_intent_has_a_typed_request(self) -> None:
-        request_model = DokployTargetSetupEnvelope.model_validate(
-            {
-                "operation": "disable-empty-compose-auto-deploy",
-                "context": self.context,
-                "instance": "prod",
-                "target_id": self.target_id.target_id,
-                "project_id": "project-original",
-                "environment_id": "environment-original",
-                "server_id": "server-original",
-                "expected_current_provider_target": self.provider.to_deployed_target_reference(),
-            }
-        )
-        self.assertEqual(request_model.target_id, self.target_id.target_id)
+    def payload(self, **extra: Any) -> dict[str, Any]:
+        return {
+            "operation": "disable-empty-compose-auto-deploy",
+            "context": self.context,
+            "instance": "prod",
+            "target_id": self.target_id.target_id,
+            "project_id": "project-original",
+            "environment_id": "environment-original",
+            "server_id": "server-original",
+            "expected_current_provider_target": self.provider.to_deployed_target_reference().model_dump(
+                mode="json"
+            ),
+            "reason": "Disable automatic deployment on original empty setup",
+            "mode": "dry-run",
+            **extra,
+        }
 
     async def review(self) -> dict[str, Any]:
         response = await self.post()
@@ -122,12 +105,13 @@ class EmptyAutomationTests(FirstEmptyInputsFixture, unittest.IsolatedAsyncioTest
             "apply",
             key,
             automation_review=review,
-            confirmation="APPLY DOKPLOY TARGET SETUP",
+            confirmation=DokployTargetSetupEnvelope.model_validate(
+                self.payload(mode="apply", automation_review=review)
+            ).expected_confirmation,
             **extra,
         )
 
     async def test_only_false_patch_and_independent_readback_preserve_all_other_state(self) -> None:
-        before = dict(self.provider_payload)
         records = (self.profile, self.target, self.target_id, self.provider, self.runtime)
         response = await self.apply_review(await self.review())
         self.assertEqual(response.status_code, 202, response.json())
@@ -136,14 +120,6 @@ class EmptyAutomationTests(FirstEmptyInputsFixture, unittest.IsolatedAsyncioTest
             self.writes, [{"composeId": self.target_id.target_id, "autoDeploy": False}]
         )
         self.assertIs(self.provider_payload["autoDeploy"], False)
-        self.assertEqual(
-            {
-                key: value
-                for key, value in self.provider_payload.items()
-                if key not in {"autoDeploy", "updatedAt"}
-            },
-            {key: value for key, value in before.items() if key not in {"autoDeploy", "updatedAt"}},
-        )
         self.assertEqual(
             records,
             (
@@ -227,14 +203,11 @@ class EmptyAutomationTests(FirstEmptyInputsFixture, unittest.IsolatedAsyncioTest
         from datetime import datetime, timedelta
 
         review = await self.review()
-        stale = {
-            **review,
-            "observed_at": (
-                datetime.fromisoformat(review["observed_at"])
-                - timedelta(seconds=automation.REVIEW_SECONDS)
-            ).isoformat(),
-        }
-        response = await self.apply_review(stale, key="stale")
+        with patch.object(automation, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = datetime.fromisoformat(review["observed_at"]) + timedelta(
+                seconds=automation.REVIEW_SECONDS
+            )
+            response = await self.apply_review(review, key="stale")
         self.assertEqual(response.status_code, 409, response.json())
         for field, value in (
             ("serverId", "foreign"),
@@ -462,3 +435,124 @@ class EmptyAutomationTests(FirstEmptyInputsFixture, unittest.IsolatedAsyncioTest
                 self.assertEqual(response.status_code, 409, response.json())
                 self.provider_payload[field] = value
         self.assertEqual(self.writes, [])
+
+    async def test_expired_original_readback_adopts_only_independently_verified_false(self) -> None:
+        from datetime import datetime, timedelta
+
+        review = await self.review()
+
+        def lost(*, path: str, **kwargs: Any) -> Any:
+            if path == "/api/compose.update":
+                self.writes.append(kwargs["payload"])
+                self.provider_payload.update(kwargs["payload"])
+                raise OSError("invented lost acknowledgement after apply")
+            return []
+
+        with patch.object(api, "dokploy_request", side_effect=lost):
+            response = await self.apply_review(review)
+        self.assertEqual(response.status_code, 409, response.json())
+        with patch.object(automation, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = datetime.fromisoformat(review["observed_at"]) + timedelta(
+                seconds=automation.REVIEW_SECONDS + 1
+            )
+            recovered = await self.post("readback", "correction", automation_review=review)
+        self.assertEqual(recovered.status_code, 202, recovered.json())
+        self.assertEqual(len(self.writes), 1)
+
+    async def test_expanded_relationship_metadata_does_not_change_target_configuration(
+        self,
+    ) -> None:
+        self.provider_payload["environment"] = {
+            "environmentId": "environment-original",
+            "projectId": "project-original",
+            "name": "Old relation name",
+        }
+        self.provider_payload["server"] = {"serverId": "server-original", "name": "Old server name"}
+        review = await self.review()
+        self.provider_payload["environment"] = {
+            "environmentId": "environment-original",
+            "projectId": "project-original",
+            "name": "Changed relation name",
+        }
+        self.provider_payload["server"] = {
+            "serverId": "server-original",
+            "name": "Changed server name",
+        }
+        response = await self.apply_review(review)
+        self.assertEqual(response.status_code, 202, response.json())
+        self.assertEqual(len(self.writes), 1)
+
+    async def test_post_update_configuration_drift_stays_uncertain(self) -> None:
+        review = await self.review()
+
+        def wrong_update(*, path: str, **kwargs: Any) -> Any:
+            if path == "/api/compose.update":
+                self.writes.append(kwargs["payload"])
+                self.provider_payload.update({**kwargs["payload"], "env": "PRIVATE=never-output"})
+                return {"autoDeploy": False}
+            return []
+
+        with patch.object(api, "dokploy_request", side_effect=wrong_update):
+            response = await self.apply_review(review)
+        self.assertEqual(response.status_code, 409, response.json())
+        self.assertNotIn("never-output", response.text)
+        self.assertEqual(len(self.writes), 1)
+        readback = await self.post("readback", "correction", automation_review=review)
+        self.assertEqual(readback.status_code, 409, readback.json())
+        self.assertEqual(len(self.writes), 1)
+
+    async def test_existing_odoo_executor_keeps_original_setup_protected(self) -> None:
+        from contextlib import contextmanager
+        from collections.abc import Iterator
+
+        @contextmanager
+        def held(**_: Any) -> Iterator[object]:
+            yield object()
+
+        with patch.object(self.store, "odoo_synchronous_lane_reservation", side_effect=held):
+            response = await self.post()
+        self.assertEqual(response.status_code, 409, response.json())
+        self.probe.assert_not_called()
+        self.assertEqual(self.writes, [])
+
+    async def test_correction_cannot_select_testing_or_unrelated_setup_inputs(self) -> None:
+        for extra in (
+            {"instance": "testing"},
+            {"target_type": "application"},
+            {"source_type": "git"},
+            {"domains": ["foreign.example.test"]},
+            {"state_volume_path": "/private"},
+        ):
+            with self.subTest(extra=extra):
+                response = await self.post(**extra)
+                self.assertEqual(response.status_code, 400, response.json())
+        response = await self.post(target_id="foreign-target")
+        self.assertEqual(response.status_code, 409, response.json())
+        self.assertEqual(self.writes, [])
+
+    async def test_remote_storage_program_never_runs_inside_serialized_effect_admission(
+        self,
+    ) -> None:
+        admission = False
+        checkpoint = self.store.checkpoint_mutation_provider_effect
+
+        def serialized_checkpoint(**kwargs: Any) -> Any:
+            nonlocal admission
+            admission = True
+            try:
+                return checkpoint(**kwargs)
+            finally:
+                admission = False
+
+        def observe_outside_admission(**kwargs: Any) -> None:
+            self.assertFalse(admission)
+            self.observe(**kwargs)
+
+        self.probe.side_effect = observe_outside_admission
+        review = await self.review()
+        with patch.object(
+            self.store, "checkpoint_mutation_provider_effect", side_effect=serialized_checkpoint
+        ):
+            response = await self.apply_review(review)
+        self.assertEqual(response.status_code, 202, response.json())
+        self.assertEqual(len(self.writes), 1)

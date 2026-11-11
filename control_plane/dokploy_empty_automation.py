@@ -15,7 +15,7 @@ from control_plane.contracts.idempotency_record import build_launchplane_mutatio
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.dokploy import api, native_copy_stream, source
 from control_plane.dokploy.target_source_setup import require_empty_compose_source
-from control_plane.dokploy_inventory import read_dokploy_project_membership
+from control_plane.dokploy_inventory import InventoryProject, read_dokploy_project_membership
 from control_plane.generic_web_testing_exclusion import (
     _target_reservations,
     require_quiescent_testing_provider_work,
@@ -52,11 +52,20 @@ class EmptyAutomationReview(BaseModel):
     plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+def _provider_configuration(payload: api.JsonObject) -> api.JsonObject:
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in {"updatedAt", "environment", "server"}
+    }
+
+
 @dataclass(frozen=True)
 class EmptyAutomationObservation:
     authority: FirstEmptyAuthority
     provider: api.JsonObject
     storage: str
+    placement: InventoryProject
 
 
 @dataclass
@@ -135,8 +144,13 @@ class EmptyAutomationAdapter:
             if check is None:
                 raise ValueError("An original setup executor still owns this context.")
             check()
-            yield
-            check()
+            with self.store.odoo_synchronous_lane_reservation(
+                product=self.product, context=self.request.context, instance="prod"
+            ) as owner:
+                if owner is not None:
+                    raise ValueError("An Odoo operation still owns the original lane.")
+                yield
+                check()
 
     def observation(self) -> EmptyAutomationObservation:
         authority = resolve_first_empty_authority(self.store, self.product, self.request.context)
@@ -146,6 +160,8 @@ class EmptyAutomationAdapter:
             != self.request.expected_current_provider_target
         ):
             raise ValueError("The original target binding changed.")
+        if authority.target.pending_public_host_effects:
+            raise ValueError("Original target setup still has unresolved public-host effects.")
         self.require_no_predecessor()
         host, token = source.read_dokploy_config(
             control_plane_root=self.root, database_url=self.store.database_url
@@ -174,32 +190,10 @@ class EmptyAutomationAdapter:
             require_quiescent_testing_provider_work(
                 host=host, token=token, target_id=self.request.target_id, never_deployed=True
             )
-            return live
+            return _provider_configuration(live)
 
         before = read_provider()
-        projects = read_dokploy_project_membership(host=host, token=token)
-        matches = [
-            (project, environment)
-            for project in projects
-            for environment in project.environments
-            if environment.environment_id == self.request.environment_id
-        ]
-        if (
-            len(matches) != 1
-            or matches[0][0].project_id != self.request.project_id
-            or [(target.category, target.target_id) for target in matches[0][1].targets]
-            != [("compose", self.request.target_id)]
-        ):
-            raise ValueError("The exact original project and environment are not exclusive.")
-        tracked = {
-            row.target_id: row.context for row in self.store.list_dokploy_target_id_records()
-        }
-        if any(
-            tracked.get(target.target_id) != self.request.context
-            for environment in matches[0][0].environments
-            for target in environment.targets
-        ):
-            raise ValueError("The original project contains foreign or unowned resources.")
+        placement = self.placement(host, token)
         spec = {
             "target_id": self.request.target_id,
             "project": before["appName"],
@@ -228,14 +222,39 @@ class EmptyAutomationAdapter:
             or frames[0]["binding"] != nonvalidating_compact_sorted_json_sha256(spec)
             or not isinstance(storage, str)
             or re.fullmatch(r"[a-f0-9]{64}", storage) is None
-            or read_dokploy_project_membership(host=host, token=token) != projects
+            or self.placement(host, token) != placement
             or read_provider() != before
             or resolve_first_empty_authority(self.store, self.product, self.request.context)
             != authority
         ):
             raise ValueError("Original storage, target or authority is unproved or changed.")
         self.require_no_predecessor()
-        return EmptyAutomationObservation(authority, before, storage)
+        return EmptyAutomationObservation(authority, before, storage, placement)
+
+    def placement(self, host: str, token: str) -> InventoryProject:
+        matches = [
+            (project, environment)
+            for project in read_dokploy_project_membership(host=host, token=token)
+            for environment in project.environments
+            if environment.environment_id == self.request.environment_id
+        ]
+        if (
+            len(matches) != 1
+            or matches[0][0].project_id != self.request.project_id
+            or [(target.category, target.target_id) for target in matches[0][1].targets]
+            != [("compose", self.request.target_id)]
+        ):
+            raise ValueError("The exact original project and environment are not exclusive.")
+        tracked = {
+            row.target_id: row.context for row in self.store.list_dokploy_target_id_records()
+        }
+        if any(
+            tracked.get(target.target_id) != self.request.context
+            for environment in matches[0][0].environments
+            for target in environment.targets
+        ):
+            raise ValueError("The original project contains foreign or unowned resources.")
+        return matches[0][0]
 
     def review_digest(
         self, observation: EmptyAutomationObservation, observed_at: datetime, enabled: bool
@@ -246,11 +265,8 @@ class EmptyAutomationAdapter:
                     mode="json", exclude={"mode", "confirmation", "automation_review"}
                 ),
                 "authority": observation.authority.fingerprint(),
-                "provider": {
-                    key: value
-                    for key, value in {**observation.provider, "autoDeploy": False}.items()
-                    if key != "updatedAt"
-                },
+                "provider": {**observation.provider, "autoDeploy": False},
+                "placement": observation.placement.model_dump(mode="json"),
                 "storage": observation.storage,
                 "observed_at": observed_at.isoformat(),
                 "observed_auto_deploy": enabled,
@@ -343,7 +359,19 @@ class EmptyAutomationAdapter:
             )
 
             def checkpoint() -> None:
-                self.reviewed_observation(new_effect=True)
+                self.require_no_predecessor()
+                live = api.fetch_dokploy_target_payload(
+                    host=host, token=token, target_type="compose", target_id=self.request.target_id
+                )
+                if (
+                    resolve_first_empty_authority(self.store, self.product, self.request.context)
+                    != current.authority
+                    or type(live.get("autoDeploy")) is not bool
+                    or _provider_configuration(live) != current.provider
+                ):
+                    raise ValueError(
+                        "Original setup authority or provider changed before dispatch."
+                    )
 
             try:
                 with self.store.provider_evidence_guard(

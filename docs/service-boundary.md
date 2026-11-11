@@ -3026,7 +3026,7 @@ The closed `DokployTargetSetupEnvelope` accepts `mode`, this `operation`,
 `context`, `instance: "prod"`, `target_type: "compose"`, exact `target_id`,
 `project_id`, `environment_id`, `server_id`, and
 `expected_current_provider_target` matching the tracked provider reference.
-`product` retains its service value `launchplane`; the exclusive lane owner is
+`product` retains its service value `launchplane`; the exclusive product is
 derived and bound separately. Supply the same `reason` throughout review/apply.
 Other creation, allocation, source, domain, storage and credential inputs are
 refused. Dry-run omits `automation_review` and writes nothing. Its
@@ -3053,8 +3053,9 @@ the existing serialized effect-admission checkpoint protect dispatch.
 
 Only `{composeId, autoDeploy: false}` reaches the provider update driver. Existing
 False is a verified no-op. Independent target reads must report literal False
-and preserve the complete observed provider configuration, except `updatedAt`
-and the intended boolean transition. Environment, source, mounts, secrets,
+and preserve the complete observed provider configuration, except `updatedAt`, expanded environment/server relationship metadata
+(independently bound by their exact IDs and project membership), and the intended
+boolean transition. Environment, source, mounts, secrets,
 identity/allocation and Launchplane release/data/target records are not written.
 The existing storage program proves no original files, data or workload are
 occupied; absence of deployments alone never establishes that fact. Readback
