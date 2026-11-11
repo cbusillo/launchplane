@@ -20,12 +20,25 @@ from control_plane.contracts.testing_candidate import (
     TestingCandidateAllocation,
     testing_candidate_namespace,
 )
+from control_plane.contracts.testing_candidate_application import TestingCandidateApplication
 from control_plane.odoo_testing_native_source import _cache_directory, verify_native_capture_files
 from control_plane.odoo_testing_restore import generation_binding
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
 UploadPart = Literal["database", "filestore"]
+CandidateUploadHold = Literal["candidate_prepared", "candidate_abandoned", "restore_started"]
+
+
+def migrated_upload_holds(application: TestingCandidateApplication) -> list[CandidateUploadHold]:
+    holds: list[CandidateUploadHold] = []
+    if application.phase == "prepared":
+        holds.append("candidate_prepared")
+    if application.phase == "abandoned":
+        holds.append("candidate_abandoned")
+    if application.restore_workflow_started:
+        holds.append("restore_started")
+    return holds
 
 
 class UploadDigest(Protocol):
@@ -52,7 +65,7 @@ def migrated_candidate(
         app.plan.source != "migrated"
         or app.plan.generation is None
         or not allow_complete
-        and (app.phase in {"prepared", "abandoned"} or app.restore_workflow_started is True)
+        and migrated_upload_holds(app)
         or app.plan.native_source != operation.request.migrated_source
     ):
         raise ValueError("Migrated input no longer belongs to an unstarted testing restore")

@@ -2805,7 +2805,23 @@ An explicit start at offset zero with the empty-prefix digest restarts only an
 incomplete part under its existing lock; completed originals cannot be reset.
 The receiver hashes and fsyncs each completed upload. A reused completed pair is
 size-checked before its generation receipt and fully rehashed before delivery. GET never commits a receipt. The original caller,
-product, candidate custody and unstarted restore remain required.
+product, candidate custody and unstarted restore remain required for writes.
+
+GET accepts `include_prerequisites=true` to add a closed `prerequisites` object:
+`candidate_phase`, nullable `restore_workflow_started`, and `holds`. The shared
+write guard supplies `candidate_prepared`, `candidate_abandoned` and
+`restore_started`; `original_caller_required` reports a reader outside the
+original write scope. Multiple holds are retained. Read authority stays unchanged;
+default GET and WebSocket bodies omit this object.
+
+Null means unknown, and empty holds are not upload eligibility or retry clearance.
+Missing, invalid, unauthorized or unbound records retain their HTTP refusal
+without a projection. These are current metadata observations, not an atomic
+snapshot, a historical refusal diagnosis, physical no-effects, restore success or
+safe release. Sizes/completion come from retained file metadata or the existing
+receipt; GET never uploads, reconciles a receipt or mutates an operation. Actual
+writes still check fresh authorization, candidate/source, storage, prefix/digest
+and receipts. A complete pair without a receipt remains unreconciled.
 
 Migrated uploads reuse one private content cache for the same product and source
 binding across candidate attempts. Each generation still has its own immutable
