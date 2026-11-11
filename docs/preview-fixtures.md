@@ -93,6 +93,18 @@ pre-dispatch failures release their reservation, and failures after dispatch
 remain `mutation_reconciliation_required` with the original key required.
 Historical failures without a retained predicate remain unknown.
 
+### Container preflight refusals
+
+A directly raised `container_unavailable` during fixture or import preflight
+carries fixed `reason: runtime_container_unverified`, projected by the installed
+transport as `summary.error_reason`. It covers a non-list container inventory,
+a selected container without an ID, or inspection without configuration/state
+objects and `Running: true`. It does not prove a stopped container. Other
+provider errors and wrapped apply/recovery failures retain their existing
+responses; a missing reason proves nothing. No exception prose is exposed.
+A refused dry run issues no review digest. Checks dependent on the failed
+observation remain unavailable, and no original-key recovery rule changes.
+
 ## Review, apply and recover
 
 Use `scripts/preview-fixture.py` with the installed catalog transport.
