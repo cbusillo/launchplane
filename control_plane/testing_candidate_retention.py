@@ -274,7 +274,6 @@ def inspect_candidate_resources(
     payload = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=candidate.compose_id
     )
-    provider_snapshot = candidate_provider_snapshot(payload)
     project = payload.get("appName")
     from control_plane.contracts.testing_candidate_application import (
         candidate_compose_project_matches,
@@ -295,76 +294,101 @@ def inspect_candidate_resources(
         != (candidate.compose_id, candidate.environment_id, candidate.server_id, "docker-compose")
     ):
         raise ValueError("Candidate provider placement is unbound.")
-    frames: list[dict[str, Any]] = []
-    app = candidate.application
-    generation = app.plan.generation if app is not None else None
-    environment = api.parse_dokploy_env_text(str(payload.get("env") or ""))
-    native_copy_stream.run_managed_server_program(
-        host=host,
-        token=token,
-        server_id=candidate.server_id,
-        program=NATIVE_TESTING_RETENTION_INSPECTION,
-        payload={
-            "resources": candidate_resources(candidate).model_dump(mode="json"),
-            "project": project,
-            "generation": generation.model_dump(mode="json") if generation else None,
-            "database_name": environment.get("ODOO_DB_NAME", ""),
-            "copy_binding_sha256": generation_binding(generation) if generation else "",
-            "identity": app.plan.runtime_identity.model_dump(mode="json") if app else None,
-            "failed_candidate": {
-                "resources": candidate_resources(candidate).model_dump(mode="json"),
-                "web_command": held_odoo_web_container_command(),
-                "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
-                **({"completed": True} if completed_copy(candidate) else {}),
-            },
-        },
-        receive=frames.append,
-        timeout_seconds=90,
-    )
-    if len(frames) != 1 or frames[0].get("type") != "complete":
-        raise ValueError("Candidate resource inventory is incomplete.")
-    current = api.fetch_dokploy_target_payload(
-        host=host, token=token, target_type="compose", target_id=candidate.compose_id
-    )
-    if candidate_provider_snapshot(current) != provider_snapshot:
-        raise ValueError("Candidate provider changed during inspection.")
     reasons = []
+    try:
+        provider_snapshot = candidate_provider_snapshot(payload)
+    except ValueError:
+        provider_snapshot = ""
+        reasons.append("provider_job_active_or_unknown")
+    app = candidate.application
     if (
         payload.get("autoDeploy") is not False
         or payload.get("domains")
         or payload.get("serviceNetworks")
     ):
         reasons.append("provider_automatic_or_public_use")
-    deployments = api.list_deployments_for_target(
-        host=host,
-        token=token,
-        target_type="compose",
-        target_id=candidate.compose_id,
-        require_complete=True,
-    )
-    if any(
-        api.deployment_status(row)
-        not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES
-        for row in deployments
-    ):
-        reasons.append("provider_job_active_or_unknown")
-    schedules = api.list_dokploy_schedules(
-        host=host, token=token, target_id=candidate.compose_id, schedule_type="compose"
-    )
-    for schedule in schedules:
-        if (
-            app is None
-            or not app.restore_schedule_id
-            or api.schedule_key(schedule) != app.restore_schedule_id
-            or schedule.get("enabled") is not False
-        ):
-            reasons.append("provider_schedule_reference")
-            continue
-        from control_plane.testing_candidate_application import candidate_restore_terminal
+    try:
+        deployments = api.list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=candidate.compose_id,
+            require_complete=True,
+        )
+        if any(not api.deployment_is_terminal(row) for row in deployments):
+            reasons.append("provider_job_active_or_unknown")
+    except (ValueError, OSError, click.ClickException) as error:
+        if isinstance(error, api.DokployRequestFailed) and error.status_code in {401, 403}:
+            raise
+        reasons.append("provider_job_inventory_unavailable")
+    try:
+        schedules = api.list_dokploy_schedules(
+            host=host, token=token, target_id=candidate.compose_id, schedule_type="compose"
+        )
+        for schedule in schedules:
+            if (
+                app is None
+                or not app.restore_schedule_id
+                or api.schedule_key(schedule) != app.restore_schedule_id
+                or schedule.get("enabled") is not False
+            ):
+                reasons.append("provider_schedule_reference")
+                continue
+            from control_plane.testing_candidate_application import candidate_restore_terminal
 
-        candidate_restore_terminal(host=host, token=token, record=candidate, require_success=False)
+            candidate_restore_terminal(
+                host=host, token=token, record=candidate, require_success=False
+            )
+    except (ValueError, OSError, click.ClickException) as error:
+        if isinstance(error, api.DokployRequestFailed) and error.status_code in {401, 403}:
+            raise
+        reasons.append("provider_schedule_inventory_unavailable")
+    frames: list[dict[str, Any]] = []
+    observed: dict[str, Any] = {
+        "volumes": [],
+        "capacity": [],
+        "capacity_refusal": "physical_inventory_unknown",
+    }
+    if provider_snapshot:
+        generation = app.plan.generation if app is not None else None
+        try:
+            environment = api.parse_dokploy_env_text(str(payload.get("env") or ""))
+            native_copy_stream.run_managed_server_program(
+                host=host,
+                token=token,
+                server_id=candidate.server_id,
+                program=NATIVE_TESTING_RETENTION_INSPECTION,
+                payload={
+                    "resources": candidate_resources(candidate).model_dump(mode="json"),
+                    "project": project,
+                    "generation": generation.model_dump(mode="json") if generation else None,
+                    "database_name": environment.get("ODOO_DB_NAME", ""),
+                    "copy_binding_sha256": generation_binding(generation) if generation else "",
+                    "identity": app.plan.runtime_identity.model_dump(mode="json") if app else None,
+                    "failed_candidate": {
+                        "resources": candidate_resources(candidate).model_dump(mode="json"),
+                        "web_command": held_odoo_web_container_command(),
+                        "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
+                        **({"completed": True} if completed_copy(candidate) else {}),
+                    },
+                },
+                receive=frames.append,
+                timeout_seconds=90,
+            )
+            if len(frames) != 1 or frames[0].get("type") != "complete":
+                raise ValueError("Candidate resource inventory is incomplete.")
+            current = api.fetch_dokploy_target_payload(
+                host=host, token=token, target_type="compose", target_id=candidate.compose_id
+            )
+            if candidate_provider_snapshot(current) != provider_snapshot:
+                raise ValueError("Candidate provider changed during inspection.")
+            observed = frames[0]
+        except (ValueError, OSError, click.ClickException) as error:
+            if isinstance(error, api.DokployRequestFailed) and error.status_code in {401, 403}:
+                raise
+            reasons.append("current_custody_unavailable")
     return {
-        **frames[0],
+        **observed,
         "project": project,
         "provider_sha256": provider_snapshot,
         "reasons": list(dict.fromkeys(reasons)),
@@ -570,7 +594,14 @@ def build_native_testing_sweep(
             )
             source_proof: dict[str, Any] = {}
             source_preserved = False
-            if not reasons:
+            readable_custody = not set(reasons).intersection(
+                {"original_not_native_testing", "foreign_original", "current_or_foreign_target"}
+            )
+            try:
+                require_candidate_target_custody(store, candidate)
+            except ValueError:
+                readable_custody = False
+            if readable_custody:
                 readback[ReadbackPredicate.FILES_READ] = "unavailable"
                 try:
                     source_preserved = _source_preserved(
@@ -598,14 +629,13 @@ def build_native_testing_sweep(
             reasons = (*reasons, *((provider_reason,) if provider_reason else ()))
             reasons = tuple(dict.fromkeys((*reasons, *observed.get("reasons", ()))))
             lifecycle: dict[str, Any] = {}
-            if (
-                not reasons
-                and source_preserved
-                and any(row.get("reason") == "container_reference" for row in observed["volumes"])
+            if readable_custody and any(
+                row.get("referenced") or row.get("reason") == "container_reference"
+                for row in observed["volumes"]
             ):
                 try:
                     lifecycle = candidate_lifecycle_custody(
-                        root, store, candidate, observed["project"]
+                        root, store, candidate, observed.get("project", "")
                     )
                     readback[ReadbackPredicate.CUSTODY] = "pass"
                 except native_copy_stream.NativeProgramFailed as error:
@@ -625,26 +655,35 @@ def build_native_testing_sweep(
                         reason=reason, kind="retained_volume", record_id=row["name"]
                     )
                     for row in observed["volumes"]
-                    for flag, reason in (
-                        ("source_inputs", "source_inputs_preserved"),
-                        ("referenced", "container_reference"),
+                    for reason in dict.fromkeys(
+                        [
+                            *row.get("reasons", ()),
+                            *((row["reason"],) if row.get("reason") else ()),
+                            *(("source_inputs_preserved",) if row.get("source_inputs") else ()),
+                            *(("container_reference",) if row.get("referenced") else ()),
+                        ]
                     )
-                    if row.get(flag) is True
+                    if reason != "provider_absent"
                 ),
             )
             bindings = []
+            lifecycle_blocked = False
             for index, row in enumerate(observed["volumes"]):
                 resource_readback = resources[index].readback
-                reason = next(iter(reasons), "") or row.get("reason", "")
-                if reason == "container_reference" and lifecycle:
-                    reason = ""
+                qualified_reason = "physical_ownership_unknown"
+                holds = list(
+                    dict.fromkeys((*reasons, *row.get("reasons", ()), row.get("reason", "")))
+                )
+                holds = [reason for reason in holds if reason]
+                if lifecycle and source_preserved and "container_reference" in holds:
+                    holds.remove("container_reference")
                 status: SweepStatus = "held"
                 if row["status"] == "absent":
                     status = "absent"
-                elif row["status"] == "observed" and not reason:
+                elif row["status"] == "observed":
                     if not row["empty"] and not source_preserved:
-                        reason = "only_needed_copy_unqualified"
-                    else:
+                        holds.append("only_needed_copy_unqualified")
+                    if readable_custody:
                         binding = RetainedVolumeBinding(
                             volume_name=row["name"],
                             server_id=candidate.server_id,
@@ -661,25 +700,46 @@ def build_native_testing_sweep(
                         }
                         inventory_references: list[dict[str, str]] = []
                         resource_readback[ReadbackPredicate.STORAGE_CONSUMERS] = "unavailable"
-                        if not _inventory_clear(
-                            root,
-                            binding,
-                            ignored_compose_id=candidate.compose_id,
-                            exact=True,
-                            references=inventory_references,
-                        ):
-                            reason = (
-                                inventory_references[0]["reason"]
-                                if inventory_references
-                                else "foreign_provider_reference"
+                        try:
+                            inventory_clear = _inventory_clear(
+                                root,
+                                binding,
+                                ignored_compose_id=candidate.compose_id,
+                                exact=True,
+                                references=inventory_references,
                             )
+                        except (
+                            ValueError,
+                            OSError,
+                            click.ClickException,
+                            ProviderMutationUnknownError,
+                        ) as error:
+                            if isinstance(
+                                error, api.DokployRequestFailed
+                            ) and error.status_code in {401, 403}:
+                                raise
+                            inventory_clear = False
+                            inventory_references.append(
+                                {
+                                    "reason": "provider_inventory_unavailable",
+                                    "kind": "provider_inventory",
+                                }
+                            )
+                        if not inventory_clear:
+                            inventory_holds = [item["reason"] for item in inventory_references] or [
+                                "provider_inventory_unavailable"
+                            ]
+                            holds.extend(inventory_holds)
                             resource_readback[ReadbackPredicate.STORAGE_CONSUMERS] = (
-                                "fail" if reason == "foreign_provider_reference" else "unavailable"
+                                "unavailable"
+                                if "provider_inventory_unavailable" in inventory_holds
+                                else "fail"
                             )
                         else:
                             resource_readback[ReadbackPredicate.STORAGE_CONSUMERS] = "pass"
-                            resource_readback[ReadbackPredicate.RESOURCES] = "unavailable"
-                            status, reason = _host_result(
+                        resource_readback[ReadbackPredicate.RESOURCES] = "unavailable"
+                        try:
+                            physical_status, physical_reason = _host_result(
                                 root,
                                 binding,
                                 "dry-run",
@@ -694,11 +754,23 @@ def build_native_testing_sweep(
                             )
                             resource_readback[ReadbackPredicate.RESOURCES] = (
                                 "pass"
-                                if status in {"eligible", "absent"}
+                                if physical_status in {"eligible", "absent"}
                                 else "unavailable"
-                                if status == "unknown"
+                                if physical_status == "unknown"
                                 else "fail"
                             )
+                            if physical_status not in {"eligible", "absent"}:
+                                holds.append(physical_reason or "physical_ownership_unknown")
+                            elif not holds:
+                                status = physical_status
+                                qualified_reason = physical_reason
+                        except (
+                            ValueError,
+                            OSError,
+                            click.ClickException,
+                            ProviderMutationUnknownError,
+                        ):
+                            holds.append("physical_ownership_unknown")
                         for reference in inventory_references:
                             item_reference = NativeTestingSweepReference.model_validate(reference)
                             if item_reference not in references:
@@ -706,19 +778,27 @@ def build_native_testing_sweep(
                         bindings.append(
                             {"binding": binding.model_dump(mode="json"), "permit": permit}
                         )
+                for reason in dict.fromkeys(holds):
+                    if reason in reasons or reason == "provider_absent":
+                        continue
+                    resource_reference = NativeTestingSweepReference(
+                        reason=reason, kind="retained_volume", record_id=row["name"]
+                    )
+                    if resource_reference not in references:
+                        references = (*references, resource_reference)
+                if status not in {"eligible", "absent"} and (
+                    not holds or any(reason != "source_inputs_preserved" for reason in holds)
+                ):
+                    lifecycle_blocked = True
                 resources[index] = resources[index].model_copy(
                     update={
                         "status": status,
-                        "reason": reason or "physical_ownership_unknown",
+                        "reason": next(iter(holds), qualified_reason),
                     }
                 )
             if not resources:
                 reasons = (*reasons, "physical_inventory_unknown")
-            if lifecycle and any(
-                item.status not in {"eligible", "absent"}
-                and item.reason != "source_inputs_preserved"
-                for item in resources
-            ):
+            if lifecycle and lifecycle_blocked:
                 lifecycle = {}
                 reasons = (*reasons, "candidate_lifecycle_custody_incomplete")
                 resources = [

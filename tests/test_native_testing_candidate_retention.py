@@ -11,6 +11,106 @@ from control_plane.testing_candidate_retention import candidate_record_refusals
 
 
 class StagedSourceInputsTests(unittest.TestCase):
+    def test_native_inspection_keeps_simultaneous_web_port_source_and_mount_holds(self) -> None:
+        import ast
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import re
+        from tempfile import TemporaryDirectory
+        import time
+        from control_plane.testing_candidate_retention_host import (
+            NATIVE_TESTING_RETENTION_INSPECTION,
+        )
+
+        resources = {"namespace": "lp-testing-" + "a" * 32, "instance": "testing"}
+        digest = hashlib.sha256(
+            json.dumps(resources, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            volumes = {}
+            for role, suffix in (
+                ("ODOO_DB_VOLUME", "db"),
+                ("ODOO_DATA_VOLUME", "data"),
+                ("ODOO_LOG_VOLUME", "logs"),
+            ):
+                name = resources["namespace"] + "-" + suffix
+                path = root / "volumes" / name / "_data"
+                path.mkdir(parents=True)
+                (path / "retained").write_text("fixture")
+                volumes[name] = {
+                    "Name": name,
+                    "Driver": "local",
+                    "Options": {},
+                    "Mountpoint": str(path),
+                    "Labels": {
+                        "io.launchplane.testing-resources": digest,
+                        "io.launchplane.testing-resource-role": role,
+                    },
+                }
+            containers = {
+                "web": {
+                    "Config": {
+                        "Labels": {
+                            "com.docker.compose.project": "project",
+                            "com.docker.compose.service": "web",
+                        }
+                    },
+                    "State": {"Running": True},
+                    "HostConfig": {"PortBindings": {"80/tcp": [{}]}},
+                    "Mounts": [{"Name": name} for name in volumes],
+                }
+            }
+            namespace: dict[str, Any] = {
+                "spec": {"resources": resources, "project": "project"},
+                "hashlib": hashlib,
+                "json": json,
+                "os": os,
+                "re": re,
+                "time": time,
+                "Path": Path,
+                "WEB_GATE_PATH": "/volumes/data/gate",
+                "load": lambda *_args: {"ID": "engine", "DockerRootDir": str(root)},
+                "identifiers": lambda *args: list(volumes if args[0] == "volume" else containers),
+                "_batched_docker_inspect": lambda kind, *_args: (
+                    volumes if kind == "volume" else containers
+                ),
+                "failed_candidate_own_web": lambda *_args: False,
+                "staged_source_inputs": lambda _path: True,
+                "web_gate_unexpected": lambda *_args: True,
+                "storage_backing_pools": lambda: {},
+                "retained_volume_identity": lambda *_args, **_kwargs: "identity",
+                "retained_volume_engine_identity": lambda *_args: "engine-identity",
+            }
+            # Execute the shipped function against an anonymous filesystem and Docker inventory.
+            tree = ast.parse(NATIVE_TESTING_RETENTION_INSPECTION)
+            function = next(
+                node
+                for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "inspect_candidate"
+            )
+            exec(
+                compile(ast.Module(body=[function], type_ignores=[]), "native-inspection", "exec"),
+                namespace,
+            )
+            from unittest.mock import patch
+
+            with patch.object(Path, "read_text", return_value="boot"):
+                result = namespace["inspect_candidate"]()
+        for row in result["volumes"]:
+            self.assertEqual(
+                set(row.get("reasons", ())),
+                {
+                    "candidate_web_active_or_unknown",
+                    "candidate_published_ports",
+                    "source_inputs_preserved",
+                    "container_reference",
+                    "completed_or_unknown_web_gate",
+                },
+            )
+
     def test_only_canonical_empty_markers_are_not_preserved_inputs(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory
@@ -82,6 +182,42 @@ class CandidateRetentionGuardTests(unittest.TestCase):
             selected_targets=(),
             **kwargs,
         )
+
+    def test_active_provider_snapshot_reports_other_holds_without_host_inspection(self) -> None:
+        from pathlib import Path
+        from unittest.mock import patch
+        from control_plane import testing_candidate_retention as retention
+        from control_plane.dokploy import api, native_copy_stream, source
+
+        payload = {
+            "composeId": self.candidate.compose_id,
+            "environmentId": self.candidate.environment_id,
+            "serverId": self.candidate.server_id,
+            "composeType": "docker-compose",
+            "appName": self.candidate.namespace,
+            "composeStatus": "running",
+            "autoDeploy": True,
+        }
+        with (
+            patch.object(source, "read_dokploy_config", return_value=("host", "token")),
+            patch.object(api, "fetch_dokploy_target_payload", return_value=payload),
+            patch.object(api, "list_deployments_for_target", side_effect=ValueError),
+            patch.object(api, "list_dokploy_schedules", return_value=[{"enabled": True}]),
+            patch.object(native_copy_stream, "run_managed_server_program") as host,
+        ):
+            observed, _reason = retention.inspect_candidate_resources(
+                Path("."), Mock(), self.candidate
+            )
+        self.assertEqual(observed["volumes"], [])
+        self.assertTrue(
+            {
+                "provider_job_active_or_unknown",
+                "provider_automatic_or_public_use",
+                "provider_job_inventory_unavailable",
+                "provider_schedule_reference",
+            }.issubset(observed["reasons"])
+        )
+        host.assert_not_called()
 
     def test_active_original_foreign_instance_and_selected_copy_each_refuse(self) -> None:
         for field, value, reason in (
@@ -334,20 +470,20 @@ class CandidateRetentionPlanTests(unittest.TestCase):
             patch.object(self.retention, "candidate_lifecycle_custody", return_value=lifecycle)
         )
         self.assertEqual(self.selected().status, "eligible")
-        custody.assert_called_once()
+        self.assertTrue(custody.called)
 
         with patch.object(self.retention, "_source_preserved", return_value=False):
             held = self.selected()
         self.assertEqual(held.status, "held")
-        self.assertEqual(held.reasons, ("completed_copy_requires_disposition",))
+        self.assertIn("completed_copy_requires_disposition", held.reasons)
+        self.assertFalse(held.lifecycle_snapshot_sha256)
         self.request = self.request.model_copy(
             update={"receiver_operation_id": self.candidate.operation_id}
         )
         receiver = self.selected()
-        self.assertEqual(
-            receiver.reasons, ("receiver_candidate", "completed_copy_requires_disposition")
-        )
-        custody.assert_called_once()
+        self.assertIn("receiver_candidate", receiver.reasons)
+        self.assertEqual(receiver.status, "held")
+        self.assertFalse(receiver.lifecycle_snapshot_sha256)
 
     def test_source_readback_distinguishes_skipped_unavailable_and_invalid_files(self) -> None:
         from unittest.mock import patch
@@ -370,14 +506,11 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         self.request = self.request.model_copy(
             update={"receiver_operation_id": self.candidate.operation_id}
         )
-        with patch.object(
-            self.retention,
-            "_source_preserved",
-            side_effect=AssertionError("held authority must short circuit"),
-        ):
+        with patch.object(self.retention, "_source_preserved", return_value=True):
             item = self.selected()
-        self.assertEqual(item.readback[ReadbackPredicate.FILES_READ], "skipped")
-        self.assertEqual(item.resources[0].readback[ReadbackPredicate.STORAGE_CONSUMERS], "skipped")
+        self.assertEqual(item.readback[ReadbackPredicate.FILES_READ], "pass")
+        self.assertEqual(item.resources[0].readback[ReadbackPredicate.STORAGE_CONSUMERS], "pass")
+        self.assertEqual(item.status, "held")
 
     def test_lifecycle_readback_keeps_acquisition_distinct_from_later_inventory_hold(self) -> None:
         from unittest.mock import patch
@@ -395,7 +528,7 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         self.assertEqual(held.readback[ReadbackPredicate.CUSTODY], "fail")
         self.assertEqual(held.readback[ReadbackPredicate.MOUNTS], "fail")
         self.assertNotIn("candidate_lifecycle_custody_incomplete", held.reasons)
-        self.host.assert_not_called()
+        self.assertEqual(held.resources[0].status, "held")
         lifecycle = {"payload": {"container_ids": ["1" * 64], "container_snapshot": "s"}}
 
         def unavailable(*_args: Any, **kwargs: Any) -> bool:
@@ -419,11 +552,13 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         self.assertEqual(
             invalidated.resources[0].readback[ReadbackPredicate.STORAGE_CONSUMERS], "unavailable"
         )
-        self.assertEqual(invalidated.references[0].record_id, "unreadable-project")
+        self.assertIn(
+            "unreadable-project", {reference.record_id for reference in invalidated.references}
+        )
         self.assertEqual(invalidated.status, "held")
-        self.host.assert_not_called()
+        self.assertEqual(invalidated.resources[0].readback[ReadbackPredicate.RESOURCES], "pass")
 
-    def test_inventory_exception_keeps_observations_and_skips_later_checks(self) -> None:
+    def test_inventory_exception_keeps_independent_physical_holds_and_later_volumes(self) -> None:
         from unittest.mock import patch
         from control_plane.copy_readback_diagnostics import ReadbackPredicate
 
@@ -432,6 +567,7 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         self.observation["volumes"].append(
             {**row, "role": "ODOO_DATA_VOLUME", "name": self.candidate.namespace + "-data"}
         )
+        self.host.return_value = ("held", "service_reference")
         with patch.object(self.retention, "_inventory_clear", side_effect=OSError):
             held = self.selected()
         self.assertEqual(held.status, "held")
@@ -439,12 +575,14 @@ class CandidateRetentionPlanTests(unittest.TestCase):
         self.assertEqual(
             held.resources[0].readback[ReadbackPredicate.STORAGE_CONSUMERS], "unavailable"
         )
-        self.assertEqual(held.resources[1].readback[ReadbackPredicate.STORAGE_CONSUMERS], "skipped")
+        self.assertEqual(
+            held.resources[1].readback[ReadbackPredicate.STORAGE_CONSUMERS], "unavailable"
+        )
         for resource in held.resources:
             self.assertEqual(resource.status, "held")
             self.assertEqual(resource.readback[ReadbackPredicate.NATIVE_READ], "pass")
-            self.assertEqual(resource.readback[ReadbackPredicate.RESOURCES], "skipped")
-        self.host.assert_not_called()
+            self.assertEqual(resource.readback[ReadbackPredicate.RESOURCES], "fail")
+        self.assertIn("service_reference", {reference.reason for reference in held.references})
 
     def test_staged_source_and_container_reference_both_survive_the_primary_hold(self) -> None:
         row = self.observation["volumes"][0]
@@ -455,7 +593,63 @@ class CandidateRetentionPlanTests(unittest.TestCase):
             {(reference.reason, reference.record_id) for reference in item.references},
             {("source_inputs_preserved", row["name"]), ("container_reference", row["name"])},
         )
-        self.host.assert_not_called()
+        self.assertEqual(self.host.call_args.args[2], "dry-run")
+
+    def test_independent_holds_are_reported_without_making_the_copy_eligible(self) -> None:
+        from unittest.mock import patch
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        self.with_application(prepared=True)
+        self.observation["project"] = self.candidate.namespace
+        row = self.observation["volumes"][0]
+        row.update(empty=False, referenced=True, reason="container_reference")
+
+        def unavailable(*_args: Any, **kwargs: Any) -> bool:
+            kwargs["references"].append(
+                {
+                    "reason": "provider_inventory_unavailable",
+                    "kind": "project",
+                    "record_id": "unknown-project",
+                }
+            )
+            return False
+
+        with (
+            patch.object(self.retention, "_source_preserved", return_value=False),
+            patch.object(self.retention, "candidate_lifecycle_custody", side_effect=ValueError),
+            patch.object(self.retention, "_inventory_clear", side_effect=unavailable),
+        ):
+            item = self.selected()
+        self.assertEqual(item.status, "held")
+        self.assertIn("completed_copy_requires_disposition", item.reasons)
+        self.assertEqual(item.readback[ReadbackPredicate.CUSTODY], "unavailable")
+        self.assertEqual(
+            item.resources[0].readback[ReadbackPredicate.STORAGE_CONSUMERS], "unavailable"
+        )
+        self.assertIn(
+            "provider_inventory_unavailable", {reference.reason for reference in item.references}
+        )
+        self.assertIn("container_reference", {reference.reason for reference in item.references})
+        self.assertFalse(item.lifecycle_snapshot_sha256)
+
+    def test_source_hold_cannot_hide_inventory_failure_from_lifecycle_invalidation(self) -> None:
+        from unittest.mock import patch
+
+        self.with_application(prepared=True)
+        self.observation["project"] = self.candidate.namespace
+        row = self.observation["volumes"][0]
+        self.observation["volumes"].append(
+            {**row, "role": "ODOO_LOG_VOLUME", "name": self.candidate.namespace + "-logs"}
+        )
+        row.update(reason="source_inputs_preserved", source_inputs=True, referenced=True)
+        lifecycle = {"payload": {"container_ids": ["1" * 64], "container_snapshot": "s"}}
+        with (
+            patch.object(self.retention, "candidate_lifecycle_custody", return_value=lifecycle),
+            patch.object(self.retention, "_inventory_clear", side_effect=[False, True]),
+        ):
+            item = self.selected()
+        self.assertFalse(item.lifecycle_snapshot_sha256)
+        self.assertTrue(all(resource.status == "held" for resource in item.resources))
 
     def test_completed_copy_lifecycle_is_bound_to_its_serving_web(self) -> None:
         from unittest.mock import patch
@@ -520,15 +714,18 @@ class CandidateRetentionPlanTests(unittest.TestCase):
 
     def test_physical_sources_and_unqualified_nonempty_copy_are_never_removed(self) -> None:
         self.observation["volumes"][0].update(empty=False, reason="source_inputs_preserved")
-        self.assertEqual(self.plan().candidates[0].resources[0].reason, "source_inputs_preserved")
-        self.host.assert_not_called()
+        resource = self.selected().resources[0]
+        self.assertEqual(resource.reason, "source_inputs_preserved")
+        self.assertEqual(resource.status, "held")
+        self.assertEqual(self.host.call_args.args[2], "dry-run")
 
     def test_nonempty_unrecorded_copy_is_held(self) -> None:
         self.observation["volumes"][0]["empty"] = False
         self.assertEqual(
             self.plan().candidates[0].resources[0].reason, "only_needed_copy_unqualified"
         )
-        self.host.assert_not_called()
+        self.assertEqual(self.selected().status, "held")
+        self.assertEqual(self.host.call_args.args[2], "dry-run")
 
     def test_free_space_changes_do_not_invalidate_reviewed_resource_ownership(self) -> None:
         self.request = self.request.model_copy(update={"candidates": (self.candidate.namespace,)})

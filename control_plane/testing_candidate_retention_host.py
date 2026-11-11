@@ -107,14 +107,14 @@ def inspect_candidate():
     existing=set(identifiers('volume','ls','-q'))
     volumes=_batched_docker_inspect('volume',sorted(existing & set(expected.values())),load)
     all_containers=_batched_docker_inspect('container',identifiers('ps','-aq','--no-trunc'),load)
-    use_reason=''
+    use_reasons=[]
     for container in all_containers.values():
         labels=container.get('Config',{}).get('Labels') or {}
         if labels.get('com.docker.compose.project')==spec['project']:
             if labels.get('com.docker.compose.service')=='web' and container.get('State',{}).get('Running') is not False and not failed_candidate_own_web(container,spec,lambda identifier:read_container_processes(docker,identifier)):
-                use_reason='candidate_web_active_or_unknown'
+                use_reasons.append('candidate_web_active_or_unknown')
             if container.get('HostConfig',{}).get('PortBindings'):
-                use_reason='candidate_published_ports'
+                use_reasons.append('candidate_published_ports')
     completed=spec.get('failed_candidate',{}).get('completed') is True
     gate_unexpected=True
     result=[]
@@ -147,15 +147,18 @@ def inspect_candidate():
         if role=='ODOO_DATA_VOLUME':
             gate=path/Path(WEB_GATE_PATH).relative_to('/volumes/data')
             gate_unexpected=web_gate_unexpected(gate,completed)
-        result.append({'role':role,'name':name,'status':'observed','reason':use_reason or ('source_inputs_preserved' if sources else 'container_reference' if referenced else ''),
+        reasons=list(dict.fromkeys(use_reasons+(['source_inputs_preserved'] if sources else [])+(['container_reference'] if referenced else [])))
+        result.append({'role':role,'name':name,'status':'observed','reason':next(iter(reasons),''),'reasons':reasons,
             'identity':identity,'engine_identity':retained_volume_engine_identity(engine_id),
             'empty':empty,'source_inputs':sources,'referenced':referenced,'free_bytes':space.f_bavail*space.f_frsize,
             'backing':['zfs',pools[metadata.st_dev]] if metadata.st_dev in pools else ['device',metadata.st_dev],
             'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
             'monotonic_deadline':time.monotonic()+300})
     for row in result:
-        if row['status']=='observed' and not row['empty'] and gate_unexpected and row['reason'] in ('','container_reference'):
-            row['reason']='completed_or_unknown_web_gate'
+        if row['status']=='observed' and not row['empty'] and gate_unexpected:
+            row['reasons'].append('completed_or_unknown_web_gate')
+            if row['reason'] in ('','container_reference'):
+                row['reason']='completed_or_unknown_web_gate'
     capacity=[]
     capacity_refusal='receiver_generation_unavailable'
     generation=spec.get('generation')
