@@ -99,6 +99,7 @@ from control_plane.odoo_release_recovery import (
     odoo_rollback_continuation_allows,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_candidate_release import release_failed_candidate
 from control_plane.testing_replacement_recovery import (
     TestingRecoveryStore,
     guard_testing_replacement,
@@ -2414,6 +2415,42 @@ def _execute_target_replacement_operation(
     lease_seconds: int,
     heartbeat_seconds: int,
 ) -> bool:
+    committed = _execute_target_replacement_under_guard(
+        record_store=record_store,
+        control_plane_root_path=control_plane_root_path,
+        operation=operation,
+        lease_owner=lease_owner,
+        lease_seconds=lease_seconds,
+        heartbeat_seconds=heartbeat_seconds,
+    )
+    if committed and isinstance(record_store, PostgresRecordStore):
+        _release_failed_testing_candidate(
+            record_store, control_plane_root_path, operation.operation_id
+        )
+    return committed
+
+
+def _release_failed_testing_candidate(
+    store: PostgresRecordStore, root: Path, operation_id: str
+) -> None:
+    # noinspection PyBroadException
+    try:
+        release_failed_candidate(store, root, operation_id)
+    except Exception:
+        logging.exception(
+            "Automatic release of failed testing candidate %s is unavailable.", operation_id
+        )
+
+
+def _execute_target_replacement_under_guard(
+    *,
+    record_store: OdooStableOperationWorkerStore,
+    control_plane_root_path: Path,
+    operation: OdooStableTargetReplacementOperationRecord,
+    lease_owner: str,
+    lease_seconds: int,
+    heartbeat_seconds: int,
+) -> bool:
     if not service_testing_operation(operation):
         return _execute_target_replacement_with_checkpoint(
             record_store=record_store,
@@ -2765,6 +2802,10 @@ def _execute_target_replacement_with_checkpoint(
                     "error_message": "Testing provider effects require proved-safe reconciliation before retry.",
                 }
             )
+    if operation.is_native_testing_rebuild and terminal_operation.status == "fail":
+        terminal_operation = terminal_operation.model_copy(
+            update={"lease_expires_at": terminal_operation.finished_at}
+        )
     if execution_checkpoint is not None and isinstance(record_store, PostgresRecordStore):
         return record_store.complete_odoo_stable_target_replacement_operation_record(
             record=terminal_operation, lease_owner=lease_owner, restore_unstarted_drill=True

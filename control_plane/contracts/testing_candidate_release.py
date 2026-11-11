@@ -14,6 +14,8 @@ TESTING_CANDIDATE_RELEASE_ROUTE = (
 )
 
 TestingCandidateReleaseStatus = Literal["eligible", "absent", "released", "held"]
+REASON_CODE_MAX_LENGTH = 200
+AUTOMATIC_RELEASE_REASONS_MAX = 32
 
 
 class TestingCandidateReleaseRequest(BaseModel):
@@ -77,3 +79,18 @@ class TestingCandidateReleaseResponse(BaseModel):
     capacity_refusal: str = Field(
         default="", json_schema_extra={"x-launchplane-optional-response": True}
     )
+    reason_code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=REASON_CODE_MAX_LENGTH,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+
+
+class AutomaticCandidateReleaseView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["released", "absent", "held", "unknown"]
+    reasons: tuple[str, ...] = Field(default=(), max_length=AUTOMATIC_RELEASE_REASONS_MAX)
+    plan_sha256: str = ""
+    idempotency_key: str
