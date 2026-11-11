@@ -220,6 +220,7 @@ class ProductEnvironmentResponse(BaseModel):
     environment: ProductEnvironmentDetail
     host_network_capacity_available: bool = False
     host_network_capacity: HostNetworkCapacityObservation | None = None
+    scratch_cs4080_probe: bool = False
 
 
 class ProductEnvironmentIncidentsResponse(BaseModel):
