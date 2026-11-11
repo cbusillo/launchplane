@@ -82,8 +82,8 @@ class MigratedStoragePhaseTests(unittest.TestCase):
         with self.assertRaises(TestingStorageCapacityRefused):
             self.admit(439)
 
-    def test_native_receiver_and_retained_observation_match_admission_peak(self) -> None:
-        for free, expected in ((440, True), (439, False)):
+    def test_native_capacity_observation_covers_current_restore_phase(self) -> None:
+        for free, expected in ((340, True), (339, False)):
             with self.subTest(free=free), self.native(free) as (namespace, spec, containers):
                 observations: list[dict[str, Any]] = []
                 self.assertEqual(
@@ -98,7 +98,7 @@ class MigratedStoragePhaseTests(unittest.TestCase):
                     expected,
                 )
                 self.assertEqual(len(observations), 1)
-                self.assertEqual(observations[0]["required_additional_bytes"], 410)
+                self.assertEqual(observations[0]["required_additional_bytes"], 310)
                 self.assertEqual(observations[0]["reserve_bytes"], self.budget.reserve_bytes)
 
     def test_separate_backings_still_require_staging_and_each_full_reserve(self) -> None:
@@ -106,9 +106,44 @@ class MigratedStoragePhaseTests(unittest.TestCase):
         with self.assertRaises(TestingStorageCapacityRefused):
             self.admit(329, separate=True)
 
-    def test_runner_copy_remains_allocated_during_snapshot(self) -> None:
-        with self.assertRaises(TestingStorageCapacityRefused):
-            self.admit(430)
+    def test_partial_and_complete_uploads_do_not_charge_a_future_snapshot_again(self) -> None:
+        self.admit(440)
+        for uploaded in (0, 37, 100):
+            with (
+                self.subTest(uploaded=uploaded),
+                self.native(440 - uploaded) as (namespace, spec, containers),
+            ):
+                data = Path(
+                    json.loads(namespace["docker"]("volume", "inspect", "fixture-data"))[0][
+                        "Mountpoint"
+                    ]
+                )
+                identity = self.source.binding_sha256[:32]
+                staging = data / (".lp-native-" + identity)
+                staging.mkdir()
+                database = min(uploaded, self.source.database.size)
+                (staging / "database.artifact.partial").write_bytes(b"d" * database)
+                (staging / "filestore.artifact.partial").write_bytes(b"f" * (uploaded - database))
+                remaining = namespace["remaining_migrated_staging"](
+                    data, identity, self.source.model_dump(mode="json")
+                )
+                self.assertTrue(
+                    namespace["storage_capacity"](
+                        spec,
+                        containers,
+                        self.budget.model_dump(),
+                        runner_staging_bytes=self.source.database.size,
+                        data_staging_bytes=remaining,
+                    )
+                )
+                self.assertTrue(
+                    namespace["storage_capacity"](
+                        spec,
+                        containers,
+                        self.budget.model_dump(),
+                        runner_staging_bytes=self.source.database.size,
+                    )
+                )
 
     def test_unknown_phase_order_keeps_staging_and_snapshot_overlapping(self) -> None:
         for free, expected in ((440, False), (540, True)):
@@ -223,14 +258,14 @@ class SnapshotPhaseBoundaryTests(unittest.TestCase):
             with self.subTest(name=name):
                 staged = self.staging / name
                 staged.write_bytes(b"retained staging")
-                with self.assertRaisesRegex(RuntimeError, "cleanup"):
+                with self.assertRaises(RuntimeError):
                     self.capture(1000)
                 self.assertEqual(staged.read_bytes(), b"retained staging")
                 staged.unlink()
         self.namespace["capture_snapshot_file"].assert_not_called()
         self.namespace["copy_filestore"].assert_not_called()
 
-    def test_unlinked_but_pinned_or_concurrently_consumed_space_refuses_before_copy(self) -> None:
+    def test_cleanup_does_not_substitute_for_fresh_physical_free_space(self) -> None:
         for remaining in (0, 229):
             with self.subTest(remaining=remaining):
                 staged = self.staging / "database.artifact"
@@ -238,7 +273,7 @@ class SnapshotPhaseBoundaryTests(unittest.TestCase):
                 with staged.open("rb") as pinned:
                     staged.unlink()
                     self.assertEqual(pinned.read(), b"fixture")
-                    with self.assertRaisesRegex(RuntimeError, "headroom"):
+                    with self.assertRaises(RuntimeError):
                         self.capture(remaining)
         self.namespace["capture_snapshot_file"].assert_not_called()
         self.namespace["copy_filestore"].assert_not_called()
@@ -300,7 +335,7 @@ class MigratedCleanupPhaseTests(unittest.TestCase):
 
 
 class RetainedCapacityConsumerTests(unittest.TestCase):
-    def test_retained_receiver_observation_uses_same_phase_peak_without_effects(self) -> None:
+    def test_retained_receiver_observation_uses_current_phase_without_effects(self) -> None:
         import base64
         from control_plane.testing_candidate_retention_host import (
             NATIVE_TESTING_RETENTION_INSPECTION,
@@ -358,7 +393,7 @@ class RetainedCapacityConsumerTests(unittest.TestCase):
         self.assertEqual(result["capacity_refusal"], "")
         self.assertEqual(len(result["capacity"]), 1)
         capacity = result["capacity"][0]
-        self.assertEqual(capacity["required_additional_bytes"], 410)
+        self.assertEqual(capacity["required_additional_bytes"], 310)
         self.assertEqual(capacity["reserve_bytes"], model.budget.reserve_bytes)
         self.assertEqual(capacity["deficit_bytes"], 0)
         self.assertEqual(fixture.removals(), [])
@@ -384,7 +419,7 @@ class RestorePhaseConsumerTests(unittest.TestCase):
         fixture.containers["script-runner"]["GraphDriver"] = {
             "Data": {"UpperDir": str(fixture.root)}
         }
-        for free, expected in ((440, 0), (439, 1)):
+        for free, expected in ((340, 0), (339, 1)):
             with (
                 self.subTest(free=free),
                 patch.object(

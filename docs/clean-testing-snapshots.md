@@ -63,7 +63,9 @@ Each new capture rechecks its destination capacity, including when a restore res
 Migrated admission and native receiver/retention checks share a phase-aware
 computation: uploaded pair staging and the clean snapshot do not overlap, but the
 restored database, expanded filestore and runner dump do. The bounds and reserve
-stay unchanged. Before a migrated capture, the local staging directory must be
+stay unchanged. Admission checks the overall peak; native receiver/retention
+checks cover the current restore phase's remaining allocation against measured
+free space without adding already uploaded bytes back. Before a migrated capture, the local staging directory must be
 absent or empty after supported cleanup; no historical cleanup record is required.
 Immediately before snapshot allocation, a fresh physical-free reading must cover
 the full snapshot and reserve. Logical deletion supplies no freed-byte credit:

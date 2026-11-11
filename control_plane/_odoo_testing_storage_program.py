@@ -194,9 +194,9 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         if probe_clones:
             decisions['snapshot'] = filestore_clone_proved(backings['data'], snapshot_path)
         demand('snapshot', snapshot_path, budget['database_bytes'] + budget['filestore_bytes'])
+    migrated = gen.get('source_mode') == 'container-export' and (gen.get('migrated_source') or {}).get('kind') == 'migrated'
     required = storage_capacity_requirements(sizes, role_backings, budget['reserve_bytes'],
-        staging_cleanup_before_snapshot=gen.get('source_mode') == 'container-export'
-            and (gen.get('migrated_source') or {}).get('kind') == 'migrated')
+        staging_cleanup_before_snapshot=migrated, phase='restore' if migrated else None)
     capacity = all(available[backing] >= size for backing, size in required.items())
     if observations is not None:
         observations.extend({
@@ -205,7 +205,7 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
             'required_additional_bytes': size - budget['reserve_bytes'],
             'reserve_bytes': budget['reserve_bytes'],
             'deficit_bytes': max(0, size - available[backing]),
-        } for backing, size in sorted(required.items()))
+        } for backing, size in sorted(required.items(), key=lambda item: backing_identities[item[0]]))
     return capacity
 """
 )

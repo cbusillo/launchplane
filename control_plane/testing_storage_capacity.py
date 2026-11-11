@@ -7,9 +7,12 @@ def storage_capacity_requirements(
     reserve: int,
     *,
     staging_cleanup_before_snapshot: bool = False,
+    phase: str | None = None,
 ) -> dict[str, int]:
     if type(reserve) is not int or reserve < 0:
         raise ValueError("Testing storage reserve is unavailable")
+    if phase not in (None, "restore", "snapshot"):
+        raise ValueError("Testing storage phase is unavailable")
     phases: dict[str, dict[str, int]] = {"restore": {}, "snapshot": {}}
     for role, size in demand.items():
         backing = backings.get(role)
@@ -17,10 +20,12 @@ def storage_capacity_requirements(
             raise ValueError("Testing storage demand or backing is unavailable")
         if not size:
             continue
-        for phase, required in phases.items():
+        for phase_name, required in phases.items():
+            if phase is not None and phase_name != phase:
+                continue
             if staging_cleanup_before_snapshot and (
-                (role == "data_staging" and phase == "snapshot")
-                or (role == "snapshot" and phase == "restore")
+                (role == "data_staging" and phase_name == "snapshot")
+                or (role == "snapshot" and phase_name == "restore")
             ):
                 continue
             required[backing] = required.get(backing, 0) + size

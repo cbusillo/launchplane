@@ -15,7 +15,10 @@ from `migrated_storage_budget`, the uploaded pair and the runner dump copy.
 Admission and the native receiver/retention observation use the same phase model:
 the pair overlaps restore, then successful local cleanup precedes the full clean
 snapshot, while the runner dump remains. Each backing needs its largest simultaneous
-demand plus the unchanged reserve. Unqualified phase ordering keeps demands overlapping.
+demand plus the unchanged reserve at admission. Native receiver/retention checks
+measure the current restore phase's remaining allocations against actual free space,
+which already excludes uploaded bytes; the later snapshot is guarded at its own boundary.
+Unqualified phase ordering keeps demands overlapping.
 This conditional bound does not count unlink as physically freed space or grant a
 clone discount. Snapshot capture verifies local cleanup and freshly measures physical
 free space for its entire new demand and reserve before dumping or copying; pinned
