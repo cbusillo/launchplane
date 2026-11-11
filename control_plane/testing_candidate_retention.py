@@ -9,6 +9,7 @@ from typing import Any, NamedTuple
 import click
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
@@ -327,13 +328,13 @@ def inspect_candidate_resources(
     )
     if candidate_provider_snapshot(current) != provider_snapshot:
         raise ValueError("Candidate provider changed during inspection.")
-    reason = ""
+    reasons = []
     if (
         payload.get("autoDeploy") is not False
         or payload.get("domains")
         or payload.get("serviceNetworks")
     ):
-        reason = "provider_automatic_or_public_use"
+        reasons.append("provider_automatic_or_public_use")
     deployments = api.list_deployments_for_target(
         host=host,
         token=token,
@@ -346,7 +347,7 @@ def inspect_candidate_resources(
         not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES
         for row in deployments
     ):
-        reason = "provider_job_active_or_unknown"
+        reasons.append("provider_job_active_or_unknown")
     schedules = api.list_dokploy_schedules(
         host=host, token=token, target_id=candidate.compose_id, schedule_type="compose"
     )
@@ -357,7 +358,7 @@ def inspect_candidate_resources(
             or api.schedule_key(schedule) != app.restore_schedule_id
             or schedule.get("enabled") is not False
         ):
-            reason = "provider_schedule_reference"
+            reasons.append("provider_schedule_reference")
             continue
         from control_plane.testing_candidate_application import candidate_restore_terminal
 
@@ -366,7 +367,8 @@ def inspect_candidate_resources(
         **frames[0],
         "project": project,
         "provider_sha256": provider_snapshot,
-    }, reason
+        "reasons": list(dict.fromkeys(reasons)),
+    }, reasons[-1] if reasons else ""
 
 
 def candidate_lifecycle_custody(
@@ -483,6 +485,31 @@ def project_capacity(
     ]
 
 
+def candidate_resource_observation(
+    candidate: TestingCandidateAllocation, row: dict[str, Any]
+) -> NativeTestingSweepResource:
+    resource_readback: dict[ReadbackPredicate, Any] = {
+        ReadbackPredicate.NATIVE_READ: "pass"
+        if row["status"] in {"observed", "absent"}
+        else "unavailable",
+        ReadbackPredicate.STORAGE_CONSUMERS: "skipped",
+        ReadbackPredicate.RESOURCES: "skipped",
+    }
+    return NativeTestingSweepResource(
+        role=row["role"],
+        backing_sha256=canonical_json_sha256(
+            {"server": candidate.server_id, "backing": row["backing"]}
+        )
+        if "backing" in row
+        else "",
+        free_bytes=row.get("free_bytes"),
+        volume_identity_sha256=row.get("identity", ""),
+        status="held",
+        reason=row.get("reason") or "physical_ownership_unknown",
+        readback=resource_readback,
+    )
+
+
 def build_native_testing_sweep(
     store: PostgresRecordStore,
     root: Path,
@@ -530,25 +557,46 @@ def build_native_testing_sweep(
     verified_sources: dict[str, dict[str, Any]] = {}
     for candidate in owned:
         selected = candidate.namespace in request.candidates
+        readback: dict[ReadbackPredicate, Any] = {
+            ReadbackPredicate.FILES_READ: "skipped",
+            ReadbackPredicate.CUSTODY: "skipped",
+            ReadbackPredicate.NATIVE_READ: "skipped",
+        }
+        references: tuple[NativeTestingSweepReference, ...] = ()
+        resources: list[NativeTestingSweepResource] = []
         try:
             ownership, reasons, references = candidate_authority(
                 store, request, candidate, allowed_provider_records
             )
             source_proof: dict[str, Any] = {}
-            try:
-                source_preserved = not reasons and _source_preserved(
-                    store, candidate, source_proof, verified_sources
-                )
-            except (ValueError, FileNotFoundError, OSError):
-                source_preserved = False
-                source_proof.clear()
+            source_preserved = False
+            if not reasons:
+                readback[ReadbackPredicate.FILES_READ] = "unavailable"
+                try:
+                    source_preserved = _source_preserved(
+                        store, candidate, source_proof, verified_sources
+                    )
+                    readback[ReadbackPredicate.FILES_READ] = (
+                        "pass" if source_preserved else "unavailable"
+                    )
+                except (OSError, native_copy_stream.NativeSourceUnavailable):
+                    readback[ReadbackPredicate.FILES_READ] = "unavailable"
+                    source_proof.clear()
+                except ValueError:
+                    readback[ReadbackPredicate.FILES_READ] = "fail"
+                    source_proof.clear()
             if completed_copy(candidate) and not source_preserved:
                 reasons = (*reasons, "completed_copy_requires_disposition")
+            readback[ReadbackPredicate.NATIVE_READ] = "unavailable"
             observed, provider_reason = inspect_candidate_resources(root, store, candidate)
+            readback[ReadbackPredicate.NATIVE_READ] = (
+                "pass" if observed["volumes"] else "unavailable"
+            )
             if candidate.namespace == receiver_namespace:
                 capacity_refusal = observed["capacity_refusal"]
                 capacities = project_capacity(candidate.server_id, observed)
             reasons = (*reasons, *((provider_reason,) if provider_reason else ()))
+            reasons = tuple(dict.fromkeys((*reasons, *observed.get("reasons", ()))))
             lifecycle: dict[str, Any] = {}
             if (
                 not reasons
@@ -559,11 +607,34 @@ def build_native_testing_sweep(
                     lifecycle = candidate_lifecycle_custody(
                         root, store, candidate, observed["project"]
                     )
+                    readback[ReadbackPredicate.CUSTODY] = "pass"
+                except native_copy_stream.NativeProgramFailed as error:
+                    readback[ReadbackPredicate.CUSTODY] = (
+                        "unavailable" if error.unavailable else "fail"
+                    )
+                    readback[error.predicate] = "unavailable" if error.unavailable else "fail"
                 except (ValueError, OSError):
-                    pass
-            resources = []
+                    readback[ReadbackPredicate.CUSTODY] = "unavailable"
+            resources = [
+                candidate_resource_observation(candidate, row) for row in observed["volumes"]
+            ]
+            references = (
+                *references,
+                *(
+                    NativeTestingSweepReference(
+                        reason=reason, kind="retained_volume", record_id=row["name"]
+                    )
+                    for row in observed["volumes"]
+                    for flag, reason in (
+                        ("source_inputs", "source_inputs_preserved"),
+                        ("referenced", "container_reference"),
+                    )
+                    if row.get(flag) is True
+                ),
+            )
             bindings = []
-            for row in observed["volumes"]:
+            for index, row in enumerate(observed["volumes"]):
+                resource_readback = resources[index].readback
                 reason = next(iter(reasons), "") or row.get("reason", "")
                 if reason == "container_reference" and lifecycle:
                     reason = ""
@@ -588,11 +659,26 @@ def build_native_testing_sweep(
                             "boot_id": row["boot_id"],
                             "monotonic_deadline": row["monotonic_deadline"],
                         }
+                        inventory_references: list[dict[str, str]] = []
+                        resource_readback[ReadbackPredicate.STORAGE_CONSUMERS] = "unavailable"
                         if not _inventory_clear(
-                            root, binding, ignored_compose_id=candidate.compose_id, exact=True
+                            root,
+                            binding,
+                            ignored_compose_id=candidate.compose_id,
+                            exact=True,
+                            references=inventory_references,
                         ):
-                            reason = "foreign_provider_reference"
+                            reason = (
+                                inventory_references[0]["reason"]
+                                if inventory_references
+                                else "foreign_provider_reference"
+                            )
+                            resource_readback[ReadbackPredicate.STORAGE_CONSUMERS] = (
+                                "fail" if reason == "foreign_provider_reference" else "unavailable"
+                            )
                         else:
+                            resource_readback[ReadbackPredicate.STORAGE_CONSUMERS] = "pass"
+                            resource_readback[ReadbackPredicate.RESOURCES] = "unavailable"
                             status, reason = _host_result(
                                 root,
                                 binding,
@@ -606,22 +692,25 @@ def build_native_testing_sweep(
                                 if lifecycle
                                 else None,
                             )
+                            resource_readback[ReadbackPredicate.RESOURCES] = (
+                                "pass"
+                                if status in {"eligible", "absent"}
+                                else "unavailable"
+                                if status == "unknown"
+                                else "fail"
+                            )
+                        for reference in inventory_references:
+                            item_reference = NativeTestingSweepReference.model_validate(reference)
+                            if item_reference not in references:
+                                references = (*references, item_reference)
                         bindings.append(
                             {"binding": binding.model_dump(mode="json"), "permit": permit}
                         )
-                resources.append(
-                    NativeTestingSweepResource(
-                        role=row["role"],
-                        backing_sha256=canonical_json_sha256(
-                            {"server": candidate.server_id, "backing": row["backing"]}
-                        )
-                        if "backing" in row
-                        else "",
-                        free_bytes=row.get("free_bytes"),
-                        volume_identity_sha256=row.get("identity", ""),
-                        status=status,
-                        reason=reason or "physical_ownership_unknown",
-                    )
+                resources[index] = resources[index].model_copy(
+                    update={
+                        "status": status,
+                        "reason": reason or "physical_ownership_unknown",
+                    }
                 )
             if not resources:
                 reasons = (*reasons, "physical_inventory_unknown")
@@ -659,6 +748,7 @@ def build_native_testing_sweep(
                 container_count=len(lifecycle["payload"]["container_ids"]) if lifecycle else 0,
                 resources=tuple(resources),
                 references=references,
+                readback=readback,
             )
             private[candidate.namespace] = {
                 "allocation": candidate.model_dump(mode="json"),
@@ -677,6 +767,11 @@ def build_native_testing_sweep(
                 status="held",
                 reasons=("current_custody_unavailable",),
                 ownership_sha256="",
+                resources=tuple(
+                    resource.model_copy(update={"status": "held"}) for resource in resources
+                ),
+                readback=readback,
+                references=references,
             )
         items.append(item)
     selected_items = [

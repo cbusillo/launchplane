@@ -336,7 +336,6 @@ def prepare_candidate_application(
             inputs=inputs,
             deployment_id=app.deployment_id,
         )
-        remove_prepared_candidate_source_cache(store, record)
         return record
 
     def payload() -> api.JsonObject:
@@ -566,7 +565,6 @@ def prepare_candidate_application(
         host=host, token=token, allocation=record, inputs=inputs, deployment_id=app.deployment_id
     )
     save(phase="prepared", prepared=prepared)
-    remove_prepared_candidate_source_cache(store, record)
     return record
 
 
@@ -587,7 +585,7 @@ def remove_prepared_candidate_source_cache(
     capture = recorded_native_testing_capture(store, generation)
     if capture is None:
         raise ValueError("The prepared native copy has no original capture receipt.")
-    remove_completed_native_capture_cache(capture)
+    remove_completed_native_capture_cache(capture, store=store)
 
 
 def candidate_restore_terminal(

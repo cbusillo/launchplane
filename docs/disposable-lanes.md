@@ -2890,8 +2890,12 @@ fix the source and start a fresh rebuild. Legacy generations follow their
 [retirement prerequisites](#retire-an-incomplete-legacy-generation-into-custody).
 Unknown effects remain fenced and never authorize recapture.
 Module, integration and website readback still precede the web gate. Successful
-readback removes raw receiver chunks and private cached bytes, retaining the
-immutable DB receipt. Failed attempts retain original chunks/cache and keep the
+readback removes raw receiver chunks, retaining the immutable DB receipt.
+For native rebuild candidates, private cache cleanup waits for completed,
+error-free rebuild custody, including other candidates sharing the same migrated
+source binding; see [candidate source retention](testing-candidate-release.md).
+Ordinary post-deploy cleanup preserves any such outstanding candidate custody.
+Failed attempts retain original chunks/cache and keep the
 generation for supported same-key recovery. Never delete retained old storage
 or fabricate a completion witness as cleanup.
 

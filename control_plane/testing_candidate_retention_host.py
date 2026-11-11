@@ -1,4 +1,5 @@
 import inspect
+from pathlib import Path
 from control_plane.dokploy.testing_retained_copy import (
     failed_candidate_own_web,
     read_container_processes,
@@ -16,6 +17,42 @@ from control_plane.retained_volume_capture import (
 )
 
 
+def staged_source_inputs(path: Path) -> bool:
+    import os
+    import re
+    import stat
+
+    try:
+        children = list(path.iterdir())
+    except OSError:
+        return True
+    for child in children:
+        if not child.name.startswith(".lp-native-"):
+            continue
+        try:
+            before = child.lstat()
+            if (
+                re.fullmatch(r"\.lp-native-[a-f0-9]{32}", child.name) is None
+                or not stat.S_ISDIR(before.st_mode)
+                or child.resolve(strict=True) != child
+            ):
+                return True
+            with os.scandir(child) as contents:
+                if next(contents, None) is not None:
+                    return True
+            after = child.lstat()
+            if (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            ):
+                return True
+        except (OSError, RuntimeError):
+            return True
+    return False
+
+
 NATIVE_TESTING_RETENTION_INSPECTION = (
     "from collections.abc import Callable,Mapping,Sequence\nfrom typing import Any\n"
     "import base64,hashlib,json,os,re,subprocess,sys,time\nfrom pathlib import Path\n"
@@ -23,6 +60,7 @@ NATIVE_TESTING_RETENTION_INSPECTION = (
     + inspect.getsource(retained_volume_docker_command)
     + inspect.getsource(retained_volume_identity)
     + inspect.getsource(retained_volume_engine_identity)
+    + inspect.getsource(staged_source_inputs)
     + inspect.getsource(web_gate_unexpected)
     + inspect.getsource(read_container_processes)
     + inspect.getsource(failed_candidate_own_web)
@@ -99,7 +137,7 @@ def inspect_candidate():
         identity=retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino,backing_filesystem_id=space.f_fsid if space.f_fsid>0 else None)
         with os.scandir(path) as children:
             empty=next(children,None) is None
-        sources=any(child.name.startswith('.lp-native-') for child in path.iterdir())
+        sources=staged_source_inputs(path)
         referenced=False
         for container in all_containers.values():
             mounts=container.get('Mounts')
@@ -111,7 +149,7 @@ def inspect_candidate():
             gate_unexpected=web_gate_unexpected(gate,completed)
         result.append({'role':role,'name':name,'status':'observed','reason':use_reason or ('source_inputs_preserved' if sources else 'container_reference' if referenced else ''),
             'identity':identity,'engine_identity':retained_volume_engine_identity(engine_id),
-            'empty':empty,'source_inputs':sources,'free_bytes':space.f_bavail*space.f_frsize,
+            'empty':empty,'source_inputs':sources,'referenced':referenced,'free_bytes':space.f_bavail*space.f_frsize,
             'backing':['zfs',pools[metadata.st_dev]] if metadata.st_dev in pools else ['device',metadata.st_dev],
             'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
             'monotonic_deadline':time.monotonic()+300})

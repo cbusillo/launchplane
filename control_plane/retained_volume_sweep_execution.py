@@ -140,28 +140,51 @@ def _environment_referenced(name: str, owner: Mapping[str, object]) -> bool:
 
 
 def _inventory_clear(
-    root: Path, binding: RetainedVolumeBinding, *, ignored_compose_id: str = "", exact: bool = False
+    root: Path,
+    binding: RetainedVolumeBinding,
+    *,
+    ignored_compose_id: str = "",
+    exact: bool = False,
+    references: list[dict[str, str]] | None = None,
 ) -> bool:
+    def refused(reference_kind: str, identity: object = "", *, referenced: bool = False) -> bool:
+        import re
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        if references is not None:
+            row = {
+                "reason": "foreign_provider_reference"
+                if referenced
+                else "provider_inventory_unavailable",
+                "kind": reference_kind,
+            }
+            if isinstance(identity, str) and identity:
+                if re.fullmatch(r"[A-Za-z0-9_-]{1,200}", identity):
+                    row["record_id"] = identity
+                else:
+                    row["record_sha256"] = canonical_json_sha256(
+                        {"kind": reference_kind, "id": identity}
+                    )
+            references.append(row)
+        return False
+
     host, token = source.read_dokploy_config(control_plane_root=root)
     for project in api.fetch_dokploy_projects(host=host, token=token):
-        if exact and (
-            not isinstance(project.get("env"), str)
-            or _environment_referenced(binding.volume_name, project)
-        ):
-            return False
+        project_id = project.get("projectId")
+        if exact and not isinstance(project.get("env"), str):
+            return refused("project", project_id)
+        if exact and _environment_referenced(binding.volume_name, project):
+            return refused("project", project_id, referenced=True)
         environments = project.get("environments")
         if not isinstance(environments, list):
-            return False
+            return refused("project", project_id)
         for environment in environments:
             if not isinstance(environment, dict):
-                return False
+                return refused("project", project_id)
+            environment_id = environment.get("environmentId")
             if exact and "env" not in environment:
-                environment_id, project_id = (
-                    environment.get("environmentId"),
-                    project.get("projectId"),
-                )
                 if not isinstance(environment_id, str) or not isinstance(project_id, str):
-                    return False
+                    return refused("environment", environment_id)
                 detail = api.as_json_object(
                     api.dokploy_request(
                         host=host,
@@ -175,20 +198,19 @@ def _inventory_clear(
                     or detail.get("environmentId") != environment_id
                     or detail.get("projectId") != project_id
                 ):
-                    return False
+                    return refused("environment", environment_id)
                 environment = {**environment, "env": detail.get("env")}
-            if exact and (
-                not isinstance(environment.get("env"), str)
-                or _environment_referenced(binding.volume_name, environment)
-            ):
-                return False
+            if exact and not isinstance(environment.get("env"), str):
+                return refused("environment", environment_id)
+            if exact and _environment_referenced(binding.volume_name, environment):
+                return refused("environment", environment_id, referenced=True)
             for kind, (target_type, identifier) in TARGET_COLLECTIONS.items():
                 targets = environment.get(kind)
                 if not isinstance(targets, list):
-                    return False
+                    return refused("environment", environment_id)
                 for target in targets:
                     if not isinstance(target, dict) or not isinstance(target.get(identifier), str):
-                        return False
+                        return refused("environment", environment_id)
                     target_id = target[identifier]
                     assert isinstance(target_id, str)
                     if target_type == "compose" and target_id == ignored_compose_id:
@@ -210,15 +232,17 @@ def _inventory_clear(
                             database_payload is None
                             or database_payload.get(identifier) != target_id
                         ):
-                            return False
+                            return refused(target_type, target_id)
                         payload = database_payload
                     if exact and _environment_referenced(binding.volume_name, payload):
-                        return False
+                        return refused(
+                            target_type, target_id, referenced=isinstance(payload.get("env"), str)
+                        )
                     mounts = payload.get("mounts")
-                    if not isinstance(mounts, list) or _volume_referenced(
-                        binding.volume_name, payload, exact=exact
-                    ):
-                        return False
+                    if not isinstance(mounts, list):
+                        return refused(target_type, target_id)
+                    if _volume_referenced(binding.volume_name, payload, exact=exact):
+                        return refused(target_type, target_id, referenced=True)
                     if target_type == "compose":
                         try:
                             documents = read_volume_documents(
@@ -238,13 +262,13 @@ def _inventory_clear(
                                 if binding.volume_name in names or _volume_referenced(
                                     binding.volume_name, document, exact=exact
                                 ):
-                                    return False
+                                    return refused(target_type, target_id, referenced=True)
                         except native_copy_stream.NativeSourceAuthorizationDenied:
                             raise
                         except api.DokployRequestFailed as error:
                             if error.status_code in {401, 403}:
                                 raise
-                            return False
+                            return refused(target_type, target_id)
                         except (
                             ValueError,
                             TypeError,
@@ -253,7 +277,7 @@ def _inventory_clear(
                             click.ClickException,
                             yaml.YAMLError,
                         ):
-                            return False
+                            return refused(target_type, target_id)
 
     return True
 
