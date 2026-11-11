@@ -835,6 +835,8 @@ from control_plane.product_config_http import (
     product_config_live_target_next_actions,
     product_environment_config_apply_request,
     product_config_has_undeclared_runtime_settings,
+    product_config_only_adopts_provider_settings,
+    product_config_plan_only_records_provider_settings,
     product_environment_config_confirmation,
 )
 from control_plane.provider_target_operations_http import (
@@ -939,6 +941,9 @@ from control_plane.storage.product_authority_bundle import (
     ServiceIdentityAuthorityError,
     ProductProfileConflictError,
     RuntimeEnvironmentConflictError,
+    RuntimeEnvironmentSetExpectation,
+    SecretDeliverySetExpectation,
+    SecretDeliveryConflictError,
 )
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
@@ -16829,6 +16834,18 @@ def create_launchplane_fastapi_app(
             return ProductConfigApplyResponse.model_validate(
                 replay_response.model_dump(mode="json")
             )
+        live_provider_adoption = (
+            isinstance(identity, LocalOperatorIdentity)
+            and director_agent_identity(identity)
+            and config_profile is not None
+            and config_profile.production_use == "live"
+            and product_config_request.instance == "prod"
+            and product_config_request.adopts_provider_keys()
+            and product_config_has_undeclared_runtime_settings(
+                profile=config_profile, payload=request_payload
+            )
+            and product_config_only_adopts_provider_settings(request_payload)
+        )
         if (
             isinstance(identity, LocalOperatorIdentity)
             and (product_config_request.mode == "apply" or not director_agent_identity(identity))
@@ -16841,6 +16858,7 @@ def create_launchplane_fastapi_app(
             and product_config_has_undeclared_runtime_settings(
                 profile=config_profile, payload=request_payload
             )
+            and not live_provider_adoption
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -16866,6 +16884,7 @@ def create_launchplane_fastapi_app(
             and product_config_request.public_hosts is None
             and product_config_request.odoo_business_hours is None
             and product_config_request.odoo_first_empty is None
+            and not live_provider_adoption
             and not product_config_dry_run_exists(
                 record_store=database_store,
                 identity=identity,
@@ -16943,6 +16962,8 @@ def create_launchplane_fastapi_app(
         )
 
         first_empty_plan: QualifiedFirstEmptyInputs | None = None
+        adoption_authority: ProductAuthorityBundle | None = None
+        adoption_review_digest = ""
         try:
             if product_config_request.odoo_first_empty is not None:
                 try:
@@ -17066,6 +17087,76 @@ def create_launchplane_fastapi_app(
                         message="Public-host apply requires a matching current target and provider dry-run.",
                     )
             if product_config_request.reads_lane_provider_env() and product_config_request.instance:
+                if live_provider_adoption:
+                    try:
+                        secret_selection = SecretDeliverySetExpectation(
+                            integration="runtime_environment",
+                            context=product_config_request.context,
+                            instance=product_config_request.instance,
+                            records=(),
+                            bindings=(),
+                        )
+                        adoption_authority = ProductAuthorityBundle(
+                            expected_product_profiles=(config_profile,)
+                            if config_profile is not None
+                            else (),
+                            expected_dokploy_targets=(
+                                database_store.read_dokploy_target_record(
+                                    context_name=product_config_request.context,
+                                    instance_name=product_config_request.instance,
+                                ),
+                            ),
+                            expected_dokploy_target_ids=(
+                                database_store.read_dokploy_target_id_record(
+                                    context_name=product_config_request.context,
+                                    instance_name=product_config_request.instance,
+                                ),
+                            ),
+                            runtime_environment_read_sets=(
+                                RuntimeEnvironmentSetExpectation(
+                                    contexts=(product_config_request.context,),
+                                    instances=(
+                                        (
+                                            product_config_request.context,
+                                            product_config_request.instance,
+                                        ),
+                                    ),
+                                    records=tuple(
+                                        record
+                                        for record in database_store.list_runtime_environment_records(
+                                            context_name=product_config_request.context
+                                        )
+                                        if record.scope == "context"
+                                        or record.instance == product_config_request.instance
+                                    ),
+                                ),
+                            ),
+                            secret_delivery_read_sets=(
+                                SecretDeliverySetExpectation(
+                                    integration="runtime_environment",
+                                    context=product_config_request.context,
+                                    instance=product_config_request.instance,
+                                    records=tuple(
+                                        record
+                                        for record in database_store.list_secret_records(
+                                            integration="runtime_environment",
+                                            context_name=product_config_request.context,
+                                        )
+                                        if secret_selection.includes(record)
+                                    ),
+                                    bindings=tuple(
+                                        binding
+                                        for binding in database_store.list_secret_bindings(
+                                            integration="runtime_environment",
+                                            context_name=product_config_request.context,
+                                        )
+                                        if secret_selection.includes(binding)
+                                    ),
+                                ),
+                            ),
+                        )
+                    except FileNotFoundError:
+                        adoption_authority = None
                 # The service reads the provider values itself; they never reach the caller.
                 lane_provider_env = await asyncio.to_thread(
                     control_plane_product_config_service.read_lane_provider_env,
@@ -17100,6 +17191,54 @@ def create_launchplane_fastapi_app(
                     first_empty_qualification=first_empty_plan,
                 )
             )
+            if (
+                adoption_authority is not None
+                and lane_provider_env_reader is not None
+                and product_config_plan_only_records_provider_settings(planned_driver_result)
+            ):
+                adoption_review_digest = build_request_fingerprint(
+                    {
+                        "authority": adoption_authority.model_dump(mode="json"),
+                        "provider_values": {
+                            key: lane_provider_env_reader().env[key]
+                            for key in cast(
+                                tuple[str, ...],
+                                cast(dict[str, object], request_payload["runtime_env"])[
+                                    "adopt_provider_keys"
+                                ],
+                            )
+                        },
+                    }
+                )
+                authority_bundle = authority_bundle.model_copy(
+                    update={
+                        "expected_dokploy_targets": adoption_authority.expected_dokploy_targets,
+                        "expected_dokploy_target_ids": adoption_authority.expected_dokploy_target_ids,
+                        "runtime_environment_read_sets": adoption_authority.runtime_environment_read_sets,
+                        "secret_delivery_read_sets": adoption_authority.secret_delivery_read_sets,
+                    }
+                )
+            if live_provider_adoption and product_config_request.mode == "apply":
+                if not adoption_review_digest:
+                    raise _launchplane_http_error(
+                        status_code=403,
+                        trace_id=trace_id,
+                        code="live_product_requires_operator",
+                        message="Live provider adoption must only record existing plain settings without retirement or other changes.",
+                    )
+                if not product_config_dry_run_exists(
+                    record_store=database_store,
+                    identity=identity,
+                    request_payload=request_payload,
+                    route_path=route_path,
+                    authority_plan_digest=adoption_review_digest,
+                ):
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="matching_dry_run_required",
+                        message="Provider facts or target authority changed. Review a fresh dry-run.",
+                    )
         except control_plane_product_config.ProductConfigError as error:
             product_config_error = (
                 control_plane_product_config_service.product_config_service_error(error)
@@ -17203,10 +17342,14 @@ def create_launchplane_fastapi_app(
                 update={"dokploy_targets": (public_hosts_plan.replacement,)}
             )
             driver_result["public_hosts"] = public_hosts_plan.result.model_dump(mode="json")
-        next_actions = product_config_live_target_next_actions(
-            request=product_config_request,
-            driver_result=driver_result,
-            tracked_targets=database_store.list_dokploy_target_records(),
+        next_actions = (
+            []
+            if adoption_review_digest
+            else product_config_live_target_next_actions(
+                request=product_config_request,
+                driver_result=driver_result,
+                tracked_targets=database_store.list_dokploy_target_records(),
+            )
         )
         if next_actions:
             driver_result = {
@@ -17223,7 +17366,9 @@ def create_launchplane_fastapi_app(
         if (
             requires_matching_review or public_hosts_plan is not None or calendar_plan is not None
         ) and product_config_request.mode == "dry-run":
-            if first_empty_plan is not None:
+            if adoption_review_digest:
+                review_digest = adoption_review_digest
+            elif first_empty_plan is not None:
                 review_digest = first_empty_plan.plan_sha256
             elif calendar_plan is not None:
                 review_digest = calendar_plan.plan_digest
@@ -17305,8 +17450,12 @@ def create_launchplane_fastapi_app(
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
-                    code="public_hosts_target_changed",
-                    message="The public-host target changed. Review a fresh dry-run.",
+                    code="matching_dry_run_required"
+                    if adoption_review_digest
+                    else "public_hosts_target_changed",
+                    message="The product-config target changed. Review a fresh dry-run."
+                    if adoption_review_digest
+                    else "The public-host target changed. Review a fresh dry-run.",
                 ) from error
             except ServiceIdentityAuthorityError as error:
                 raise _launchplane_http_error(
@@ -17338,6 +17487,13 @@ def create_launchplane_fastapi_app(
                     or stored_record.state != "completed"
                     or stored_record.request_fingerprint != payload_fingerprint
                 ):
+                    if isinstance(write_error, SecretDeliveryConflictError):
+                        raise _launchplane_http_error(
+                            status_code=409,
+                            trace_id=trace_id,
+                            code="matching_dry_run_required",
+                            message="Lane secret metadata changed. Review a fresh dry-run.",
+                        ) from write_error
                     raise write_error
                 replay_response = replay_idempotent_response(
                     trace_id=trace_id,
