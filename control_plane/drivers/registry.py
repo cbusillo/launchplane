@@ -26,7 +26,10 @@ from control_plane.contracts.driver_descriptor import (
     DriverView,
 )
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneProfile,
+)
 from control_plane.contracts.production_backup_authority import (
     GENERIC_WEB_PROMOTION_BACKUP_ACTION,
     ODOO_PROMOTION_BACKUP_ACTION,
@@ -1404,6 +1407,23 @@ def _production_backup_authorities(
             )
         )
         for action in promotion_actions
+    )
+
+
+def read_product_lane_summary(
+    *, record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+) -> LaunchplaneLaneSummary | None:
+    owners = _product_profile_target_owners(
+        record_store=record_store, context_name=lane.context, instance_name=lane.instance
+    )
+    if (
+        len(owners) != 1
+        or owners[0].product != profile.product
+        or not any(descriptor.driver_id == profile.driver_id for descriptor in _DESCRIPTORS)
+    ):
+        return None
+    return _read_lane_summary(
+        record_store=record_store, context_name=lane.context, instance_name=lane.instance
     )
 
 

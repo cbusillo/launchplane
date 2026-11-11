@@ -678,6 +678,32 @@ class _HistoricalActivityRecordStore(_PreviewRecordStore):
 
 
 class ProductEnvironmentReadModelTest(unittest.TestCase):
+    def test_product_overview_reads_preview_records_without_loading_generation_history(
+        self,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
+        preview = _preview_record(
+            preview_id="current-preview",
+            context=profile.preview.context,
+            anchor_repo=profile.repository.rsplit("/", 1)[-1],
+            state="active",
+            updated_at=profile.updated_at,
+        )
+        store = _PreviewRecordStore(profile, (preview,))
+        with patch.object(
+            store,
+            "list_preview_summaries",
+            side_effect=AssertionError("generation history read"),
+            create=True,
+        ):
+            overview = build_product_site_overview(
+                record_store=store, product=profile.product, action_allowed=lambda *_: True
+            )
+        self.assertEqual(overview.preview.latest_preview_id, preview.preview_id)
+        self.assertEqual(overview.preview.active_count, 1)
+        self.assertEqual(overview.preview.records[0].preview_id, preview.preview_id)
+        self.assertEqual(len(overview.environments), len(profile.lanes))
+
     def test_lane_status_warns_for_stored_credentials_without_integration_allowance(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
