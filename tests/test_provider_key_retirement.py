@@ -501,6 +501,43 @@ class ProviderKeyRetirementApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status_code, 400, response.text)
 
+    async def test_setting_a_retired_key_names_the_refusal_and_the_list_edit_sets_it(
+        self,
+    ) -> None:
+        self.store.write_runtime_environment_record(_runtime_record(retired=("LISTEN_HOST",)))
+        runtime_env: dict[str, object] = {"scope": "instance", "env": {"LISTEN_HOST": "0.0.0.0"}}
+        setting: dict[str, object] = {
+            "schema_version": 1,
+            "mode": "dry-run",
+            "product": "example-site",
+            "context": "example-site",
+            "instance": "testing",
+            "reason": "Set the listener input.",
+            "runtime_env": runtime_env,
+        }
+        with self.assertLogs("control_plane.http_error_evidence", "WARNING") as logs:
+            refused = await _post_product_config_apply(
+                self.app, setting, authorization="Bearer local-operator-token"
+            )
+        self.assertEqual(refused.status_code, 400, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "runtime_key_retired")
+        self.assertNotIn("0.0.0.0", refused.text + "".join(logs.output))
+        self.assertIn('"module": "control_plane.product_config"', "".join(logs.output))
+
+        unretired = {
+            **setting,
+            "schema_version": 2,
+            "runtime_env": {**runtime_env, "retired_provider_keys": []},
+        }
+        planned = await _post_product_config_apply(
+            self.app, unretired, authorization="Bearer local-operator-token"
+        )
+        self.assertEqual(planned.status_code, 202, planned.text)
+        runtime = planned.json()["result"]["runtime_environment"]
+        self.assertEqual(runtime["retired_provider_keys_before"], ["LISTEN_HOST"])
+        self.assertEqual(runtime["retired_provider_keys_after"], [])
+        self.assertEqual(runtime["env_value_count_after"], 2)
+
 
 class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
     def test_existing_record_maintenance_preserves_retirement(self) -> None:

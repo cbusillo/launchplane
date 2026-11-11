@@ -3043,7 +3043,9 @@ onboarding workflow removal does not retire credentials, grants or policy record
   services cannot silently discard a destructive request. Existing runtime
   values are preserved. Dry-run reports the before/after key names without
   reading or returning retired secret values. The normal matching dry-run,
-  authorization, idempotency and atomic stale-write guards apply.
+  authorization, idempotency and atomic stale-write guards apply. Setting a
+  key the lane retires is refused with `400 runtime_key_retired`; to set it,
+  send the complete list without that key.
   Declared application settings and protected database, volume and identity
   keys cannot be retired. Apply changes records only. The subsequent native
   live-target runtime sync removes exactly those names, preserves other
