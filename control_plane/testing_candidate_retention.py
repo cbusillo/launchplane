@@ -579,6 +579,7 @@ def build_native_testing_sweep(
             source_proof: dict[str, Any] = {}
             source_preserved = False
             if not reasons:
+                readback[ReadbackPredicate.FILES_READ] = "unavailable"
                 try:
                     source_preserved = _source_preserved(
                         store, candidate, source_proof, verified_sources
@@ -586,7 +587,7 @@ def build_native_testing_sweep(
                     readback[ReadbackPredicate.FILES_READ] = (
                         "pass" if source_preserved else "unavailable"
                     )
-                except OSError:
+                except (OSError, native_copy_stream.NativeSourceUnavailable):
                     readback[ReadbackPredicate.FILES_READ] = "unavailable"
                     source_proof.clear()
                 except ValueError:

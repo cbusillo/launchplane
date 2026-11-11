@@ -352,9 +352,14 @@ class CandidateRetentionPlanTests(unittest.TestCase):
     def test_source_readback_distinguishes_skipped_unavailable_and_invalid_files(self) -> None:
         from unittest.mock import patch
         from control_plane.copy_readback_diagnostics import ReadbackPredicate
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
 
         self.with_application(prepared=True)
-        for error, status in ((FileNotFoundError(), "unavailable"), (ValueError(), "fail")):
+        for error, status in (
+            (FileNotFoundError(), "unavailable"),
+            (NativeSourceUnavailable("Private capture mount is unavailable"), "unavailable"),
+            (ValueError(), "fail"),
+        ):
             with (
                 self.subTest(status=status),
                 patch.object(self.retention, "_source_preserved", side_effect=error),
