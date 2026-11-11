@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.exc import SQLAlchemyError
 
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.data_provenance import DataProvenance
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_inventory_scan_record import (
@@ -130,6 +131,7 @@ def current_sleep_binding(
     evidence: PreviewSleepEvidence,
     profile: LaunchplaneProductProfileRecord,
     slug: str,
+    previews: tuple[PreviewRecord, ...],
 ) -> str:
     binding = evidence.binding
     if binding is None:
@@ -137,7 +139,9 @@ def current_sleep_binding(
     if (binding.product, binding.context) != (profile.product, profile.preview.context):
         return "changed"
     try:
-        preview = getattr(record_store, "read_preview_record")(binding.preview_id)
+        preview = next((item for item in previews if item.preview_id == binding.preview_id), None)
+        if preview is None:
+            return "unknown"
         if (
             preview.context != binding.context
             or preview.anchor_repo not in {profile.repository, profile.repository.partition("/")[2]}
@@ -180,11 +184,12 @@ def project_sleep_observations(
     record_store: object,
     profile: LaunchplaneProductProfileRecord,
     include_private: bool,
+    previews: tuple[PreviewRecord, ...],
 ) -> PreviewInventoryEvidence:
     projected = []
     for observation in inventory.sleep_observations:
         evidence = observation.evidence or PreviewSleepEvidence()
-        current = current_sleep_binding(record_store, evidence, profile, observation.slug)
+        current = current_sleep_binding(record_store, evidence, profile, observation.slug, previews)
         try:
             completed = datetime.fromisoformat(evidence.completed_at.replace("Z", "+00:00"))
             started = datetime.fromisoformat(
@@ -200,7 +205,11 @@ def project_sleep_observations(
             update={"current_binding": current if fresh else "unknown", "freshness": freshness}
         )
         updates: dict[str, object] = {"evidence": evidence if include_private else None}
-        if observation.evidence is not None and (current != "current" or not fresh):
+        if (
+            evidence.binding is not None
+            and observation.state in {"awake", "asleep"}
+            and (current != "current" or not fresh)
+        ):
             updates.update(state="unknown", reason="Exact current sleep binding is unqualified.")
         projected.append(observation.model_copy(update=updates))
     return inventory.model_copy(update={"sleep_observations": tuple(projected)})

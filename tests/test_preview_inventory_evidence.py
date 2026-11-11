@@ -2,7 +2,6 @@ from control_plane.contracts.preview_inventory_scan_record import (
     PREVIEW_INVENTORY_COLLECTION_SOURCE,
 )
 from datetime import datetime, timezone
-from typing import Any
 from types import SimpleNamespace
 import unittest
 
@@ -13,96 +12,58 @@ from tests.test_product_environment_read_model import _PreviewRecordStore, _site
 
 
 class PreviewInventoryEvidenceTests(unittest.TestCase):
-    def test_exact_sleep_read_never_rebinds_saved_facts_to_replaced_generation_or_target(
-        self,
-    ) -> None:
+    def test_unbound_observations_preserve_public_reasons(self) -> None:
         from control_plane.contracts.preview_inventory_scan_record import (
-            PreviewSleepBinding,
-            PreviewSleepEvidence,
             PreviewSleepObservation,
         )
         from control_plane.preview_inventory_evidence import (
             inventory_scan_evidence,
             project_sleep_observations,
         )
-        from tests.test_preview_idle import runtime_identity
 
         profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
-        identity = runtime_identity().model_copy(
-            update={"product": profile.product, "context": profile.preview.context}
-        )
-        binding = PreviewSleepBinding(
-            **{
-                key: value
-                for key, value in identity.model_dump().items()
-                if key in PreviewSleepBinding.model_fields
-            },
-            generation_id=identity.preview_generation_id,
-            provider_target_id="observed-target",
-        )
-        now = datetime.now(timezone.utc).isoformat()
-        observation = PreviewSleepObservation(
-            slug="pr-1",
-            state="asleep",
-            evidence=PreviewSleepEvidence(
-                coverage="complete",
-                completed_at=now,
-                binding=binding,
-            ),
-        )
-        scan = PreviewInventoryScanRecord(
-            scan_id="saved",
-            context=profile.preview.context,
-            product=profile.product,
-            repository=profile.repository,
-            scanned_at=now,
-            source="fixture",
-            status="pass",
-            preview_count=1,
-            preview_slugs=("pr-1",),
-            sleep_observations=(observation,),
-        )
-        preview = SimpleNamespace(
-            context=binding.context,
-            anchor_repo=profile.repository,
-            anchor_pr_number=1,
-            state="active",
-            serving_generation_id=binding.generation_id,
-            active_generation_id=binding.generation_id,
-        )
-        preparation = SimpleNamespace(
-            state="completed",
-            response_payload={"result": {"compose_id": binding.provider_target_id}},
-        )
-        store = SimpleNamespace(
-            read_preview_record=lambda _: preview,
-            read_preview_generation_record=lambda _: SimpleNamespace(runtime_identity=identity),
-            read_idempotency_record_by_id=lambda _: preparation,
-        )
-        inventory = inventory_scan_evidence(scan, include_sleep_evidence=True)
-
-        def read(private: bool = True) -> Any:
-            return project_sleep_observations(
-                inventory, record_store=store, profile=profile, include_private=private
-            ).sleep_observations[0]
-
-        current = read()
-        self.assertEqual(current.evidence.current_binding, "current")
-        self.assertNotIn("evidence", read(False).model_dump())
-        preview.serving_generation_id = "replacement"
-        changed = read()
-        self.assertEqual(changed.state, "unknown")
-        self.assertEqual(changed.evidence.current_binding, "changed")
-        self.assertEqual(changed.evidence.binding, binding)
-        preview.serving_generation_id = binding.generation_id
-        preparation.response_payload["result"]["compose_id"] = "replacement-target"
-        self.assertEqual(read().evidence.current_binding, "changed")
-        preparation.response_payload.clear()
-        self.assertEqual(read().evidence.current_binding, "unknown")
-        self.assertEqual(read().evidence.binding, binding)
-        assert observation.evidence is not None
-        observation.evidence.completed_at = "invalid"
-        self.assertEqual(read().state, "unknown")
+        for state, coverage, reason in (
+            ("cannot_sleep", "not_attempted", "Gateway is missing."),
+            ("unknown", "not_attempted", "Read budget exhausted."),
+            ("unknown", "unavailable", "Poll failed."),
+            ("awake", "partial", ""),
+        ):
+            with self.subTest(state=state, coverage=coverage):
+                observation = PreviewSleepObservation.model_validate(
+                    {
+                        "slug": "pr-1",
+                        "state": state,
+                        "reason": reason,
+                        "evidence": {"coverage": coverage},
+                    }
+                )
+                scan = PreviewInventoryScanRecord(
+                    scan_id="saved",
+                    context=profile.preview.context,
+                    product=profile.product,
+                    repository=profile.repository,
+                    scanned_at=datetime.now(timezone.utc).isoformat(),
+                    source="fixture",
+                    status="pass",
+                    preview_count=1,
+                    preview_slugs=("pr-1",),
+                    sleep_observations=(observation,),
+                )
+                for private in (False, True):
+                    row = project_sleep_observations(
+                        inventory_scan_evidence(scan, include_sleep_evidence=True),
+                        record_store=object(),
+                        profile=profile,
+                        previews=(),
+                        include_private=private,
+                    ).sleep_observations[0]
+                    self.assertEqual((row.state, row.reason), (state, reason))
+                    if private:
+                        assert row.evidence is not None
+                        self.assertEqual(row.evidence.current_binding, "unknown")
+                        self.assertEqual(row.evidence.coverage, coverage)
+                    else:
+                        self.assertNotIn("evidence", row.model_dump())
 
     def test_product_uses_real_empty_scan_instead_of_default_preview_provenance(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())

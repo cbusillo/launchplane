@@ -251,17 +251,6 @@ def collect_preview_sleep_observations(
         evidence = state.evidence
         if evidence is not None:
             evidence.completed_at = datetime.now(timezone.utc).isoformat()
-            if evidence.binding is not None and evidence.phase == "unknown":
-                state = state.model_copy(
-                    update={"state": "unknown", "reason": "Sleep observation is incomplete."}
-                )
-            elif evidence.phase in {"stopping", "waking", "inconsistent"}:
-                state = state.model_copy(
-                    update={
-                        "state": "cannot_sleep",
-                        "reason": "Application and gateway sleep state is incomplete or changing.",
-                    }
-                )
         observations.append(state)
     if should_stop():
         raise PreviewLifecycleSweepCancelled()

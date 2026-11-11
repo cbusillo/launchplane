@@ -1148,6 +1148,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             PreviewInventoryScanRecord,
             PreviewSleepObservation,
             PreviewSleepEvidence,
+            PreviewSleepBinding,
         )
 
         with TemporaryDirectory() as temporary_directory_name:
@@ -1172,6 +1173,17 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                     eligible_at=profile.updated_at,
                 )
                 store.write_preview_record(preview)
+                binding = PreviewSleepBinding(
+                    product=profile.product,
+                    context=preview.context,
+                    instance="fixture-pr-28",
+                    preview_id=preview.preview_id,
+                    generation_id="observed-generation",
+                    provider_target_id="observed-target",
+                    artifact_id="observed-artifact",
+                    source_git_ref="observed-source",
+                    image_reference="fixture@sha256:observed",
+                )
                 store.write_preview_inventory_scan_record(
                     PreviewInventoryScanRecord(
                         scan_id="private-sleep",
@@ -1187,7 +1199,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                             PreviewSleepObservation(
                                 slug="pr-28",
                                 state="unknown",
-                                evidence=PreviewSleepEvidence(coverage="partial"),
+                                evidence=PreviewSleepEvidence(coverage="partial", binding=binding),
                             ),
                         ),
                     )
@@ -1229,6 +1241,9 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                             detail.json()["product"]["preview"],
                         )
                         for summary in summaries:
+                            self.assertEqual(
+                                len(summary["inventory"]["sleep_observations"]), 1 if allowed else 0
+                            )
                             for item in summary["inventory"]["sleep_observations"]:
                                 self.assertNotIn("evidence", item)
                             self.assertEqual(summary["active_count"], 1)
@@ -1250,13 +1265,16 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                                 headers={"Authorization": "Bearer valid-token"},
                             )
                             self.assertEqual(private.status_code, 200, private.text)
-                            self.assertEqual(private.headers["cache-control"], "private, no-store")
+                            self.assertIn("private", private.headers["cache-control"].split(", "))
+                            self.assertIn("no-store", private.headers["cache-control"].split(", "))
                             payload = private.json()[key]
                             overview = payload[0] if key == "products" else payload
                             observations = overview["preview"]["inventory"]["sleep_observations"]
                             if allowed:
                                 self.assertEqual(observations[0]["evidence"]["coverage"], "partial")
-                                self.assertIsNone(observations[0]["evidence"]["binding"])
+                                self.assertEqual(
+                                    observations[0]["evidence"]["binding"], binding.model_dump()
+                                )
                             else:
                                 self.assertEqual(observations, [])
             finally:

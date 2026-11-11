@@ -2504,6 +2504,7 @@ def _build_preview_summary(
             record_store=record_store,
             profile=profile,
             include_private=include_sleep_evidence,
+            previews=previews,
         )
     records_status: Literal["available", "authorization_denied", "unsupported"] = (
         "authorization_denied"

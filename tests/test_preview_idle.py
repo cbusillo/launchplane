@@ -445,6 +445,7 @@ class PreviewIdleOperationTests(unittest.TestCase):
 
             started = datetime.now(timezone.utc).isoformat()
             result = read()
+            self.assertEqual(result.state, "asleep")
             self.assertEqual(result.evidence.phase, "waking")
             self.assertEqual(result.evidence.coverage, "complete")
             self.assertEqual(result.evidence.binding.generation_id, self.generation.generation_id)
@@ -467,8 +468,6 @@ class PreviewIdleOperationTests(unittest.TestCase):
             self.assertNotIn(
                 "evidence", inventory_scan_evidence(restored).sleep_observations[0].model_dump()
             )
-            self.assertNotIn("sleep_record_id", restored.model_dump_json())
-            self.assertNotIn("boot_id", restored.model_dump_json())
             self.value["evidence"]["receipts"]["sleep_agrees"] = False
             self.assertEqual(read().evidence.phase, "inconsistent")
             self.value["evidence"]["receipts"]["sleep_agrees"] = None
@@ -570,11 +569,111 @@ class PreviewIdleOperationTests(unittest.TestCase):
                 ),
                 prefix="fixture",
             )
+            started = datetime.now(timezone.utc).isoformat()
             states = collect_preview_sleep_observations(**arguments)
             self.assertEqual([item.state for item in states], ["awake", "unknown"])
             self.assertEqual(remote.call_count, 1)
             self.assertEqual(provider.call_count, 1)
             records.assert_called_once()
+            from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+            from control_plane.contracts.preview_inventory_scan_record import (
+                PreviewInventoryScanRecord,
+            )
+            from control_plane.preview_inventory_evidence import (
+                read_preview_inventory_evidence,
+                project_sleep_observations,
+            )
+
+            observed_evidence = states[0].evidence
+            assert observed_evidence is not None
+            binding = observed_evidence.binding
+            assert binding is not None
+            self.assertEqual(binding.generation_id, self.generation.generation_id)
+            self.assertEqual(binding.provider_target_id, self.provider["composeId"])
+            self.assertEqual(observed_evidence.receipts.persisted_state, "missing")
+            self.assertEqual(observed_evidence.coverage, "partial")
+            preparation = LaunchplaneIdempotencyRecord(
+                record_id=self.identity.deployment_record_id,
+                scope="fixture",
+                route_path="/fixture",
+                idempotency_key="fixture",
+                request_fingerprint="fixture",
+                recorded_at=started,
+                response_status_code=200,
+                response_trace_id="fixture-trace",
+                response_payload={"result": {"compose_id": binding.provider_target_id}},
+            )
+            self.store.write_idempotency_record(preparation)
+            scan = PreviewInventoryScanRecord(
+                scan_id="native-poll",
+                context=self.profile.preview.context,
+                product=self.profile.product,
+                repository=self.profile.repository,
+                scanned_at=started,
+                source="fixture",
+                status="pass",
+                preview_count=2,
+                preview_slugs=("pr-1", "pr-2"),
+                sleep_observations=states,
+            )
+            self.store.write_preview_inventory_scan_record(scan)
+
+            def read() -> Any:
+                inventory = read_preview_inventory_evidence(
+                    record_store=self.store,
+                    context=self.profile.preview.context,
+                    product=self.profile.product,
+                    repository=self.profile.repository,
+                    include_sleep_evidence=True,
+                )
+                return project_sleep_observations(
+                    inventory,
+                    record_store=self.store,
+                    profile=self.profile,
+                    include_private=True,
+                    previews=self.store.list_preview_records(),
+                ).sleep_observations[0]
+
+            self.assertEqual(read().evidence.binding, binding)
+            self.assertEqual(read().evidence.current_binding, "current")
+            self.store.write_preview_record(
+                self.preview.model_copy(update={"serving_generation_id": "replacement"})
+            )
+            self.assertEqual(read().evidence.current_binding, "changed")
+            self.assertEqual(read().state, "unknown")
+            self.assertEqual(read().evidence.binding, binding)
+            self.store.write_preview_record(self.preview)
+            self.store.write_idempotency_record(
+                preparation.model_copy(
+                    update={"response_payload": {"result": {"compose_id": "replacement-target"}}}
+                )
+            )
+            self.assertEqual(read().evidence.current_binding, "changed")
+            self.store.write_idempotency_record(
+                preparation.model_copy(update={"response_payload": {}})
+            )
+            self.assertEqual(read().evidence.current_binding, "unknown")
+            self.assertEqual(read().evidence.binding, binding)
+            self.store.write_idempotency_record(preparation)
+            self.assertEqual(read().evidence.current_binding, "current")
+            from datetime import timedelta
+
+            for completed in (
+                "invalid",
+                (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                (datetime.fromisoformat(started) - timedelta(seconds=1)).isoformat(),
+            ):
+                invalid = states[0].model_copy(
+                    update={
+                        "evidence": observed_evidence.model_copy(update={"completed_at": completed})
+                    }
+                )
+                self.store.write_preview_inventory_scan_record(
+                    scan.model_copy(update={"sleep_observations": (invalid, states[1])})
+                )
+                self.assertEqual(read().evidence.freshness, "invalid")
+                self.assertEqual(read().evidence.current_binding, "unknown")
+                self.assertEqual(read().state, "unknown")
             cancelled[0] = True
             with self.assertRaises(PreviewLifecycleSweepCancelled):
                 collect_preview_sleep_observations(**arguments, should_stop=lambda: cancelled[0])

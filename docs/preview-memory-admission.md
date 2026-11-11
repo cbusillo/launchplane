@@ -126,9 +126,16 @@ leave `current_binding=unknown` while retaining the observed facts; they do not
 prevent the read. A changed generation or target reports `changed`, never a
 replacement binding. Per-preview `freshness` is independent of scan provenance;
 invalid, future or pre-scan completion times cannot qualify a current row.
-Noncurrent rows have an unknown coarse state. Legacy rows expose
+An observed binding that cannot be matched currently demotes an awake/asleep
+coarse state to unknown. Pre-poll refusals and budget/failure reasons stay
+unchanged, as do coarse summaries of incomplete polls without binding.
+Private phase describes transitions independently of that existing summary. Legacy rows expose
 `coverage=legacy` with no binding, and incomplete polls remain partial or
-unavailable. Versioned opaque-source serialization keeps older record readers
+unavailable. A missing receipt file (including a preview that has never slept)
+remains partial: there is no persisted receipt agreement to claim.
+`not_attempted` means the poll did not run, including pre-poll refusals and
+budget exhaustion; `unavailable` means the attempted read failed. Coverage
+describes the observation, not readiness or eligibility. Versioned opaque-source serialization keeps older record readers
 able to load a scan after rollback without treating new private details as
 legacy scope evidence.
 
