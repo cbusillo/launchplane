@@ -183,9 +183,7 @@ try:
     assert active["type"] == "failed", active
     PROOF["active_web_refused"] = True
     compose("stop", "web")
-    services["web"]["command"] = [
-        value.replace("$", "$$") for value in EXPORT["failed_candidate"]["web_command"]
-    ]
+    services["web"]["command"] = EXPORT["rendered_web_command"]
     (ROOT / "compose.json").write_text(json.dumps({"services": services, "volumes": volumes}))
     compose("up", "--detach", "--force-recreate", "--no-deps", "--pull", "never", "web")
     gate = paths["ODOO_DATA_VOLUME"] / Path(EXPORT["failed_candidate"]["web_gate_path"]).name

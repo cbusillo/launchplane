@@ -76,6 +76,14 @@ def web_gate_unexpected(gate: Path, completed: bool) -> bool:
     return gate.exists() or gate.is_symlink()
 
 
+def read_container_processes(docker: Callable[..., str | bytes], identifier: str) -> list[str]:
+    output = docker("top", identifier, "-o", "pid,comm")
+    header, *rows = (output if isinstance(output, str) else bytes(output).decode()).splitlines()
+    if header.split() != ["PID", "COMMAND"]:
+        raise ValueError("Container process inventory is unavailable.")
+    return [row.split(maxsplit=1)[1] for row in rows]
+
+
 def failed_candidate_own_web(
     container: dict[str, Any], spec: dict[str, Any], read_processes: Callable[[str], list[str]]
 ) -> bool:
@@ -418,6 +426,7 @@ def retained_copy_host_program() -> str:
         + inspect.getsource(require_complete_container_inventory)
         + inspect.getsource(retained_container_snapshot)
         + inspect.getsource(web_gate_unexpected)
+        + inspect.getsource(read_container_processes)
         + inspect.getsource(failed_candidate_own_web)
         + inspect.getsource(qualify_failed_testing_containers)
         + "\nHEALTH_PROGRAM="
@@ -464,7 +473,7 @@ try:
             if any(item['Id'] in expected and item['Id'] not in own for item in containers) or own-set(expected):
                 raise ValueError('Original candidate container ownership changed')
         else:
-            failed_custody=qualify_failed_testing_containers(containers,spec,lambda identifier: docker('top',identifier,'-eo','comm').decode().splitlines()[1:])
+            failed_custody=qualify_failed_testing_containers(containers,spec,lambda identifier: read_container_processes(docker,identifier))
         if not any(item['Id'] in own and item['Config']['Labels'].get('com.docker.compose.service')=='web' for item in containers):
             qualification_spec={**spec,'identity':None}
     if spec['mode'] in {'remove','removal-readback'}:
