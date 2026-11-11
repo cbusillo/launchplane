@@ -217,6 +217,25 @@ jobs:
           uv run --no-project --no-config \
             .test-quality-catalog/scripts/check_new_comments.py --repo . --base "$BASE_SHA" --format github
 
+      # A bounded-read field the catalog's helper does not accept fails here,
+      # before merge. Land the catalog allowlist change first, then rerun.
+      - name: Check out catalog read allowlists
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: cbusillo/codex-skills
+          ref: main
+          path: .catalog-read-allowlists
+          sparse-checkout: skills/launchplane/scripts
+          persist-credentials: false
+
+      - name: Check bounded read fields against the catalog allowlists
+        run: |
+          set -euo pipefail
+          uv run --locked launchplane service export-openapi --output "$RUNNER_TEMP/launchplane-openapi.json"
+          uv run --no-project --no-config \
+            .catalog-read-allowlists/skills/launchplane/scripts/check-read-response-fields.py \
+            --openapi "$RUNNER_TEMP/launchplane-openapi.json"
+
   audit_policy:
     needs: candidate_ci
     if: needs.candidate_ci.outputs.delegated == 'false'
