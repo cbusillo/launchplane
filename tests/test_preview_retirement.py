@@ -231,7 +231,12 @@ class PreviewRetirementTests(unittest.IsolatedAsyncioTestCase):
             "New artifact scan refused",
             now=(datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat(),
         )
-        self.assertTrue(preview_refresh_failure(later, store=self.store))
+        with patch.object(
+            self.store,
+            "list_odoo_preview_originals",
+            side_effect=AssertionError("operation history cannot affect a later failure"),
+        ):
+            self.assertTrue(preview_refresh_failure(later, store=self.store))
 
     def test_harmless_sweep_does_not_revive_a_superseded_failure(self) -> None:
         self.retire()

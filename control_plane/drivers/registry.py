@@ -26,7 +26,10 @@ from control_plane.contracts.driver_descriptor import (
     DriverView,
 )
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneProfile,
+)
 from control_plane.contracts.production_backup_authority import (
     GENERIC_WEB_PROMOTION_BACKUP_ACTION,
     ODOO_PROMOTION_BACKUP_ACTION,
@@ -41,7 +44,10 @@ from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.drivers.route_paths import INGRESS_ROUTE_APPLY_ROUTE
-from control_plane.lane_runtime_verification import read_lane_runtime_verification
+from control_plane.lane_runtime_verification import (
+    LaneRuntimeVerification,
+    read_lane_runtime_verification,
+)
 from control_plane.preview_inventory_evidence import read_preview_inventory_evidence
 from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
@@ -1005,26 +1011,22 @@ def effective_driver_setting_groups(
     return tuple(setting_groups_by_id.values())
 
 
-def _profile_uses_driver(
-    *, profile: LaunchplaneProductProfileRecord, descriptor: DriverDescriptor
-) -> bool:
-    return profile.driver_id.strip() == descriptor.driver_id
-
-
-def _product_profile_target_owners(
+def _product_target_driver(
     *,
     record_store: object,
     context_name: str,
     instance_name: str,
-) -> tuple[LaunchplaneProductProfileRecord, ...]:
+    profiles: tuple[LaunchplaneProductProfileRecord, ...] | None = None,
+) -> tuple[LaunchplaneProductProfileRecord, DriverDescriptor] | None:
     list_profiles = _list_product_profile_records_method(record_store)
-    if list_profiles is None:
-        return ()
-    try:
-        profiles = list_profiles()
-    except FileNotFoundError:
-        return ()
-    return tuple(
+    if profiles is None:
+        if list_profiles is None:
+            return None
+        try:
+            profiles = list_profiles()
+        except FileNotFoundError:
+            return None
+    owners = tuple(
         profile
         for profile in profiles
         if _product_profile_matches_target(
@@ -1034,31 +1036,17 @@ def _product_profile_target_owners(
         )
     )
 
-
-def _product_profile_descriptors(
-    *,
-    record_store: object,
-    descriptor: DriverDescriptor,
-    context_name: str,
-    instance_name: str,
-) -> tuple[DriverDescriptor, ...]:
-    list_profiles = _list_product_profile_records_method(record_store)
-    if list_profiles is None:
-        return ()
-    try:
-        profiles = list_profiles(driver_id=descriptor.driver_id)
-    except FileNotFoundError:
-        return ()
-    return tuple(
-        _descriptor_for_product_profile(descriptor=descriptor, profile=profile)
-        for profile in profiles
-        if _profile_uses_driver(profile=profile, descriptor=descriptor)
-        and _product_profile_matches_target(
-            profile=profile,
-            context_name=context_name,
-            instance_name=instance_name,
-        )
+    if len(owners) != 1:
+        return None
+    profile = owners[0]
+    descriptors = tuple(
+        descriptor
+        for descriptor in _DESCRIPTORS
+        if descriptor.driver_id == profile.driver_id.strip()
     )
+    if len(descriptors) != 1:
+        return None
+    return profile, _descriptor_for_product_profile(descriptor=descriptors[0], profile=profile)
 
 
 def _parse_timestamp(value: str) -> datetime | None:
@@ -1187,12 +1175,9 @@ def _read_lane_summary(
         return None
     read_summary = _read_lane_summary_method(record_store)
     if read_summary is not None:
-        summary = read_summary(
+        return read_summary(
             context_name=context_name,
             instance_name=instance_name,
-        )
-        return summary.model_copy(
-            update={"provenance": build_lane_summary_provenance(summary, record_store=record_store)}
         )
 
     inventory = None
@@ -1260,7 +1245,7 @@ def _read_lane_summary(
             instance_name=instance_name,
         )
 
-    summary = LaunchplaneLaneSummary(
+    return LaunchplaneLaneSummary(
         context=context_name,
         instance=instance_name,
         inventory=inventory,
@@ -1270,9 +1255,6 @@ def _read_lane_summary(
         latest_promotion=latest_promotion,
         latest_backup_gate=latest_backup_gate,
         odoo_instance_override=odoo_instance_override,
-    )
-    return summary.model_copy(
-        update={"provenance": build_lane_summary_provenance(summary, record_store=record_store)}
     )
 
 
@@ -1407,6 +1389,35 @@ def _production_backup_authorities(
     )
 
 
+def read_product_lane_evidence(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    profiles: tuple[LaunchplaneProductProfileRecord, ...] | None = None,
+) -> tuple[LaunchplaneLaneSummary | None, LaneRuntimeVerification | None]:
+    target = _product_target_driver(
+        record_store=record_store,
+        context_name=lane.context,
+        instance_name=lane.instance,
+        profiles=profiles,
+    )
+    if target is None or target[0].product != profile.product:
+        return None, None
+    summary = _read_lane_summary(
+        record_store=record_store, context_name=lane.context, instance_name=lane.instance
+    )
+    if summary is None:
+        return None, None
+    verification = read_lane_runtime_verification(
+        record_store=record_store, profile=profile, lane=lane, summary=summary
+    )
+    provenance = (
+        verification.provenance if profile.is_active else build_lane_summary_provenance(summary)
+    )
+    return summary.model_copy(update={"provenance": provenance}), verification
+
+
 def build_driver_context_view(
     *,
     record_store: object,
@@ -1415,60 +1426,52 @@ def build_driver_context_view(
     action_allowed: Callable[[str, str, str, tuple[str, ...]], bool] | None = None,
 ) -> DriverContextView:
     drivers: list[DriverView] = []
-    owners = _product_profile_target_owners(
-        record_store=record_store,
-        context_name=context_name,
-        instance_name=instance_name,
+    target = _product_target_driver(
+        record_store=record_store, context_name=context_name, instance_name=instance_name
     )
-    matched_descriptors: tuple[DriverDescriptor, ...] = ()
-    if len(owners) == 1:
-        matched_descriptors = tuple(
-            matched_descriptor
-            for descriptor in _DESCRIPTORS
-            for matched_descriptor in _product_profile_descriptors(
+    if target is not None:
+        owner, matched_descriptor = target
+        lane_summary = _read_lane_summary(
+            record_store=record_store, context_name=context_name, instance_name=instance_name
+        )
+        if lane_summary is not None:
+            lane_summary = lane_summary.model_copy(
+                update={
+                    "provenance": build_lane_summary_provenance(
+                        lane_summary, record_store=record_store
+                    )
+                }
+            )
+        preview_summaries: tuple[LaunchplanePreviewSummary, ...] = ()
+        if _driver_exposes_preview_inventory(matched_descriptor):
+            preview_summaries = _list_preview_summaries(
                 record_store=record_store,
-                descriptor=descriptor,
                 context_name=context_name,
-                instance_name=instance_name,
+            )
+        preview_inventory_provenance = None
+        if _driver_exposes_preview_inventory(matched_descriptor):
+            preview_inventory_provenance = read_preview_inventory_evidence(
+                record_store=record_store,
+                context=context_name,
+                product=owner.product,
+                repository=owner.repository,
+            ).provenance
+        drivers.append(
+            DriverView(
+                driver_id=matched_descriptor.driver_id,
+                descriptor=matched_descriptor,
+                available_actions=effective_driver_actions(matched_descriptor),
+                lane_summary=lane_summary,
+                production_backup_authorities=_production_backup_authorities(
+                    record_store=record_store,
+                    profile=owner,
+                    descriptor=matched_descriptor,
+                    context_name=context_name,
+                    instance_name=instance_name,
+                    action_allowed=action_allowed,
+                ),
+                preview_summaries=preview_summaries,
+                preview_inventory_provenance=preview_inventory_provenance,
             )
         )
-    if len(matched_descriptors) == 1:
-        for matched_descriptor in matched_descriptors:
-            lane_summary = _read_lane_summary(
-                record_store=record_store,
-                context_name=context_name,
-                instance_name=instance_name,
-            )
-            preview_summaries: tuple[LaunchplanePreviewSummary, ...] = ()
-            if _driver_exposes_preview_inventory(matched_descriptor):
-                preview_summaries = _list_preview_summaries(
-                    record_store=record_store,
-                    context_name=context_name,
-                )
-            preview_inventory_provenance = None
-            if _driver_exposes_preview_inventory(matched_descriptor):
-                preview_inventory_provenance = read_preview_inventory_evidence(
-                    record_store=record_store,
-                    context=context_name,
-                    product=owners[0].product,
-                    repository=owners[0].repository,
-                ).provenance
-            drivers.append(
-                DriverView(
-                    driver_id=matched_descriptor.driver_id,
-                    descriptor=matched_descriptor,
-                    available_actions=effective_driver_actions(matched_descriptor),
-                    lane_summary=lane_summary,
-                    production_backup_authorities=_production_backup_authorities(
-                        record_store=record_store,
-                        profile=owners[0],
-                        descriptor=matched_descriptor,
-                        context_name=context_name,
-                        instance_name=instance_name,
-                        action_allowed=action_allowed,
-                    ),
-                    preview_summaries=preview_summaries,
-                    preview_inventory_provenance=preview_inventory_provenance,
-                )
-            )
     return DriverContextView(context=context_name, instance=instance_name, drivers=tuple(drivers))

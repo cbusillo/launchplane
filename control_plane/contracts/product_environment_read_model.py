@@ -29,7 +29,6 @@ from control_plane.contracts.preview_desired_state_record import PreviewDesiredS
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord, PreviewState
-from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
@@ -95,14 +94,13 @@ from control_plane.contracts.sync_cycle_health import SyncCycleHealthEvidence
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretClass
 from control_plane.contracts.secret_record import SecretBinding, SecretSharingReason
 from control_plane.drivers.registry import (
-    build_driver_context_view,
+    read_product_lane_evidence,
     effective_driver_actions,
     list_driver_descriptors,
     read_driver_descriptor,
 )
 from control_plane.lane_runtime_verification import (
     monitor_observation_provenance,
-    read_lane_runtime_verification,
 )
 from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
@@ -217,16 +215,6 @@ class ProductEnvironmentReadModelStore(ProductReadModelStore, Protocol):
         anchor_pr_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[PreviewRecord, ...]: ...
-
-    def list_preview_summaries(
-        self,
-        *,
-        context_name: str = "",
-        anchor_repo: str = "",
-        anchor_pr_number: int | None = None,
-        preview_limit: int | None = None,
-        generation_limit: int | None = 1,
-    ) -> tuple[LaunchplanePreviewSummary, ...]: ...
 
     def list_preview_desired_state_records(
         self, *, context_name: str = "", limit: int | None = None
@@ -740,13 +728,15 @@ class ProductActivityReadModel(BaseModel):
 def build_product_site_overviews(
     *, record_store: ProductReadModelStore, action_allowed: ActionAllowed
 ) -> tuple[ProductSiteOverview, ...]:
+    profiles = record_store.list_product_profile_records()
     return tuple(
-        build_product_site_overview(
+        _build_product_site_overview(
             record_store=record_store,
-            product=profile.product,
+            profile=profile,
+            profiles=profiles,
             action_allowed=action_allowed,
         )
-        for profile in record_store.list_product_profile_records()
+        for profile in profiles
         if profile.is_active
     )
 
@@ -754,7 +744,20 @@ def build_product_site_overviews(
 def build_product_site_overview(
     *, record_store: ProductReadModelStore, product: str, action_allowed: ActionAllowed
 ) -> ProductSiteOverview:
-    profile = record_store.read_product_profile_record(product)
+    return _build_product_site_overview(
+        record_store=record_store,
+        profile=record_store.read_product_profile_record(product),
+        action_allowed=action_allowed,
+    )
+
+
+def _build_product_site_overview(
+    *,
+    record_store: ProductReadModelStore,
+    profile: LaunchplaneProductProfileRecord,
+    action_allowed: ActionAllowed,
+    profiles: tuple[LaunchplaneProductProfileRecord, ...] | None = None,
+) -> ProductSiteOverview:
     descriptor, descriptor_warning = _read_profile_descriptor(profile)
     environment_summaries = tuple(
         _build_environment_summary(
@@ -763,6 +766,7 @@ def build_product_site_overview(
             descriptor=descriptor,
             lane=lane,
             action_allowed=action_allowed,
+            profiles=profiles,
         )
         for lane in profile.lanes
     )
@@ -904,7 +908,7 @@ def build_product_environment_detail(
         profile, declared_lane, read_split_ingress_binding(record_store, profile, declared_lane)
     )
     descriptor, descriptor_warning = _read_profile_descriptor(profile)
-    lane_summary = _read_product_lane_summary(
+    lane_summary, runtime_verification = read_product_lane_evidence(
         record_store=record_store,
         profile=profile,
         lane=lane,
@@ -917,13 +921,7 @@ def build_product_environment_detail(
         profile=profile,
         lane=lane,
         lane_summary=lane_summary,
-        runtime_verification=(
-            read_lane_runtime_verification(
-                record_store=record_store, profile=profile, lane=lane, summary=lane_summary
-            )
-            if lane_summary is not None
-            else None
-        ),
+        runtime_verification=runtime_verification,
     )
     warnings = tuple(
         warning
@@ -1041,7 +1039,7 @@ def build_product_environment_config_status(
             provenance=DataProvenance(source_kind="record", freshness_status="recorded"),
         )
     else:
-        lane_summary = _read_product_lane_summary(
+        lane_summary, _ = read_product_lane_evidence(
             record_store=record_store,
             profile=profile,
             lane=lane,
@@ -2366,11 +2364,13 @@ def _build_environment_summary(
     descriptor: DriverDescriptor | None,
     lane: ProductLaneProfile,
     action_allowed: ActionAllowed,
+    profiles: tuple[LaunchplaneProductProfileRecord, ...] | None = None,
 ) -> ProductEnvironmentSummary:
-    lane_summary = _read_product_lane_summary(
+    lane_summary, runtime_verification = read_product_lane_evidence(
         record_store=record_store,
         profile=profile,
         lane=lane,
+        profiles=profiles,
     )
     provenance = (
         lane_summary.provenance if lane_summary is not None else _missing_lane_provenance(lane)
@@ -2380,13 +2380,7 @@ def _build_environment_summary(
         profile=profile,
         lane=lane,
         lane_summary=lane_summary,
-        runtime_verification=(
-            read_lane_runtime_verification(
-                record_store=record_store, profile=profile, lane=lane, summary=lane_summary
-            )
-            if lane_summary is not None
-            else None
-        ),
+        runtime_verification=runtime_verification,
     )
     return ProductEnvironmentSummary(
         environment=lane.instance,
@@ -2433,23 +2427,6 @@ def _build_environment_summary(
     )
 
 
-def _read_product_lane_summary(
-    *,
-    record_store: object,
-    profile: LaunchplaneProductProfileRecord,
-    lane: ProductLaneProfile,
-) -> LaunchplaneLaneSummary | None:
-    view = build_driver_context_view(
-        record_store=record_store,
-        context_name=lane.context,
-        instance_name=lane.instance,
-    )
-    for driver in view.drivers:
-        if driver.descriptor.product == profile.product or driver.driver_id == profile.driver_id:
-            return driver.lane_summary
-    return None
-
-
 def _testing_deploy_hold(
     *, record_store: object, lane: ProductLaneProfile
 ) -> TestingHoldPurpose | None:
@@ -2475,41 +2452,20 @@ def _build_preview_summary(
 ) -> ProductPreviewSummary:
     if not profile.preview.enabled:
         return ProductPreviewSummary(enabled=False, context=profile.preview.context)
-    summaries: tuple[LaunchplanePreviewSummary | PreviewRecord, ...] = ()
-    list_preview_summaries = getattr(record_store, "list_preview_summaries", None)
-    list_preview_records = getattr(record_store, "list_preview_records", None)
+    list_previews = getattr(record_store, "list_preview_records", None)
     anchor_repo = _profile_anchor_repo(profile)
-    if callable(list_preview_summaries):
-        summaries = list_preview_summaries(
-            context_name=profile.preview.context,
-            anchor_repo=anchor_repo,
-            preview_limit=None,
-            generation_limit=1,
+    preview_records: tuple[PreviewRecord, ...] = ()
+    if callable(list_previews):
+        preview_records = cast(ProductEnvironmentReadModelStore, record_store).list_preview_records(
+            context_name=profile.preview.context, anchor_repo=anchor_repo
         )
-    elif callable(list_preview_records):
-        summaries = tuple(
-            list_preview_records(
-                context_name=profile.preview.context,
-                anchor_repo=anchor_repo,
-                limit=None,
-            )
-        )
-    filtered_summaries: list[LaunchplanePreviewSummary | PreviewRecord] = []
-    for summary in summaries:
-        if isinstance(summary, LaunchplanePreviewSummary):
-            preview = summary.preview
-        else:
-            preview = summary
-        if preview.context != profile.preview.context:
-            continue
-        if preview.anchor_repo != anchor_repo:
-            continue
-        if preview.state == "destroyed":
-            continue
-        filtered_summaries.append(summary)
-    summaries = tuple(filtered_summaries)
-    latest_summary = next(iter(summaries), None)
-    latest_preview_id = ""
+    previews = tuple(
+        preview
+        for preview in preview_records
+        if preview.context == profile.preview.context
+        and preview.anchor_repo == anchor_repo
+        and preview.state != "destroyed"
+    )
     inventory = read_preview_inventory_evidence(
         record_store=record_store,
         context=profile.preview.context,
@@ -2517,19 +2473,9 @@ def _build_preview_summary(
         repository=profile.repository,
     )
     provenance = inventory.provenance
-    if latest_summary is not None:
-        preview = (
-            latest_summary.preview
-            if isinstance(latest_summary, LaunchplanePreviewSummary)
-            else latest_summary
-        )
-        latest_preview_id = preview.preview_id
     tracked_slugs = {
         profile.preview.slug_template.format(number=preview.anchor_pr_number)
-        for summary in summaries
-        for preview in (
-            summary.preview if isinstance(summary, LaunchplanePreviewSummary) else summary,
-        )
+        for preview in previews
     }
     observed_slugs = set(inventory.observed_slugs)
     comparable = inventory.status in {"empty", "nonempty"}
@@ -2540,7 +2486,7 @@ def _build_preview_summary(
         "authorization_denied"
         if not records_allowed
         else "available"
-        if callable(list_preview_summaries) or callable(list_preview_records)
+        if callable(list_previews)
         else "unsupported"
     )
     records = (
@@ -2552,10 +2498,7 @@ def _build_preview_summary(
                 recorded_state=preview.state,
                 updated_at=preview.updated_at,
             )
-            for summary in summaries[:PRODUCT_PREVIEW_REFERENCE_LIMIT]
-            for preview in (
-                summary.preview if isinstance(summary, LaunchplanePreviewSummary) else summary,
-            )
+            for preview in previews[:PRODUCT_PREVIEW_REFERENCE_LIMIT]
         )
         if records_allowed
         else ()
@@ -2564,7 +2507,7 @@ def _build_preview_summary(
         enabled=True,
         context=profile.preview.context,
         slug_template=profile.preview.slug_template,
-        active_count=len(summaries),
+        active_count=len(previews),
         inventory=inventory
         if records_allowed
         else inventory.model_copy(update={"observed_slugs": (), "sleep_observations": ()}),
@@ -2574,10 +2517,10 @@ def _build_preview_summary(
         untracked_observed_slugs=tuple(sorted(observed_slugs - tracked_slugs))
         if comparable and records_allowed
         else (),
-        latest_preview_id=latest_preview_id,
+        latest_preview_id=previews[0].preview_id if previews else "",
         records_status=records_status,
         records=records,
-        records_truncated=records_allowed and len(summaries) > len(records),
+        records_truncated=records_allowed and len(previews) > len(records),
         trust_state=provenance.freshness_status,
         provenance=provenance,
     )
