@@ -271,6 +271,34 @@
         ]
       },
       {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_odoo_inventory_readback",
+        "path": "/v1/products/{product}/environments/{environment}/odoo-inventory-readback",
+        "purpose": "Read current stored inventory, bounded private part witnesses and one declared purchaser seed on exact testing without writes or external connections.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "410",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "b759edf7cd5cc1e5aacb5a1f31baefb89a6bc34097e8e9a75c53d2bc9b568821",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "body",
         "identity_dependencies": [
           "read_browser_mutation_identity"
@@ -1538,8 +1566,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "7a047880df9be074865c4bfd12e723d5eadfa0fd"
+    "source_commit_sha": "753d4704ab14522aa390de23d6854d87d04665f2"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "eb76625796cd269479841eb6e578b1b9da624a53eefc66ae9ff9fe108792cc8f"
+  "semantic_digest_sha256": "e637fdc2193a2c73795f61beba311c579cc6cc94f310861b6bf2919c3c4bf0d7"
 }

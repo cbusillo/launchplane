@@ -35,6 +35,9 @@ installed client's configured connection with fixed `SHOW GRANTS`, returning onl
 Raw grants and connection values never enter the receipt. Existing managed
 private-source TLS behavior is preserved; no new TLS choice is made.
 
+Direct preflight container refusals use the shared
+[maintenance diagnostics](preview-fixtures.md#container-preflight-refusals).
+
 Dry run performs preflight without importing. Review its identity, source digest
 and qualification. Apply repeats preflight, obtains the native data-workflow lock
 and calls the fixed public entrypoint. A supervisor **inside the container**

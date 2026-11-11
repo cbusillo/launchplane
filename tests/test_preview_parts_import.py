@@ -432,6 +432,60 @@ class ImportHostReceiptTests(unittest.TestCase):
 
 
 class PreviewPartsImportHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_container_preflight_refusal_identifies_unverified_runtime_without_private_detail(
+        self,
+    ) -> None:
+        from control_plane.odoo_runtime_reads import OdooRuntimeReadError
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
+        from tests.support.auth import StubVerifier, identity
+        from tests.support.http import request
+
+        with fixture_tests.PreviewFixtureLaneTests().preview() as (store, adapter, _slot):
+            app = create_launchplane_fastapi_app(
+                verifier=StubVerifier(identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"schema_version": 2}),
+                record_store_factory=lambda: store,
+                control_plane_root_path=adapter.root,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_operator_token="operator-example",
+                    local_operator_subject="director-example",
+                    local_operator_token_label="operator-example",
+                ),
+            )
+            for failure, reason in (
+                (
+                    OdooRuntimeReadError("container_unavailable", "PRIVATE exception detail"),
+                    "runtime_container_unverified",
+                ),
+                (ValueError("PRIVATE exception detail"), None),
+            ):
+                for maintenance in (
+                    import_request(instance=adapter.request.instance),
+                    fixture_request(instance=adapter.request.instance),
+                ):
+                    with (
+                        self.subTest(failure=type(failure).__name__, action=maintenance.action),
+                        patch(
+                            "control_plane.odoo_runtime_reads.connect_runtime", side_effect=failure
+                        ),
+                    ):
+                        response = await request(
+                            app,
+                            "POST",
+                            "/v1/drivers/odoo/app-maintenance",
+                            headers={"Authorization": "Bearer operator-example"},
+                            payload={
+                                "product": adapter.product,
+                                "maintenance": maintenance.model_dump(mode="json"),
+                            },
+                        )
+                        self.assertEqual(response.status_code, 409, response.text)
+                        body = response.json()
+                        self.assertEqual(body["error"].get("reason"), reason)
+                        self.assertNotIn(str(failure), response.text)
+                        self.assertNotIn("result", body)
+
     async def test_existing_preview_authority_selects_import_adapter_and_requires_key(self) -> None:
         from tempfile import TemporaryDirectory
         from control_plane.storage.postgres import PostgresRecordStore
