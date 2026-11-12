@@ -188,7 +188,9 @@ website or reviewed head evidence refuses the effect. The public origin's host
 must be a domain on the current route binding or a committed public hostname on
 the same tracked target with no pending public-host effect. Route bindings hold
 only the target's internal domains, so a site with public hostnames is served
-through the second form. A separate route digest
+through the second form. That hostname must also have exactly one current
+provider route on the same compose target, matching the web origin route's port
+and the shape the public-host planner records. A separate route digest
 does not waive topology's `stale_route_authority` warning. Apply locks the
 native website row, checks the reviewed baseline, reads back in the transaction,
 commits and completes native cache notification, then returns its receipt.

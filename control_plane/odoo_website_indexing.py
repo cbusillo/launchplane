@@ -110,6 +110,35 @@ def _origin_host_served_by_target(
     return host in dokploy_target.public_hosts and host not in pending_hosts
 
 
+def _origin_routed_by_provider(
+    binding: dict[str, Any], payload: api.JsonObject, target_id: str
+) -> bool:
+    from control_plane.product_public_hosts import public_host_route_matches
+
+    route_hosts = {domain["domain_name"] for domain in binding["route"]["domains"]}
+    host = binding["public_origin"].split("://", 1)[1]
+    if host in route_hosts:
+        return True
+    raw_routes = payload.get("domains")
+    routes = [
+        route
+        for route in (
+            api.as_json_object(raw) for raw in (raw_routes if isinstance(raw_routes, list) else ())
+        )
+        if route is not None
+    ]
+    origin_ports = [
+        route.get("port")
+        for route in routes
+        if route.get("host") in route_hosts and route.get("serviceName") == "web"
+    ]
+    port = origin_ports[0] if origin_ports else None
+    selected = [route for route in routes if route.get("host") == host]
+    if type(port) is not int or any(other != port for other in origin_ports) or len(selected) != 1:
+        return False
+    return public_host_route_matches(selected[0], target_id, port)
+
+
 def indexing_binding(
     store: Any,
     product: str,
@@ -259,6 +288,8 @@ class WebsiteIndexingExecution:
             or manifest.image.repository != binding["profile"]["image"]["repository"]
         ):
             raise ValueError("Website indexing runtime differs from its artifact authority.")
+        if not _origin_routed_by_provider(binding, payload, target["target_id"]):
+            raise ValueError("Website indexing public host is not routed to the production target.")
         transport_binding = {
             "project": payload["appName"],
             "database": environment["ODOO_DB_NAME"],

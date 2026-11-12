@@ -28,7 +28,7 @@ class PublicHostsProviderError(RuntimeError):
     """An effect may have happened; no successful config receipt was committed."""
 
 
-def _route_matches(route: api.JsonObject, compose_id: str, port: int) -> bool:
+def public_host_route_matches(route: api.JsonObject, compose_id: str, port: int) -> bool:
     return all(
         route.get(key) == value
         for key, value in {
@@ -93,7 +93,7 @@ class PublicHostsPlan:
                 if (
                     len(selected) != 1
                     or selected[0].get("domainId") != domain_id
-                    or not _route_matches(
+                    or not public_host_route_matches(
                         selected[0], self.target_id.target_id, self.result.runtime_port
                     )
                     or tuple(route for route in observed_routes if route.get("host") != host)
@@ -121,7 +121,7 @@ class PublicHostsPlan:
                 raise PublicHostsProviderError("Provider routes changed during reconciliation.")
             for host in self.result.after:
                 selected = [route for route in observed if route.get("host") == host]
-                if len(selected) != 1 or not _route_matches(
+                if len(selected) != 1 or not public_host_route_matches(
                     selected[0], self.target_id.target_id, self.result.runtime_port
                 ):
                     raise PublicHostsProviderError("Public-host provider read-back did not match.")
@@ -204,7 +204,9 @@ def plan_public_hosts(
         if (
             type(port) is not int
             or not 1 <= port <= 65535
-            or not all(_route_matches(route, target_id.target_id, port) for route in origins)
+            or not all(
+                public_host_route_matches(route, target_id.target_id, port) for route in origins
+            )
         ):
             raise ValueError("Public hosts require an existing HTTPS web origin route.")
         effects = {effect.host: effect for effect in target.pending_public_host_effects}
@@ -226,7 +228,7 @@ def plan_public_hosts(
                 len(selected) != 1
                 or not effect.domain_id
                 or selected[0].get("domainId") != effect.domain_id
-                or not _route_matches(selected[0], effect.target_id, effect.runtime_port)
+                or not public_host_route_matches(selected[0], effect.target_id, effect.runtime_port)
             ):
                 raise ProductConfigError(
                     "Pending public-host effect has uncertain or changed ownership; inspect the target before retrying.",
@@ -249,7 +251,7 @@ def plan_public_hosts(
             if public_host not in after:
                 if selected and (
                     type(selected[0].get("port")) is not int
-                    or not _route_matches(
+                    or not public_host_route_matches(
                         selected[0], target_id.target_id, cast(int, selected[0]["port"])
                     )
                 ):
@@ -265,7 +267,7 @@ def plan_public_hosts(
                         target_id=target_id.target_id,
                         runtime_port=port,
                     )
-            elif _route_matches(selected[0], target_id.target_id, port):
+            elif public_host_route_matches(selected[0], target_id.target_id, port):
                 unchanged.append(public_host)
             else:
                 updated.append(public_host)

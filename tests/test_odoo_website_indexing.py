@@ -157,7 +157,7 @@ class WebsiteIndexingBindingTests(unittest.TestCase):
         self.runtime = runtime_identity(
             image_reference="ghcr.io/example/odoo@sha256:" + "1" * 64
         ).model_copy(update={"database_uuid": "synthetic-database"})
-        self.payload = {
+        self.payload: dict[str, Any] = {
             "composeId": self.store.target.target_id,
             "appName": "example-prod",
             "serverId": "synthetic-server",
@@ -248,17 +248,53 @@ class WebsiteIndexingBindingTests(unittest.TestCase):
             update={"domains": (route.domains[0].model_copy(update={"domain_name": host}),)}
         )
 
-    def test_public_host_origin_beside_an_internal_route_domain_reaches_the_native_plan(
-        self,
-    ) -> None:
+    def _provider_route(self, host: str, **changes: Any) -> dict[str, Any]:
+        return {
+            "host": host,
+            "composeId": self.store.target.target_id,
+            "serviceName": "web",
+            "port": 8069,
+            "path": "/",
+            "internalPath": "/",
+            "https": True,
+            "certificateType": "none",
+            "stripPath": False,
+            **changes,
+        }
+
+    def _serve_public_host_beside_internal_origin(self, *public_routes: dict[str, Any]) -> None:
         self.store.route_binding = self._route_serving("example-prod.internal.test")
         self.store.dokploy_target = self.store.dokploy_target.model_copy(
             update={"domains": ("example-prod.internal.test",)}
         )
+        self.payload["domains"] = [
+            self._provider_route("example-prod.internal.test"),
+            *public_routes,
+        ]
+
+    def test_public_host_origin_beside_an_internal_route_domain_reaches_the_native_plan(
+        self,
+    ) -> None:
+        self._serve_public_host_beside_internal_origin(self._provider_route("example.test"))
         plan = self.execution.observe()
         self.assertEqual(plan["native"]["public_origin"], "https://example.test")
         self.native.assert_called_once()
         self.assertEqual(self.writes, 0)
+
+    def test_public_host_without_its_provider_route_on_the_target_never_reaches_native(
+        self,
+    ) -> None:
+        for public_routes in (
+            (),
+            (self._provider_route("example.test", composeId="other-compose"),),
+            (self._provider_route("example.test", port=8080),),
+            (self._provider_route("example.test"), self._provider_route("example.test")),
+        ):
+            with self.subTest(public_routes=public_routes):
+                self._serve_public_host_beside_internal_origin(*public_routes)
+                with self.assertRaisesRegex(ValueError, "not routed to the production target"):
+                    self.execution.observe()
+        self.native.assert_not_called()
 
     def test_origin_outside_route_domains_and_committed_public_hosts_never_reaches_native(
         self,
