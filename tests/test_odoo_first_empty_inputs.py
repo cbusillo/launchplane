@@ -294,7 +294,7 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
 
-    async def test_refused_original_apply_resumes_only_with_its_own_key_body_and_facts(
+    async def test_refused_original_apply_records_nothing_and_resumes_on_unchanged_facts(
         self,
     ) -> None:
         entries = [
@@ -1235,11 +1235,13 @@ if change=='volume_aliases_original':
 if change=='original_volume_created':
     Path(original).mkdir(parents=True,exist_ok=True)
     volumes['db']={}
-containers={'foreign':{'Name':'/unrelated','Labels':{},'Mounts':[]}}
+containers={'foreign':{'Name':'/unrelated','Labels':{},'Mounts':[]},'kept':{'Name':'/kept','Labels':{},'Mounts':[]}}
 if change=='unrelated_container':
     containers['arrived']={'Name':'/arrived','Labels':{},'Mounts':[{'Type':'volume','Name':'unrelated','Source':root+'/volumes/unrelated/_data'}]}
 if change=='unrelated_container_renamed':
     containers['foreign']['Name']='/renamed'
+if change=='unrelated_container_removed':
+    del containers['foreign']
 if change=='container_mounts_original':
     containers['arrived']={'Name':'/arrived','Labels':{},'Mounts':[{'Type':'volume','Name':'db','Source':original}]}
 if change=='container_binds_original':
@@ -1340,6 +1342,7 @@ class FirstEmptyStorageStabilityTests(unittest.TestCase):
         for change in (
             "unrelated_container",
             "unrelated_container_renamed",
+            "unrelated_container_removed",
             "unrelated_volume",
             "unrelated_service",
         ):
