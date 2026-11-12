@@ -1320,8 +1320,7 @@ operation and pending gate with no passing evidence. The operation retains its
 complete prior attempt and backup record, review digest, authenticated actor,
 reason and time. Repeating an applied review returns its receipt, even after all
 release steps complete, without requeueing. Consumed captures and stopped
-promotions still require their own supported recovery. Odoo continuation is not
-supported by this route. Inspecting release progress alone never retries
+promotions still require their own supported recovery. Inspecting release progress alone never retries
 anything. Known expired or superseded evidence leaves an unstarted release
 waiting for this continuation; a source-busy promotion before any effect also
 waits. Progress offers continuation only while the shared capture-eligibility
@@ -1332,6 +1331,51 @@ with its fixed, redacted description. Continuation refusals return a bounded cau
 or `backup_continuation_review_changed`; unexpected evidence errors retain the
 generic `backup_continuation_held` response. Planning inspects credential metadata
 without decrypting capture values.
+
+For an Odoo accepted release, this same route can review and continue an original
+promotion that failed before replacement dispatch. Review is inert; Apply queues
+the original promotion for the normal release worker and can therefore resume
+production delivery. Source activation, progress reads and worker ticks never
+reopen a failed operation. The request, response, authenticated caller checks
+and `client_release_backup.continue` action are unchanged.
+
+The original promotion operation must retain its exact decision-derived key,
+request, fingerprint, Client authority, candidate, successful logical backup and
+failed promotion record. Its promotion must carry the backup guard's affirmative
+`infrastructure_provider_effects_status=not_started` receipt and held source
+lock, with no deployment or post-deploy effects. Its durable operation must
+also lack a first-production-write checkpoint. Missing receipts or records from
+another family do not establish safety. Unknown, partial, running, cancelled or
+already delivered outcomes cannot be deployed again through this continuation.
+
+Review rechecks the current accepted checklist and Client, unchanged production
+and testing versions, release holds and window, recovery deployment, verified
+unused infrastructure backup and its freshness, and a ready current replacement
+plan. The current provider target and runtime must match the original pinned
+passing production deployment. Missing original physical target evidence
+refuses continuation. Changed plans, targets, backup evidence or decisions
+invalidate the review digest. Apply repeats qualification under the existing
+lane, product-authority and backup-source locks, rejects competing work and
+draining, and compares the original operation before committing.
+Before the continued worker's first production write, it rechecks the accepted
+versions and original physical target again. Once a write is marked, existing
+unknown-effect reconciliation and protective recovery keep their own fences.
+
+The same operation becomes pending with its original request, key, authorization
+and attempt budget. It retains the complete failed operation and promotion in
+`previous_attempt` and `previous_promotion`, together with the continuation
+digest, authenticated actor, reason and time. The failed promotion record itself
+is preserved. An interrupted response or repeated applied digest reads the same
+receipt, including after completion, without queueing another attempt. Fresh
+worker admission and existing unknown-effect reconciliation remain required;
+continuation does not supply a new acceptance or caller promotion permission.
+Only the exact failed promotion archived by this continuation is excluded from
+backup consumption. Unrelated promotions retain their existing consumption and
+delivery-failure reporting. An ordinary operation omits unused continuation
+fields. Once Apply writes a receipt, a source image that predates this receipt
+model cannot read that operation; service recovery must use an image compatible
+with the retained receipt. This source delivery does not qualify an actual
+continuation or a rollback to an older incompatible image.
 
 `GET /v1/release-review` returns
 `release_on_acceptance` (what the next acceptance would do), `live_site_url`,

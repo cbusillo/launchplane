@@ -60,6 +60,17 @@ when a real `cp --reflink=always` probe proves block sharing. Cloning saves
 physical pool space, but dataset quotas can still charge each reference;
 the available filesystem bytes must cover the whole admitted budget and reserve.
 Each new capture rechecks its destination capacity, including when a restore resumes.
+Migrated admission and native receiver/retention checks share a phase-aware
+computation: uploaded pair staging and the clean snapshot do not overlap, but the
+restored database, expanded filestore and runner dump do. The bounds and reserve
+stay unchanged. Admission checks the overall peak; native receiver/retention
+checks cover the current restore phase's remaining allocation against measured
+free space without adding already uploaded bytes back. Before a migrated capture, the local staging directory must be
+absent or empty after supported cleanup; no historical cleanup record is required.
+Immediately before snapshot allocation, a fresh physical-free reading must cover
+the full snapshot and reserve. Logical deletion supplies no freed-byte credit:
+blocks still pinned after unlink, failed cleanup, concurrent consumption or a
+failed capacity read stop capture before dump/copy effects.
 A proved clone runs `cp --reflink=always` and fails rather than silently
 switching to a full copy. Database restores are also charged in full. Demands on
 datasets sharing a ZFS pool are summed, using the smallest available-space reading in that pool;

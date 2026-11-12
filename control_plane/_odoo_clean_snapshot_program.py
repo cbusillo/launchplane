@@ -1,10 +1,12 @@
 from control_plane._odoo_snapshot_files import SNAPSHOT_FILES_LIBRARY
 from control_plane.preview_filestore import PREVIEW_FILESTORE_LIBRARY
+from control_plane.testing_storage_capacity import STORAGE_CAPACITY_LIBRARY
 
 
 CLEAN_TESTING_SNAPSHOT_LIBRARY = (
     SNAPSHOT_FILES_LIBRARY
     + PREVIEW_FILESTORE_LIBRARY
+    + STORAGE_CAPACITY_LIBRARY
     + r"""
 import json
 from pathlib import Path
@@ -200,10 +202,16 @@ def capture_clean_snapshot(spec, containers, clone):
     budget = spec['generation'].get('drill_storage_budget')
     if budget is None:
         raise RuntimeError('Clean snapshot capture requires reviewed storage headroom')
-    space = os.statvfs(destination.parent)
-    required = budget['database_bytes'] + budget['filestore_bytes'] + budget['reserve_bytes']
-    if space.f_bavail * space.f_frsize < required:
-        raise RuntimeError('Clean snapshot capture lacks reviewed storage headroom')
+    def require_capacity():
+        required = storage_capacity_requirements(
+            {'snapshot': budget['database_bytes'] + budget['filestore_bytes']},
+            {'snapshot': 'destination'}, budget['reserve_bytes'])['destination']
+        space = os.statvfs(destination.parent)
+        if space.f_bavail * space.f_frsize < required:
+            raise RuntimeError('Clean snapshot capture lacks reviewed storage headroom')
+    migrated = spec['generation'].get('migrated_source') is not None
+    if not migrated:
+        require_capacity()
     web = json.loads(docker('inspect', containers['web'][0]))[0]
     if (web.get('State') or {}).get('Running') is not False:
         raise RuntimeError('Clean snapshot capture requires a stopped testing writer')
@@ -212,7 +220,18 @@ def capture_clean_snapshot(spec, containers, clone):
     filestore = mountpoint / 'filestore' / spec['database_name']
     if filestore.resolve() != filestore.absolute():
         raise RuntimeError('Clean snapshot source filestore is aliased')
+    if migrated:
+        binding = spec['generation'].get('source_binding_sha256', '')
+        if re.fullmatch(r'[a-f0-9]{64}', binding) is None:
+            raise RuntimeError('Migrated snapshot cleanup identity is unavailable')
+        staging = mountpoint / ('.lp-native-' + binding[:32])
+        if staging.resolve() != staging.absolute() or staging.is_symlink():
+            raise RuntimeError('Migrated snapshot cleanup custody is aliased')
+        if staging.exists() and (not staging.is_dir() or any(staging.iterdir())):
+            raise RuntimeError('Migrated snapshot cleanup is incomplete')
     expected_tree = snapshot_tree_digest(filestore, budget['filestore_bytes'])
+    if migrated:
+        require_capacity()
     with tempfile.TemporaryDirectory(prefix=snapshot_id + '-', dir=destination.parent) as temporary:
         path = Path(temporary)
         arguments = ['docker', 'exec', containers['database'][0], 'sh', '-c',

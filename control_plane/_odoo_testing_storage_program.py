@@ -1,10 +1,12 @@
-"""Fixed host maintenance library embedded behind the existing restore guard."""
+from control_plane.testing_storage_capacity import STORAGE_CAPACITY_LIBRARY
 
 MAX_DISPOSALS_PER_PASS = 4
 CLONE_PROBE_BYTES = 4 * 1024 * 1024
 TXG_SYNC_WAIT_SECONDS = 6
 
-STORAGE_MAINTENANCE_LIBRARY = r"""
+STORAGE_MAINTENANCE_LIBRARY = (
+    STORAGE_CAPACITY_LIBRARY
+    + r"""
 import os
 from pathlib import Path
 import subprocess
@@ -136,17 +138,24 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
     decisions = {} if clone_decisions is None else clone_decisions
     filestore_charged_as_staging = host_staging_bytes is None and gen.get('source_mode', 'ssh') != 'container-export'
     zfs_pools = storage_backing_pools()
-    required = {}
+    sizes = {}
+    role_backings = {}
+    backing_identities = {}
     available = {}
-    def demand(path, size):
+    def demand(role, path, size):
         path = Path(path).resolve(strict=True)
         device = path.stat().st_dev
         backing = ('zfs', zfs_pools[device]) if device in zfs_pools else ('device', device)
         stat = os.statvfs(path)
         free = stat.f_bavail * stat.f_frsize
+        if free < 0:
+            raise RuntimeError('Testing storage capacity is unavailable')
         if size:
-            required[backing] = required.get(backing, 0) + size
-            available[backing] = min(available.get(backing, free), free)
+            key = repr(backing)
+            sizes[role] = size
+            role_backings[role] = key
+            backing_identities[key] = list(backing)
+            available[key] = min(available.get(key, free), free)
     backings = {}
     for role, suffix, size in (('database', '-db', budget['database_bytes']), ('data', '-data', budget['filestore_bytes'])):
         name = spec.get('preview_volumes', {}).get(role, gen['namespace'] + suffix)
@@ -156,9 +165,9 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
             size = 0
         elif role == 'data' and filestore_clone_source is not None:
             decisions['data'] = filestore_clone_proved(filestore_clone_source, backings[role])
-        demand(backings[role], max(0,size-filestore_existing_bytes) if role=='data' else size)
+        demand(role, backings[role], max(0,size-filestore_existing_bytes) if role=='data' else size)
     if data_staging_bytes:
-        demand(backings['data'], data_staging_bytes)
+        demand('data_staging', backings['data'], data_staging_bytes)
     # SSH capture stages on the host; native capture/assembly stages in the
     # runner's writable layer. Require known backing rather than guessing overlay space.
     driver = containers['script-runner'][1].get('GraphDriver', {})
@@ -168,34 +177,38 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
     if runner_staging_bytes is None:
         runner_staging_bytes = (budget['database_bytes'] if filestore_charged_as_staging
             else max(assembly_bytes, budget['staging_bytes'] - staged_bytes))
-    demand(upper, runner_staging_bytes)
+    demand('writable', upper, runner_staging_bytes)
     if filestore_charged_as_staging:
-        demand(restore_staging_path(backings['data']).parent, budget['staging_bytes'])
+        demand('host_staging', restore_staging_path(backings['data']).parent, budget['staging_bytes'])
     elif host_staging_bytes is not None:
-        demand(spec['staging_directory'], host_staging_bytes)
+        demand('host_staging', spec['staging_directory'], host_staging_bytes)
     if database_staging_bytes:
         upper = containers['database'][1].get('GraphDriver', {}).get('Data', {}).get('UpperDir')
         if not upper:
             raise RuntimeError('Database staging backing is unavailable')
-        demand(upper, database_staging_bytes)
+        demand('database_staging', upper, database_staging_bytes)
     if gen.get('clean_snapshot_enabled'):
         snapshot_path = clean_snapshot_root(spec['copy_binding_sha256'], create=False).parent
         while not snapshot_path.exists():
             snapshot_path = snapshot_path.parent
         if probe_clones:
             decisions['snapshot'] = filestore_clone_proved(backings['data'], snapshot_path)
-        demand(snapshot_path, budget['database_bytes'] + budget['filestore_bytes'])
-    capacity = all(available[backing] >= size + budget['reserve_bytes'] for backing, size in required.items())
+        demand('snapshot', snapshot_path, budget['database_bytes'] + budget['filestore_bytes'])
+    migrated = gen.get('source_mode') == 'container-export' and (gen.get('migrated_source') or {}).get('kind') == 'migrated'
+    required = storage_capacity_requirements(sizes, role_backings, budget['reserve_bytes'],
+        staging_cleanup_before_snapshot=migrated, phase='restore' if migrated else None)
+    capacity = all(available[backing] >= size for backing, size in required.items())
     if observations is not None:
         observations.extend({
-            'backing': list(backing),
+            'backing': backing_identities[backing],
             'free_bytes': available[backing],
-            'required_additional_bytes': size,
+            'required_additional_bytes': size - budget['reserve_bytes'],
             'reserve_bytes': budget['reserve_bytes'],
-            'deficit_bytes': max(0, size + budget['reserve_bytes'] - available[backing]),
-        } for backing, size in sorted(required.items()))
+            'deficit_bytes': max(0, size - available[backing]),
+        } for backing, size in sorted(required.items(), key=lambda item: backing_identities[item[0]]))
     return capacity
 """
+)
 STORAGE_MAINTENANCE_LIBRARY = (
     STORAGE_MAINTENANCE_LIBRARY.replace("__MAX_DISPOSALS__", str(MAX_DISPOSALS_PER_PASS))
     .replace("__CLONE_PROBE_BYTES__", str(CLONE_PROBE_BYTES))

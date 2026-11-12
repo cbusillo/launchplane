@@ -1921,6 +1921,18 @@ def _execute_prod_promotion_operation(
                 if not isinstance(record_store, PostgresRecordStore):
                     raise ValueError("Odoo Client release recovery requires durable storage.")
                 require_odoo_release_recovery_pin(record_store, operation)
+                if operation.previous_attempt is not None:
+                    from control_plane.client_release_odoo_continuation import (
+                        require_continued_odoo_target,
+                    )
+
+                    require_continued_odoo_target(
+                        record_store,
+                        control_plane_root_path,
+                        record_store.read_odoo_prod_promotion_operation_record(
+                            operation.operation_id
+                        ),
+                    )
             checkpoint_provider_effect(effect_name)
             started = True
 
