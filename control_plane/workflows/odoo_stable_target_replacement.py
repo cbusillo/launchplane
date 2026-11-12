@@ -1,4 +1,6 @@
 from __future__ import annotations
+import hashlib
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 
 from control_plane.odoo_first_empty_inputs import (
     QualifiedFirstEmptyInputs,
@@ -957,6 +959,9 @@ def _assert_prelaunch_rebuild_policy_allows_request(
 ) -> str:
     if request.data_source_mode == "existing":
         return ""
+    if first_empty is not None and first_empty.release_decision_record_id:
+        first_empty.validate(request.product, lane.context, lane.instance)
+        return first_empty.release_decision_record_id
     policy = lane.odoo_prelaunch_rebuild
     if not policy.enabled:
         raise click.ClickException(
@@ -1486,6 +1491,7 @@ def build_odoo_stable_target_replacement_plan(
     request: OdooStableTargetReplacementRequest,
     dokploy_request: DokployRequest | None = None,
     dokploy_config_reader: DokployConfigReader | None = None,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> OdooStableTargetReplacementPlan:
     resolved_dokploy_request = dokploy_request or dokploy_api.dokploy_request
     resolved_dokploy_config_reader = dokploy_config_reader or dokploy_source.read_dokploy_config
@@ -1583,7 +1589,7 @@ def build_odoo_stable_target_replacement_plan(
     if (
         isinstance(record_store, PostgresRecordStore)
         and lane.instance == "prod"
-        and lane.odoo_data_policy.data_authority == "unknown"
+        and (lane.odoo_data_policy.data_authority == "unknown" or release_decision is not None)
         and request.data_source_mode == "empty"
     ):
         try:
@@ -1593,6 +1599,7 @@ def build_odoo_stable_target_replacement_plan(
                 product=profile.product,
                 context=lane.context,
                 intent="replacement",
+                release_decision=release_decision,
             )
             if qualified.authority.profile != profile:
                 raise ValueError("Original product profile changed during planning.")
@@ -2090,6 +2097,7 @@ def execute_odoo_stable_target_replacement_apply(
     release_operation: bool = False,
     operation_id: str = "",
     operation_lease_owner: str = "",
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> OdooStableTargetReplacementApplyResult:
     with _failure_stage("plan_build_failed"):
         plan = build_odoo_stable_target_replacement_plan(
@@ -2107,6 +2115,7 @@ def execute_odoo_stable_target_replacement_apply(
                 expected_current_artifact_id=request.expected_current_artifact_id,
             ),
             dokploy_request=dokploy_request,
+            release_decision=release_decision,
         )
     if plan.plan_status != "ready" or plan.current_target is None:
         raise OdooTargetReplacementStageError(
@@ -2127,7 +2136,7 @@ def execute_odoo_stable_target_replacement_apply(
     if (
         request.instance == "prod"
         and request.data_source_mode == "empty"
-        and lane.odoo_data_policy.data_authority == "unknown"
+        and (lane.odoo_data_policy.data_authority == "unknown" or release_decision is not None)
         and not plan.destructive_backup_required
     ):
         if (
@@ -2146,6 +2155,7 @@ def execute_odoo_stable_target_replacement_apply(
                 product=profile.product,
                 context=lane.context,
                 intent="replacement",
+                release_decision=release_decision,
             )
             if qualified.authority.profile != profile:
                 raise ValueError("Original product profile changed after planning.")
@@ -2307,6 +2317,9 @@ def execute_odoo_stable_target_replacement_apply(
             )
 
     runtime_source: dict[str, str] = {"data_source_mode": plan.data_source_mode}
+    if release_decision is not None:
+        runtime_source["first_empty_release_decision"] = release_decision.record_id
+        runtime_source["first_empty_release_operation"] = operation_id
     if published_copy is not None:
         runtime_source.update(
             {
@@ -2348,6 +2361,7 @@ def execute_odoo_stable_target_replacement_apply(
                     pending_deployment=pending_first_empty_deployment,
                     staged_environment=staged_environment,
                     staged_compose=staged_compose,
+                    release_decision=release_decision,
                 )
             except (ValueError, FileNotFoundError) as qualification_error:
                 raise click.ClickException(
@@ -3020,6 +3034,13 @@ def execute_odoo_stable_target_replacement_apply(
             compose_type=str(target_payload.get("composeType") or "docker-compose"),
             current_env_text=str(target_payload.get("env") or ""),
         )
+        if release_decision is not None:
+            runtime_source["first_empty_provider_env_sha256"] = hashlib.sha256(
+                prepared_env_text.encode()
+            ).hexdigest()
+            runtime_source["first_empty_provider_compose_sha256"] = hashlib.sha256(
+                compose_file.encode()
+            ).hexdigest()
         dokploy_api.update_dokploy_target_env(
             host=host,
             token=token,

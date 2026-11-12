@@ -26,6 +26,34 @@ class ReleaseVersion(BaseModel):
     )
 
 
+class AbsentProduction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    state: Literal["absent"] = "absent"
+    authority_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    recovery_backup_root: str = Field(min_length=1)
+
+    @property
+    def artifact_id(self) -> str:
+        return ""
+
+    @property
+    def source_commit(self) -> str:
+        return ""
+
+    @property
+    def shared_addons_digest(self) -> str:
+        return ""
+
+    @property
+    def website_settings_sha256(self) -> str:
+        return ""
+
+    @property
+    def runtime_settings(self) -> GenericWebReleaseSettings | None:
+        return None
+
+
 class ReleaseReviewItem(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -52,7 +80,7 @@ class SharedSourceReview(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     repository: str
-    production_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    production_commit: str = Field(pattern=r"^(?:[0-9a-f]{40})?$")
     candidate_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     items: tuple[ReleaseReviewItem, ...]
     untracked_commits: tuple[str, ...] = ()
@@ -65,7 +93,7 @@ class ReleaseChecklist(BaseModel):
     repository: str
     owner_github_id: str
     testing_url: str
-    production: ReleaseVersion
+    production: ReleaseVersion | AbsentProduction
     candidate: ReleaseVersion
     items: tuple[ReleaseReviewItem, ...]
     untracked_commits: tuple[str, ...] = ()

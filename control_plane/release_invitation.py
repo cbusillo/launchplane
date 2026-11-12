@@ -23,6 +23,7 @@ from control_plane.contracts.release_review import (
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
     ReleaseVersion,
+    AbsentProduction,
 )
 from control_plane.release_invitation_changes import InvitationChange, client_invitation_changes
 from control_plane.release_review import (
@@ -281,7 +282,7 @@ def _accepted_release_in_progress(
     store: ReleaseReviewStore,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord | None,
-    production: ReleaseVersion,
+    production: ReleaseVersion | AbsentProduction,
     candidate: ReleaseVersion,
 ) -> bool:
     if decision is None or decision.decision != "accepted" or not decision.release_start:

@@ -4,6 +4,39 @@ import type { Request } from "@playwright/test";
 import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
 import { RELEASE_PROGRESS_REFRESH_MS } from "../../src/OwnerReleaseReviewRoute";
 
+test("The first production release keeps acceptance bound while showing no previous version", { tag: "@responsive" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("products");
+  });
+  const checklist = response.review.checklist!;
+  checklist.production = { state: "absent", authority_sha256: "a".repeat(64), recovery_backup_root: "/volumes/data/backups/launchplane" };
+  response.review.latest_decision = null;
+  response.review.approved = false;
+  response.review.checklist_complete = true;
+  response.release_on_acceptance = "promote_with_rollback_drill";
+  response.release_run = null;
+  const writes: unknown[] = [];
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: response.owner_github_login, github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.route("**/v1/release-review/decisions", route => {
+    writes.push(route.request().postDataJSON());
+    return route.fulfill({ json: response });
+  });
+  await page.goto("/ui/owner-review?product=example-site");
+  const technical = page.locator(".release-review-technical");
+  await technical.getByText("Technical details", { exact: true }).click();
+  const production = technical.locator("dl > div").first().locator("dd");
+  await expect(production.locator("code")).toHaveCount(0);
+  await expect(production).not.toBeEmpty();
+  const decision = page.getByRole("region", { name: "Client release decision", exact: true });
+  await expect(decision.getByRole("button", { name: "Accept release", exact: true })).toBeEnabled();
+  await decision.getByRole("button", { name: "Accept release", exact: true }).click();
+  await waitForState(() => writes).toMatchObject([{ product: response.product, checklist_digest: response.review.checklist_digest, decision: "accepted", reason: "" }]);
+  await page.screenshot({ path: testInfo.outputPath("first-production-review.png"), fullPage: true });
+});
+
 test("A settings-only release shows its saved settings and allows the release request", { tag: "@responsive" }, async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=operator");
   const response = await page.evaluate(async () => {

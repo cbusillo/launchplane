@@ -20260,6 +20260,35 @@ class PostgresRecordStore(HumanSessionStore):
     def write_environment_inventory(self, record: EnvironmentInventory) -> None:
         self._write_row(self._environment_inventory_row(record))
 
+    def compare_and_write_environment_inventory(
+        self,
+        *,
+        expected_record: EnvironmentInventory | None,
+        replacement_record: EnvironmentInventory,
+    ) -> bool:
+        if expected_record is not None and (expected_record.context, expected_record.instance) != (
+            replacement_record.context,
+            replacement_record.instance,
+        ):
+            raise ValueError("Inventory comparison must identify one exact lane.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            row = session.scalar(
+                select(LaunchplaneInventoryRow)
+                .where(
+                    LaunchplaneInventoryRow.context == replacement_record.context,
+                    LaunchplaneInventoryRow.instance == replacement_record.instance,
+                )
+                .with_for_update()
+            )
+            current = EnvironmentInventory.model_validate(row.payload) if row is not None else None
+            if current != expected_record:
+                return False
+            session.merge(self._environment_inventory_row(replacement_record))
+            session.commit()
+            return True
+
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
     ) -> EnvironmentInventory:

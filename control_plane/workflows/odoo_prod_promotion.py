@@ -152,6 +152,8 @@ def execute_odoo_prod_promotion(
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
     release_decision: ReleaseReviewDecisionRecord | None = None,
     cutover_dispatch_guard: Callable[[], None] | None = None,
+    operation_id: str = "",
+    operation_lease_owner: str = "",
 ) -> OdooProdPromotionResult:
     del state_dir, database_url
     product = _resolve_product_profile_key(product=request.product, context=request.context)
@@ -245,8 +247,21 @@ def execute_odoo_prod_promotion(
                 "Unfinished cutover requires its persisted plan/provider or coherent recovery; in-place promotion is refused."
             )
         backup_gate = record_store.read_backup_gate_record(request.backup_record_id)
+        from control_plane.odoo_first_release import FIRST_RELEASE_ABSENCE_SOURCE
+        from control_plane.contracts.release_review import AbsentProduction
+
+        absence_gate = (
+            release_decision is not None
+            and isinstance(release_decision.checklist.production, AbsentProduction)
+            and backup_gate.source == FIRST_RELEASE_ABSENCE_SOURCE
+            and backup_gate.evidence.get("release_decision_record_id") == release_decision.record_id
+            and backup_gate.evidence.get("operation_id") == operation_id
+            and backup_gate.evidence.get("authority_sha256")
+            == release_decision.checklist.production.authority_sha256
+        )
         if (
             backup_gate.source != BACKUP_GATE_SOURCE
+            and not absence_gate
             or not backup_gate.required
             or backup_gate.status != "pass"
             or backup_gate.context != request.context
@@ -310,6 +325,15 @@ def execute_odoo_prod_promotion(
                     dispatch_guard=cutover_dispatch_guard,
                 )
             else:
+                from control_plane.contracts.release_review import AbsentProduction
+                from control_plane.odoo_first_release import first_release_is_stopped
+
+                first_release = release_decision is not None and isinstance(
+                    release_decision.checklist.production, AbsentProduction
+                )
+                initial_empty = first_release and not first_release_is_stopped(
+                    record_store, release_decision, request.context
+                )
                 replacement_result = execute_odoo_stable_target_replacement_apply(
                     control_plane_root=control_plane_root,
                     record_store=record_store,
@@ -325,6 +349,7 @@ def execute_odoo_prod_promotion(
                         timeout_seconds=request.timeout_seconds,
                         health_timeout_seconds=request.health_timeout_seconds,
                         no_cache=request.no_cache,
+                        data_source_mode="empty" if initial_empty else "existing",
                     ),
                     release_website_settings=release_decision.checklist.website_settings
                     if release_decision is not None
@@ -334,6 +359,9 @@ def execute_odoo_prod_promotion(
                     provider_effect_checkpoint=_checkpoint_chain(
                         provider_effect_checkpoint, backup_checkpoint
                     ),
+                    operation_id=operation_id,
+                    operation_lease_owner=operation_lease_owner,
+                    release_decision=release_decision if first_release else None,
                 )
         infrastructure_backup.evidence.update(backup_checkpoint.evidence)
         deployment_record = _read_deployment_record_if_present(

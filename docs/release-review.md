@@ -2,6 +2,53 @@
 title: Client release review
 ---
 
+## First accepted Odoo release
+
+An Odoo product's first accepted release can initialize its original empty
+production target through the existing release worker and replacement executor.
+It requires exclusive ownership, unused/resettable storage, no Live use or
+upstream custody, and current target/runtime/secret-binding evidence. The
+checklist records production as `state: absent`, binds those initial facts and
+recovery inputs, and reviews the candidate's complete product and shared source
+history. Missing provenance, notes or coverage still blocks acceptance. The
+service performs no provider read while rendering the checklist.
+
+Acceptance starts the ordinary infrastructure snapshot and PBS capture. Before
+the first deploy, a distinct original-absence recovery witness proves that the
+original provider inputs and storage are still empty. It is not a logical
+database backup: no original database exists. The accepted executor requalifies
+the target before its first write and before dispatch, and delivers the initial
+managed runtime values itself. Prior provider runtime sync, a separate setup
+deploy and the prelaunch review exemption are unnecessary. The acceptance
+supplies the exact initialization intent; no prelaunch rebuild policy or
+confirmation is needed for this qualified accepted-release branch. Other
+replacement callers keep their existing requirements.
+
+The recovery pin means no production version was serving. Automatic recovery and
+the first release's rollback drill stop only that release's web container and
+disable its restart policy. They retain the database, idle script runner,
+volumes, provider configuration and historical release records. The current
+inventory records no serving artifact, with a stopped/retained witness and
+original-operation custody. This restores absence of service, not empty storage.
+A timeout, foreign deployment, changed placement, incomplete witness or
+concurrent inventory write retains the original operation for reconciliation
+rather than replaying it or deleting data.
+
+The drill then takes its second infrastructure capture and a real logical
+database/filestore backup against the retained stopped web container and running
+script runner. It promotes the same accepted candidate in existing-data mode.
+The backup directory is bound in the initial checklist; without an explicit
+runtime override the first release uses the backup driver's existing default
+directory on the data volume. No extra provider sync is needed. Only the first,
+physically empty original state can use an absence witness. Later data-bearing
+backup gates remain ordinary verified captures.
+
+Service routes and acceptance/standing-Director settings are unchanged. Direct
+target replacement Apply cannot substitute for first-release acceptance. A failed
+initial release preserves its newly created data and original operation; this
+path authorizes no deletion, unreviewed deploy or blind retry of uncertain
+effects.
+
 ## Recorded source inputs
 
 Odoo release review lists addon, base-image and build-tool commit ranges from

@@ -156,6 +156,9 @@ class MediaforceReleaseTests(unittest.TestCase):
         self.decision = decision(self.store).model_copy(update={"release_start": "promote"})
         self.store.write_release_review_decision_record(self.decision)
         self.request = MediaforceReleaseRequest(product=self.profile.product, source_commit=HEAD)
+        from control_plane.contracts.release_review import ReleaseVersion
+
+        assert isinstance(self.decision.checklist.production, ReleaseVersion)
         self.plan = MediaforceReleasePlan(
             request=self.request,
             repository=self.profile.repository,

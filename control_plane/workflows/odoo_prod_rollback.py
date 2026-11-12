@@ -399,6 +399,21 @@ def execute_odoo_prod_rollback(
     if not normalized_product or normalized_product == "odoo":
         raise click.ClickException("Odoo prod rollback requires a DB-backed product profile key.")
     typed_record_store = _require_record_store(record_store)
+    if target is not None and target.absent_release_decision_id:
+        from control_plane.odoo_first_release import stop_first_release
+
+        if (
+            release_decision is None
+            or release_decision.record_id != target.absent_release_decision_id
+        ):
+            raise ValueError("Original-absence rollback requires the exact accepted release.")
+        return stop_first_release(
+            record_store,
+            control_plane_root,
+            release_decision,
+            request.context,
+            provider_effect_checkpoint,
+        )
     current_deployment = _lane_cutover_deployment(
         typed_record_store, request, include_terminal_rollback=cutover_reconciliation
     )

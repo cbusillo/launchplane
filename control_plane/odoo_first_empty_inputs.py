@@ -16,6 +16,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.release_review import AbsentProduction, ReleaseReviewDecisionRecord
 from control_plane.contracts.product_profile_record import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
     LaunchplaneProductProfileRecord,
@@ -58,13 +59,16 @@ class FirstEmptyAuthority:
     volumes: tuple[str, ...]
 
     def fingerprint(self) -> str:
+        bundle = self.bundle.model_dump(mode="json")
+        for profile in bundle["expected_product_profiles"]:
+            profile.pop("release_request", None)
         return nonvalidating_compact_sorted_json_sha256(
             {
-                "profile": self.profile.model_dump(mode="json"),
+                "profile": self.profile.model_dump(mode="json", exclude={"release_request"}),
                 "target": self.target.model_dump(mode="json"),
                 "target_id": self.target_id.model_dump(mode="json"),
                 "provider": self.provider.model_dump(mode="json"),
-                "expectations": self.bundle.model_dump(mode="json"),
+                "expectations": bundle,
                 "volumes": self.volumes,
             }
         )
@@ -78,6 +82,7 @@ class QualifiedFirstEmptyInputs:
     observed_at: datetime
     storage_sha256: str
     provider_spec: dict[str, object]
+    release_decision_record_id: str = ""
 
     def validate(self, product: str, context: str, instance: str) -> None:
         if (product, context, instance) != (
@@ -94,6 +99,7 @@ def resolve_first_empty_authority(
     context: str,
     *,
     pending_deployment: DeploymentRecord | None = None,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> FirstEmptyAuthority:
     profile = store.read_product_profile_record(product)
     lane = next(
@@ -145,11 +151,19 @@ def resolve_first_empty_authority(
         or safety.production_resources in {"shared", "separation_ready"}
     ):
         raise ValueError("Recorded data, use or custody protects this target.")
-    if (
+    if release_decision is not None:
+        require_first_release_history(
+            store, release_decision, context, pending_deployment=pending_deployment
+        )
+    elif (
         store.list_deployment_records(context_name=context, instance_name="prod")
         != ((pending_deployment,) if pending_deployment is not None else ())
         or store.list_promotion_records(context_name=context, to_instance_name="prod")
         or store.list_backup_gate_records(context_name=context, instance_name="prod")
+        or any(
+            record.context == context and record.channel == "prod"
+            for record in store.list_release_tuple_records()
+        )
     ):
         raise ValueError("Production history requires the existing recovery or release route.")
     runtime = store.list_runtime_environment_records()
@@ -217,7 +231,110 @@ def resolve_first_empty_authority(
         secret_delivery_read_sets=deliveries,
         runtime_environment_read_sets=(runtime_read_set,),
     )
-    return FirstEmptyAuthority(profile, target, target_id, provider, bundle, volumes)
+    authority = FirstEmptyAuthority(profile, target, target_id, provider, bundle, volumes)
+    if release_decision is not None and (
+        not isinstance(release_decision.checklist.production, AbsentProduction)
+        or release_decision.checklist.production.authority_sha256 != authority.fingerprint()
+    ):
+        raise ValueError("The accepted original target or initial runtime inputs changed.")
+    return authority
+
+
+def require_first_release_history(
+    store: PostgresRecordStore,
+    decision: ReleaseReviewDecisionRecord,
+    context: str,
+    *,
+    pending_deployment: DeploymentRecord | None = None,
+) -> frozenset[str]:
+    if (
+        not isinstance(decision.checklist.production, AbsentProduction)
+        or decision.decision != "accepted"
+        or store.read_release_review_decision_record(
+            product=decision.product, record_id=decision.record_id
+        )
+        != decision
+    ):
+        raise ValueError("Original-absence authority requires its exact saved acceptance.")
+    operations = store.list_odoo_prod_promotion_operation_records(
+        product=decision.product, context_name=context, instance_name="prod"
+    )
+    from control_plane.client_release import client_release_steps, client_release_step_operation_id
+
+    profile = store.read_product_profile_record(decision.product)
+    steps = client_release_steps(decision.release_start)
+    expected_operations = {
+        client_release_step_operation_id(profile=profile, decision=decision, step=step)
+        for step in steps
+        if step.kind == "promote"
+    }
+    expected_captures = {
+        client_release_step_operation_id(profile=profile, decision=decision, step=step)
+        for step in steps
+        if step.kind == "backup"
+    }
+    own = tuple(
+        operation
+        for operation in operations
+        if (
+            operation.authorization.release_decision_record_id == decision.record_id
+            and operation.operation_id in expected_operations
+            and operation.idempotency_scope == "client-release"
+            and operation.request.expected_artifact_id == decision.checklist.candidate.artifact_id
+        )
+    )
+    if len(own) != len(operations):
+        raise ValueError("A foreign production operation protects this original target.")
+    from control_plane.workflows.odoo_prod_promotion_inputs import build_odoo_prod_backup_record_id
+
+    backup_ids = {operation.request.infrastructure_backup_record_id for operation in own}
+    backup_ids.update(
+        build_odoo_prod_backup_record_id(
+            context=context, instance="prod", request_id=operation.request.request_id
+        )
+        for operation in own
+    )
+    for operation in store.list_verireel_prod_backup_gate_operation_records(
+        product=decision.product, context_name=context, instance_name="prod"
+    ):
+        if (
+            operation.authorization is None
+            or operation.authorization.release_decision_record_id != decision.record_id
+            or operation.operation_id not in expected_captures
+        ):
+            raise ValueError("A foreign capture operation protects this original target.")
+        backup_ids.add(operation.backup_record_id)
+    if any(
+        record.record_id not in backup_ids
+        for record in store.list_backup_gate_records(context_name=context, instance_name="prod")
+    ):
+        raise ValueError("A foreign backup protects this original target.")
+    deployments = store.list_deployment_records(context_name=context, instance_name="prod")
+    if any(
+        record.runtime_source.get("first_empty_release_decision") != decision.record_id
+        or record.runtime_source.get("first_empty_release_operation")
+        not in {operation.operation_id for operation in own}
+        or record.artifact_identity is None
+        or record.artifact_identity.artifact_id != decision.checklist.candidate.artifact_id
+        for record in deployments
+    ):
+        raise ValueError("A foreign deployment protects this original target.")
+    if any(
+        record.artifact_identity.artifact_id != decision.checklist.candidate.artifact_id
+        or record.backup_record_id not in backup_ids
+        for record in store.list_promotion_records(context_name=context, to_instance_name="prod")
+    ):
+        raise ValueError("A foreign promotion protects this original target.")
+    if any(
+        record.context == context
+        and record.channel == "prod"
+        and record.artifact_id != decision.checklist.candidate.artifact_id
+        for record in store.list_release_tuple_records()
+    ):
+        raise ValueError("Another production release protects this original target.")
+    return frozenset(
+        record.deploy.deployment_id for record in deployments if record.deploy.deployment_id
+    )
 
 
 def _provider_projection(
@@ -285,6 +402,7 @@ def qualify_first_empty_storage(
     pending_deployment: DeploymentRecord | None = None,
     staged_environment: str | None = None,
     staged_compose: str | None = None,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> QualifiedFirstEmptyInputs:
     if (
         pending_deployment is not None
@@ -293,11 +411,19 @@ def qualify_first_empty_storage(
     ) and (previous is None or previous.intent != "replacement" or intent != "replacement"):
         raise ValueError("Staged inputs require the original executor qualification.")
     authority = resolve_first_empty_authority(
-        store, product, context, pending_deployment=pending_deployment
+        store,
+        product,
+        context,
+        pending_deployment=pending_deployment,
+        release_decision=release_decision,
     )
     if previous is not None and authority != previous.authority:
         raise ValueError("Original profile, target, runtime or binding authority changed.")
-    if intent == "replacement" and not authority.profile.prelaunch_bootstrap_authorized:
+    if (
+        intent == "replacement"
+        and release_decision is None
+        and not authority.profile.prelaunch_bootstrap_authorized
+    ):
         raise ValueError("Empty replacement requires explicit prelaunch bootstrap authority.")
     host, token = source.read_dokploy_config(
         control_plane_root=root, database_url=store.database_url
@@ -307,6 +433,13 @@ def qualify_first_empty_storage(
         payload = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=authority.target_id.target_id
         )
+        if (
+            release_decision is not None
+            and payload.get("composeType", "docker-compose") != "docker-compose"
+        ):
+            raise ValueError(
+                "The initial accepted release requires the qualified Compose executor."
+            )
         if api.list_deployments_for_target(
             host=host,
             token=token,
@@ -345,7 +478,11 @@ def qualify_first_empty_storage(
         or re.fullmatch(r"[a-f0-9]{64}", storage) is None
         or provider_read() != spec
         or resolve_first_empty_authority(
-            store, product, context, pending_deployment=pending_deployment
+            store,
+            product,
+            context,
+            pending_deployment=pending_deployment,
+            release_decision=release_decision,
         )
         != authority
         or (previous is not None and storage != previous.storage_sha256)
@@ -359,7 +496,15 @@ def qualify_first_empty_storage(
             "intent": intent,
         }
     )
-    return QualifiedFirstEmptyInputs(authority, intent, digest, datetime.now(UTC), storage, spec)
+    return QualifiedFirstEmptyInputs(
+        authority,
+        intent,
+        digest,
+        datetime.now(UTC),
+        storage,
+        spec,
+        release_decision.record_id if release_decision is not None else "",
+    )
 
 
 def validate_first_empty_generation(

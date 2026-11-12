@@ -7,7 +7,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple, Protocol, cast
+from typing import NamedTuple, Protocol, cast, Literal, overload
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote
 
@@ -40,6 +40,7 @@ from control_plane.contracts.release_review import (
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
     ReleaseVersion,
+    AbsentProduction,
     SharedSourceReview,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
@@ -348,19 +349,59 @@ def release_website_settings(
     )
 
 
+@overload
+def release_version(
+    *,
+    store: ReleaseReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    instance: Literal["testing"],
+) -> ReleaseVersion: ...
+
+
+@overload
 def release_version(
     *, store: ReleaseReviewStore, profile: LaunchplaneProductProfileRecord, instance: str
-) -> ReleaseVersion:
+) -> ReleaseVersion | AbsentProduction: ...
+
+
+def release_version(
+    *, store: ReleaseReviewStore, profile: LaunchplaneProductProfileRecord, instance: str
+) -> ReleaseVersion | AbsentProduction:
     lane = next((lane for lane in profile.lanes if lane.instance == instance), None)
     if lane is None:
         if instance == "testing":
             raise ReleaseEvidenceUnavailable("testing_lane_missing")
         raise _identity_missing(instance)
     if profile.driver_id == "odoo":
+        if instance == "prod":
+            from control_plane.odoo_first_release import (
+                first_release_is_stopped,
+                first_release_production,
+            )
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            if isinstance(store, PostgresRecordStore):
+                latest = store.list_release_review_decision_records(
+                    product=profile.product, limit=1
+                )
+                if latest and first_release_is_stopped(store, latest[0], lane.context):
+                    return first_release_production(store, profile.product, lane.context)
         try:
             release = store.read_release_tuple_record(
                 context_name=lane.context, channel_name=instance
             )
+        except FileNotFoundError as error:
+            if instance == "prod":
+                from control_plane.odoo_first_release import first_release_production
+                from control_plane.storage.postgres import PostgresRecordStore
+
+                if isinstance(store, PostgresRecordStore):
+                    try:
+                        return first_release_production(store, profile.product, lane.context)
+                    except (FileNotFoundError, ValueError):
+                        pass
+            raise ReleaseEvidenceUnavailable("release_record_missing") from error
+        try:
             artifact = store.read_artifact_manifest(release.artifact_id)
         except FileNotFoundError as error:
             raise ReleaseEvidenceUnavailable("release_record_missing") from error
@@ -555,7 +596,9 @@ def build_release_review(
         )
         if profile.driver_id == "odoo":
             shared_sources, additional_changes = read_shared_source_changes(
-                production=store.read_artifact_manifest(production.artifact_id),
+                production=store.read_artifact_manifest(production.artifact_id)
+                if not isinstance(production, AbsentProduction)
+                else None,
                 candidate=store.read_artifact_manifest(candidate.artifact_id),
                 repository=profile.repository,
                 read=read,
@@ -617,7 +660,7 @@ def build_release_review(
                 production=store.read_artifact_manifest(production.artifact_id),
                 candidate=store.read_artifact_manifest(candidate.artifact_id),
             )
-            if profile.driver_id == "odoo"
+            if profile.driver_id == "odoo" and not isinstance(production, AbsentProduction)
             else None
         ),
     )

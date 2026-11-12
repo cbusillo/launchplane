@@ -100,7 +100,7 @@ def release_decision_issue_body(
         "## Release",
         _literal(
             f"Product: {checklist.product}\n"
-            f"Production: {checklist.production.source_commit} ({checklist.production.artifact_id})\n"
+            f"Production: {checklist.production.source_commit + ' (' + checklist.production.artifact_id + ')' if checklist.production.artifact_id else 'No version serving; initial release rollback stops service and retains data.'}\n"
             f"Testing: {checklist.candidate.source_commit} ({checklist.candidate.artifact_id})\n"
             f"Production shared inputs: {checklist.production.shared_addons_digest}\n"
             f"Testing shared inputs: {checklist.candidate.shared_addons_digest}\n"

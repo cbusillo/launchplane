@@ -20,7 +20,8 @@ from control_plane.release_review import (
     release_version,
     ReleaseEvidenceUnavailable,
 )
-from control_plane.contracts.release_review import ReleaseVersion
+from control_plane.contracts.release_review import ReleaseVersion, AbsentProduction
+from pydantic import TypeAdapter
 from control_plane.notifications import DiscordNotificationError, public_discord_url_error
 from control_plane.source_control_change import read_branch_revision, read_waiting_source_changes
 from control_plane.storage.postgres import PostgresRecordStore, OutboxWithIdempotencyRequest
@@ -62,7 +63,7 @@ _BLOCKER_TEXT = {
 @dataclass(frozen=True)
 class WaitingReleaseList:
     content: str
-    production: ReleaseVersion
+    production: ReleaseVersion | AbsentProduction
     head_commit: str
     waiting_hours: int | None
     blockers: tuple[DigestBlocker, ...]
@@ -358,7 +359,9 @@ def deliver_release_digest(
             return result("delivered", action="skipped_retired_product")
         if profile.repository != record.payload.get("repository") or release_version(
             store=store, profile=profile, instance="prod"
-        ) != ReleaseVersion.model_validate(record.payload.get("production")):
+        ) != TypeAdapter(ReleaseVersion | AbsentProduction).validate_python(
+            record.payload.get("production")
+        ):
             return result("delivered", action="skipped_changed_production")
         policies = store.list_public_ingress_notification_policy_records(
             product=profile.product, context_name=context, instance_name="prod", status="enabled"

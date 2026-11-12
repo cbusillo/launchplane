@@ -223,6 +223,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   }
 
   const checklist = response?.review.checklist;
+  const productionVersion = checklist && !("state" in checklist.production) ? checklist.production : null;
   const latestDecision = response?.review.latest_decision;
   const noNewRelease = response?.review.no_new_release === true;
   const testingUrl = checklist ? safeExternalUrl(checklist.testing_url) : null;
@@ -236,15 +237,16 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const reviewingHotfix = activeHotfix && !response?.can_start_temporary_hotfix;
   const incomplete = !checklist || response?.review.checklist_complete !== true;
   const hasChanges = !!checklist && !noNewRelease && (
-    checklist.production.artifact_id !== checklist.candidate.artifact_id
-    || checklist.production.source_commit !== checklist.candidate.source_commit
-    || (checklist.production.shared_addons_digest ?? "") !== (checklist.candidate.shared_addons_digest ?? "")
-    || runtimeSettingsIdentity(checklist.production.runtime_settings) !== runtimeSettingsIdentity(checklist.candidate.runtime_settings)
+    !productionVersion
+    || productionVersion.artifact_id !== checklist.candidate.artifact_id
+    || productionVersion.source_commit !== checklist.candidate.source_commit
+    || (productionVersion.shared_addons_digest ?? "") !== (checklist.candidate.shared_addons_digest ?? "")
+    || runtimeSettingsIdentity(productionVersion.runtime_settings) !== runtimeSettingsIdentity(checklist.candidate.runtime_settings)
   );
   const changedSettings = Object.entries(checklist?.candidate.runtime_settings?.values ?? {})
-    .filter(([key, value]) => checklist?.production.runtime_settings?.values[key] !== value);
+    .filter(([key, value]) => productionVersion?.runtime_settings?.values[key] !== value);
   const removedSettings = (checklist?.candidate.runtime_settings?.absent_keys ?? [])
-    .filter(key => !checklist?.production.runtime_settings?.absent_keys.includes(key));
+    .filter(key => !productionVersion?.runtime_settings?.absent_keys.includes(key));
   const client = response?.owner_github_login ?? "";
   // A viewer who is not the Client learns first who the Client is and that their
   // own decision cannot start the release.
@@ -291,6 +293,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {response.release_run ? <ReleaseRunProgress run={response.release_run} refreshFailed={refreshFailed} /> : null}
       {checklist && !noNewRelease ? <>
+        {!productionVersion ? <p>This is the first production release. Accepting starts deployment to the empty target. If it fails, rollback stops the site and keeps any data entered.</p> : null}
         {checklist.first_live_origin ? <p>Accepting this release puts {checklist.first_live_origin} into live use. After the release succeeds, Launchplane removes its prelaunch search protection.</p> : null}
         {checklist.website_settings ? <section data-website-settings aria-label="Website settings in this release">
           <h3>Website settings</h3>
@@ -370,7 +373,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       {checklist ? <details className="release-review-technical">
         <summary>Technical details</summary>
         <dl>
-          <div><dt>{reviewingHotfix ? "Version the urgent fix replaced:" : "Current production version:"}</dt><dd><code>{checklist.production.source_commit}</code></dd></div>
+          <div><dt>{reviewingHotfix ? "Version the urgent fix replaced:" : "Current production version:"}</dt><dd>{productionVersion ? <code>{productionVersion.source_commit}</code> : "No version serving"}</dd></div>
           <div><dt>{noNewRelease ? "Testing version (already in production):" : reviewingHotfix ? "Live urgent fix:" : "Proposed production version:"}</dt><dd><code>{checklist.candidate.source_commit}</code>{reviewingHotfix ? null : <span>Currently in testing</span>}</dd></div>
           {(checklist.shared_sources ?? []).map(source => <div key={`${source.repository}/${source.production_commit}/${source.candidate_commit}`}>
             <dt>Shared components from {source.repository}</dt>
