@@ -14,6 +14,8 @@ and shared sources, image, runtime setup and Client test notes. It does not
 compare source history against an invented predecessor. Missing provenance or
 initial test notes still blocks acceptance. The
 service performs no provider read while rendering the checklist.
+Absence here means no production release is recorded; physical absence is
+proved inside the accepted operation before initialization.
 
 Read `GET /v1/release-review?product=P`, then prepare the whole-version test notes
 on the existing `POST /v1/release-review/requests` route with
@@ -68,6 +70,13 @@ target replacement Apply cannot substitute for first-release acceptance. A faile
 initial release preserves its newly created data and original operation; this
 path authorizes no deletion, unreviewed deploy or blind retry of uncertain
 effects.
+
+The inverse never delivers edited runtime inputs. It can stop the original
+owned web after a settings or managed-binding edit, using the immutable recovery
+pin and current custody, placement, use, data and Live checks. Forward capture,
+initialization and repromotion still require the exact accepted fingerprint.
+Changed protected facts retain the hold; changed forward inputs need fresh
+review and acceptance.
 
 ## Recorded source inputs
 

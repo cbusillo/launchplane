@@ -39,7 +39,11 @@ test("The first production release keeps acceptance bound while showing no previ
   await expect(production.locator("code")).toHaveCount(0);
   await expect(production).not.toBeEmpty();
   const decision = page.getByRole("region", { name: "Client release decision", exact: true });
-  await expect(page.getByRole("region", { name: "Complete initial version", exact: true })).toContainText(checklist.initial_version.client_test_notes);
+  const initial = page.getByRole("region", { name: "Complete initial version", exact: true });
+  await expect(initial).toContainText(checklist.initial_version.client_test_notes);
+  await initial.getByText("Setup included in this release", { exact: true }).click();
+  await expect(initial).toContainText("ODOO_DB_NAME");
+  await expect(initial).toContainText(checklist.initial_version.runtime_values.ODOO_DB_NAME);
   await expect(decision.getByRole("button", { name: "Accept release", exact: true })).toBeEnabled();
   await decision.getByRole("button", { name: "Accept release", exact: true }).click();
   await waitForState(() => writes).toMatchObject([{ product: response.product, checklist_digest: response.review.checklist_digest, decision: "accepted", reason: "" }]);

@@ -11,7 +11,7 @@ from control_plane.contracts.release_review import (
     InitialVersionReview,
     InitialVersionSource,
     ReleaseChecklist,
-    ReleaseReviewStatus,
+    InitialVersionTestNotes,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -30,7 +30,9 @@ def initial_version_inputs_sha256(checklist: ReleaseChecklist) -> str:
             "initial_version": initial.model_copy(update={"client_test_notes": ""}),
         }
     )
-    return nonvalidating_compact_sorted_json_sha256(without_notes.model_dump(mode="json"))
+    from control_plane.release_review import checklist_digest
+
+    return checklist_digest(without_notes)
 
 
 def initial_version_review(
@@ -79,97 +81,28 @@ def initial_version_review(
         ),
         target_context=context,
         target_name=authority.target.target_name,
-        runtime_values=_resolve_recorded_runtime_values(
-            record_store=record_store, context=context, instance="prod"
-        ),
+        runtime_values={
+            key: value
+            for key, value in _resolve_recorded_runtime_values(
+                record_store=record_store, context=context, instance="prod"
+            ).items()
+            if key not in keys
+        },
         managed_secret_keys=keys,
     ), tuple(blockers)
 
 
 def recorded_initial_version_notes(
-    checklist: ReleaseChecklist, profile: LaunchplaneProductProfileRecord
+    checklist: ReleaseChecklist, notes: InitialVersionTestNotes | None
 ) -> ReleaseChecklist:
-    request = profile.release_request
-    if (
-        checklist.initial_version is None
-        or request is None
-        or request.initial_version_review is None
-    ):
+    if checklist.initial_version is None or notes is None:
         return checklist
-    notes = request.initial_version_review
-    if (
-        request.production != checklist.production
-        or request.candidate != checklist.candidate
-        or notes.inputs_sha256 != initial_version_inputs_sha256(checklist)
-    ):
+    if notes.inputs_sha256 != initial_version_inputs_sha256(checklist):
         return checklist
     return checklist.model_copy(
         update={
             "initial_version": checklist.initial_version.model_copy(
                 update={"client_test_notes": notes.client_test_notes}
             ),
-        }
-    )
-
-
-def prepare_initial_version_notes(
-    store: object,
-    profile: LaunchplaneProductProfileRecord,
-    review: ReleaseReviewStatus,
-    notes: str,
-) -> ReleaseReviewStatus:
-    from control_plane.release_review import (
-        CLIENT_APPROVAL_REQUIRED,
-        RELEASE_RECORD_PENDING,
-        checklist_blockers,
-        checklist_digest,
-    )
-
-    checklist = review.checklist
-    if checklist is None or checklist.initial_version is None or not notes.strip():
-        raise ValueError("Complete initial-version test notes require its current checklist.")
-    replacement = checklist.model_copy(
-        update={
-            "initial_version": checklist.initial_version.model_copy(
-                update={"client_test_notes": notes.strip()}
-            ),
-        }
-    )
-    digest = checklist_digest(replacement)
-    matching = [
-        record
-        for record in cast(PostgresRecordStore, store).list_release_review_decision_records(
-            product=profile.product
-        )
-        if record.checklist_digest == digest
-    ]
-    latest = max(matching, key=lambda record: (record.decided_at, record.record_id), default=None)
-    replaced_decision_blockers = (
-        {"The Client requested changes.", RELEASE_RECORD_PENDING}
-        if digest != review.checklist_digest and review.latest_decision is not None
-        else set()
-    )
-    blockers = tuple(
-        dict.fromkeys(
-            (
-                *(
-                    blocker
-                    for blocker in review.blockers
-                    if blocker not in {INITIAL_TEST_NOTES_REQUIRED, CLIENT_APPROVAL_REQUIRED}
-                    and blocker not in replaced_decision_blockers
-                    and blocker not in checklist_blockers(checklist, profile=profile)
-                ),
-                *checklist_blockers(replacement, profile=profile),
-            )
-        )
-    )
-    return review.model_copy(
-        update={
-            "checklist": replacement,
-            "checklist_digest": digest,
-            "latest_decision": latest,
-            "approved": False,
-            "checklist_complete": not blockers,
-            "blockers": blockers or (CLIENT_APPROVAL_REQUIRED,),
         }
     )

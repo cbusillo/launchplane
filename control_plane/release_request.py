@@ -17,7 +17,7 @@ from control_plane.release_invitation import (
     _ready,
     publish_release_invitation,
 )
-from control_plane.release_review import ReleaseReviewStore
+from control_plane.release_review import ReleaseReviewStore, current_release_review
 from control_plane.storage.postgres import ProductProfileCompareWriteResult
 
 
@@ -50,6 +50,7 @@ def record_release_request(
     decision_reference: str,
     actor: str,
     initial_version_test_notes: str = "",
+    control_plane_root: Path | None = None,
 ) -> LaunchplaneProductProfileRecord:
     from control_plane.client_release import live_temporary_hotfix
 
@@ -57,16 +58,30 @@ def record_release_request(
     if initial_version_test_notes:
         from control_plane.initial_version_review import (
             initial_version_inputs_sha256,
-            prepare_initial_version_notes,
         )
 
-        if review.checklist is None:
+        if (
+            review.checklist is None
+            or review.checklist.initial_version is None
+            or control_plane_root is None
+        ):
             raise ValueError("The initial review checklist is unavailable.")
         initial_notes = InitialVersionTestNotes(
             inputs_sha256=initial_version_inputs_sha256(review.checklist),
             client_test_notes=initial_version_test_notes.strip(),
         )
-        review = prepare_initial_version_notes(store, profile, review, initial_version_test_notes)
+        review = current_release_review(
+            record_store=store,
+            profile=profile,
+            control_plane_root=control_plane_root,
+            initial_version_test_notes=initial_notes,
+        )
+        if (
+            review.checklist is None
+            or review.checklist.initial_version is None
+            or initial_version_inputs_sha256(review.checklist) != initial_notes.inputs_sha256
+        ):
+            raise ValueError("The initial version changed while its notes were prepared.")
     elif (
         profile.release_request is not None
         and review.checklist is not None
@@ -153,6 +168,7 @@ def request_release_review(
         decision_reference=decision_reference,
         actor=actor,
         initial_version_test_notes=initial_version_test_notes,
+        control_plane_root=control_plane_root,
     )
     if saved.release_on_acceptance == "director_standing":
         return True

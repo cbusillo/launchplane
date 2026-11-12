@@ -59,16 +59,31 @@ def pin_odoo_release_recovery_target(
 
 
 def require_odoo_release_recovery_pin(
-    store: PostgresRecordStore, operation: OdooProdPromotionOperationRecord
+    store: PostgresRecordStore,
+    operation: OdooProdPromotionOperationRecord,
+    *,
+    recovering: bool = False,
 ) -> None:
     decision = store.read_release_review_decision_record(
         product=operation.product, record_id=operation.authorization.release_decision_record_id
     )
     pin = operation.checkpoints[0].evidence if operation.checkpoints else {}
     if isinstance(decision.checklist.production, AbsentProduction):
-        expected = pin_odoo_release_recovery_target(store, decision, operation.context)
+        from control_plane.odoo_first_empty_inputs import resolve_first_empty_authority
+
+        expected = {
+            "recovery_kind": "original_absence",
+            "release_decision_record_id": decision.record_id,
+            "authority_sha256": decision.checklist.production.authority_sha256,
+        }
         if pin != expected:
             raise ValueError("The original-absence recovery binding changed.")
+        if recovering:
+            resolve_first_empty_authority(
+                store, decision.product, operation.context, inverse_decision=decision
+            )
+        else:
+            pin_odoo_release_recovery_target(store, decision, operation.context)
         return
     deployment = store.read_deployment_record(pin.get("recovery_deployment_record_id", ""))
     if (
@@ -212,7 +227,7 @@ def build_odoo_release_recovery(
         return None
     if target.absent_release_decision_id:
         try:
-            require_odoo_release_recovery_pin(store, source)
+            require_odoo_release_recovery_pin(store, source, recovering=True)
         except (FileNotFoundError, ValueError):
             return None
     key = f"{source.operation_id}:failure-recovery"

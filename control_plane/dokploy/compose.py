@@ -22,6 +22,7 @@ TESTING_CONNECTION_CSP = (
     "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
     "style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-src 'self'"
 )
+DEFAULT_DATA_WORKFLOW_SSH_DIR = "/home/ubuntu/.ssh"
 
 DOKPLOY_COMPOSE_METADATA_LABELS = frozenset(
     {
@@ -258,10 +259,10 @@ def render_odoo_raw_compose_file(
     workflow_ssh_mounts = ""
     if mount_workflow_ssh:
         if not protect_workflow_ssh:
-            workflow_ssh_mounts += (
-                "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/home/ubuntu/.ssh:ro\n"
-            )
-        workflow_ssh_mounts += "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/root/.ssh:ro\n"
+            workflow_ssh_mounts += f"      - ${{DATA_WORKFLOW_SSH_DIR:-{DEFAULT_DATA_WORKFLOW_SSH_DIR}}}:/home/ubuntu/.ssh:ro\n"
+        workflow_ssh_mounts += (
+            f"      - ${{DATA_WORKFLOW_SSH_DIR:-{DEFAULT_DATA_WORKFLOW_SSH_DIR}}}:/root/.ssh:ro\n"
+        )
     workflow_security = (
         '    security_opt: ["no-new-privileges:true"]' if protect_workflow_ssh else ""
     )

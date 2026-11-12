@@ -104,8 +104,11 @@ def resolve_first_empty_authority(
     *,
     pending_deployment: DeploymentRecord | None = None,
     release_decision: ReleaseReviewDecisionRecord | None = None,
+    inverse_decision: ReleaseReviewDecisionRecord | None = None,
     allow_release_history: bool = False,
 ) -> FirstEmptyAuthority:
+    if release_decision is not None and inverse_decision is not None:
+        raise ValueError("Forward and inverse authority are separate release boundaries.")
     profile = store.read_product_profile_record(product)
     lane = next(
         (lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "prod")), None
@@ -156,8 +159,9 @@ def resolve_first_empty_authority(
         or safety.production_resources in {"shared", "separation_ready"}
     ):
         raise ValueError("Recorded data, use or custody protects this target.")
-    if release_decision is not None:
-        require_first_release_history(store, release_decision, context)
+    decision = release_decision or inverse_decision
+    if decision is not None:
+        require_first_release_history(store, decision, context)
     elif allow_release_history:
         require_first_release_history(store, None, context, product=product)
     elif (
@@ -218,7 +222,7 @@ def resolve_first_empty_authority(
             "records": tuple(record for record in runtime if runtime_read_set.includes(record)),
         }
     )
-    if any(
+    if inverse_decision is None and any(
         plain_setting_looks_like_credential(key, str(value))
         for record in runtime_read_set.records
         for key, value in record.env.items()
@@ -242,9 +246,9 @@ def resolve_first_empty_authority(
         or release_decision.checklist.production.authority_sha256 != authority.fingerprint()
     ):
         raise ValueError("The accepted original target or initial runtime inputs changed.")
-    if release_decision is not None:
-        initial = release_decision.checklist.initial_version
-        artifact = store.read_artifact_manifest(release_decision.checklist.candidate.artifact_id)
+    if decision is not None:
+        initial = decision.checklist.initial_version
+        artifact = store.read_artifact_manifest(decision.checklist.candidate.artifact_id)
         if (
             initial is None
             or initial.artifact_manifest_sha256

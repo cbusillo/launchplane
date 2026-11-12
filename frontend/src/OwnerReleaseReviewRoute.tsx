@@ -299,7 +299,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {response.release_run ? <ReleaseRunProgress run={response.release_run} refreshFailed={refreshFailed} /> : null}
       {checklist && !noNewRelease ? <>
-        {!productionVersion ? <p>No version is serving in production. This release creates or resumes the initial site. If it fails, rollback stops the site and keeps its data.</p> : null}
+        {!productionVersion ? <p>No release is recorded for production. Before the first change, Launchplane proves the target is empty and unused. This release creates or resumes the initial site. If it fails, rollback stops the site and keeps its data.</p> : null}
         {checklist.first_live_origin ? <p>Accepting this release puts {checklist.first_live_origin} into live use. After the release succeeds, Launchplane removes its prelaunch search protection.</p> : null}
         {checklist.website_settings ? <section data-website-settings aria-label="Website settings in this release">
           <h3>Website settings</h3>
@@ -317,11 +317,11 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
               {source.name}: {source.repository} <code>{source.commit}</code>
             </li>)}</ul>
           </details>
-          {response.can_override ? <details><summary>Setup included in this release</summary>
+          <details><summary>Setup included in this release</summary>
             <p>{initial.target_context}: {initial.target_name}</p>
             <dl>{Object.entries(initial.runtime_values).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
             <p>Managed credential purposes: {initial.managed_secret_keys.join(", ")}. Values are private.</p>
-          </details> : null}
+          </details>
         </section> : <ReleaseItems items={checklist.items} viewerIsOwner={response.viewer_is_owner} emptyMessage={(checklist.shared_sources ?? []).length ? "No product-repository changes. Review the shared components below." : undefined} />}
         {(checklist.shared_sources ?? []).map(source => <section key={`${source.repository}/${source.production_commit}/${source.candidate_commit}`} aria-label={`Shared release inputs from ${source.repository}`}>
           <h4>Shared release inputs</h4>
@@ -394,7 +394,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       {checklist ? <details className="release-review-technical">
         <summary>Technical details</summary>
         <dl>
-          <div><dt>{reviewingHotfix ? "Version the urgent fix replaced:" : "Current production version:"}</dt><dd>{productionVersion ? <code>{productionVersion.source_commit}</code> : "No version serving"}</dd></div>
+          <div><dt>{reviewingHotfix ? "Version the urgent fix replaced:" : "Current production version:"}</dt><dd>{productionVersion ? <code>{productionVersion.source_commit}</code> : "No production release recorded"}</dd></div>
           <div><dt>{noNewRelease ? "Testing version (already in production):" : reviewingHotfix ? "Live urgent fix:" : "Proposed production version:"}</dt><dd><code>{checklist.candidate.source_commit}</code>{reviewingHotfix ? null : <span>Currently in testing</span>}</dd></div>
           {(checklist.shared_sources ?? []).map(source => <div key={`${source.repository}/${source.production_commit}/${source.candidate_commit}`}>
             <dt>Shared components from {source.repository}</dt>

@@ -2,7 +2,8 @@ import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from typing import Any
+from typing import Any, Self
+from collections.abc import Callable
 from urllib.parse import parse_qs, urlsplit
 
 from control_plane.contracts.artifact_identity import (
@@ -14,6 +15,7 @@ from control_plane.contracts.artifact_identity import (
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.product_profile_record import ProductOwnerProfile
+from control_plane.contracts.release_review import ReleaseDecision
 from control_plane.release_review import build_release_review, checklist_digest
 from tests.test_odoo_first_empty_inputs import FirstEmptyInputsFixture
 from tests.test_release_review import github_read
@@ -110,8 +112,8 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
 
     def test_review_binds_actual_absence_and_initial_runtime_without_exemption(self) -> None:
         review = build_release_review(store=self.store, profile=self.profile, read=self.read)
-        if not review.checklist_complete:
-            review = self.prepare_initial_review()
+        self.assertFalse(review.checklist_complete)
+        review = self.prepare_initial_review()
         self.assertTrue(review.required)
         self.assertFalse(review.approved)
         self.assertTrue(review.checklist_complete, review.blockers)
@@ -141,6 +143,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             reason="Initial version is ready for review",
             decision_reference="https://github.com/example/product/issues/1#issuecomment-1",
             actor="fixture",
+            control_plane_root=Path("."),
             initial_version_test_notes="Open the initial site, add a fictional contact and verify the follow-up reminder.",
         )
         return build_release_review(store=self.store, profile=self.profile, read=self.read)
@@ -303,7 +306,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         ):
             asyncio.run(exercise())
 
-    def accept(self) -> Any:
+    def decide(self, kind: ReleaseDecision = "accepted") -> Any:
         from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
         from control_plane.client_release import release_start_for_acceptance
         from control_plane.timestamps import utc_now_timestamp
@@ -319,12 +322,15 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             product=self.profile.product,
             checklist=review.checklist,
             checklist_digest=review.checklist_digest,
-            decision="accepted",
+            decision=kind,
+            reason="Revise the initial version" if kind == "changes_requested" else "",
             actor_github_id=self.profile.owner.github_id,
             actor_github_login=self.profile.owner.github_login,
             release_issue_url="https://github.com/example/product/issues/1",
             decided_at=utc_now_timestamp(),
-            release_start=release_start_for_acceptance(store=self.store, profile=self.profile),
+            release_start=release_start_for_acceptance(store=self.store, profile=self.profile)
+            if kind == "accepted"
+            else "",
         )
         self.store.write_release_review_decision_record(decision)
         return decision
@@ -332,7 +338,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
     def test_missing_recorded_production_artifact_is_not_original_absence(self) -> None:
         from control_plane.release_review import release_version, ReleaseEvidenceUnavailable
 
-        self.accept()
+        self.decide()
         self.store.write_release_tuple_record(
             ReleaseTupleRecord(
                 tuple_id="fictional-prod",
@@ -348,11 +354,31 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             with self.assertRaises(ReleaseEvidenceUnavailable):
                 release_version(store=self.store, profile=self.profile, instance="prod")
 
-    def test_rejected_first_candidate_can_be_reviewed_again(self) -> None:
-        rejected = self.accept().model_copy(
-            update={"decision": "changes_requested", "reason": "Revise it", "release_start": ""}
+    def test_initial_review_separates_managed_keys_from_plain_setup(self) -> None:
+        from control_plane.product_config import apply_product_config_bundle
+
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                "product": self.profile.product,
+                "context": self.context,
+                "instance": "prod",
+                "secrets": [
+                    {"binding_key": "ODOO_WORKERS", "value": "2", "secret_class": "prod_only"}
+                ],
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="fixture",
         )
-        self.store.write_release_review_decision_record(rejected)
+        accepted = self.decide()
+        initial = accepted.checklist.initial_version
+        assert initial is not None
+        self.assertIn("ODOO_WORKERS", initial.managed_secret_keys)
+        self.assertNotIn("ODOO_WORKERS", initial.runtime_values)
+
+    def test_rejected_first_candidate_can_be_reviewed_again(self) -> None:
+        self.decide("changes_requested")
         review = build_release_review(store=self.store, profile=self.profile, read=self.read)
         self.assertIsNotNone(review.checklist)
         self.assertFalse(review.approved)
@@ -366,6 +392,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             reason="The initial test notes were corrected",
             decision_reference="https://github.com/example/product/issues/1#issuecomment-2",
             actor="fixture",
+            control_plane_root=Path("."),
             initial_version_test_notes="Verify the corrected initial contact and follow-up workflow.",
         )
         changed = build_release_review(store=self.store, profile=self.profile, read=self.read)
@@ -811,90 +838,305 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         }
 
     def complete_drill(self, *, expected_first_mode: str, replacement: Any = None) -> None:
-        from control_plane.client_release import _queue_rollback, ClientReleaseStep
-        from control_plane.timestamps import utc_now_timestamp
+        from datetime import UTC, datetime, timedelta
+        from control_plane.client_release import (
+            advance_client_releases,
+            client_release_steps,
+            read_client_release_run,
+        )
         from control_plane.release_review import release_version
         from control_plane.odoo_first_release import FIRST_RELEASE_ABSENCE_SOURCE
+        from control_plane.contracts.production_backup_authority import ProductionBackupPolicyRecord
+        from control_plane.workflows.production_promotion_backup import ODOO_PROMOTION_BACKUP_ACTION
+        from control_plane.workflows.production_backup_gate_operation_worker import (
+            run_production_backup_gate_operation_worker_once,
+        )
+        from tests.test_production_backup_provider import _binding, BackupHost, setup_memory_files
 
+        binding = _binding()
+        payload = binding.policy.model_dump(mode="json")
+        for derived in ("policy_id", "record_id", "policy_digest"):
+            payload.pop(derived)
+        payload.update(
+            product=self.profile.product,
+            context=self.context,
+            promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+        )
+        self.store.write_production_backup_target_record(binding.source_target)
+        self.store.write_production_backup_target_record(binding.destination_target)
+        self.store.write_production_backup_policy_record(
+            ProductionBackupPolicyRecord.model_validate(payload)
+        )
+        setup_memory_files(self)
+        host = BackupHost()
+        capture_time = datetime.now(UTC)
+
+        class CaptureClock(datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> Self:
+                return cls.fromtimestamp(capture_time.timestamp(), tz)
+
+        self.enterContext(
+            patch("control_plane.workflows.production_promotion_backup.datetime", CaptureClock)
+        )
+        self.enterContext(
+            patch(
+                "control_plane.workflows.production_backup_provider.utc_now_timestamp",
+                side_effect=lambda: capture_time.isoformat(),
+            )
+        )
+        self.enterContext(
+            patch(
+                "control_plane.workflows.production_backup_gate_operation_worker._utc_now_timestamp",
+                side_effect=lambda: capture_time.isoformat(),
+            )
+        )
         dump = self.enterContext(
             patch(
                 "control_plane.dokploy.post_deploy.run_compose_odoo_backup_gate",
                 side_effect=self.capture_stopped_backup,
             )
         )
-        self.accepted = self.accept()
-        first = self.queue_promotion(self.accepted)
+        self.enterContext(
+            patch(
+                "control_plane.workflows.production_backup_gate.resolve_guest_capture_values",
+                return_value={
+                    "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "fictional-private",
+                    "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "fictional-hosts",
+                },
+            )
+        )
+        self.enterContext(
+            patch(
+                "control_plane.workflows.production_backup_provider.subprocess.run",
+                side_effect=host.run,
+            )
+        )
+        for target in (
+            "control_plane.client_release.current_release_review",
+            "control_plane.release_review.current_release_review",
+        ):
+            self.enterContext(
+                patch(
+                    target,
+                    side_effect=lambda **_: build_release_review(
+                        store=self.store, profile=self.profile, read=self.read
+                    ),
+                )
+            )
+        self.accepted = self.decide()
         self.modes: list[str] = []
         with patch(
             "control_plane.workflows.odoo_prod_promotion.execute_odoo_stable_target_replacement_apply",
             side_effect=replacement or self.provider_replacement,
         ):
-            self.assertTrue(self.run_worker().terminal_write_committed)
-            forward = self.store.read_odoo_prod_promotion_operation_record(first.operation_id)
-            self.assertEqual(forward.status, "pass", forward.error_message)
-            assert forward.result is not None
-            gate = self.store.read_backup_gate_record(forward.result.backup_record_id)
-            if expected_first_mode == "empty":
-                self.assertEqual(gate.source, FIRST_RELEASE_ABSENCE_SOURCE)
-                self.assertNotIn("database_dump_sha256", gate.evidence)
-            else:
-                self.assertIn("database_dump_sha256", gate.evidence)
-            retained = dict(self.docker_state.volumes)
-            rollback_id = _queue_rollback(
-                self.store,
-                Path("."),
-                self.profile,
-                self.accepted,
-                ClientReleaseStep("rollback", 1),
-                self.context,
-                utc_now_timestamp(),
-            )
-            self.assertTrue(self.run_worker().terminal_write_committed)
-            inverse = self.store.read_odoo_prod_rollback_operation_record(rollback_id)
-            self.assertEqual(inverse.status, "pass", inverse.error_message)
-            self.assertEqual(self.docker_state.volumes, retained)
-            self.assertFalse(self.docker_state.rows["web-id"]["State"]["Running"])
-            self.assertEqual(
-                release_version(store=self.store, profile=self.profile, instance="prod"),
-                self.accepted.checklist.production,
-            )
-            second = self.queue_promotion(self.accepted, 2)
+            for step in client_release_steps(self.accepted.release_start):
+                queued = advance_client_releases(store=self.store, control_plane_root=Path("."))
+                self.assertEqual(
+                    len(queued),
+                    1,
+                    (
+                        step.name,
+                        read_client_release_run(
+                            store=self.store,
+                            profile=self.profile,
+                            decision=self.accepted,
+                            control_plane_root=Path("."),
+                        ),
+                    ),
+                )
+                (operation_id,) = queued
+                self.assertFalse(
+                    advance_client_releases(store=self.store, control_plane_root=Path("."))
+                )
+                operation: Any
+                if step.kind == "backup":
+                    worked = run_production_backup_gate_operation_worker_once(
+                        record_store=self.store,
+                        control_plane_root_path=Path("."),
+                        lease_owner="fictional-backup-worker",
+                    )
+                    operation = self.store.read_verireel_prod_backup_gate_operation_record(
+                        operation_id
+                    )
+                    capture_time = datetime.fromisoformat(operation.finished_at) + timedelta(
+                        seconds=1
+                    )
+                else:
+                    worked = self.run_worker()
+                    operation = (
+                        self.store.read_odoo_prod_promotion_operation_record(operation_id)
+                        if step.kind == "promote"
+                        else self.store.read_odoo_prod_rollback_operation_record(operation_id)
+                    )
+                self.assertTrue(worked.terminal_write_committed)
+                self.assertEqual(operation.status, "pass", operation.error_message)
+                if step.kind == "promote" and step.attempt == 1:
+                    assert operation.result is not None
+                    gate = self.store.read_backup_gate_record(operation.result.backup_record_id)
+                    if expected_first_mode == "empty":
+                        self.assertEqual(gate.source, FIRST_RELEASE_ABSENCE_SOURCE)
+                        self.assertNotIn("database_dump_sha256", gate.evidence)
+                    else:
+                        self.assertIn("database_dump_sha256", gate.evidence)
+                if step.kind == "rollback":
+                    self.assert_parked_web_only()
+                    self.assertFalse(self.docker_state.rows["web-id"]["State"]["Running"])
+                    self.assertEqual(
+                        release_version(store=self.store, profile=self.profile, instance="prod"),
+                        self.accepted.checklist.production,
+                    )
+        self.assertFalse(advance_client_releases(store=self.store, control_plane_root=Path(".")))
+        run = read_client_release_run(
+            store=self.store, profile=self.profile, decision=self.accepted
+        )
+        assert run is not None
+        self.assertEqual(run.state, "passed")
+        self.assertEqual(dump.call_count, 1 if expected_first_mode == "empty" else 2)
+        self.assertEqual(sum(command[0] == "vzdump" for command in host.commands), 2)
+        self.assertEqual(self.modes, [expected_first_mode, "existing"])
+        self.assertEqual(
+            release_version(store=self.store, profile=self.profile, instance="prod"),
+            self.accepted.checklist.candidate,
+        )
 
-            self.assertTrue(self.run_worker().terminal_write_committed)
-            repeated = self.store.read_odoo_prod_promotion_operation_record(second.operation_id)
-            self.assertEqual(repeated.status, "pass", repeated.error_message)
-            self.assertEqual(dump.call_count, 1 if expected_first_mode == "empty" else 2)
-            self.assertEqual(self.modes, [expected_first_mode, "existing"])
-            self.assertEqual(
-                release_version(store=self.store, profile=self.profile, instance="prod"),
-                self.accepted.checklist.candidate,
+    def assert_parked_web_only(self) -> None:
+        self.assertEqual([command[0] for command in self.docker_state.writes], ["update", "stop"])
+        self.assertTrue(all(command[-1] == "web-id" for command in self.docker_state.writes))
+        self.assertTrue(self.docker_state.rows["database"]["State"]["Running"])
+        self.assertTrue(self.docker_state.rows["script-runner"]["State"]["Running"])
+
+    def test_failure_recovery_stops_owned_web_after_runtime_and_secret_edits(self) -> None:
+        from control_plane.product_config import apply_product_config_bundle
+
+        def edit_workers() -> None:
+            self.runtime = self.runtime.model_copy(
+                update={"env": {**self.runtime.env, "ODOO_WORKERS": "3"}}
             )
+            self.store.write_runtime_environment_record(self.runtime)
+
+        def rotate_secret() -> None:
+            apply_product_config_bundle(
+                record_store=self.store,
+                payload={
+                    "product": self.profile.product,
+                    "context": self.context,
+                    "instance": "prod",
+                    "secrets": [
+                        {
+                            "binding_key": "ODOO_DB_PASSWORD",
+                            "value": "fictional-rotated",
+                            "secret_class": "prod_only",
+                        }
+                    ],
+                },
+                mode="apply",
+                actor="fixture",
+                source_label="fixture",
+            )
+
+        self.fail_and_recover(before_terminal=edit_workers, before_recovery=rotate_secret)
+
+    def test_newer_acceptance_cannot_deploy_until_original_recovery_releases_the_lane(self) -> None:
+        from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
+
+        later = None
+
+        def newer_acceptance() -> None:
+            nonlocal later
+            later = self.decide()
+            with self.assertRaises(OdooStableLaneOperationConflictError):
+                self.queue_promotion(later)
+            self.assertFalse(
+                any(
+                    record.authorization.release_decision_record_id == later.record_id
+                    for record in self.store.list_odoo_prod_promotion_operation_records()
+                )
+            )
+
+        self.fail_and_recover(before_recovery=newer_acceptance)
+        assert later is not None
+        self.accepted = later
+        self.fail_deployment = False
+        operation = self.queue_promotion(later)
+        with patch(
+            "control_plane.workflows.odoo_prod_promotion.execute_odoo_stable_target_replacement_apply",
+            side_effect=self.provider_replacement,
+        ):
+            self.assertTrue(self.run_worker().terminal_write_committed)
+        finished = self.store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+        self.assertEqual(finished.status, "pass", finished.error_message)
+        self.assertEqual(self.modes, ["empty", "existing"])
+
+    def test_inverse_refuses_changed_original_storage_before_native_effects(self) -> None:
+        inverse_id = self.promote_and_queue_inverse()
+        self.store.write_runtime_environment_record(
+            self.runtime.model_copy(
+                update={"env": {**self.runtime.env, "ODOO_DB_VOLUME": "another-original-db"}}
+            )
+        )
+        self.probe.reset_mock()
+        self.run_worker()
+        self.assertEqual(
+            self.store.read_odoo_prod_rollback_operation_record(inverse_id).status, "fail"
+        )
+        self.probe.assert_not_called()
+        self.assertFalse(self.docker_state.writes)
+        self.assertTrue(self.docker_state.rows["web-id"]["State"]["Running"])
+
+    def test_drill_inverse_can_stop_after_settings_edit_but_cannot_repromote_changed_inputs(
+        self,
+    ) -> None:
+        from control_plane.client_release import advance_client_releases
+
+        inverse_id = self.promote_and_queue_inverse()
+        self.store.write_runtime_environment_record(
+            self.runtime.model_copy(update={"env": {**self.runtime.env, "ODOO_WORKERS": "3"}})
+        )
+        self.assertTrue(self.run_worker().terminal_write_committed)
+        inverse = self.store.read_odoo_prod_rollback_operation_record(inverse_id)
+        self.assertEqual(inverse.status, "pass", inverse.error_message)
+        self.assert_parked_web_only()
+        self.assertFalse(advance_client_releases(store=self.store, control_plane_root=Path(".")))
+        self.assertEqual(self.modes, ["empty"])
 
     def test_failed_first_deploy_queues_same_acceptance_recovery_without_deleting_data(
         self,
     ) -> None:
         self.fail_and_recover()
 
-    def fail_and_recover(self, *, initialized: bool = True) -> None:
+    def fail_and_recover(
+        self,
+        *,
+        initialized: bool = True,
+        before_terminal: Callable[[], None] | None = None,
+        before_recovery: Callable[[], None] | None = None,
+    ) -> None:
         self.enterContext(
             patch(
                 "control_plane.dokploy.post_deploy.run_compose_odoo_backup_gate",
                 side_effect=self.capture_stopped_backup,
             )
         )
-        self.accepted = self.accept()
+        self.accepted = self.decide()
         first = self.queue_promotion(self.accepted)
         self.modes = []
         self.fail_deployment = True
         self.no_initialized_stack = not initialized
+
+        def replace(**kwargs: Any) -> Any:
+            result = self.provider_replacement(**kwargs)
+            if before_terminal is not None:
+                before_terminal()
+            return result
+
         with patch(
             "control_plane.workflows.odoo_prod_promotion.execute_odoo_stable_target_replacement_apply",
-            side_effect=self.provider_replacement,
+            side_effect=replace,
         ):
             self.assertTrue(self.run_worker().terminal_write_committed)
         failed = self.store.read_odoo_prod_promotion_operation_record(first.operation_id)
         self.assertEqual(failed.status, "fail")
-        retained = dict(self.docker_state.volumes)
         recoveries = tuple(
             record
             for record in self.store.list_odoo_prod_rollback_operation_records()
@@ -904,11 +1146,13 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         self.assertEqual(
             recoveries[0].authorization.release_decision_record_id, self.accepted.record_id
         )
+        if before_recovery is not None:
+            before_recovery()
         self.assertTrue(self.run_worker().terminal_write_committed)
         recovery = self.store.read_odoo_prod_rollback_operation_record(recoveries[0].operation_id)
         self.assertEqual(recovery.status, "pass", recovery.error_message)
-        self.assertEqual(self.docker_state.volumes, retained)
         if initialized:
+            self.assert_parked_web_only()
             self.assertFalse(self.docker_state.rows["web-id"]["State"]["Running"])
         else:
             self.assertFalse(self.docker_state.rows)
@@ -942,7 +1186,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         from control_plane.contracts.backup_gate_record import BackupGateRecord
         from control_plane.timestamps import utc_now_timestamp
 
-        accepted = self.accept()
+        accepted = self.decide()
         operation = self.queue_promotion(accepted)
         self.store.write_backup_gate_record(
             BackupGateRecord(
@@ -996,7 +1240,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         from control_plane.client_release import _queue_rollback, ClientReleaseStep
         from control_plane.timestamps import utc_now_timestamp
 
-        self.accepted = self.accept()
+        self.accepted = self.decide()
         self.queue_promotion(self.accepted)
         self.modes = []
         with patch(
@@ -1026,11 +1270,10 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 raise NativeSourceUnavailable("fictional response loss")
 
         self.probe.side_effect = lost_response
-        retained = dict(self.docker_state.volumes)
         self.run_worker()
         operation = self.store.read_odoo_prod_rollback_operation_record(inverse_id)
         self.assertEqual(operation.status, "reconciliation_required")
-        self.assertEqual(self.docker_state.volumes, retained)
+        self.assert_parked_web_only()
         observed = self.probe.call_count
         self.run_worker()
         self.assertEqual(self.probe.call_count, observed)
@@ -1199,7 +1442,6 @@ class FirstReleaseParkingTests(unittest.TestCase):
 
         docker = FakeReleaseDocker("artifact", "deployment", ("db", "data", "logs"))
         spec = docker.park_spec()
-        retained = dict(docker.volumes)
 
         def run(arguments: list[str], **_: Any) -> Any:
             return SimpleNamespace(returncode=0, stdout=docker(*arguments[3:]).encode())
@@ -1221,7 +1463,8 @@ class FirstReleaseParkingTests(unittest.TestCase):
         self.assertFalse(docker.rows["web-id"]["State"]["Running"])
         self.assertTrue(docker.rows["database"]["State"]["Running"])
         self.assertTrue(docker.rows["script-runner"]["State"]["Running"])
-        self.assertEqual(docker.volumes, retained)
+        self.assertEqual([command[0] for command in docker.writes], ["update", "stop"])
+        self.assertTrue(all(command[-1] == "web-id" for command in docker.writes))
 
     def test_foreign_container_retaining_original_storage_blocks_before_writes(self) -> None:
         from control_plane.odoo_first_release import park_first_release_web

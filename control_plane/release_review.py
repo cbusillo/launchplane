@@ -40,6 +40,7 @@ from control_plane.contracts.release_review import (
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
     ReleaseReviewItem,
+    InitialVersionTestNotes,
     ReleaseVersion,
     AbsentProduction,
     SharedSourceReview,
@@ -517,7 +518,11 @@ def _generic_web_inventory_release_version(
 
 
 def build_release_review(
-    *, store: ReleaseReviewStore, profile: LaunchplaneProductProfileRecord, read: GitHubRead
+    *,
+    store: ReleaseReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    read: GitHubRead,
+    initial_version_test_notes: InitialVersionTestNotes | None = None,
 ) -> ReleaseReviewStatus:
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
@@ -678,7 +683,17 @@ def build_release_review(
     if initial_version is not None:
         from control_plane.initial_version_review import recorded_initial_version_notes
 
-        checklist = recorded_initial_version_notes(checklist, profile)
+        checklist = recorded_initial_version_notes(
+            checklist,
+            initial_version_test_notes
+            or (
+                profile.release_request.initial_version_review
+                if profile.release_request is not None
+                else None
+            ),
+        )
+    elif initial_version_test_notes is not None:
+        raise ValueError("Initial-version notes cannot prepare an ordinary release.")
     digest = checklist_digest(checklist)
     matching = [
         decision
@@ -859,6 +874,7 @@ def current_release_review(
     profile: LaunchplaneProductProfileRecord,
     include_prelaunch: bool = False,
     trace_id: str = "",
+    initial_version_test_notes: InitialVersionTestNotes | None = None,
 ) -> ReleaseReviewStatus:
     with ExitStack() as credentials:
         if profile.prelaunch_bootstrap_authorized and not include_prelaunch:
@@ -893,6 +909,7 @@ def current_release_review(
                 store=cast(ReleaseReviewStore, record_store),
                 profile=profile,
                 read=read,
+                initial_version_test_notes=initial_version_test_notes,
             )
         # Provider errors may contain private URLs: log and return only the fixed code.
         except ReleaseEvidenceUnavailable as error:

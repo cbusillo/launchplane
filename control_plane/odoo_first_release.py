@@ -16,12 +16,14 @@ from control_plane.contracts.odoo_target_replacement_failures import (
     OdooProviderEffectUncertainError,
 )
 from control_plane.dokploy import api, source, native_copy_stream
+from control_plane.dokploy.compose import DEFAULT_DATA_WORKFLOW_SSH_DIR
 from control_plane.odoo_first_empty_inputs import (
     qualify_first_empty_storage,
     resolve_first_empty_authority,
     require_first_release_history,
     _provider_projection,
     first_release_custody,
+    FirstEmptyAuthority,
     FIRST_RELEASE_STOPPED_KEY as FIRST_RELEASE_STOPPED_KEY,
     FIRST_RELEASE_ABSENCE_SOURCE as FIRST_RELEASE_ABSENCE_SOURCE,
 )
@@ -364,8 +366,10 @@ def require_first_release_placement(
     decision: ReleaseReviewDecisionRecord,
     context: str,
     payload: api.JsonObject,
+    *,
+    authority: FirstEmptyAuthority | None = None,
 ) -> None:
-    authority = resolve_first_empty_authority(
+    authority = authority or resolve_first_empty_authority(
         store, decision.product, context, release_decision=decision
     )
     custody = first_release_custody(store, decision.product, context, decision)
@@ -400,7 +404,7 @@ def stop_first_release(
     if not isinstance(store, PostgresRecordStore) or checkpoint is None:
         raise ValueError("Original-absence rollback requires the existing durable release worker.")
     authority = resolve_first_empty_authority(
-        store, decision.product, context, release_decision=decision
+        store, decision.product, context, inverse_decision=decision
     )
     deployment_ids = require_first_release_history(store, decision, context)
     custody = first_release_custody(store, decision.product, context, decision)
@@ -448,7 +452,7 @@ def stop_first_release(
     compose_source = payload.get("composeFile")
     if not isinstance(environment, str) or not isinstance(compose_source, str):
         raise ValueError("The original provider inputs are unavailable.")
-    require_first_release_placement(store, decision, context, payload)
+    require_first_release_placement(store, decision, context, payload, authority=authority)
     current_deployment = max(
         deployments, key=lambda record: (record.deploy.started_at, record.record_id)
     )
@@ -476,19 +480,45 @@ def stop_first_release(
             for record in deployments
             if record.artifact_identity is not None and record.runtime_identity is not None
         },
-        "workflow_ssh_source": api.parse_dokploy_env_text(environment).get(
-            "DATA_WORKFLOW_SSH_DIR", "/home/ubuntu/.ssh"
-        ),
+        "workflow_ssh_source": api.parse_dokploy_env_text(environment).get("DATA_WORKFLOW_SSH_DIR")
+        or DEFAULT_DATA_WORKFLOW_SSH_DIR,
     }
     frames: list[dict[str, Any]] = []
     record_store = store
+
+    def recheck_inverse() -> None:
+        current = resolve_first_empty_authority(
+            record_store, decision.product, context, inverse_decision=decision
+        )
+        current_payload = api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="compose", target_id=current.target_id.target_id
+        )
+        require_first_release_placement(
+            record_store, decision, context, current_payload, authority=current
+        )
+        if (
+            current_payload.get("env") != environment
+            or current_payload.get("composeFile") != compose_source
+        ):
+            raise ValueError("The original inverse's owned provider inputs changed.")
+        owned = require_first_release_history(record_store, decision, context)
+        if any(
+            api.deployment_key(row) not in owned or not api.deployment_is_terminal(row)
+            for row in api.list_deployments_for_target(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=current.target_id.target_id,
+                require_complete=True,
+            )
+        ):
+            raise ValueError("An unowned or unfinished provider deployment protects the inverse.")
+
     checkpoint("first_release_web_park")
     try:
 
         def dispatch_guard(dispatch: Callable[[], None]) -> None:
-            resolve_first_empty_authority(
-                record_store, decision.product, context, release_decision=decision
-            )
+            recheck_inverse()
             from control_plane.workflows.odoo_stable_target_replacement import (
                 TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
             )
@@ -522,7 +552,7 @@ def stop_first_release(
             or len(frames[0]["result"]["retained_storage_sha256"]) != 64
         ):
             raise ValueError("The original release's stopped/retained witness is incomplete.")
-        resolve_first_empty_authority(store, decision.product, context, release_decision=decision)
+        recheck_inverse()
     except (ValueError, OSError, RuntimeError, KeyError, TypeError, AttributeError) as error:
         raise OdooProviderEffectUncertainError(
             "Original release parking requires reconciliation."
