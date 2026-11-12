@@ -1029,13 +1029,15 @@ expected-commit comparison; exhaustion still fails closed as stale state.
 
 The GitHub adapter uses the shared workflow execution selector to distinguish
 current Actions executions from superseded runs and independent suites.
-Identity-verified failing Actions jobs trigger a bounded, complete exact-head
-workflow inventory. A job is removed only when a
+Identity-verified failing or pending required Actions jobs trigger a bounded,
+complete exact-head workflow inventory. A job is removed only when a
 proved newer execution supersedes its workflow, event, branch, source repository
 and PR target family, with matching head, job link, run and suite identities.
 Other workflows remain independent; their pending jobs do not preserve a
-superseded failure. A reported current required job that is still running remains
-pending. Removing a superseded failure without finding its required replacement
+superseded execution. An older equivalent execution is history whether completed,
+queued or running; unknown identity or ordering retains its check. A reported
+current required job that is still running remains pending. Removing a
+superseded check without finding its required replacement
 also leaves that requirement pending. Successful, neutral or skipped reported
 checks count as passing. Otherwise-green reported requirements retain their
 existing path without a workflow-history dependency; these reads do not prove

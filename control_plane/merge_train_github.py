@@ -7023,7 +7023,7 @@ def _without_superseded_actions_checks(
     ]
     if not any(
         identity is not None
-        and _check_run_status(cast(dict[str, object], check)) == "fail"
+        and _check_run_status(cast(dict[str, object], check)) in {"fail", "pending"}
         and (
             required_checks is None
             or any(
