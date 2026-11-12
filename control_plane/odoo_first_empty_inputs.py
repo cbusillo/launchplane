@@ -414,18 +414,31 @@ def first_empty_storage_snapshot(
             raise ValueError("Incomplete Docker inventory.")
         return sorted(values)
 
-    def metadata(identifiers: list[str], *arguments: str, key: str) -> dict[str, Any]:
+    def metadata(
+        identifiers: list[str], *arguments: str, key: str, by_prefix: bool = False
+    ) -> dict[str, Any]:
+        def resolves(item: object, reference: str) -> bool:
+            if not isinstance(item, dict) or not isinstance(item.get(key), str):
+                return False
+            identifier: str = item[key]
+            return identifier == reference or (by_prefix and identifier.startswith(reference))
+
         result: dict[str, Any] = {}
         for offset in range(0, len(identifiers), 128):
             batch = identifiers[offset : offset + 128]
             items = [json.loads(line) for line in docker(*arguments, *batch).splitlines()]
+            references = [
+                [reference for reference in batch if resolves(item, reference)] for item in items
+            ]
             if (
                 len(items) != len(batch)
-                or any(not isinstance(item, dict) for item in items)
-                or {item.get(key) for item in items} != set(batch)
+                or any(len(matched) != 1 for matched in references)
+                or {matched[0] for matched in references} != set(batch)
             ):
                 raise ValueError("Incomplete Docker metadata.")
             result.update({item[key]: item for item in items})
+        if len(result) != len(identifiers):
+            raise ValueError("Incomplete Docker metadata.")
         return result
 
     project = spec["project"]
@@ -495,7 +508,7 @@ def first_empty_storage_snapshot(
     }:
         raise ValueError("Original engine inventory is incomplete.")
     swarm = read_swarm(docker) if info["Swarm"]["LocalNodeState"] == "active" else []
-    services = inventory("service", "ls", "--quiet", "--no-trunc") if swarm else []
+    services = inventory("service", "ls", "--quiet") if swarm else []
     service_rows = metadata(
         services,
         "service",
@@ -503,6 +516,7 @@ def first_empty_storage_snapshot(
         "--format",
         '{"ID":{{json .ID}},"Name":{{json .Spec.Name}},"Labels":{{json .Spec.Labels}},"Mounts":{{json .Spec.TaskTemplate.ContainerSpec.Mounts}}}',
         key="ID",
+        by_prefix=True,
     )
     for row in service_rows.values():
         mounts = row.get("Mounts") or []

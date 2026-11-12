@@ -880,6 +880,9 @@ p.write_text(json.dumps(s))
 if sys.argv[1:3] != ['--host','unix:///var/run/docker.sock']:
     raise SystemExit(97)
 a=sys.argv[3:]
+services=[{'ID':'k3x9p2m7q4w8e1r5t6y0u2i3o','Name':'unrelated'}]
+if s.get('renamed'):
+    services.append({'ID':'z8c4v6b2n1m5a7s3d9f0g4h2j','Name':services[0]['ID'][:12]})
 if s.get('denied'):
     print('permission denied while trying to connect to the docker daemon',file=sys.stderr)
     raise SystemExit(1)
@@ -888,10 +891,19 @@ if a[0]=='info':
 elif a[:2]==['node','ls']:
     print(json.dumps({'ID':'node-original','Self':True}))
 elif a[:2]==['service','ls']:
-    print('foreign-service')
+    if '--no-trunc' in a:
+        print('unknown flag: --no-trunc',file=sys.stderr)
+        raise SystemExit(125)
+    print('\n'.join(service['ID'][:12] for service in services))
 elif a[:2]==['service','inspect']:
-    for identifier in a[4:]:
-        print(json.dumps({'ID':identifier,'Name':'unrelated','Labels':{},'Mounts':[]}))
+    for reference in a[4:]:
+        found=([service for service in services if service['ID']==reference]
+            or [service for service in services if service['Name']==reference]
+            or [service for service in services if service['ID'].startswith(reference)])
+        if len(found)!=1:
+            print('Error: no such service or ambiguous: '+reference,file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps({**found[0],'Labels':{},'Mounts':[]}))
 elif a[:2]==['volume','ls']:
     print('\n'.join('unrelated-'+str(i) for i in range(s['volumes'])))
 elif a[:2]==['volume','inspect']:
@@ -913,6 +925,7 @@ else:
                 ("empty", "complete"),
                 ("denied", "denied"),
                 ("unknown", "failed"),
+                ("renamed", "failed"),
             ):
                 with self.subTest(scenario=scenario):
                     state_path.write_text(
@@ -943,7 +956,7 @@ else:
                         )
                         self.assertEqual(len(frame["storage"]), 64)
                         self.assertLess(json.loads(state_path.read_text())["calls"], 40)
-                    elif scenario == "unknown":
+                    elif expected == "failed":
                         failure = native_copy_stream.NativeProgramFailed(
                             "fixture", program=program, program_sites=frame["sites"]
                         )
