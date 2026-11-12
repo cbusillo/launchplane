@@ -12,6 +12,8 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
+import click
+
 from control_plane import secrets
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.dokploy import api, native_copy_stream, source
@@ -719,28 +721,39 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
                 source_label="test",
             )
         self.assertEqual(rotated.exception.code, "runtime_key_safety_failed")
-        # A supplied value written under another binding key of the same secret
-        # replaces what the generated binding delivers, so it loses its pass.
-        apply_product_config_bundle(
-            record_store=self.store,
-            payload={**lane, "secrets": [{**supplied, "name": key, "binding_key": "ALIAS_ONE"}]},
-            mode="apply",
-            actor="fixture",
-            source_label="test",
+        # A value written under another binding key of the same secret would replace what
+        # the generated binding delivers, so neither writer accepts it.
+        before = (self.store.list_secret_records(), self.store.list_secret_bindings())
+        for mode in ("dry-run", "apply"):
+            with self.subTest(mode=mode), self.assertRaises(ProductConfigError) as aliased:
+                apply_product_config_bundle(
+                    record_store=self.store,
+                    payload={
+                        **lane,
+                        "secrets": [{**supplied, "name": key, "binding_key": "ALIAS"}],
+                    },
+                    mode=mode,
+                    actor="fixture",
+                    source_label="test",
+                )
+            self.assertEqual(aliased.exception.code, "generated_secret_alias_refused")
+        with self.assertRaises(click.ClickException):
+            secrets.write_secret_value(
+                record_store=self.store,
+                scope="context_instance",
+                integration="runtime_environment",
+                name=sibling_key,
+                plaintext_value="invented-alias",
+                binding_key="ALIAS",
+                context_name=self.context,
+                instance_name="prod",
+                actor="fixture",
+            )
+        self.assertEqual(
+            (self.store.list_secret_records(), self.store.list_secret_bindings()), before
         )
-        secrets.write_secret_value(
-            record_store=self.store,
-            scope="context_instance",
-            integration="runtime_environment",
-            name=sibling_key,
-            plaintext_value="invented-alias",
-            binding_key="ALIAS_TWO",
-            context_name=self.context,
-            instance_name="prod",
-            actor="fixture",
-        )
-        self.assertEqual(stored_findings(key), ["context_not_allowed"])
-        self.assertEqual(stored_findings(sibling_key), ["context_not_allowed"])
+        self.assertEqual(stored_findings(key), [])
+        self.assertEqual(stored_findings(sibling_key), [])
 
     async def test_caller_values_testing_namespace_and_mixed_writes_cannot_enter_first_empty(
         self,

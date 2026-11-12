@@ -801,8 +801,9 @@ decryption key state denies the reveal or resolution.
 - Product-config records the binding's `value_source` as `supplied`, `copy`,
   `provider` or `generated`, based on the actual value input. Callers cannot assert that origin
   through classification metadata. A new value reaches every binding of its
-  secret, so a write through one binding key also gives the secret's other
-  bindings that write's origin, or none for a plain managed-secret write. Copied, provider-adopted and older bindings
+  secret, so a value write under one binding key is refused
+  (`generated_secret_alias_refused`) while another binding key of that secret
+  delivers a service-generated value; write the value through that binding key instead. Copied, provider-adopted and older bindings
   without origin metadata keep key-name policy precedence during planning and
   subsequent delivery; merely declaring them `testing` cannot override that rule.
 - The environment managed-secret form stores independently supplied runtime
