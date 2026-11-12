@@ -20,7 +20,8 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.outbound_http import PublicHttpResponse
-from control_plane.product_config import apply_product_config_bundle
+from control_plane.contracts.secret_record import SecretVersion
+from control_plane.product_config import ProductConfigError, apply_product_config_bundle
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_request, _RejectingVerifier
@@ -751,6 +752,22 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertNotIn(key, report.json()["lanes"][0]["local_keys"])
 
+    def write_generated_value_recorded_before_alias_refusal(self, secret_id: str) -> None:
+        current = self.store.read_secret_record(secret_id)
+        ciphertext, key_id = secrets._encrypt_secret_value("synthetic-generated-token")
+        version = SecretVersion(
+            version_id=secrets._version_id(secret_id=secret_id),
+            secret_id=secret_id,
+            created_at=current.updated_at,
+            key_id=key_id,
+            ciphertext=ciphertext,
+            value_origin="generated",
+        )
+        self.store.write_secret_version(version)
+        self.store.write_secret_record(
+            current.model_copy(update={"current_version_id": version.version_id})
+        )
+
     async def test_generated_alias_cannot_disclose_a_shared_value_record(self) -> None:
         self.external_fixture()
         self.profile.expected_config.managed_secret_bindings += (
@@ -784,25 +801,28 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             actor="fixture",
             source_label="test",
         )
-        apply_product_config_bundle(
-            record_store=self.store,
-            payload={
-                "product": self.profile.product,
-                "context": self.profile.product,
-                "instance": "testing",
-                "secrets": [
-                    {
-                        "binding_key": "LOCAL_ACCESS",
-                        "name": record.name,
-                        "generate": "testing_local",
-                        "secret_class": "testing",
-                    }
-                ],
-            },
-            mode="apply",
-            actor="fixture",
-            source_label="test",
-        )
+        with self.assertRaises(ProductConfigError) as refused:
+            apply_product_config_bundle(
+                record_store=self.store,
+                payload={
+                    "product": self.profile.product,
+                    "context": self.profile.product,
+                    "instance": "testing",
+                    "secrets": [
+                        {
+                            "binding_key": "LOCAL_ACCESS",
+                            "name": record.name,
+                            "generate": "testing_local",
+                            "secret_class": "testing",
+                        }
+                    ],
+                },
+                mode="apply",
+                actor="fixture",
+                source_label="test",
+            )
+        self.assertEqual(refused.exception.code, "secret_origin_alias_refused")
+        self.write_generated_value_recorded_before_alias_refusal(record.secret_id)
         from datetime import datetime, timedelta
 
         current = self.store.read_secret_record(record.secret_id)

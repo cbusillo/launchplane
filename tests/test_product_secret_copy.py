@@ -9,15 +9,21 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from typing import Any
 
+import click
 from fastapi import FastAPI
 from httpx2 import Response
 
 from control_plane import secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.secret_record import SecretScope
-from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyTarget,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.runtime_key_safety import evaluate_runtime_key_safety_from_store
 from control_plane.product_config import (
+    ProductConfigError,
     apply_product_config_bundle,
     plan_product_config_authority_bundle,
 )
@@ -26,11 +32,13 @@ from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
+    LaunchplaneIdentity,
     LocalOperatorPolicyRule,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
     ProductContextOwnershipError,
     ProductProfileConflictError,
     SecretCopySourceConflictError,
@@ -1330,6 +1338,174 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "runtime_key_safety_failed")
         self.assertEqual(self.store.list_secret_bindings(instance_name="testing"), ())
         self.assertEqual(self.store.read_secret_record(self.source.secret_id), self.source)
+
+    def supplied_testing_token(self) -> dict[str, Any]:
+        policy = self.store.list_runtime_key_safety_policy_records()[0]
+        self.store.write_runtime_key_safety_policy_record(
+            policy.model_copy(
+                update={
+                    "rules": (
+                        RuntimeSecretSafetyRule(
+                            binding_key="DISCORD_TOKEN",
+                            secret_class="prod_only",
+                            allowed_contexts=("example-site",),
+                            allowed_instances=("prod",),
+                        ),
+                    )
+                }
+            )
+        )
+        return {
+            **self.payload,
+            "secrets": [
+                {"binding_key": "DISCORD_TOKEN", "value": "testing-only", "secret_class": "testing"}
+            ],
+        }
+
+    def copy_under_alias(self) -> dict[str, Any]:
+        return {
+            **self.payload,
+            "secrets": [{**self.payload["secrets"][0], "name": "DISCORD_TOKEN"}],
+        }
+
+    def findings_for_testing_token(self) -> list[str]:
+        evaluation = evaluate_runtime_key_safety_from_store(
+            record_store=self.store,
+            target=RuntimeKeySafetyTarget(
+                context="example-site", instance="testing", environment_class="testing"
+            ),
+            required_binding_keys=("DISCORD_TOKEN",),
+        )
+        return [finding.code for finding in evaluation.findings]
+
+    def secret_state(self) -> tuple[object, ...]:
+        return self.store.list_secret_records(), self.store.list_secret_bindings(limit=None)
+
+    async def test_copy_under_another_binding_key_never_hides_behind_a_supplied_testing_binding(
+        self,
+    ) -> None:
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload=self.supplied_testing_token(),
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        self.assertEqual(self.findings_for_testing_token(), [])
+        before = self.secret_state()
+        dry_run = await self.post(self.copy_under_alias())
+        self.assertEqual(dry_run.status_code, 400, dry_run.text)
+        self.assertEqual(dry_run.json()["error"]["code"], "secret_origin_alias_refused")
+        with self.assertRaises(ProductConfigError) as applied:
+            apply_product_config_bundle(
+                record_store=self.store,
+                payload=self.copy_under_alias(),
+                mode="apply",
+                actor="fixture",
+                source_label="test",
+            )
+        self.assertEqual(applied.exception.code, "secret_origin_alias_refused")
+        with self.assertRaises(click.ClickException):
+            secrets.write_secret_value(
+                record_store=self.store,
+                scope="context_instance",
+                integration="runtime_environment",
+                name="DISCORD_TOKEN",
+                plaintext_value="plain-alias",
+                binding_key="REPAIRSHOPR_TOKEN",
+                context_name="example-site",
+                instance_name="testing",
+                actor="fixture",
+            )
+        self.assertEqual(self.secret_state(), before)
+        self.assertEqual(self.findings_for_testing_token(), [])
+
+    async def test_plain_value_whose_secret_changes_before_commit_asks_for_a_fresh_dry_run(
+        self,
+    ) -> None:
+        supplied = {**self.supplied_testing_token(), "mode": "dry-run"}
+        planned = await self.post(supplied)
+        self.assertEqual(planned.status_code, 202, planned.text)
+        commit = self.store.write_product_authority_bundle
+
+        def commit_after_a_competing_write(
+            bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity | None = None
+        ) -> None:
+            with patch.object(self.store, "write_product_authority_bundle", commit):
+                secrets.write_secret_value(
+                    record_store=self.store,
+                    scope="context_instance",
+                    integration="runtime_environment",
+                    name="DISCORD_TOKEN",
+                    plaintext_value="competing-value",
+                    binding_key="ALIAS",
+                    context_name="example-site",
+                    instance_name="testing",
+                    actor="fixture",
+                )
+            commit(bundle, identity=identity)
+
+        with patch.object(
+            self.store, "write_product_authority_bundle", side_effect=commit_after_a_competing_write
+        ):
+            applied = await self.post({**supplied, "mode": "apply"}, key="apply-supplied")
+        self.assertEqual(applied.status_code, 409, applied.text)
+        self.assertEqual(applied.json()["error"]["code"], "matching_dry_run_required")
+        self.assertEqual(
+            [
+                binding.binding_key
+                for binding in self.store.list_secret_bindings(instance_name="testing", limit=None)
+            ],
+            ["ALIAS"],
+        )
+
+    def test_supplied_value_under_another_binding_key_keeps_both_supplied_origins_true(
+        self,
+    ) -> None:
+        supplied = self.supplied_testing_token()
+        alias = {
+            **supplied["secrets"][0],
+            "name": "DISCORD_TOKEN",
+            "binding_key": "ALIAS",
+            "value": "testing-rotated",
+        }
+        for payload in (supplied, {**supplied, "secrets": [alias]}):
+            apply_product_config_bundle(
+                record_store=self.store,
+                payload=payload,
+                mode="apply",
+                actor="fixture",
+                source_label="test",
+            )
+        testing_bindings = self.store.list_secret_bindings(instance_name="testing", limit=None)
+        self.assertEqual(
+            sorted((item.binding_key, item.value_source) for item in testing_bindings),
+            [("ALIAS", "supplied"), ("DISCORD_TOKEN", "supplied")],
+        )
+        self.assertEqual(len({item.secret_id for item in testing_bindings}), 1)
+        self.assertEqual(self.findings_for_testing_token(), [])
+
+    def test_copy_planned_before_a_supplied_binding_never_commits_behind_it(self) -> None:
+        supplied = self.supplied_testing_token()
+        _, planned_copy = plan_product_config_authority_bundle(
+            record_store=self.store,
+            payload=self.copy_under_alias(),
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload=supplied,
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        before = self.secret_state()
+        with self.assertRaises(SecretCopySourceConflictError):
+            self.store.write_product_authority_bundle(planned_copy)
+        self.assertEqual(self.secret_state(), before)
+        self.assertEqual(self.findings_for_testing_token(), [])
 
     async def test_explicit_source_class_requires_authorized_source_reclassification(self) -> None:
         binding = self.store.list_secret_bindings(limit=None)[0]

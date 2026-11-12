@@ -21,7 +21,11 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
+    LaunchplaneIdentity,
+)
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import (
@@ -707,11 +711,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(self.store.list_secret_records(), ())
 
-    async def test_operator_applies_pinned_submission_and_later_owner_input_does_not_rotate_runtime(
-        self,
-    ) -> None:
-        written = await self.post(await self.submission())
-        version_id = written.json()["fields"][0]["submission_version_id"]
+    def allow_testing_mail_password(self) -> None:
         self.store.write_runtime_key_safety_policy_record(
             RuntimeKeySafetyPolicyRecord.model_validate(
                 {
@@ -729,6 +729,13 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
         )
+
+    async def test_operator_applies_pinned_submission_and_later_owner_input_does_not_rotate_runtime(
+        self,
+    ) -> None:
+        written = await self.post(await self.submission())
+        version_id = written.json()["fields"][0]["submission_version_id"]
+        self.allow_testing_mail_password()
         payload: dict[str, object] = {
             "mode": "dry-run",
             "reason": "Configure the supplied mail credential.",
@@ -815,3 +822,59 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_secret_records(), secrets_before)
         self.assertEqual(self.store.list_secret_bindings(), bindings_before)
         self.assertNotIn("mail-secret-value", refused_replay.text)
+
+    async def test_secret_written_by_another_request_before_commit_refuses_without_writing(
+        self,
+    ) -> None:
+        written = await self.post(await self.submission())
+        self.allow_testing_mail_password()
+        payload: dict[str, object] = {
+            "mode": "dry-run",
+            "reason": "Configure the supplied mail credential.",
+            "managed_secrets": [
+                {
+                    "integration": "runtime_environment",
+                    "binding_key": "SMTP_PASSWORD",
+                    "owner_submission_version_id": written.json()["fields"][0][
+                        "submission_version_id"
+                    ],
+                }
+            ],
+        }
+        operator = _human("operator", 9003, "admin")
+        planned = await self.post(payload, human=operator, path=_CONFIG)
+        self.assertEqual(planned.status_code, 202, planned.text)
+        commit = self.store.write_product_authority_bundle
+
+        def commit_after_a_competing_write(
+            bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity | None = None
+        ) -> None:
+            with patch.object(self.store, "write_product_authority_bundle", commit):
+                secrets.write_secret_value(
+                    record_store=self.store,
+                    scope="context_instance",
+                    integration="runtime_environment",
+                    name="SMTP_PASSWORD",
+                    plaintext_value="competing-value",
+                    binding_key="ALIAS",
+                    context_name="example-site",
+                    instance_name="testing",
+                    actor="fixture",
+                )
+            commit(bundle, identity=identity)
+
+        with patch.object(
+            self.store, "write_product_authority_bundle", side_effect=commit_after_a_competing_write
+        ):
+            applied = await self.post(
+                {**payload, "mode": "apply", "confirmation": "APPLY example-site/testing"},
+                human=operator,
+                path=_CONFIG,
+                key="apply-mail-submission",
+            )
+        self.assertEqual(applied.status_code, 409, applied.text)
+        self.assertEqual(applied.json()["error"]["code"], "matching_dry_run_required")
+        self.assertEqual(
+            [binding.binding_key for binding in self.store.list_secret_bindings(limit=None)],
+            ["ALIAS"],
+        )

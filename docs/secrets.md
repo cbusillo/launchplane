@@ -801,9 +801,16 @@ decryption key state denies the reveal or resolution.
 - Product-config records the binding's `value_source` as `supplied`, `copy`,
   `provider` or `generated`, based on the actual value input. Callers cannot assert that origin
   through classification metadata. A new value reaches every binding of its
-  secret, so a value write under one binding key is refused
-  (`generated_secret_alias_refused`) while another binding key of that secret
-  delivers a service-generated value; write the value through that binding key instead. Copied, provider-adopted and older bindings
+  secret, so product-config and the plain `secrets put` writer refuse a value
+  under one binding key (`secret_origin_alias_refused`) while another binding
+  key of that secret records a different origin; the plain writer records none,
+  so it refuses beside any recorded origin. Write the value through that binding
+  key, or give the new binding its own secret name. Product-config also commits
+  a value only if that secret's bindings are unchanged since planning; otherwise
+  nothing is written and the route answers `matching_dry_run_required`
+  (`secret_copy_source_changed` when the request copies). Review a fresh
+  dry-run, which shows the current bindings. The plain writer is a direct
+  database write with no commit-time check. Copied, provider-adopted and older bindings
   without origin metadata keep key-name policy precedence during planning and
   subsequent delivery; merely declaring them `testing` cannot override that rule.
 - The environment managed-secret form stores independently supplied runtime

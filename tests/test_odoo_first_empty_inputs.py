@@ -31,10 +31,15 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyTarget,
     RuntimeSecretSafetyRule,
 )
-from control_plane.product_config import ProductConfigError, apply_product_config_bundle
+from control_plane.product_config import (
+    ProductConfigError,
+    apply_product_config_bundle,
+    plan_product_config_authority_bundle,
+)
 from control_plane.runtime_key_safety import evaluate_runtime_key_safety_from_store
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import SecretCopySourceConflictError
 from control_plane.odoo_first_empty_inputs import (
     first_empty_storage_snapshot,
     first_empty_storage_program,
@@ -755,7 +760,7 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
                     actor="fixture",
                     source_label="test",
                 )
-            self.assertEqual(aliased.exception.code, "generated_secret_alias_refused")
+            self.assertEqual(aliased.exception.code, "secret_origin_alias_refused")
         with self.assertRaises(click.ClickException):
             secrets.write_secret_value(
                 record_store=self.store,
@@ -796,6 +801,30 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
         self.assertEqual(self.secret_state(), before)
         secrets.write_secret_value(**rotation)
         self.assertEqual(self.stored_findings("ODOO_MASTER_PASSWORD"), ["context_not_allowed"])
+
+    async def test_value_planned_before_generation_never_commits_behind_the_generated_binding(
+        self,
+    ) -> None:
+        planned = [
+            plan_product_config_authority_bundle(
+                record_store=self.store,
+                payload=self.supplied_prod_secret(name="ODOO_DB_PASSWORD", binding_key=key),
+                mode="apply",
+                actor="fixture",
+                source_label="test",
+            )[1]
+            for key in ("ODOO_DB_PASSWORD", "ALIAS")
+        ]
+        await self.generate_shared_rule_keys()
+        before = self.secret_state()
+        for bundle in planned:
+            with (
+                self.subTest(bindings=bundle.secret_bindings),
+                self.assertRaises(SecretCopySourceConflictError),
+            ):
+                self.store.write_product_authority_bundle(bundle)
+        self.assertEqual(self.secret_state(), before)
+        self.assertEqual(self.stored_findings("ODOO_DB_PASSWORD"), [])
 
     async def test_caller_values_testing_namespace_and_mixed_writes_cannot_enter_first_empty(
         self,
