@@ -510,10 +510,7 @@ class _NeverLiveProductionDomainFixture(_EmptyComposeDomainFixture):
             for domain in self.payload["domains"]
         ]
 
-
-class DirectorNeverLiveProductionDomainSetupTests(_NeverLiveProductionDomainFixture):
-    async def test_owned_never_live_production_gets_only_its_backend_routes(self) -> None:
-        await self.plan_apply_and_replay()
+    def assert_only_reviewed_routes_recorded(self) -> None:
         self.assertEqual(self.writes, self.expected_routes())
         recorded = self.read_target()
         self.assertEqual(recorded.domains, tuple(self.payload["domains"]))
@@ -528,6 +525,45 @@ class DirectorNeverLiveProductionDomainSetupTests(_NeverLiveProductionDomainFixt
         )
         self.assertEqual(self.store.list_deployment_records(), ())
         self.assertEqual(self.store.list_promotion_records(), ())
+
+    async def assert_only_the_same_request_recovers(self, changed_domains: list[str]) -> None:
+        changed = await self.post(domains=changed_domains)
+        self.assertEqual(changed.status_code, 400, changed.text)
+        recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assert_only_reviewed_routes_recorded()
+
+    async def lose_receipt_then_recover(self, changed_domains: list[str]) -> None:
+        with patch.object(
+            self.store,
+            "write_idempotency_record",
+            side_effect=RuntimeError("Fixture lost receipt storage"),
+        ):
+            with self.assertRaises(RuntimeError):
+                await self.post()
+        await self.assert_only_the_same_request_recovers(changed_domains)
+
+    async def lose_second_route_then_recover(self, changed_domains: list[str]) -> None:
+        original = self.provider_request
+
+        def provider(**kwargs: Any) -> Any:
+            result = original(**kwargs)
+            if kwargs.get("method") == "POST" and len(self.writes) == 2:
+                raise RuntimeError("Lost response after route creation")
+            return result
+
+        self.inventory.side_effect = provider
+        lost = await self.post()
+        self.assertEqual(lost.status_code, 502, lost.text)
+        self.assertEqual(lost.json()["error"]["code"], "dokploy_domain_partial_outcome")
+        self.assertEqual(self.read_target(), self.target)
+        await self.assert_only_the_same_request_recovers(changed_domains)
+
+
+class DirectorNeverLiveProductionDomainSetupTests(_NeverLiveProductionDomainFixture):
+    async def test_owned_never_live_production_gets_only_its_backend_routes(self) -> None:
+        await self.plan_apply_and_replay()
+        self.assert_only_reviewed_routes_recorded()
 
     async def test_refused_original_key_continues_only_with_the_same_request(self) -> None:
         self.store.write_product_profile_record(
@@ -707,37 +743,10 @@ class DirectorNeverLiveProductionDomainSetupTests(_NeverLiveProductionDomainFixt
             self.assert_no_effects(await self.post(), 400)
 
     async def test_missing_receipt_recovers_only_the_recorded_exact_hostnames(self) -> None:
-        with patch.object(
-            self.store,
-            "write_idempotency_record",
-            side_effect=RuntimeError("Fixture lost receipt storage"),
-        ):
-            with self.assertRaises(RuntimeError):
-                await self.post()
-        expanded = await self.post(domains=[*self.payload["domains"], "www.example.invalid"])
-        self.assertEqual(expanded.status_code, 400, expanded.text)
-        recovered = await self.post()
-        self.assertEqual(recovered.status_code, 202, recovered.text)
-        self.assertEqual(self.writes, self.expected_routes())
+        await self.lose_receipt_then_recover([*self.payload["domains"], "www.example.invalid"])
 
     async def test_lost_second_route_response_recovers_without_duplicate_routes(self) -> None:
-        original = self.provider_request
-
-        def provider(**kwargs: Any) -> Any:
-            result = original(**kwargs)
-            if kwargs.get("method") == "POST" and len(self.writes) == 2:
-                raise RuntimeError("Lost response after route creation")
-            return result
-
-        self.inventory.side_effect = provider
-        lost = await self.post()
-        self.assertEqual(lost.status_code, 502, lost.text)
-        self.assertEqual(lost.json()["error"]["code"], "dokploy_domain_partial_outcome")
-        self.assertEqual(self.read_target(), self.target)
-        recovered = await self.post()
-        self.assertEqual(recovered.status_code, 202, recovered.text)
-        self.assertEqual(self.writes, self.expected_routes())
-        self.assertEqual(self.read_target().domains, tuple(self.payload["domains"]))
+        await self.lose_second_route_then_recover(["new.example.invalid"])
 
 
 CREATED_HOSTNAME = "seeded.example.invalid"
@@ -810,21 +819,8 @@ class DirectorCreatedHostnameProductionDomainTests(_NeverLiveProductionDomainFix
     async def test_unrouted_created_hostname_gives_way_to_only_the_reviewed_names(self) -> None:
         self.record_creation_receipt()
         await self.plan_apply_and_replay()
-        self.assertEqual(self.writes, self.expected_routes())
-        recorded = self.read_target()
-        self.assertEqual(recorded.domains, tuple(self.payload["domains"]))
-        self.assertNotIn(CREATED_HOSTNAME, recorded.hostname_claims)
-        self.assertEqual(
-            recorded.model_dump(exclude={"domains", "updated_at", "source_label"}),
-            self.target.model_dump(exclude={"domains", "updated_at", "source_label"}),
-        )
-        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
-        self.assertEqual(
-            self.store.read_provider_target_record(context_name=self.context, instance_name="prod"),
-            self.target_provider,
-        )
-        self.assertEqual(self.store.list_deployment_records(), ())
-        self.assertEqual(self.store.list_promotion_records(), ())
+        self.assert_only_reviewed_routes_recorded()
+        self.assertNotIn(CREATED_HOSTNAME, self.read_target().hostname_claims)
 
     async def test_tracked_hostname_without_creation_receipt_keeps_the_record_refusal(
         self,
@@ -935,38 +931,8 @@ class DirectorCreatedHostnameProductionDomainTests(_NeverLiveProductionDomainFix
         self,
     ) -> None:
         self.record_creation_receipt()
-        original = self.provider_request
-
-        def provider(**kwargs: Any) -> Any:
-            result = original(**kwargs)
-            if kwargs.get("method") == "POST" and len(self.writes) == 2:
-                raise RuntimeError("Lost response after route creation")
-            return result
-
-        self.inventory.side_effect = provider
-        lost = await self.post()
-        self.assertEqual(lost.status_code, 502, lost.text)
-        self.assertEqual(lost.json()["error"]["code"], "dokploy_domain_partial_outcome")
-        self.assertEqual(self.read_target(), self.target)
-        changed = await self.post(domains=["new.example.invalid"])
-        self.assertEqual(changed.status_code, 400, changed.text)
-        recovered = await self.post()
-        self.assertEqual(recovered.status_code, 202, recovered.text)
-        self.assertEqual(self.writes, self.expected_routes())
-        self.assertEqual(self.read_target().domains, tuple(self.payload["domains"]))
+        await self.lose_second_route_then_recover(["new.example.invalid"])
 
     async def test_lost_receipt_continues_only_the_same_reviewed_request(self) -> None:
         self.record_creation_receipt()
-        with patch.object(
-            self.store,
-            "write_idempotency_record",
-            side_effect=RuntimeError("Fixture lost receipt storage"),
-        ):
-            with self.assertRaises(RuntimeError):
-                await self.post()
-        with_created = await self.post(domains=[*self.payload["domains"], CREATED_HOSTNAME])
-        self.assertEqual(with_created.status_code, 400, with_created.text)
-        recovered = await self.post()
-        self.assertEqual(recovered.status_code, 202, recovered.text)
-        self.assertEqual(self.writes, self.expected_routes())
-        self.assertEqual(self.read_target().domains, tuple(self.payload["domains"]))
+        await self.lose_receipt_then_recover([*self.payload["domains"], CREATED_HOSTNAME])

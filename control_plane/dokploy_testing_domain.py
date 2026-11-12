@@ -444,6 +444,7 @@ def setup_empty_lane_domain(
             "source_label": "service:dokploy-targets:setup:reconcile-compose-domain",
         }
     )
+    dropped_hostnames = tuple(name for name in created_hostnames if name not in request.domains)
     route_ids: list[str] = []
     effect_started = False
     provider_verified = False
@@ -500,25 +501,22 @@ def setup_empty_lane_domain(
                 record_store, context=request.context, target_id=target_id.target_id
             )
         require_unprotected_binding()
-        targets = record_store.list_dokploy_target_records()
-        profiles = record_store.list_product_profile_records()
-        bindings = record_store.list_route_binding_records()
         for domain in request.domains:
             require_testing_hostname_claims_available(
                 product=product,
                 target=target,
                 domain=domain,
-                targets=targets,
-                profiles=profiles,
-                bindings=bindings,
+                targets=record_store.list_dokploy_target_records(),
+                profiles=record_store.list_product_profile_records(),
+                bindings=record_store.list_route_binding_records(),
             )
         require_created_hostnames_unused(
             product=product,
             target=target,
-            hostnames=tuple(host for host in created_hostnames if host not in request.domains),
-            targets=targets,
-            profiles=profiles,
-            bindings=bindings,
+            hostnames=dropped_hostnames,
+            targets=record_store.list_dokploy_target_records(),
+            profiles=record_store.list_product_profile_records(),
+            bindings=record_store.list_route_binding_records(),
         )
         live = fetch_dokploy_target_payload_for_setup(host, token, "compose", target_id.target_id)
         require_empty_compose_source(live, target_id.target_id)
