@@ -69,6 +69,61 @@ def _record(
 
 
 class MergeTrainFeedbackRetryTests(TestCase):
+    def test_stack_and_candidate_waits_reuse_delivered_feedback_across_passes(self) -> None:
+        for container in ("queue", "stack_waits"):
+            with (
+                self.subTest(container=container),
+                TemporaryDirectory() as directory,
+                patch(
+                    "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                    return_value={
+                        "action": "created",
+                        "comment_id": 123,
+                        "comment_url": "https://github.com/cbusillo/alpha/pull/7#issuecomment-123",
+                    },
+                ) as deliver,
+            ):
+                store = FilesystemRecordStore(Path(directory))
+                for index in range(2):
+                    response = {
+                        "result": {
+                            "repository": "cbusillo/alpha",
+                            "base_branch": "main",
+                            "controller_action": "idle",
+                            "dry_run_result": {
+                                container: [
+                                    {
+                                        "number": 7,
+                                        "eligible": False,
+                                        "ready_handoff": {"comment_id": 8, "head_sha": "head"},
+                                        "ineligible_reasons": ["waiting for parent"],
+                                        **(
+                                            {"deferred_reasons": ["waiting for next candidate"]}
+                                            if container == "queue"
+                                            else {}
+                                        ),
+                                    }
+                                ],
+                            },
+                        },
+                        "records": {"merge_train_batch_candidate_record_id": f"candidate-{index}"},
+                    }
+                    payloads = build_feedback_payloads(response=response)
+                    self.assertEqual(len(payloads), 1)
+                    payload = payloads[0]
+                    self.assertEqual(payload["event"], "waiting")
+                    write_merge_train_pr_feedback_record(
+                        store=require_merge_train_pr_feedback_record_store(store),
+                        request=MergeTrainPrFeedbackEnvelope.model_validate(payload),
+                        policy_key="test",
+                        policy_sha256="digest",
+                        token="fixture",
+                        recorded_at=_TIME,
+                        response_trace_id=f"trace-{index}",
+                    )
+                deliver.assert_called_once()
+                self.assertEqual(len(store.list_merge_train_pr_feedback_records()), 1)
+
     def test_queue_feedback_retries_failed_delivery_and_reuses_unchanged_delivered_record(
         self,
     ) -> None:

@@ -95,8 +95,17 @@ class BatchPlanOrderingTests(unittest.IsolatedAsyncioTestCase):
             feedback = build_feedback_payloads(response=payload, phase="batch-candidate")
             self.assertEqual(
                 [(entry["pull_request_number"], entry["event"]) for entry in feedback],
-                [(selected["number"], "blocked")],
+                [
+                    (selected["number"], "blocked"),
+                    (saved.plan.entries[1].pull_request_number, "waiting"),
+                ],
             )
+            self.assertEqual(
+                [entry["number"] for entry in result["dry_run_result"]["queue"]],
+                [selected["number"]],
+            )
+            for reason in result["dry_run_result"]["stack_waits"][0]["ineligible_reasons"]:
+                self.assertIn(reason, cast(str, feedback[1]["message"]))
             self.assertEqual(feedback[0]["repository"], saved.plan.repository)
             self.assertEqual(feedback[0]["base_branch"], saved.plan.base_branch)
             self.assertEqual(feedback[0]["controller_action"], "block")
