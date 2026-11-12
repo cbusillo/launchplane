@@ -128,7 +128,7 @@ def _queue_feedback(
             not deferred
             and not labeled
             and not (handoff.get("comment_id") and handoff.get("head_sha"))
-            and not any(_string(reason).startswith("dependency update ") for reason in reasons)
+            and not entry.get("dependency_update")
         ):
             continue
         if not reasons:

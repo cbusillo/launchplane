@@ -4,7 +4,7 @@ from typing import Any, cast
 from unittest import TestCase
 
 from control_plane import merge_train_controller_feedback as feedback
-from control_plane.merge_train import build_merge_train_dry_run_result
+from control_plane.merge_train import build_merge_train_dry_run_result, CURRENT_HEAD_PREVIEW_FAILED
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train_handoff import MergeTrainReadyHandoff, ready_handoff_refusal
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
@@ -129,6 +129,12 @@ class MergeTrainControllerFeedbackTests(TestCase):
         dependency_review = dependency_failed.model_copy(
             update={"dependency_update_class": "needs_review", "required_checks_status": "pass"}
         )
+        dependency_preview = dependency_failed.model_copy(
+            update={"required_checks_status": "pass", "preview_hold": CURRENT_HEAD_PREVIEW_FAILED}
+        )
+        dependency_notes = dependency_failed.model_copy(
+            update={"client_test_notes_error": "Client notes need an agent"}
+        )
         edited = refused.model_copy(
             update={
                 "ready_handoff": handoff.model_copy(update={"status": "edited", "head_sha": ""}),
@@ -143,6 +149,8 @@ class MergeTrainControllerFeedbackTests(TestCase):
             edited,
             dependency_failed,
             dependency_review,
+            dependency_preview,
+            dependency_notes,
         ):
             for another_candidate in (False, True):
                 with self.subTest(change=change, another_candidate=another_candidate):
