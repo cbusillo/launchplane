@@ -789,14 +789,17 @@ decryption key state denies the reveal or resolution.
   `prod_only` on a `testing` lane. A declaration covers that binding only; a
   later write without `secret_class` clears it. A valid explicit `testing` or
   `non_prod` declaration for an exact testing runtime binding whose value was
-  independently supplied takes precedence over a key-name rule: the credential is independent of production's
-  credential with the same name. This does not apply to shared bindings,
-  `shared_safe` declarations, production/dev targets or previews. Their policy rules
+  independently supplied or service-generated takes precedence over a key-name rule: the credential is independent of production's
+  credential with the same name. On a production lane, only a `prod_only`
+  binding that [qualified first-empty generation](#first-empty-odoo-runtime-credentials)
+  wrote for exactly that lane takes the same precedence; supplied, copied and
+  provider-adopted production values keep their key-name rule. This does not apply to shared bindings,
+  `shared_safe` declarations, dev targets or previews. Their policy rules
   remain in force. An explicit class incompatible with the stable lane is refused.
   Integration-marker keys never use this precedence exception, including markers
   added by the active policy.
-- Product-config records the binding's `value_source` as `supplied`, `copy` or
-  `provider`, based on the actual value input. Callers cannot assert that origin
+- Product-config records the binding's `value_source` as `supplied`, `copy`,
+  `provider` or `generated`, based on the actual value input. Callers cannot assert that origin
   through classification metadata. Copied, provider-adopted and older bindings
   without origin metadata keep key-name policy precedence during planning and
   subsequent delivery; merely declaring them `testing` cannot override that rule.

@@ -393,6 +393,9 @@ def _evaluate_binding(
         declared_findings = _evaluate_declared_secret_class(target=target, binding=binding)
         if declared_findings:
             return declared_findings
+        # A lane's own value passes on its lane-specific class. On production only a
+        # service-generated value qualifies: qualified first-empty generation is the one
+        # writer of a generated prod_only runtime binding on an exact prod lane.
         if (
             binding.value_source in {"supplied", "generated"}
             and (
@@ -405,9 +408,13 @@ def _evaluate_binding(
                     and binding.declared_secret_class in {"preview", "non_prod"}
                 )
             )
-            and not is_integration_runtime_key(
-                binding.binding_key, extra_markers=extra_integration_key_markers
+            or (
+                binding.value_source == "generated"
+                and target.environment_class == "prod"
+                and binding.declared_secret_class == "prod_only"
             )
+        ) and not is_integration_runtime_key(
+            binding.binding_key, extra_markers=extra_integration_key_markers
         ):
             return ()
     if rule is not None:

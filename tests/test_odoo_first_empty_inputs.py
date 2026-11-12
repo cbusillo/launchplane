@@ -24,7 +24,13 @@ from control_plane.contracts.dokploy_target_record import (
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
-from control_plane.product_config import apply_product_config_bundle
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeKeySafetyTarget,
+    RuntimeSecretSafetyRule,
+)
+from control_plane.product_config import ProductConfigError, apply_product_config_bundle
+from control_plane.runtime_key_safety import evaluate_runtime_key_safety_from_store
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.odoo_first_empty_inputs import (
@@ -622,6 +628,87 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
         )
         self.assertEqual(stale.status_code, 409, stale.text)
         self.assertEqual(len(self.store.list_secret_records()), len(before) + 1)
+
+    async def test_only_qualified_generation_passes_a_shared_rule_naming_other_sites(
+        self,
+    ) -> None:
+        key = "ODOO_DB_PASSWORD"
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-shared-password",
+                status="active",
+                source="test",
+                updated_at="2026-06-01T00:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key=key,
+                        secret_class="shared_safe",
+                        allowed_contexts=("unrelated-site",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            )
+        )
+        lane: dict[str, object] = {
+            "product": self.profile.product,
+            "context": self.context,
+            "instance": "prod",
+        }
+        supplied = {"binding_key": key, "value": "invented", "secret_class": "prod_only"}
+        for secret in (supplied, {**supplied, "value_source": "generated"}):
+            with self.subTest(secret=secret), self.assertRaises(ProductConfigError) as refused:
+                apply_product_config_bundle(
+                    record_store=self.store,
+                    payload={**lane, "secrets": [secret]},
+                    mode="dry-run",
+                    actor="fixture",
+                    source_label="test",
+                )
+            self.assertEqual(refused.exception.code, "runtime_key_safety_failed")
+        unqualified = {
+            "binding_key": key,
+            "generate": "odoo_first_empty",
+            "secret_class": "prod_only",
+        }
+        for payload in (
+            {**lane, "secrets": [unqualified]},
+            {**lane, "odoo_first_empty": "runtime_credentials", "secrets": [unqualified]},
+        ):
+            with self.subTest(payload=payload), self.assertRaises(ProductConfigError):
+                apply_product_config_bundle(
+                    record_store=self.store,
+                    payload=payload,
+                    mode="dry-run",
+                    actor="fixture",
+                    source_label="test",
+                )
+        self.assertFalse(self.store.list_secret_records())
+
+        dry = await self.post("runtime_credentials")
+        self.assertEqual(dry.status_code, 202, dry.text)
+        applied = await self.post(
+            "runtime_credentials",
+            mode="apply",
+            reviewed_plan_sha256=dry.json()["result"]["odoo_first_empty"]["plan_sha256"],
+            key="shared-rule-original",
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        target = RuntimeKeySafetyTarget(
+            context=self.context, instance="prod", environment_class="prod"
+        )
+        stored = evaluate_runtime_key_safety_from_store(
+            record_store=self.store, target=target, required_binding_keys=(key,)
+        )
+        self.assertEqual(stored.status, "pass", stored.findings)
+        with self.assertRaises(ProductConfigError) as rotated:
+            apply_product_config_bundle(
+                record_store=self.store,
+                payload={**lane, "secrets": [supplied]},
+                mode="dry-run",
+                actor="fixture",
+                source_label="test",
+            )
+        self.assertEqual(rotated.exception.code, "runtime_key_safety_failed")
 
     async def test_caller_values_testing_namespace_and_mixed_writes_cannot_enter_first_empty(
         self,
