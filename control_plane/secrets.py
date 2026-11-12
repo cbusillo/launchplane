@@ -787,6 +787,21 @@ def write_secret_value(
     action: SecretWriteAction = "created" if existing_record is None else "rotated"
     version_id = _version_id(secret_id=secret_id)
     ciphertext, key_id = _encrypt_secret_value(plaintext_value)
+    created_at = existing_record.created_at if existing_record is not None else now
+    binding = SecretBinding(
+        binding_id=_binding_id(secret_id=secret_id, binding_key=binding_key),
+        secret_id=secret_id,
+        integration=integration,
+        binding_key=binding_key,
+        context=context_name,
+        instance=instance_name,
+        created_at=created_at,
+        updated_at=now,
+    )
+    # These writes commit separately, so a rotation drops the binding's recorded origin
+    # before the new value is published; an interrupted write then fails closed.
+    if existing_record is not None:
+        record_store.write_secret_binding(binding)
     record_store.write_secret_version(
         SecretVersion(
             version_id=version_id,
@@ -798,7 +813,6 @@ def write_secret_value(
             value_origin=value_origin,
         )
     )
-    created_at = existing_record.created_at if existing_record is not None else now
     record_store.write_secret_record(
         SecretRecord(
             secret_id=secret_id,
@@ -817,18 +831,8 @@ def write_secret_value(
             else "",
         )
     )
-    record_store.write_secret_binding(
-        SecretBinding(
-            binding_id=_binding_id(secret_id=secret_id, binding_key=binding_key),
-            secret_id=secret_id,
-            integration=integration,
-            binding_key=binding_key,
-            context=context_name,
-            instance=instance_name,
-            created_at=created_at,
-            updated_at=now,
-        )
-    )
+    if existing_record is None:
+        record_store.write_secret_binding(binding)
     record_store.write_secret_audit_event(
         SecretAuditEvent(
             event_id=_audit_event_id(secret_id=secret_id, event_type=action),

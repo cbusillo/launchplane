@@ -754,6 +754,29 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
         )
         self.assertEqual(stored_findings(key), [])
         self.assertEqual(stored_findings(sibling_key), [])
+        # Rotating through the generated binding's own key drops its pass. The plain
+        # writer commits step by step, so a failed binding write never publishes the value.
+        rotation: dict[str, Any] = {
+            "record_store": self.store,
+            "scope": "context_instance",
+            "integration": "runtime_environment",
+            "name": sibling_key,
+            "plaintext_value": "invented-rotation",
+            "binding_key": sibling_key,
+            "context_name": self.context,
+            "instance_name": "prod",
+            "actor": "fixture",
+        }
+        with (
+            patch.object(self.store, "write_secret_binding", side_effect=RuntimeError("stop")),
+            self.assertRaises(RuntimeError),
+        ):
+            secrets.write_secret_value(**rotation)
+        self.assertEqual(
+            (self.store.list_secret_records(), self.store.list_secret_bindings()), before
+        )
+        secrets.write_secret_value(**rotation)
+        self.assertEqual(stored_findings(sibling_key), ["context_not_allowed"])
 
     async def test_caller_values_testing_namespace_and_mixed_writes_cannot_enter_first_empty(
         self,
