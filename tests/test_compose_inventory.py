@@ -695,6 +695,21 @@ class CachedComposeInventoryTests(unittest.TestCase):
                 inventory.read_cached_files(self.base, {**request, "hash_environment": True})
             ),
         )
+        read_regular = inventory._read_regular
+        environment_reads = 0
+
+        def changing_environment(path: Path, bound: int) -> bytes:
+            nonlocal environment_reads
+            content = read_regular(path, bound)
+            if path == self.environment:
+                environment_reads += 1
+                if environment_reads > 1:
+                    return content + b"\nCHANGED=1\n"
+            return content
+
+        with patch.object(inventory, "_read_regular", side_effect=changing_environment):
+            with self.assertRaises(ValueError):
+                inventory.read_cached_files(self.base, {**request, "hash_environment": True})
         for filename in ("../outside.yml", "/outside.yml", "docker/coolify/.env"):
             with self.subTest(filename=filename), self.assertRaises(ValueError):
                 inventory.read_cached_files(self.base, {**request, "files": [filename]})

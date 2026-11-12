@@ -637,6 +637,12 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
     def test_accepted_executor_delivers_initial_credentials_and_completes_real_executor_drill(
         self,
     ) -> None:
+        self.exercise_accepted_executor()
+
+    def test_known_deploy_survives_unavailable_rendered_receipt_and_still_drills(self) -> None:
+        self.exercise_accepted_executor(rendered_failure=True)
+
+    def exercise_accepted_executor(self, *, rendered_failure: bool = False) -> None:
         from control_plane import runtime_environments
         from control_plane.dokploy import api, compose, source, post_deploy
         from control_plane.runtime_environments import resolve_site_runtime_environment_from_store
@@ -650,7 +656,15 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         from tests.test_odoo_stable_target_replacement import _verification_result
 
         self.runtime = self.runtime.model_copy(
-            update={"env": {**self.runtime.env, "ODOO_DB_USER": "example"}}
+            update={
+                "env": {
+                    **self.runtime.env,
+                    "ODOO_DB_USER": "example",
+                    "ODOO_SMTP_SERVER": "127.0.0.1",
+                    "ODOO_SMTP_PORT": "9",
+                    "ODOO_SMTP_SSL": "false",
+                }
+            }
         )
         self.store.write_runtime_environment_record(self.runtime)
         self.target = self.target.model_copy(
@@ -712,9 +726,17 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
 
         def execute_real(**kwargs: Any) -> Any:
             self.modes.append(kwargs["request"].data_source_mode)
-            return replacement.execute_odoo_stable_target_replacement_apply(
+            result = replacement.execute_odoo_stable_target_replacement_apply(
                 **kwargs, dokploy_request=provider_request
             )
+            if rendered_failure and kwargs["request"].data_source_mode == "empty":
+                recorded = self.store.read_deployment_record(result.deployment_record_id)
+                self.assertEqual(recorded.deploy.status, "pass")
+                self.assertEqual(
+                    recorded.runtime_source["first_empty_rendered_inputs"], "unavailable"
+                )
+                self.assertTrue(recorded.runtime_source["first_empty_provider_deployment_id"])
+            return result
 
         def post_deploy_execution(**kwargs: Any) -> dict[str, str]:
             kwargs["before_provider_mutation"]("post_deploy_target_update")
@@ -746,7 +768,18 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 payload={"runtime_identity": json.loads(env[RUNTIME_IDENTITY_ENV_KEY])}
             )
 
+        from control_plane.odoo_first_release import first_release_rendered_inputs
+
+        def rendered_inputs(**kwargs: Any) -> dict[str, str]:
+            if rendered_failure:
+                raise ValueError("Fictional cached environment is unavailable")
+            return first_release_rendered_inputs(**kwargs)
+
         with (
+            patch(
+                "control_plane.odoo_first_release.first_release_rendered_inputs",
+                side_effect=rendered_inputs,
+            ),
             patch.object(
                 replacement,
                 "build_odoo_stable_target_replacement_plan",

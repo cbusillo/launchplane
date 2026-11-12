@@ -337,7 +337,8 @@ def release_start_for_acceptance(
                 )
             )
         except (FileNotFoundError, ValueError):
-            return "promote_with_rollback_drill"
+            original = None
+            mode = "promote_with_rollback_drill"
         if isinstance(original, AbsentProduction):
             mode = "promote_with_rollback_drill"
     if mode == "promote_with_rollback_drill" and _product_drill_passed(store, profile):
