@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from control_plane.storage.postgres import PostgresRecordStore
 
 FirstEmptyIntent = Literal["runtime_credentials"]
+SECTIONS_EACH_SNAPSHOT_CLEARS = ("volumes", "containers", "services", "swarm")
 
 
 class FirstEmptyInputResult(BaseModel):
@@ -629,6 +630,8 @@ def first_empty_storage_program(*, compose_root: Path = Path("/etc/dokploy/compo
         "import base64,hashlib,json,re,subprocess,sys\nfrom pathlib import Path\n"
         "from typing import Any\nfrom collections.abc import Callable\n"
         + f"NATIVE_PROGRAM_SOURCE_SITE_LIMIT={native_copy_stream.NATIVE_PROGRAM_SOURCE_SITE_LIMIT}\n"
+        + f"SNAPSHOT_SECTIONS={native_copy_stream.NATIVE_STORAGE_SNAPSHOT_SECTIONS!r}\n"
+        + f"SECTIONS_EACH_SNAPSHOT_CLEARS={SECTIONS_EACH_SNAPSHOT_CLEARS!r}\n"
         + inspect.getsource(docker_daemon_authorization_denied)
         + "\n"
         + inspect.getsource(single_local_swarm_node)
@@ -649,12 +652,14 @@ def docker(*arguments):
     return result.stdout.decode('utf-8')
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+changed = []
 try:
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     before = first_empty_storage_snapshot(docker, spec, compose_root=COMPOSE_ROOT, read_swarm=single_local_swarm_node)
     after = first_empty_storage_snapshot(docker, spec, compose_root=COMPOSE_ROOT, read_swarm=single_local_swarm_node)
-    if before != after:
-        raise ValueError('Storage changed during observation')
+    changed = sorted({section if section in SNAPSHOT_SECTIONS else 'other' for section in {*before, *after} if before.get(section) != after.get(section)})
+    if not set(changed) <= set(SECTIONS_EACH_SNAPSHOT_CLEARS):
+        raise ValueError('Original storage changed during observation')
     result = {'type':'complete', 'binding':digest(spec), 'storage':digest(before['selected'])}
 except PermissionError:
     result = {'type':'denied'}
@@ -665,6 +670,8 @@ except Exception as error:
         if failure_traceback.tb_frame.f_code.co_filename=='<string>': sites.append(failure_traceback.tb_lineno)
         failure_traceback=failure_traceback.tb_next
     result = {'type':'failed', 'sites':sites[-NATIVE_PROGRAM_SOURCE_SITE_LIMIT:]}
+    if changed:
+        result['changed_sections'] = changed
 print(sys.argv[2] + json.dumps(result), flush=True)
 """
     )

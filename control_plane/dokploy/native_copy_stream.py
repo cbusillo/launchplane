@@ -71,6 +71,16 @@ NATIVE_CONTAINER_SPEC_FIELDS = (
     "Ulimits",
     "OomScoreAdj",
 )
+NATIVE_STORAGE_SNAPSHOT_SECTIONS = (
+    "volumes",
+    "containers",
+    "services",
+    "swarm",
+    "selected",
+    "project_exists",
+    "docker_root",
+    "other",
+)
 
 
 class NativeSourceAuthorizationDenied(DurableOperationAuthorizationDeniedError):
@@ -97,6 +107,7 @@ class NativeProgramFailed(NativeSourceUnavailable):
         program: str = "",
         program_sites: object = None,
         container_fields: object = None,
+        changed_sections: object = None,
         failure_evidence_id: object = None,
         failure_markers: object = None,
     ) -> None:
@@ -132,6 +143,18 @@ class NativeProgramFailed(NativeSourceUnavailable):
                 for item in container_fields
             )
             and len({item["field"] for item in container_fields}) == len(container_fields)
+            else ()
+        )
+        self.changed_sections: tuple[str, ...] = (
+            tuple(changed_sections)
+            if self.program_sites
+            and isinstance(changed_sections, list)
+            and changed_sections
+            and all(
+                isinstance(section, str) and section in NATIVE_STORAGE_SNAPSHOT_SECTIONS
+                for section in changed_sections
+            )
+            and len(set(changed_sections)) == len(changed_sections)
             else ()
         )
         self.has_diagnostic = predicate in ReadbackPredicate and kind in {"refused", "unavailable"}
@@ -406,6 +429,7 @@ def _read_program(
                 program=program,
                 program_sites=value.get("sites"),
                 container_fields=value.get("container_fields"),
+                changed_sections=value.get("changed_sections"),
                 failure_evidence_id=value.get(COPY_FAILURE_EVIDENCE_MARKER),
                 failure_markers=value,
             )
