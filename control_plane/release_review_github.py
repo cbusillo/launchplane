@@ -191,28 +191,6 @@ def read_release_changes(
     commits: list[str] = []
     total = None
     for page in range(1, 51):
-        if not production_commit:
-            batch = read(
-                f"/repos/{repository_path}/commits?sha={candidate_commit}&per_page=100&page={page}"
-            )
-            if not isinstance(batch, list):
-                raise ValueError("Initial release history is incomplete.")
-            for commit in batch:
-                sha = commit.get("sha") if isinstance(commit, dict) else None
-                if (
-                    not isinstance(sha, str)
-                    or not re.fullmatch(r"[0-9a-f]{40}", sha)
-                    or sha in commits
-                ):
-                    raise ValueError(
-                        "Initial release history contains invalid or repeated commits."
-                    )
-                commits.append(sha)
-            if len(batch) < 100:
-                if not commits or commits[0] != candidate_commit:
-                    raise ValueError("Initial release history does not identify the candidate.")
-                break
-            continue
         comparison = read(
             f"/repos/{repository_path}/compare/{production_commit}...{candidate_commit}"
             f"?per_page=100&page={page}"

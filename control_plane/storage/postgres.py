@@ -20282,7 +20282,9 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 .with_for_update()
             )
-            current = EnvironmentInventory.model_validate(row.payload) if row is not None else None
+            current = None
+            if row is not None:
+                current = EnvironmentInventory.model_validate(row.payload)
             if current != expected_record:
                 return False
             session.merge(self._environment_inventory_row(replacement_record))

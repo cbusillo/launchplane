@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 import logging
+from typing import Union
 import time
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -359,7 +360,7 @@ def deliver_release_digest(
             return result("delivered", action="skipped_retired_product")
         if profile.repository != record.payload.get("repository") or release_version(
             store=store, profile=profile, instance="prod"
-        ) != TypeAdapter(ReleaseVersion | AbsentProduction).validate_python(
+        ) != TypeAdapter(Union[ReleaseVersion, AbsentProduction]).validate_python(
             record.payload.get("production")
         ):
             return result("delivered", action="skipped_changed_production")

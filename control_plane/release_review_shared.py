@@ -24,7 +24,7 @@ def _selectors(artifact: ArtifactIdentityManifest, repository: str) -> dict[str,
 
 def read_shared_source_changes(
     *,
-    production: ArtifactIdentityManifest | None,
+    production: ArtifactIdentityManifest,
     candidate: ArtifactIdentityManifest,
     repository: str,
     read: GitHubRead,
@@ -32,19 +32,13 @@ def read_shared_source_changes(
     review_label: str = "owner-review",
     policy_store: object = None,
 ) -> tuple[tuple[SharedSourceReview, ...], tuple[str, ...]]:
-    before_inputs, before_unknown = (
-        verified_release_inputs(production) if production is not None else ({}, ())
-    )
+    before_inputs, before_unknown = verified_release_inputs(production)
     after_inputs, after_unknown = verified_release_inputs(candidate)
     unexplained = list(dict.fromkeys((*before_unknown, *after_unknown)))
     ranges = set()
     for name in sorted(before_inputs.keys() | after_inputs.keys()):
         before = before_inputs.get(name)
         after = after_inputs.get(name)
-        if production is None and after is not None:
-            if after.has_source_identity and after.repository != repository_key(repository):
-                ranges.add((after.repository, "", after.commit))
-            continue
         if before is None or after is None:
             unexplained.append(
                 f"{name}: UNKNOWN input was added or removed without review coverage."
@@ -58,24 +52,20 @@ def read_shared_source_changes(
             )
             continue
         if before.repository == repository_key(repository):
-            if (
-                production is None
-                or before.commit != production.source_commit
-                or after.commit != candidate.source_commit
-            ):
+            if before.commit != production.source_commit or after.commit != candidate.source_commit:
                 unexplained.append(f"{name}: UNKNOWN source differs from the product commit.")
             continue
         if before.commit != after.commit:
             ranges.add((before.repository, before.commit, after.commit))
     try:
-        before_selectors = _selectors(production, repository) if production is not None else {}
+        before_selectors = _selectors(production, repository)
         after_selectors = _selectors(candidate, repository)
     except ValueError:
         before_selectors, after_selectors = {}, {}
         unexplained.append("Shared release input source selection is UNKNOWN or ambiguous.")
     reviews = []
     for key in sorted(after_selectors):
-        if production is not None and before_selectors.get(key) != after_selectors.get(key):
+        if before_selectors.get(key) != after_selectors.get(key):
             unexplained.append(
                 f"Shared release input {key} changed its source selection without review coverage."
             )

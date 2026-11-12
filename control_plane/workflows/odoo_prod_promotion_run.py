@@ -348,15 +348,19 @@ def execute_odoo_prod_promotion_run(
         from control_plane.contracts.release_review import AbsentProduction
         from control_plane.odoo_first_release import (
             capture_first_release_absence,
-            first_release_is_stopped,
+            first_release_has_retained_stack,
             first_release_backup_runtime,
         )
 
         absent = release_decision is not None and isinstance(
             release_decision.checklist.production, AbsentProduction
         )
-        stopped = absent and first_release_is_stopped(
-            record_store, release_decision, request.context
+        stopped = (
+            absent
+            and release_decision is not None
+            and first_release_has_retained_stack(
+                record_store, request.context, product=release_decision.product
+            )
         )
         backup_request = OdooProdBackupGateRequest(
             context=request.context,

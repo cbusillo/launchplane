@@ -326,13 +326,17 @@ def execute_odoo_prod_promotion(
                 )
             else:
                 from control_plane.contracts.release_review import AbsentProduction
-                from control_plane.odoo_first_release import first_release_is_stopped
+                from control_plane.odoo_first_release import first_release_has_retained_stack
 
                 first_release = release_decision is not None and isinstance(
                     release_decision.checklist.production, AbsentProduction
                 )
-                initial_empty = first_release and not first_release_is_stopped(
-                    record_store, release_decision, request.context
+                initial_empty = (
+                    first_release
+                    and release_decision is not None
+                    and not first_release_has_retained_stack(
+                        record_store, request.context, product=release_decision.product
+                    )
                 )
                 replacement_result = execute_odoo_stable_target_replacement_apply(
                     control_plane_root=control_plane_root,

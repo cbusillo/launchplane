@@ -22,10 +22,40 @@ from tests.test_release_review import github_read
 class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
     def setUp(self) -> None:
         super().setUp()
+        from control_plane.contracts.odoo_online_backup import DEFAULT_ODOO_BACKUP_ROOT
+
+        self.runtime = self.runtime.model_copy(
+            update={"env": {**self.runtime.env, "ODOO_BACKUP_ROOT": DEFAULT_ODOO_BACKUP_ROOT}}
+        )
+        self.store.write_runtime_environment_record(self.runtime)
         self.profile = self.profile.model_copy(
             update={"owner": ProductOwnerProfile(github_id="9001", github_login="site-owner")}
         )
         self.store.write_product_profile_record(self.profile)
+        from control_plane.product_config import apply_product_config_bundle
+        from control_plane.contracts.product_profile_record import (
+            FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
+        )
+
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                "product": self.profile.product,
+                "context": self.context,
+                "instance": "prod",
+                "secrets": [
+                    {
+                        "binding_key": key,
+                        "value": f"fictional-{key.lower()}",
+                        "secret_class": "prod_only",
+                    }
+                    for key in sorted(FRESH_TESTING_LOCAL_CREDENTIAL_KEYS)
+                ],
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="fixture",
+        )
         self.artifact = ArtifactIdentityManifest(
             artifact_id="fictional-candidate",
             source_commit="b" * 40,
@@ -65,7 +95,8 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             )
         )
 
-    def read(self, path: str) -> Any:
+    @staticmethod
+    def read(path: str) -> Any:
         if "/commits?" in path:
             return [{"sha": parse_qs(urlsplit(path).query)["sha"][0]}]
         result = github_read(path)
@@ -79,6 +110,8 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
 
     def test_review_binds_actual_absence_and_initial_runtime_without_exemption(self) -> None:
         review = build_release_review(store=self.store, profile=self.profile, read=self.read)
+        if not review.checklist_complete:
+            review = self.prepare_initial_review()
         self.assertTrue(review.required)
         self.assertFalse(review.approved)
         self.assertTrue(review.checklist_complete, review.blockers)
@@ -88,7 +121,6 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         self.assertNotIn("artifact_id", production)
         self.assertEqual(review.checklist.candidate.artifact_id, self.artifact.artifact_id)
         self.probe.assert_not_called()
-        self.assertEqual(self.provider_payload["env"], "")
         before = checklist_digest(review.checklist)
         self.store.write_runtime_environment_record(
             self.runtime.model_copy(update={"env": {**self.runtime.env, "ODOO_WORKERS": "3"}})
@@ -96,6 +128,180 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         changed = build_release_review(store=self.store, profile=self.profile, read=self.read)
         assert changed.checklist is not None
         self.assertNotEqual(checklist_digest(changed.checklist), before)
+
+    def prepare_initial_review(self) -> Any:
+        from control_plane.release_request import record_release_request
+
+        review = build_release_review(store=self.store, profile=self.profile, read=self.read)
+        self.profile = record_release_request(
+            store=self.store,
+            profile=self.profile,
+            review=review,
+            source="director_request",
+            reason="Initial version is ready for review",
+            decision_reference="https://github.com/example/product/issues/1#issuecomment-1",
+            actor="fixture",
+            initial_version_test_notes="Open the initial site, add a fictional contact and verify the follow-up reminder.",
+        )
+        return build_release_review(store=self.store, profile=self.profile, read=self.read)
+
+    def test_initial_notes_bind_whole_version_without_requiring_ancestor_change_notes(self) -> None:
+        from control_plane.artifact_release_inputs import verified_release_inputs
+
+        with patch(
+            "control_plane.release_review.read_release_changes",
+            side_effect=AssertionError("No historical comparison"),
+        ):
+            incomplete = build_release_review(
+                store=self.store, profile=self.profile, read=self.read
+            )
+            self.assertFalse(incomplete.checklist_complete)
+            complete = self.prepare_initial_review()
+        self.assertTrue(complete.checklist_complete, complete.blockers)
+        initial = complete.checklist.initial_version
+        self.assertIsNotNone(initial)
+        self.assertEqual(initial.runtime_values, self.runtime.env)
+        inputs, unknown = verified_release_inputs(self.artifact)
+        self.assertFalse(unknown)
+        self.assertTrue(
+            {(source.name, source.repository, source.commit) for source in inputs.values()}
+            <= {(source.name, source.repository, source.commit) for source in initial.sources}
+        )
+        self.store.write_artifact_manifest(
+            self.artifact.model_copy(update={"odoo_install_modules": ("website",)})
+        )
+        changed = build_release_review(store=self.store, profile=self.profile, read=self.read)
+        self.assertFalse(changed.checklist_complete)
+        assert changed.checklist is not None and changed.checklist.initial_version is not None
+        self.assertFalse(changed.checklist.initial_version.client_test_notes)
+        self.assertNotEqual(changed.checklist_digest, complete.checklist_digest)
+
+    def test_http_initial_notes_prepare_review_then_only_exact_human_acceptance_starts_release(
+        self,
+    ) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
+        from tests.http_app_test_support import (
+            _github_oauth_config,
+            _browser_mutation_headers,
+            _RejectingVerifier,
+            _local_operator_bearer_config,
+        )
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.support.http import request
+        from tests.test_product_review import _human
+
+        self.profile = self.profile.model_copy(update={"release_on_acceptance": "promote"})
+        self.store.write_product_profile_record(self.profile)
+        sessions = HumanSessionManager(
+            config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=_local_operator_bearer_config(),
+            human_session_manager=sessions,
+            authz_policy=LaunchplaneAuthzPolicy(),
+        )
+
+        def browser_headers() -> dict[str, str]:
+            session = sessions.issue(
+                _human(
+                    login=self.profile.owner.github_login,
+                    github_id=int(self.profile.owner.github_id),
+                )
+            )
+            return _browser_mutation_headers(sessions, session)
+
+        async def exercise() -> None:
+            initial = build_release_review(store=self.store, profile=self.profile, read=self.read)
+            payload = {
+                "product": self.profile.product,
+                "checklist_digest": initial.checklist_digest,
+                "decision": "accepted",
+            }
+            refused = await request(
+                app,
+                "POST",
+                "/v1/release-review/decisions",
+                headers=browser_headers(),
+                payload=payload,
+            )
+            self.assertEqual(refused.status_code, 409)
+            self.assertFalse(
+                self.store.list_release_review_decision_records(product=self.profile.product)
+            )
+            preparation = {
+                "product": self.profile.product,
+                "checklist_digest": initial.checklist_digest,
+                "reason": "The complete first version is ready",
+                "decision_reference": "https://github.com/example/product/issues/1#issuecomment-1",
+                "initial_version_test_notes": "Open the initial site and verify a fictional contact and follow-up.",
+            }
+            prepared = await request(
+                app,
+                "POST",
+                "/v1/release-review/requests",
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload=preparation,
+            )
+            self.assertEqual(prepared.status_code, 200, prepared.text)
+            ready = prepared.json()["review"]
+            self.assertTrue(ready["checklist_complete"])
+            self.assertNotEqual(ready["checklist_digest"], initial.checklist_digest)
+            self.assertFalse(
+                self.store.list_release_review_decision_records(product=self.profile.product)
+            )
+            replay = await request(
+                app,
+                "POST",
+                "/v1/release-review/requests",
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload=preparation,
+            )
+            self.assertEqual(replay.status_code, 200, replay.text)
+            self.assertEqual(replay.json()["review"]["checklist_digest"], ready["checklist_digest"])
+            altered = await request(
+                app,
+                "POST",
+                "/v1/release-review/requests",
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload={**preparation, "initial_version_test_notes": "Changed notes"},
+            )
+            self.assertEqual(altered.status_code, 409)
+            stale = await request(
+                app,
+                "POST",
+                "/v1/release-review/decisions",
+                headers=browser_headers(),
+                payload=payload,
+            )
+            self.assertEqual(stale.status_code, 409)
+            accepted = await request(
+                app,
+                "POST",
+                "/v1/release-review/decisions",
+                headers=browser_headers(),
+                payload={**payload, "checklist_digest": ready["checklist_digest"]},
+            )
+            self.assertEqual(accepted.status_code, 200, accepted.text)
+            self.assertTrue(accepted.json()["review"]["latest_decision"]["release_start"])
+
+        with (
+            patch(
+                "control_plane.http_app.current_release_review",
+                side_effect=lambda **kwargs: build_release_review(
+                    store=self.store, profile=kwargs["profile"], read=self.read
+                ),
+            ),
+            patch("control_plane.release_request.publish_release_invitation", return_value=True),
+            patch(
+                "control_plane.http_app.publish_release_decision",
+                return_value="https://github.com/example/product/issues/1",
+            ),
+        ):
+            asyncio.run(exercise())
 
     def accept(self) -> Any:
         from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
@@ -105,9 +311,11 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         self.profile = self.profile.model_copy(update={"release_on_acceptance": "promote"})
         self.store.write_product_profile_record(self.profile)
         review = build_release_review(store=self.store, profile=self.profile, read=self.read)
+        if not review.checklist_complete:
+            review = self.prepare_initial_review()
         assert review.checklist is not None
         decision = ReleaseReviewDecisionRecord(
-            record_id="fictional-first-acceptance",
+            record_id=f"fictional-acceptance-{len(self.store.list_release_review_decision_records(product=self.profile.product)) + 1}",
             product=self.profile.product,
             checklist=review.checklist,
             checklist_digest=review.checklist_digest,
@@ -139,6 +347,81 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         with patch.object(self.store, "read_artifact_manifest", side_effect=FileNotFoundError):
             with self.assertRaises(ReleaseEvidenceUnavailable):
                 release_version(store=self.store, profile=self.profile, instance="prod")
+
+    def test_rejected_first_candidate_can_be_reviewed_again(self) -> None:
+        rejected = self.accept().model_copy(
+            update={"decision": "changes_requested", "reason": "Revise it", "release_start": ""}
+        )
+        self.store.write_release_review_decision_record(rejected)
+        review = build_release_review(store=self.store, profile=self.profile, read=self.read)
+        self.assertIsNotNone(review.checklist)
+        self.assertFalse(review.approved)
+        from control_plane.release_request import record_release_request
+
+        self.profile = record_release_request(
+            store=self.store,
+            profile=self.profile,
+            review=review,
+            source="director_request",
+            reason="The initial test notes were corrected",
+            decision_reference="https://github.com/example/product/issues/1#issuecomment-2",
+            actor="fixture",
+            initial_version_test_notes="Verify the corrected initial contact and follow-up workflow.",
+        )
+        changed = build_release_review(store=self.store, profile=self.profile, read=self.read)
+        self.assertTrue(changed.checklist_complete, changed.blockers)
+        self.assertIsNone(changed.latest_decision)
+        self.assertNotEqual(changed.checklist_digest, review.checklist_digest)
+
+    def test_standing_acceptance_waits_for_complete_initial_notes_and_binds_the_prepared_version(
+        self,
+    ) -> None:
+        from control_plane.client_release import _record_standing_acceptance
+
+        self.profile = self.profile.model_copy(
+            update={"release_on_acceptance": "director_standing"}
+        )
+        self.store.write_product_profile_record(self.profile)
+        with patch(
+            "control_plane.client_release.current_release_review",
+            side_effect=lambda **_: build_release_review(
+                store=self.store, profile=self.profile, read=self.read
+            ),
+        ):
+            _record_standing_acceptance(self.store, Path("."), self.profile)
+            self.assertFalse(
+                self.store.list_release_review_decision_records(product=self.profile.product)
+            )
+            prepared = self.prepare_initial_review()
+            _record_standing_acceptance(self.store, Path("."), self.profile)
+        (accepted,) = self.store.list_release_review_decision_records(product=self.profile.product)
+        self.assertEqual(accepted.checklist_digest, prepared.checklist_digest)
+        self.assertEqual(accepted.acceptance_source, "director_standing")
+        self.assertEqual(accepted.release_start, "promote_with_rollback_drill")
+        self.probe.assert_not_called()
+
+    def test_initial_review_requires_recorded_recovery_root_and_bounds_invalid_inputs(self) -> None:
+        from control_plane.client_release import release_start_for_acceptance
+        from control_plane.release_review import release_version, ReleaseEvidenceUnavailable
+
+        self.profile = self.profile.model_copy(update={"release_on_acceptance": "promote"})
+        self.store.write_product_profile_record(self.profile)
+        for missing in ("ODOO_BACKUP_ROOT", "ODOO_DB_NAME"):
+            with self.subTest(missing=missing):
+                self.store.write_runtime_environment_record(
+                    self.runtime.model_copy(
+                        update={
+                            "env": {
+                                key: value
+                                for key, value in self.runtime.env.items()
+                                if key != missing
+                            }
+                        }
+                    )
+                )
+                with self.assertRaises(ReleaseEvidenceUnavailable):
+                    release_version(store=self.store, profile=self.profile, instance="prod")
+                release_start_for_acceptance(store=self.store, profile=self.profile)
 
     def queue_promotion(self, decision: Any, attempt: int = 1) -> Any:
         from control_plane.client_release import _queue_promotion, ClientReleaseStep
@@ -177,6 +460,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             OdooStableTargetReplacementApplyResult,
         )
         from control_plane.contracts.promotion_record import HealthcheckEvidence
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
         from control_plane.workflows.inventory import build_environment_inventory
         from control_plane.workflows.odoo_stable_target_replacement import (
             TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
@@ -186,7 +470,9 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         import hashlib
 
         request = kwargs["request"]
+        failed = getattr(self, "fail_deployment", False)
         self.modes.append(request.data_source_mode)
+        self.deployment_counter = getattr(self, "deployment_counter", 0) + 1
         self.assertEqual(kwargs["release_decision"].record_id, self.accepted.record_id)
         self.assertTrue(kwargs["operation_id"])
         self.assertTrue(kwargs["operation_lease_owner"])
@@ -196,7 +482,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         )
         self.provider_payload["composeFile"] = "services: {}"
         deployment = _deployment(
-            f"fictional-deployment-{len(self.modes)}", self.artifact.artifact_id
+            f"fictional-deployment-{self.deployment_counter}", self.artifact.artifact_id
         ).model_copy(
             update={
                 "context": self.context,
@@ -207,6 +493,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 "runtime_source": {
                     "first_empty_release_decision": self.accepted.record_id,
                     "first_empty_release_operation": kwargs["operation_id"],
+                    "first_empty_provider_deployment_id": f"fictional-provider-{self.deployment_counter}",
                     "first_empty_provider_env_sha256": hashlib.sha256(
                         str(self.provider_payload["env"]).encode()
                     ).hexdigest(),
@@ -214,23 +501,40 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                         str(self.provider_payload["composeFile"]).encode()
                     ).hexdigest(),
                 },
+                "runtime_identity": RuntimeIdentity(
+                    product=self.profile.product,
+                    context=self.context,
+                    instance="prod",
+                    artifact_id=self.artifact.artifact_id,
+                    deployment_record_id=f"fictional-deployment-{self.deployment_counter}",
+                    source_git_ref=self.artifact.source_commit,
+                    image_reference=f"{self.artifact.image.repository}@{self.artifact.image.digest}",
+                ),
             }
         )
-        self.store.write_deployment_record(deployment)
-        self.store.write_environment_inventory(
-            build_environment_inventory(
-                deployment_record=deployment, updated_at=utc_now_timestamp()
+        if failed:
+            deployment = deployment.model_copy(
+                update={"deploy": deployment.deploy.model_copy(update={"status": "fail"})}
             )
-        )
+        self.store.write_deployment_record(deployment)
+        if not failed:
+            self.store.write_environment_inventory(
+                build_environment_inventory(
+                    deployment_record=deployment, updated_at=utc_now_timestamp()
+                )
+            )
         prior = getattr(self, "docker_state", None)
         self.docker_state = FakeReleaseDocker(
             self.artifact.artifact_id,
             deployment.record_id,
             ("example-db", "example-data", "example-logs", "example-data-filestore"),
+            image=f"{self.artifact.image.repository}@{self.artifact.image.digest}",
         )
         if prior is not None and request.data_source_mode == "existing":
             self.docker_state.volumes = prior.volumes
-        failed = getattr(self, "fail_deployment", False)
+        if failed and getattr(self, "no_initialized_stack", False):
+            self.docker_state.rows.clear()
+            self.docker_state.volumes.clear()
         return OdooStableTargetReplacementApplyResult(
             product=self.profile.product,
             context=self.context,
@@ -257,60 +561,41 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             lease_owner="fictional-worker",
         )
 
-    def test_accepted_executor_delivers_initial_credentials_without_runtime_sync(self) -> None:
-        from functools import partial
-        from datetime import UTC, datetime, timedelta
+    def test_accepted_executor_delivers_initial_credentials_and_completes_real_executor_drill(
+        self,
+    ) -> None:
         from control_plane import runtime_environments
-        from control_plane.dokploy import api, compose
-        from control_plane.product_config import apply_product_config_bundle
+        from control_plane.dokploy import api, compose, source, post_deploy
         from control_plane.runtime_environments import resolve_site_runtime_environment_from_store
-        from control_plane.workflows.odoo_prod_promotion_run import execute_odoo_prod_promotion_run
         from control_plane.workflows import odoo_stable_target_replacement as replacement
-        from tests.test_odoo_first_empty_lifecycle import ReachedDeployment
         from control_plane.contracts.odoo_stable_target_replacement import (
             LAUNCHPLANE_REQUIRED_ODOO_MODULES,
         )
+        from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
+        from control_plane.workflows.runtime_identity_health import HealthcheckPass
+        from tests.test_odoo_post_deploy import _module_update_evidence
+        from tests.test_odoo_stable_target_replacement import _verification_result
 
         self.runtime = self.runtime.model_copy(
             update={"env": {**self.runtime.env, "ODOO_DB_USER": "example"}}
         )
         self.store.write_runtime_environment_record(self.runtime)
-        keys = ("ODOO_ADMIN_PASSWORD", "ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD")
-        apply_product_config_bundle(
-            record_store=self.store,
-            payload={
-                "product": self.profile.product,
-                "context": self.context,
-                "instance": "prod",
-                "secrets": [
-                    {
-                        "binding_key": key,
-                        "value": f"fictional-{key.lower()}",
-                        "secret_class": "prod_only",
-                    }
-                    for key in keys
-                ],
-            },
-            mode="apply",
-            actor="fixture",
-            source_label="fixture",
+        self.target = self.target.model_copy(
+            update={"domains": ("example.test",), "public_hosts": ("example.test",)}
         )
-        self.target = self.target.model_copy(update={"domains": ("example.test",)})
         self.store.write_dokploy_target_record(self.target)
+        from tests.test_product_topology_read_model import _route_binding
+
+        self.store.write_route_binding_record(
+            _route_binding(
+                product=self.profile.product, target_name=self.target.target_name
+            ).model_copy(update={"context": self.context})
+        )
         self.artifact = self.artifact.model_copy(
             update={"odoo_install_modules": LAUNCHPLANE_REQUIRED_ODOO_MODULES}
         )
         self.store.write_artifact_manifest(self.artifact)
-        accepted = self.accept()
-        operation = self.queue_promotion(accepted)
-        now = datetime.now(UTC)
-        current = self.store.claim_next_odoo_prod_promotion_operation_record(
-            lease_owner="fictional-worker",
-            claimed_at=now.isoformat(),
-            lease_expires_at=(now + timedelta(minutes=5)).isoformat(),
-        )
-        assert current is not None
-        self.assertEqual(current.operation_id, operation.operation_id)
+        history: list[dict[str, str]] = []
 
         def source_write(**kwargs: Any) -> dict[str, str]:
             self.provider_payload["composeFile"] = kwargs["compose_file"]
@@ -320,6 +605,30 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         def environment_write(**kwargs: Any) -> None:
             self.provider_payload["env"] = kwargs["env_text"]
 
+        def trigger(**kwargs: Any) -> None:
+            env = api.parse_dokploy_env_text(str(self.provider_payload["env"]))
+            identity = json.loads(env[RUNTIME_IDENTITY_ENV_KEY])
+            prior = getattr(self, "docker_state", None)
+            self.docker_state = FakeReleaseDocker(
+                identity["artifact_id"],
+                identity["deployment_record_id"],
+                (env["ODOO_DB_VOLUME"], env["ODOO_DATA_VOLUME"], env["ODOO_LOG_VOLUME"]),
+                image=identity["image_reference"],
+            )
+            for name in ("web-id", "script-runner"):
+                self.docker_state.rows[name]["Config"]["Env"] = [
+                    f"{key}={value}" for key, value in env.items()
+                ]
+            if prior is not None:
+                self.docker_state.volumes = prior.volumes
+            history.append(
+                {
+                    "deploymentId": f"provider-{len(history) + 1}",
+                    "status": "done",
+                    "title": kwargs["title"],
+                }
+            )
+
         def provider_request(*, path: str, **_: Any) -> Any:
             return (
                 [{"host": "example.test", "domainId": "fictional-domain"}]
@@ -327,20 +636,55 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 else []
             )
 
+        def execute_real(**kwargs: Any) -> Any:
+            self.modes.append(kwargs["request"].data_source_mode)
+            return replacement.execute_odoo_stable_target_replacement_apply(
+                **kwargs, dokploy_request=provider_request
+            )
+
+        def post_deploy_execution(**kwargs: Any) -> dict[str, str]:
+            kwargs["before_provider_mutation"]("post_deploy_target_update")
+            return _module_update_evidence(website_indexing_production_use="prelaunch")
+
+        def native_indexing(**kwargs: Any) -> dict[str, Any]:
+            request = kwargs["request"]
+            return {
+                "status": "complete",
+                "native": {
+                    **request["indexing"],
+                    "website_id": 1,
+                    "field": "custom_code_head",
+                    "before_sha256": "a" * 64,
+                    "after_sha256": "b" * 64,
+                    "changed": True,
+                    "managed_noindex_before": False,
+                    "managed_noindex_after": True,
+                    "committed": False,
+                    "database_uuid": "fictional-database",
+                },
+            }
+
+        def health_read(**_: Any) -> HealthcheckPass:
+            env = dict(
+                value.split("=", 1) for value in self.docker_state.rows["web-id"]["Config"]["Env"]
+            )
+            return HealthcheckPass(
+                payload={"runtime_identity": json.loads(env[RUNTIME_IDENTITY_ENV_KEY])}
+            )
+
         with (
-            patch(
-                "control_plane.workflows.odoo_prod_promotion.execute_odoo_stable_target_replacement_apply",
-                side_effect=partial(
-                    replacement.execute_odoo_stable_target_replacement_apply,
-                    dokploy_request=provider_request,
-                ),
-            ),
             patch.object(
                 replacement,
                 "build_odoo_stable_target_replacement_plan",
                 wraps=replacement.build_odoo_stable_target_replacement_plan,
             ) as plan,
             patch.object(api, "dokploy_request", side_effect=provider_request),
+            patch.object(api, "list_deployments_for_target", side_effect=lambda **_: list(history)),
+            patch.object(
+                api,
+                "latest_deployment_for_target",
+                side_effect=lambda **_: history[-1] if history else None,
+            ),
             patch.object(
                 runtime_environments,
                 "resolve_site_runtime_environment",
@@ -359,27 +703,44 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 side_effect=lambda **_: str(self.provider_payload["composeFile"]),
             ),
             patch.object(api, "update_dokploy_target_env", side_effect=environment_write),
-            patch.object(api, "latest_deployment_for_target", return_value=None),
-            patch.object(api, "trigger_deployment", side_effect=ReachedDeployment),
+            patch.object(api, "trigger_deployment", side_effect=trigger),
+            patch.object(api, "wait_for_target_deployment", return_value="done"),
+            patch.object(
+                source,
+                "read_control_plane_dokploy_source_of_truth",
+                side_effect=lambda **_: source.load_optional_dokploy_source_of_truth_from_store(
+                    record_store=self.store
+                ),
+            ),
+            patch.object(
+                post_deploy, "run_compose_post_deploy_update", side_effect=post_deploy_execution
+            ) as updates,
+            patch(
+                "control_plane.odoo_website_indexing.run_native_indexing",
+                side_effect=native_indexing,
+            ),
+            patch.object(
+                replacement, "verify_odoo_stable_readiness", return_value=_verification_result()
+            ),
+            patch.object(
+                replacement,
+                "wait_for_runtime_identity_healthcheck_with_retry",
+                side_effect=health_read,
+            ),
             patch.object(replacement, "require_forward_lane_build"),
         ):
-            with self.assertRaises(ReachedDeployment):
-                result = execute_odoo_prod_promotion_run(
-                    control_plane_root=Path("."),
-                    state_dir=Path("."),
-                    database_url=self.store.database_url,
-                    record_store=self.store,
-                    request=current.request,
-                    release_decision=accepted,
-                    operation_id=current.operation_id,
-                    operation_lease_owner=current.lease_owner,
-                    provider_effect_checkpoint=lambda _: None,
-                )
-                self.fail(result.error_message)
+            self.complete_drill(expected_first_mode="empty", replacement=execute_real)
         self.assertTrue(plan.called)
+        self.assertEqual(updates.call_count, 2)
         delivered = api.parse_dokploy_env_text(str(self.provider_payload["env"]))
-        self.assertTrue(set(self.runtime.env) | set(keys) <= delivered.keys())
-        for key in keys:
+        from control_plane.contracts.product_profile_record import (
+            FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
+        )
+
+        self.assertTrue(
+            set(self.runtime.env) | FRESH_TESTING_LOCAL_CREDENTIAL_KEYS <= delivered.keys()
+        )
+        for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS:
             self.assertEqual(delivered[key], f"fictional-{key.lower()}")
         self.assertFalse(
             self.store.read_product_profile_record(
@@ -411,29 +772,73 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 }
             )
         else:
-            super().observe(payload=payload, receive=receive, **kwargs)
+            fixture = getattr(self, "empty_storage_fixture", None)
+            if fixture is None:
+                super().observe(payload=payload, receive=receive, **kwargs)
+            else:
+                from control_plane.odoo_first_empty_inputs import first_empty_storage_snapshot
+                from control_plane.contracts.canonical_json import (
+                    nonvalidating_compact_sorted_json_sha256,
+                )
+
+                storage = first_empty_storage_snapshot(
+                    fixture.docker,
+                    payload,
+                    compose_root=fixture.root / "compose",
+                    read_swarm=lambda _: [],
+                )
+                receive(
+                    {
+                        "type": "complete",
+                        "binding": nonvalidating_compact_sorted_json_sha256(payload),
+                        "storage": nonvalidating_compact_sorted_json_sha256(storage),
+                    }
+                )
 
     def test_first_drill_retains_data_then_takes_real_dump_and_repromotes(self) -> None:
+        self.complete_drill(expected_first_mode="empty")
+
+    def capture_stopped_backup(self, **kwargs: Any) -> dict[str, Any]:
+        from tests.test_odoo_prod_backup_gate import _passing_backup_capture_evidence
+
+        self.assertFalse(self.docker_state.rows["web-id"]["State"]["Running"])
+        self.assertEqual(kwargs["expected_web_state"], "exited")
+        return {
+            **_passing_backup_capture_evidence(),
+            "backup_nonce": kwargs["backup_nonce"],
+            "backup_record_id": kwargs["backup_record_id"],
+            "database_name": kwargs["database_name"],
+        }
+
+    def complete_drill(self, *, expected_first_mode: str, replacement: Any = None) -> None:
         from control_plane.client_release import _queue_rollback, ClientReleaseStep
         from control_plane.timestamps import utc_now_timestamp
         from control_plane.release_review import release_version
         from control_plane.odoo_first_release import FIRST_RELEASE_ABSENCE_SOURCE
-        from tests.test_odoo_prod_backup_gate import _passing_backup_capture_evidence
 
+        dump = self.enterContext(
+            patch(
+                "control_plane.dokploy.post_deploy.run_compose_odoo_backup_gate",
+                side_effect=self.capture_stopped_backup,
+            )
+        )
         self.accepted = self.accept()
         first = self.queue_promotion(self.accepted)
         self.modes: list[str] = []
         with patch(
             "control_plane.workflows.odoo_prod_promotion.execute_odoo_stable_target_replacement_apply",
-            side_effect=self.provider_replacement,
+            side_effect=replacement or self.provider_replacement,
         ):
             self.assertTrue(self.run_worker().terminal_write_committed)
             forward = self.store.read_odoo_prod_promotion_operation_record(first.operation_id)
             self.assertEqual(forward.status, "pass", forward.error_message)
             assert forward.result is not None
             gate = self.store.read_backup_gate_record(forward.result.backup_record_id)
-            self.assertEqual(gate.source, FIRST_RELEASE_ABSENCE_SOURCE)
-            self.assertNotIn("database_dump_sha256", gate.evidence)
+            if expected_first_mode == "empty":
+                self.assertEqual(gate.source, FIRST_RELEASE_ABSENCE_SOURCE)
+                self.assertNotIn("database_dump_sha256", gate.evidence)
+            else:
+                self.assertIn("database_dump_sha256", gate.evidence)
             retained = dict(self.docker_state.volumes)
             rollback_id = _queue_rollback(
                 self.store,
@@ -455,38 +860,33 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             )
             second = self.queue_promotion(self.accepted, 2)
 
-            def capture(**kwargs: Any) -> dict[str, Any]:
-                self.assertFalse(self.docker_state.rows["web-id"]["State"]["Running"])
-                self.assertEqual(kwargs["expected_web_state"], "exited")
-                return {
-                    **_passing_backup_capture_evidence(),
-                    "backup_nonce": kwargs["backup_nonce"],
-                    "backup_record_id": kwargs["backup_record_id"],
-                    "database_name": kwargs["database_name"],
-                }
-
-            with patch(
-                "control_plane.dokploy.post_deploy.run_compose_odoo_backup_gate",
-                side_effect=capture,
-            ) as dump:
-                self.assertTrue(self.run_worker().terminal_write_committed)
+            self.assertTrue(self.run_worker().terminal_write_committed)
             repeated = self.store.read_odoo_prod_promotion_operation_record(second.operation_id)
             self.assertEqual(repeated.status, "pass", repeated.error_message)
-            dump.assert_called_once()
-            self.assertEqual(self.modes, ["empty", "existing"])
+            self.assertEqual(dump.call_count, 1 if expected_first_mode == "empty" else 2)
+            self.assertEqual(self.modes, [expected_first_mode, "existing"])
             self.assertEqual(
                 release_version(store=self.store, profile=self.profile, instance="prod"),
                 self.accepted.checklist.candidate,
             )
-            self.assertEqual(self.docker_state.volumes, retained)
 
     def test_failed_first_deploy_queues_same_acceptance_recovery_without_deleting_data(
         self,
     ) -> None:
+        self.fail_and_recover()
+
+    def fail_and_recover(self, *, initialized: bool = True) -> None:
+        self.enterContext(
+            patch(
+                "control_plane.dokploy.post_deploy.run_compose_odoo_backup_gate",
+                side_effect=self.capture_stopped_backup,
+            )
+        )
         self.accepted = self.accept()
         first = self.queue_promotion(self.accepted)
         self.modes = []
         self.fail_deployment = True
+        self.no_initialized_stack = not initialized
         with patch(
             "control_plane.workflows.odoo_prod_promotion.execute_odoo_stable_target_replacement_apply",
             side_effect=self.provider_replacement,
@@ -495,7 +895,11 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         failed = self.store.read_odoo_prod_promotion_operation_record(first.operation_id)
         self.assertEqual(failed.status, "fail")
         retained = dict(self.docker_state.volumes)
-        recoveries = self.store.list_odoo_prod_rollback_operation_records()
+        recoveries = tuple(
+            record
+            for record in self.store.list_odoo_prod_rollback_operation_records()
+            if record.authorization.release_decision_record_id == self.accepted.record_id
+        )
         self.assertEqual(len(recoveries), 1)
         self.assertEqual(
             recoveries[0].authorization.release_decision_record_id, self.accepted.record_id
@@ -504,7 +908,35 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         recovery = self.store.read_odoo_prod_rollback_operation_record(recoveries[0].operation_id)
         self.assertEqual(recovery.status, "pass", recovery.error_message)
         self.assertEqual(self.docker_state.volumes, retained)
-        self.assertFalse(self.docker_state.rows["web-id"]["State"]["Running"])
+        if initialized:
+            self.assertFalse(self.docker_state.rows["web-id"]["State"]["Running"])
+        else:
+            self.assertFalse(self.docker_state.rows)
+
+    def test_conclusive_failure_without_a_stack_requalifies_owned_configuration_and_absence(
+        self,
+    ) -> None:
+        from tests.test_odoo_first_empty_inputs import FirstEmptyStorageTests
+        from control_plane.dokploy import api
+
+        fixture = FirstEmptyStorageTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.empty_storage_fixture = fixture
+        self.fail_and_recover(initialized=False)
+        code = fixture.root / "compose" / "example-prod" / "code"
+        code.mkdir(parents=True)
+        (code / "docker-compose.yml").write_text(str(self.provider_payload["composeFile"]))
+        (code / ".env").write_text(str(self.provider_payload["env"]))
+        self.enterContext(
+            patch.object(
+                api,
+                "list_deployments_for_target",
+                return_value=[{"deploymentId": "fictional-provider-1", "status": "error"}],
+            )
+        )
+        self.fail_deployment = False
+        self.complete_drill(expected_first_mode="empty")
 
     def test_foreign_backup_prevents_initial_provider_reads_or_writes(self) -> None:
         from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -535,11 +967,34 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             "pass",
         )
 
-    def test_lost_parking_response_holds_original_operation_without_reexecution(self) -> None:
+    def test_recovered_initial_releases_can_accept_again_and_finish_with_retained_data(
+        self,
+    ) -> None:
+        self.fail_and_recover()
+        first = self.accepted
+        self.fail_and_recover()
+        self.assertNotEqual(self.accepted.record_id, first.record_id)
+        self.artifact = self.artifact.model_copy(
+            update={"artifact_id": "fictional-corrected", "source_commit": "c" * 40}
+        )
+        self.store.write_artifact_manifest(self.artifact)
+        self.store.write_release_tuple_record(
+            ReleaseTupleRecord(
+                tuple_id="fictional-corrected-testing",
+                context=self.context,
+                channel="testing",
+                artifact_id=self.artifact.artifact_id,
+                repo_shas={self.profile.repository: self.artifact.source_commit},
+                provenance="ship",
+                minted_at="2026-11-12T16:00:00Z",
+            )
+        )
+        self.fail_deployment = False
+        self.complete_drill(expected_first_mode="existing")
+
+    def promote_and_queue_inverse(self) -> str:
         from control_plane.client_release import _queue_rollback, ClientReleaseStep
         from control_plane.timestamps import utc_now_timestamp
-        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
-        from control_plane.odoo_first_release import first_release_park_program
 
         self.accepted = self.accept()
         self.queue_promotion(self.accepted)
@@ -549,7 +1004,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             side_effect=self.provider_replacement,
         ):
             self.run_worker()
-        inverse_id = _queue_rollback(
+        return _queue_rollback(
             self.store,
             Path("."),
             self.profile,
@@ -558,6 +1013,12 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             self.context,
             utc_now_timestamp(),
         )
+
+    def test_lost_parking_response_holds_original_operation_without_repeating_effects(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.odoo_first_release import first_release_park_program
+
+        inverse_id = self.promote_and_queue_inverse()
 
         def lost_response(**kwargs: Any) -> None:
             self.observe(**kwargs)
@@ -579,27 +1040,12 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         )
 
     def test_parking_publication_cannot_overwrite_concurrent_inventory(self) -> None:
-        from control_plane.client_release import _queue_rollback, ClientReleaseStep
-        from control_plane.timestamps import utc_now_timestamp
-        from control_plane.odoo_first_release import first_release_park_program, STOPPED_RELEASE_KEY
-
-        self.accepted = self.accept()
-        self.queue_promotion(self.accepted)
-        self.modes = []
-        with patch(
-            "control_plane.workflows.odoo_prod_promotion.execute_odoo_stable_target_replacement_apply",
-            side_effect=self.provider_replacement,
-        ):
-            self.run_worker()
-        inverse_id = _queue_rollback(
-            self.store,
-            Path("."),
-            self.profile,
-            self.accepted,
-            ClientReleaseStep("rollback", 1),
-            self.context,
-            utc_now_timestamp(),
+        from control_plane.odoo_first_release import (
+            first_release_park_program,
+            FIRST_RELEASE_STOPPED_KEY,
         )
+
+        inverse_id = self.promote_and_queue_inverse()
         original = self.store.read_environment_inventory(
             context_name=self.context, instance_name="prod"
         )
@@ -629,30 +1075,85 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             context_name=self.context, instance_name="prod"
         )
         self.assertEqual(current, replacement)
-        self.assertNotIn(STOPPED_RELEASE_KEY, current.post_deploy_update.evidence)
+        self.assertNotIn(FIRST_RELEASE_STOPPED_KEY, current.post_deploy_update.evidence)
 
 
 class FakeReleaseDocker:
-    def __init__(self, artifact: str, deployment: str, volumes: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        artifact: str,
+        deployment: str,
+        volumes: tuple[str, ...],
+        *,
+        image: str = "example/odoo@sha256:" + "a" * 64,
+    ) -> None:
         self.volumes = {name: {"retained-business-data": object()} for name in volumes}
         self.writes: list[tuple[str, ...]] = []
-        self.rows: dict[str, dict[str, Any]] = {
-            "web-id": {
-                "Id": "web-id",
+        from control_plane.dokploy.compose import render_odoo_raw_compose_file
+        import yaml
+
+        compose = yaml.safe_load(
+            render_odoo_raw_compose_file(
+                image_reference=image,
+                hold_web_until_integration_readback=True,
+            )
+        )
+        names = dict(zip(("odoo_db", "odoo_data", "odoo_logs"), volumes[:3], strict=True))
+        self.workflow_ssh_source = ""
+        self.artifact, self.deployment, self.image = artifact, deployment, image
+        self.rows: dict[str, dict[str, Any]] = {}
+        for service, definition in compose["services"].items():
+            identifier = "web-id" if service == "web" else service
+            mounts = []
+            for mount in definition.get("volumes", []):
+                if mount.startswith("${DATA_WORKFLOW_SSH_DIR"):
+                    source, destination, mode = mount.rsplit(":", 2)
+                    self.workflow_ssh_source = source.split(":-", 1)[1].removesuffix("}")
+                    mounts.append(
+                        {
+                            "Type": "bind",
+                            "Source": self.workflow_ssh_source,
+                            "Destination": destination,
+                            "RW": mode != "ro",
+                        }
+                    )
+                else:
+                    name, destination = mount.split(":", 1)
+                    mounts.append(
+                        {
+                            "Type": "volume",
+                            "Name": names[name],
+                            "Destination": destination,
+                            "Source": f"/fictional/volumes/{names[name]}/_data",
+                        }
+                    )
+            self.rows[identifier] = {
+                "Id": identifier,
                 "Config": {
+                    "Image": definition["image"],
                     "Labels": {
                         "com.docker.compose.project": "example-prod",
-                        "com.docker.compose.service": "web",
+                        "com.docker.compose.service": service,
                     },
                     "Env": [
                         f"LAUNCHPLANE_ARTIFACT_ID={artifact}",
                         f"LAUNCHPLANE_DEPLOYMENT_RECORD_ID={deployment}",
                     ],
+                    "Cmd": definition.get("command", "").split()
+                    if isinstance(definition.get("command", ""), str)
+                    else definition["command"],
                 },
-                "Mounts": [{"Type": "volume", "Name": volumes[1]}],
+                "Mounts": mounts,
                 "State": {"Running": True},
                 "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}},
-            },
+            }
+
+    def park_spec(self) -> dict[str, Any]:
+        return {
+            "project": "example-prod",
+            "volumes": list(self.volumes),
+            "workflow_ssh_source": self.workflow_ssh_source,
+            "deployments": {self.deployment: {"artifact": self.artifact, "image": self.image}},
         }
 
     def __call__(self, *args: str) -> str:
@@ -662,6 +1163,18 @@ class FakeReleaseDocker:
             return "\n".join(self.rows)
         if args[:2] == ("volume", "ls"):
             return "\n".join(self.volumes)
+        if args[:2] == ("volume", "inspect"):
+            return json.dumps(
+                [
+                    {
+                        "Name": name,
+                        "Driver": "local",
+                        "Options": {},
+                        "Mountpoint": f"/fictional/volumes/{name}/_data",
+                    }
+                    for name in args[2:]
+                ]
+            )
         if args[0] == "inspect":
             return json.dumps([self.rows[key] for key in args[1:]])
         self.writes.append(args)
@@ -685,26 +1198,7 @@ class FirstReleaseParkingTests(unittest.TestCase):
         from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
         docker = FakeReleaseDocker("artifact", "deployment", ("db", "data", "logs"))
-        for name in ("database", "script-runner"):
-            docker.rows[name] = {
-                **docker.rows["web-id"],
-                "Id": name,
-                "State": {"Running": True},
-                "Config": {
-                    **docker.rows["web-id"]["Config"],
-                    "Cmd": ["tail", "-f", "/dev/null"],
-                    "Labels": {
-                        "com.docker.compose.project": "example-prod",
-                        "com.docker.compose.service": name,
-                    },
-                },
-            }
-        spec = {
-            "project": "example-prod",
-            "volumes": list(docker.volumes),
-            "artifact": "artifact",
-            "deployments": ["deployment"],
-        }
+        spec = docker.park_spec()
         retained = dict(docker.volumes)
 
         def run(arguments: list[str], **_: Any) -> Any:
@@ -741,12 +1235,7 @@ class FirstReleaseParkingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             park_first_release_web(
                 docker,
-                {
-                    "project": "example-prod",
-                    "volumes": list(docker.volumes),
-                    "artifact": "artifact",
-                    "deployments": ["deployment"],
-                },
+                docker.park_spec(),
             )
         self.assertEqual(docker.writes, [])
         self.assertTrue(docker.rows["web-id"]["State"]["Running"])

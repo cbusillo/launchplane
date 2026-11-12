@@ -1013,6 +1013,11 @@ def _release_invitation_body(
         action = "review the prepared production settings on the release page" + (
             " and " + action if changes else ""
         )
+    if checklist.initial_version is not None:
+        notes = [
+            "- Complete initial version: review its pinned sources, setup and test notes on the release page."
+        ]
+        action = "review the complete initial version and follow its test notes on the release page"
     return (
         f"{release_candidate_issue_marker(digest)}\n{release_issue_product_marker(profile.product)}\n"
         + f"<!-- launchplane:release-request-decision:{request_decision.record_id} -->\n"

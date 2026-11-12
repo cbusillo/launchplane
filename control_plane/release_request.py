@@ -8,7 +8,7 @@ from control_plane.contracts.release_request import (
     ReleaseRequestDecisionRecord,
     ReleaseRequestSource,
 )
-from control_plane.contracts.release_review import ReleaseReviewStatus
+from control_plane.contracts.release_review import ReleaseReviewStatus, InitialVersionTestNotes
 from control_plane.generic_web_release_settings import requires_initial_settings_request
 from control_plane.release_invitation import (
     _accepted_release_in_progress,
@@ -49,14 +49,38 @@ def record_release_request(
     reason: str,
     decision_reference: str,
     actor: str,
+    initial_version_test_notes: str = "",
 ) -> LaunchplaneProductProfileRecord:
     from control_plane.client_release import live_temporary_hotfix
 
+    initial_notes = None
+    if initial_version_test_notes:
+        from control_plane.initial_version_review import (
+            initial_version_inputs_sha256,
+            prepare_initial_version_notes,
+        )
+
+        if review.checklist is None:
+            raise ValueError("The initial review checklist is unavailable.")
+        initial_notes = InitialVersionTestNotes(
+            inputs_sha256=initial_version_inputs_sha256(review.checklist),
+            client_test_notes=initial_version_test_notes.strip(),
+        )
+        review = prepare_initial_version_notes(store, profile, review, initial_version_test_notes)
+    elif (
+        profile.release_request is not None
+        and review.checklist is not None
+        and review.checklist.initial_version is not None
+    ):
+        initial_notes = profile.release_request.initial_version_review
     standing_settings_request = (
         profile.release_on_acceptance == "director_standing"
         and review.checklist is not None
-        and requires_initial_settings_request(
-            review.checklist.production, review.checklist.candidate
+        and (
+            review.checklist.initial_version is not None
+            or requires_initial_settings_request(
+                review.checklist.production, review.checklist.candidate
+            )
         )
     )
     if not _client_release_requests_enabled(
@@ -89,6 +113,7 @@ def record_release_request(
             checklist_digest=review.checklist_digest,
             production=review.checklist.production,
             candidate=review.checklist.candidate,
+            initial_version_review=initial_notes,
             client_decision_record_id=client_decision_id,
             source=source,
             reason=reason,
@@ -117,6 +142,7 @@ def request_release_review(
     reason: str,
     decision_reference: str,
     actor: str,
+    initial_version_test_notes: str = "",
 ) -> bool:
     saved = record_release_request(
         store=store,
@@ -126,6 +152,7 @@ def request_release_review(
         reason=reason,
         decision_reference=decision_reference,
         actor=actor,
+        initial_version_test_notes=initial_version_test_notes,
     )
     if saved.release_on_acceptance == "director_standing":
         return True

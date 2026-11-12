@@ -17,6 +17,7 @@ from control_plane.contracts.odoo_instance_override_record import (
 )
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, AbsentProduction
 from control_plane.contracts.public_hosts import resolve_public_base_url
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
 from control_plane.contracts.odoo_target_replacement_failures import (
@@ -276,6 +277,7 @@ def execute_odoo_post_deploy(
     restore_release_website_settings: bool = False,
     release_operation: bool = False,
     rollback: bool = False,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> OdooPostDeployResult:
     if request.website_indexing is not None:
         raise ValueError("Website indexing requires the guarded service configuration path.")
@@ -397,6 +399,13 @@ def execute_odoo_post_deploy(
             if len(profiles) != 1:
                 raise click.ClickException("Release indexing requires one active product owner.")
             profile = profiles[0]
+            initial_decision = (
+                release_decision
+                if profile.production_use == "unknown"
+                and release_decision is not None
+                and isinstance(release_decision.checklist.production, AbsentProduction)
+                else None
+            )
             try:
                 native_plan = WebsiteIndexingExecution(
                     record_store,
@@ -407,6 +416,8 @@ def execute_odoo_post_deploy(
                         mode="dry-run", public_origin=production_origin(record_store, profile)
                     ),
                     expected_artifact_id=artifact_id,
+                    desired_state="prelaunch" if initial_decision is not None else None,
+                    initial_release_decision=initial_decision,
                 ).observe()
             except (ValueError, RuntimeError, FileNotFoundError) as error:
                 raise click.ClickException(

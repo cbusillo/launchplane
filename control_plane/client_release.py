@@ -108,6 +108,7 @@ from control_plane.odoo_release_recovery import (
 )
 from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
 from control_plane.release_review import (
+    ReleaseReviewStore,
     ReleaseEvidenceUnavailable,
     current_release_review,
     release_version,
@@ -324,7 +325,9 @@ def release_start_for_acceptance(
         from control_plane.contracts.release_review import AbsentProduction
 
         try:
-            original = release_version(store=store, profile=profile, instance="prod")
+            original = release_version(
+                store=cast("ReleaseReviewStore", store), profile=profile, instance="prod"
+            )
         except (FileNotFoundError, ValueError):
             original = None
         if isinstance(original, AbsentProduction):
