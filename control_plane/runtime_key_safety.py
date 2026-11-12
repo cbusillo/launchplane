@@ -405,9 +405,9 @@ def _evaluate_binding(
                     and binding.declared_secret_class in {"preview", "non_prod"}
                 )
             )
-            and not is_integration_runtime_key(
-                binding.binding_key, extra_markers=extra_integration_key_markers
-            )
+            or _is_service_generated_production_credential(target=target, binding=binding)
+        ) and not is_integration_runtime_key(
+            binding.binding_key, extra_markers=extra_integration_key_markers
         ):
             return ()
     if rule is not None:
@@ -431,6 +431,16 @@ def _evaluate_binding(
             secret_id=binding.secret_id,
             detail=f"Managed secret binding {binding.binding_key!r} has no runtime key safety rule.",
         ),
+    )
+
+
+def _is_service_generated_production_credential(
+    *, target: RuntimeKeySafetyTarget, binding: SecretBinding
+) -> bool:
+    return (
+        target.environment_class == "prod"
+        and binding.declared_secret_class == "prod_only"
+        and binding.value_source == "generated"
     )
 
 

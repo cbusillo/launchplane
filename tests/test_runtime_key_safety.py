@@ -158,6 +158,70 @@ class RuntimeKeySafetyTests(unittest.TestCase):
                 if expected == "fail":
                     self.assertEqual(evaluation.findings[0].code, "context_not_allowed")
 
+    def test_production_password_passes_its_shared_rule_only_when_generated_for_its_lane(
+        self,
+    ) -> None:
+        target = RuntimeKeySafetyTarget(
+            context="new-tenant", instance="prod", environment_class="prod"
+        )
+        rule = RuntimeSecretSafetyRule(
+            binding_key="ODOO_DB_PASSWORD",
+            secret_class="shared_safe",
+            allowed_contexts=("older-tenant",),
+            allowed_instances=("testing", "prod"),
+        )
+        generated = _binding(
+            binding_key=rule.binding_key, context=target.context, instance="prod"
+        ).model_copy(update={"declared_secret_class": "prod_only", "value_source": "generated"})
+        cases: tuple[tuple[SecretBinding, str | None], ...] = (
+            (generated, None),
+            *(
+                (generated.model_copy(update={"value_source": source}), "context_not_allowed")
+                for source in ("supplied", "copy", "provider", None)
+            ),
+            (
+                generated.model_copy(update={"declared_secret_class": "shared_safe"}),
+                "context_not_allowed",
+            ),
+            (generated.model_copy(update={"declared_secret_class": None}), "context_not_allowed"),
+            (
+                generated.model_copy(update={"declared_secret_class": "testing"}),
+                "secret_class_not_allowed",
+            ),
+            (
+                generated.model_copy(
+                    update={"context": "", "instance": "", "declared_secret_class": None}
+                ),
+                "context_not_allowed",
+            ),
+            (
+                generated.model_copy(update={"instance": "", "declared_secret_class": None}),
+                "context_not_allowed",
+            ),
+            (generated.model_copy(update={"context": "older-tenant"}), "binding_missing"),
+            (generated.model_copy(update={"instance": "testing"}), "binding_missing"),
+        )
+        for binding, expected in cases:
+            with self.subTest(binding=binding.model_dump(exclude={"created_at", "updated_at"})):
+                evaluation = evaluate_runtime_key_safety(
+                    target=target,
+                    required_binding_keys=(rule.binding_key,),
+                    secret_bindings=(binding,),
+                    secret_rules=(rule,),
+                )
+                self.assertEqual(
+                    [finding.code for finding in evaluation.findings][:1],
+                    [expected] if expected else [],
+                )
+        integration = generated.model_copy(update={"binding_key": "SMTP_PASSWORD"})
+        evaluation = evaluate_runtime_key_safety(
+            target=target,
+            required_binding_keys=(integration.binding_key,),
+            secret_bindings=(integration,),
+            secret_rules=(rule.model_copy(update={"binding_key": integration.binding_key}),),
+        )
+        self.assertEqual(evaluation.findings[0].code, "context_not_allowed")
+
     def test_testing_environment_rejects_prod_only_secret(self) -> None:
         evaluation = evaluate_runtime_key_safety(
             target=RuntimeKeySafetyTarget(

@@ -12,6 +12,8 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
+import click
+
 from control_plane import secrets
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.dokploy import api, native_copy_stream, source
@@ -24,7 +26,13 @@ from control_plane.contracts.dokploy_target_record import (
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
-from control_plane.product_config import apply_product_config_bundle
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeKeySafetyTarget,
+    RuntimeSecretSafetyRule,
+)
+from control_plane.product_config import ProductConfigError, apply_product_config_bundle
+from control_plane.runtime_key_safety import evaluate_runtime_key_safety_from_store
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.odoo_first_empty_inputs import (
@@ -622,6 +630,172 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
         )
         self.assertEqual(stale.status_code, 409, stale.text)
         self.assertEqual(len(self.store.list_secret_records()), len(before) + 1)
+
+    SHARED_RULE_KEYS = ("ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD")
+
+    def write_shared_rule_naming_other_sites(self) -> None:
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-shared-password",
+                source="test",
+                updated_at="2026-06-01T00:00:00Z",
+                rules=tuple(
+                    RuntimeSecretSafetyRule(
+                        binding_key=rule_key,
+                        secret_class="shared_safe",
+                        allowed_contexts=("unrelated-site",),
+                        allowed_instances=("prod",),
+                    )
+                    for rule_key in self.SHARED_RULE_KEYS
+                ),
+            )
+        )
+
+    async def generate_shared_rule_keys(self) -> None:
+        self.write_shared_rule_naming_other_sites()
+        entries = [
+            {"binding_key": key, "generate": "odoo_first_empty", "secret_class": "prod_only"}
+            for key in self.SHARED_RULE_KEYS
+        ]
+        dry = await self.post("runtime_credentials", secrets=entries)
+        self.assertEqual(dry.status_code, 202, dry.text)
+        applied = await self.post(
+            "runtime_credentials",
+            secrets=entries,
+            mode="apply",
+            reviewed_plan_sha256=dry.json()["result"]["odoo_first_empty"]["plan_sha256"],
+            key="shared-rule-original",
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+
+    def stored_findings(self, binding_key: str) -> list[str]:
+        evaluation = evaluate_runtime_key_safety_from_store(
+            record_store=self.store,
+            target=RuntimeKeySafetyTarget(
+                context=self.context, instance="prod", environment_class="prod"
+            ),
+            required_binding_keys=(binding_key,),
+        )
+        return [finding.code for finding in evaluation.findings]
+
+    def supplied_prod_secret(self, **secret: str) -> dict[str, object]:
+        return {
+            "product": self.profile.product,
+            "context": self.context,
+            "instance": "prod",
+            "secrets": [
+                {
+                    "binding_key": "ODOO_DB_PASSWORD",
+                    "value": "invented",
+                    "secret_class": "prod_only",
+                    **secret,
+                }
+            ],
+        }
+
+    def secret_state(self) -> tuple[object, ...]:
+        return self.store.list_secret_records(), self.store.list_secret_bindings()
+
+    async def test_only_qualified_generation_passes_a_shared_rule_naming_other_sites(
+        self,
+    ) -> None:
+        self.write_shared_rule_naming_other_sites()
+        for payload in (
+            self.supplied_prod_secret(),
+            self.supplied_prod_secret(value_source="generated"),
+        ):
+            with self.subTest(payload=payload), self.assertRaises(ProductConfigError) as refused:
+                apply_product_config_bundle(
+                    record_store=self.store,
+                    payload=payload,
+                    mode="dry-run",
+                    actor="fixture",
+                    source_label="test",
+                )
+            self.assertEqual(refused.exception.code, "runtime_key_safety_failed")
+        unqualified = {
+            "binding_key": "ODOO_DB_PASSWORD",
+            "generate": "odoo_first_empty",
+            "secret_class": "prod_only",
+        }
+        for intent in ({}, {"odoo_first_empty": "runtime_credentials"}):
+            with self.subTest(intent=intent), self.assertRaises(ProductConfigError):
+                apply_product_config_bundle(
+                    record_store=self.store,
+                    payload={**self.supplied_prod_secret(), **intent, "secrets": [unqualified]},
+                    mode="dry-run",
+                    actor="fixture",
+                    source_label="test",
+                )
+        self.assertFalse(self.store.list_secret_records())
+        await self.generate_shared_rule_keys()
+        for key in self.SHARED_RULE_KEYS:
+            self.assertEqual(self.stored_findings(key), [])
+        with self.assertRaises(ProductConfigError) as rotated:
+            apply_product_config_bundle(
+                record_store=self.store,
+                payload=self.supplied_prod_secret(),
+                mode="dry-run",
+                actor="fixture",
+                source_label="test",
+            )
+        self.assertEqual(rotated.exception.code, "runtime_key_safety_failed")
+
+    async def test_value_under_another_binding_key_never_hides_behind_a_generated_binding(
+        self,
+    ) -> None:
+        await self.generate_shared_rule_keys()
+        before = self.secret_state()
+        for mode in ("dry-run", "apply"):
+            with self.subTest(mode=mode), self.assertRaises(ProductConfigError) as aliased:
+                apply_product_config_bundle(
+                    record_store=self.store,
+                    payload=self.supplied_prod_secret(name="ODOO_DB_PASSWORD", binding_key="ALIAS"),
+                    mode=mode,
+                    actor="fixture",
+                    source_label="test",
+                )
+            self.assertEqual(aliased.exception.code, "generated_secret_alias_refused")
+        with self.assertRaises(click.ClickException):
+            secrets.write_secret_value(
+                record_store=self.store,
+                scope="context_instance",
+                integration="runtime_environment",
+                name="ODOO_MASTER_PASSWORD",
+                plaintext_value="invented-alias",
+                binding_key="ALIAS",
+                context_name=self.context,
+                instance_name="prod",
+                actor="fixture",
+            )
+        self.assertEqual(self.secret_state(), before)
+        for key in self.SHARED_RULE_KEYS:
+            self.assertEqual(self.stored_findings(key), [])
+
+    async def test_interrupted_plain_rotation_never_publishes_behind_a_generated_binding(
+        self,
+    ) -> None:
+        await self.generate_shared_rule_keys()
+        before = self.secret_state()
+        rotation: dict[str, Any] = {
+            "record_store": self.store,
+            "scope": "context_instance",
+            "integration": "runtime_environment",
+            "name": "ODOO_MASTER_PASSWORD",
+            "plaintext_value": "invented-rotation",
+            "binding_key": "ODOO_MASTER_PASSWORD",
+            "context_name": self.context,
+            "instance_name": "prod",
+            "actor": "fixture",
+        }
+        with (
+            patch.object(self.store, "write_secret_binding", side_effect=RuntimeError("stop")),
+            self.assertRaises(RuntimeError),
+        ):
+            secrets.write_secret_value(**rotation)
+        self.assertEqual(self.secret_state(), before)
+        secrets.write_secret_value(**rotation)
+        self.assertEqual(self.stored_findings("ODOO_MASTER_PASSWORD"), ["context_not_allowed"])
 
     async def test_caller_values_testing_namespace_and_mixed_writes_cannot_enter_first_empty(
         self,
