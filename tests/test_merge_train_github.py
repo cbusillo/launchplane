@@ -2090,7 +2090,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 "canonical_case",
                 "pending_non_actions",
                 "old_queued",
-                "old_zero_jobs",
+                "jobless_current_execution",
                 "old_in_progress",
                 "old_queued_different_workflow",
                 "old_queued_different_event",
@@ -2100,7 +2100,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 "old_queued_unknown_order",
                 "old_queued_new_failure",
                 "old_queued_new_pending",
-                "ambiguous_same_run_rerun",
+                "contradictory_pending_rerun",
                 "replacement_missing_required",
             ):
                 with self.subTest(consumer=consumer, change=change):
@@ -2156,7 +2156,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         old["run_attempt"] = 2
                         old["run_started_at"] = "2026-01-01T10:02:00Z"
                     elif change.startswith("old_queued") or change in {
-                        "old_zero_jobs",
+                        "jobless_current_execution",
                         "old_in_progress",
                     }:
                         old["status"] = "in_progress" if change == "old_in_progress" else "queued"
@@ -2180,8 +2180,11 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         elif change == "old_queued_new_pending":
                             current["status"] = "queued"
                             current["conclusion"] = None
-                    elif change == "ambiguous_same_run_rerun":
+                    elif change == "contradictory_pending_rerun":
+                        old["status"] = "queued"
+                        old["conclusion"] = None
                         current["id"] = old["id"]
+                        current["run_number"] = old["run_number"]
                         current["run_attempt"] = 2
                         current["run_started_at"] = ""
                     elif change == "suite_mismatch":
@@ -2212,8 +2215,16 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                             (cast(int, current["id"]), 102, 20, current),
                         )
                     ]
-                    if change == "old_zero_jobs":
-                        checks = checks[1:]
+                    if change == "jobless_current_execution":
+                        old["status"] = "in_progress"
+                        old["conclusion"] = None
+                        checks[0]["status"] = "in_progress"
+                        checks[0]["conclusion"] = None
+                        current["status"] = "queued"
+                        current["conclusion"] = None
+                        checks[1]["details_url"] = (
+                            "https://github.com/example/tool/actions/runs/13/job/102"
+                        )
                     elif change == "replacement_missing_required":
                         checks[1]["name"] = "another-job"
                     elif change == "check_suite_missing":
@@ -2250,8 +2261,24 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         MergeTrainGitHubError("workflow evidence unavailable", status_code=403)
                         if change == "metadata_unavailable"
                         else {
-                            "total_count": 3 if change == "metadata_incomplete" else 2,
-                            "workflow_runs": [current, old],
+                            "total_count": 3
+                            if change in {"metadata_incomplete", "jobless_current_execution"}
+                            else 2,
+                            "workflow_runs": [current, old]
+                            + (
+                                [
+                                    {
+                                        **old,
+                                        "id": 13,
+                                        "workflow_id": 8,
+                                        "check_suite_id": 20,
+                                        "status": "completed",
+                                        "conclusion": "success",
+                                    }
+                                ]
+                                if change == "jobless_current_execution"
+                                else []
+                            ),
                         },
                     )
                     transport = RecordingMergeTrainGitHubTransport(responses=responses)
@@ -2316,7 +2343,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         "old_startup_failure",
                         "skipped_replacement",
                         "old_queued",
-                        "old_zero_jobs",
                         "old_in_progress",
                     }:
                         self.assertEqual(status, "pass")
@@ -2331,12 +2357,14 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         "rerun",
                         "old_queued_new_pending",
                         "replacement_missing_required",
+                        "jobless_current_execution",
+                        "contradictory_pending_rerun",
                     }:
                         self.assertEqual(status, "pending")
                     else:
                         self.assertNotEqual(status, "pass")
 
-    def test_workflow_read_retries_preserve_provider_evidence_and_passing_reads_stay_cheap(
+    def test_workflow_read_retries_preserve_provider_evidence_and_lone_checks_stay_cheap(
         self,
     ) -> None:
         from control_plane.merge_train_github import _list_check_runs
@@ -2349,17 +2377,20 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             "check_suite": {"id": 10},
             "details_url": "https://github.com/example/tool/actions/runs/11/job/101",
         }
-        passing = {**check, "conclusion": "success"}
-        transport = RecordingMergeTrainGitHubTransport(responses=({"check_runs": [passing]},))
-        self.assertEqual(
-            _list_check_runs(
-                transport=transport,
-                repository_path="example/tool",
-                encoded_head_sha="head",
-            )["check_runs"],
-            [passing],
-        )
-        self.assertEqual(len(transport.requests), 1)
+        for lone in (
+            {**check, "conclusion": "success"},
+            {**check, "status": "queued", "conclusion": None},
+        ):
+            transport = RecordingMergeTrainGitHubTransport(responses=({"check_runs": [lone]},))
+            self.assertEqual(
+                _list_check_runs(
+                    transport=transport,
+                    repository_path="example/tool",
+                    encoded_head_sha="head",
+                )["check_runs"],
+                [lone],
+            )
+            self.assertEqual(len(transport.requests), 1)
         for status, limited in ((429, True), (503, False), (None, False)):
             with self.subTest(status=status, limited=limited):
                 error = MergeTrainGitHubError(

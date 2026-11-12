@@ -7015,15 +7015,38 @@ def _without_superseded_actions_checks(
     required_checks: tuple[tuple[str, int | None], ...] | None = None,
 ) -> tuple[list[object], str]:
     """Retain blockers unless complete execution evidence proves they are history."""
-    from github_plan_status.workflow_runs import current_workflow_runs
+    from github_plan_status.workflow_runs import current_workflow_runs, workflow_execution_identity
 
     identities = [
         _actions_check_identity(check, repository_path=repository_path, head_sha=head_sha)
         for check in check_runs
     ]
+
+    def has_replacement(
+        check: object,
+        identity: tuple[int, int],
+        executions: set[tuple[int, int]] | None = None,
+    ) -> bool:
+        return any(
+            peer_identity is not None
+            and peer_identity[1] != identity[1]
+            and (executions is None or peer_identity in executions)
+            and isinstance(check, dict)
+            and isinstance(peer, dict)
+            and check.get("name") == peer.get("name")
+            and _check_payload_app_id(check) == _check_payload_app_id(peer)
+            for peer, peer_identity in zip(check_runs, identities, strict=True)
+        )
+
     if not any(
         identity is not None
-        and _check_run_status(cast(dict[str, object], check)) in {"fail", "pending"}
+        and (
+            _check_run_status(cast(dict[str, object], check)) == "fail"
+            or (
+                _check_run_status(cast(dict[str, object], check)) == "pending"
+                and has_replacement(check, identity)
+            )
+        )
         and (
             required_checks is None
             or any(
@@ -7080,7 +7103,11 @@ def _without_superseded_actions_checks(
             return unavailable("workflow_inventory_has_no_current_execution")
         current_ids = {run["id"] for run in current}
         superseded = {
-            (run["id"], run["check_suite_id"])
+            (run["id"], run["check_suite_id"]): {
+                (replacement["id"], replacement["check_suite_id"])
+                for replacement in current
+                if workflow_execution_identity(replacement) == workflow_execution_identity(run)
+            }
             for run in selection["superseded"]
             if run["id"] not in current_ids
         }
@@ -7090,6 +7117,11 @@ def _without_superseded_actions_checks(
         check
         for check, identity in zip(check_runs, identities, strict=True)
         if identity not in superseded
+        or (
+            identity is not None
+            and _check_run_status(cast(dict[str, object], check)) == "pending"
+            and not has_replacement(check, identity, superseded[identity])
+        )
     ], ""
 
 
