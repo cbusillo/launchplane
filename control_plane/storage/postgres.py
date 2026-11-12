@@ -9370,6 +9370,24 @@ class PostgresRecordStore(HumanSessionStore):
                 for row in session.scalars(statement.execution_options(populate_existing=True))
             )
 
+    def list_completed_target_creation_receipts(
+        self, *, route_path: str, context: str, instance: str, target_id: str
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        result = LaunchplaneIdempotencyRow.payload["response_payload"]["result"]
+        statement = select(LaunchplaneIdempotencyRow).where(
+            LaunchplaneIdempotencyRow.route_path == route_path,
+            LaunchplaneIdempotencyRow.state == "completed",
+            result["operation"].as_string() == "create-compose",
+            result["context"].as_string() == context,
+            result["instance"].as_string() == instance,
+            result["setup"]["target_id_record"]["target_id"].as_string() == target_id,
+        )
+        with self._session_factory() as session:
+            return tuple(
+                self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+                for row in session.scalars(statement)
+            )
+
     def read_original_mutation_intent(
         self, reservation: LaunchplaneIdempotencyRecord
     ) -> dict[str, Any]:

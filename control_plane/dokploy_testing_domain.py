@@ -1,10 +1,14 @@
 from collections.abc import Iterable
 from contextlib import ExitStack
 
+from pydantic import ValidationError
+
 from control_plane.disposable_lanes import recorded_lane_protection
 from control_plane.contracts.public_hosts import normalize_public_hosts, retained_hostname_identity
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.provider_operations import build_provider_operation_key
@@ -262,6 +266,96 @@ def match_first_origins(
     return matched
 
 
+def _created_unrouted_by_receipt(
+    receipt: LaunchplaneIdempotencyRecord,
+    *,
+    target: DokployTargetRecord,
+    target_id: DokployTargetIdRecord,
+) -> bool:
+    result = receipt.response_payload.get("result")
+    setup = result.get("setup") if isinstance(result, dict) else None
+    created = setup.get("target_record") if isinstance(setup, dict) else None
+    if (
+        not isinstance(result, dict)
+        or not isinstance(setup, dict)
+        or not isinstance(created, dict)
+        or receipt.response_status_code != 202
+        or result.get("operation") != "create-compose"
+        or result.get("mode") != "apply"
+        or result.get("applied") is not True
+        or result.get("route_domain_ids") != []
+        or created.get("env_value_count") != 0
+    ):
+        return False
+    try:
+        created_target = DokployTargetRecord.model_validate(
+            {
+                key: value
+                for key, value in created.items()
+                if key not in {"env_keys", "env_value_count"}
+            }
+        )
+        created_id = DokployTargetIdRecord.model_validate(setup.get("target_id_record"))
+    except ValidationError:
+        return False
+    return created_target == target and created_id == target_id
+
+
+def unrouted_created_hostnames(
+    store: PostgresRecordStore,
+    *,
+    target: DokployTargetRecord,
+    target_id: DokployTargetIdRecord,
+) -> tuple[str, ...]:
+    from control_plane.dokploy_compose_allocation import ROUTE
+
+    receipts = store.list_completed_target_creation_receipts(
+        route_path=ROUTE,
+        context=target.context,
+        instance=target.instance,
+        target_id=target_id.target_id,
+    )
+    if any(
+        _created_unrouted_by_receipt(receipt, target=target, target_id=target_id)
+        for receipt in receipts
+    ):
+        return target.domains
+    return ()
+
+
+def require_created_hostnames_unused(
+    *,
+    product: str,
+    target: DokployTargetRecord,
+    hostnames: tuple[str, ...],
+    targets: Iterable[DokployTargetRecord],
+    profiles: Iterable[LaunchplaneProductProfileRecord],
+    bindings: Iterable[EnvironmentRouteBindingRecord],
+) -> None:
+    targets, profiles, bindings = tuple(targets), tuple(profiles), tuple(bindings)
+    identities = {retained_hostname_identity(hostname) for hostname in hostnames}
+    for identity in identities:
+        require_testing_hostname_claims_available(
+            product=product,
+            target=target,
+            domain=identity,
+            targets=targets,
+            profiles=profiles,
+            bindings=bindings,
+        )
+    lane_hosts = {
+        retained_hostname_identity(value)
+        for profile in profiles
+        if profile.product == product
+        for lane in profile.lanes
+        if (lane.context, lane.instance) == (target.context, target.instance)
+        for value in (lane.base_url, lane.health_url)
+        if value
+    }
+    if identities & lane_hosts:
+        raise ValueError("The lane's created hostname is already in use.")
+
+
 def _lane_lock_names(
     request: DokployTargetSetupEnvelope, provider: ProviderTargetRecord
 ) -> list[str]:
@@ -318,6 +412,11 @@ def setup_empty_lane_domain(
     provider = record_store.read_provider_target_record(
         context_name=request.context, instance_name=instance
     )
+    created_hostnames = (
+        ()
+        if target.domains in ((), request.domains)
+        else unrouted_created_hostnames(record_store, target=target, target_id=target_id)
+    )
     if (
         target.target_type != "compose"
         or target_id.source_label != CREATE_COMPOSE_SOURCE_LABEL
@@ -327,7 +426,7 @@ def setup_empty_lane_domain(
             target_record=target, target_id_record=target_id
         ).to_deployed_target_reference()
         or target.env
-        or target.domains not in ((), request.domains)
+        or target.domains not in ((), request.domains, created_hostnames)
         or target.public_hosts
         or target.pending_public_host_effects
         or target.custom_git_url
@@ -401,15 +500,26 @@ def setup_empty_lane_domain(
                 record_store, context=request.context, target_id=target_id.target_id
             )
         require_unprotected_binding()
+        targets = record_store.list_dokploy_target_records()
+        profiles = record_store.list_product_profile_records()
+        bindings = record_store.list_route_binding_records()
         for domain in request.domains:
             require_testing_hostname_claims_available(
                 product=product,
                 target=target,
                 domain=domain,
-                targets=record_store.list_dokploy_target_records(),
-                profiles=record_store.list_product_profile_records(),
-                bindings=record_store.list_route_binding_records(),
+                targets=targets,
+                profiles=profiles,
+                bindings=bindings,
             )
+        require_created_hostnames_unused(
+            product=product,
+            target=target,
+            hostnames=tuple(host for host in created_hostnames if host not in request.domains),
+            targets=targets,
+            profiles=profiles,
+            bindings=bindings,
+        )
         live = fetch_dokploy_target_payload_for_setup(host, token, "compose", target_id.target_id)
         require_empty_compose_source(live, target_id.target_id)
         matching_routes(live.get("domains"))

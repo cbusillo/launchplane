@@ -1206,6 +1206,92 @@ class DirectorFirstProductionTargetTests(_DirectorTestingSetupFixture):
         self.assertIn(result.status_code, (400, 409), result.text)
         self.assert_nothing_staged()
 
+    async def continue_reviewed_hostnames(self) -> list[dict[str, Any]]:
+        reviewed = ["new.reviewed.example", "reviewed.example"]
+        lanes = LaunchplaneProductProfileRecord.model_validate(
+            _generic_site_profile_payload("staged-site")
+        ).lanes
+        self.staged = self.staged.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"base_url": None, "health_url": None}) for lane in lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(self.staged)
+        compose_id = self.store.read_dokploy_target_id_record(
+            context_name="staged-site", instance_name="prod"
+        ).target_id
+        routes: list[dict[str, Any]] = []
+        live = {
+            "composeId": compose_id,
+            "environmentId": "empty-production-environment",
+            "serverId": "production-server",
+            "appName": "staged-site-prod",
+            "name": "staged-site-prod",
+            "sourceType": "raw",
+            "composeType": "docker-compose",
+            "composeStatus": "idle",
+            "isolatedDeployment": False,
+            "randomize": False,
+            "serviceNetworks": [],
+            "mounts": [],
+            "domains": [],
+            "autoDeploy": False,
+            "env": "",
+        }
+
+        def provider(**kwargs: Any) -> Any:
+            if kwargs.get("method") == "POST":
+                routes.append({"domainId": f"route-{len(routes)}", **kwargs["payload"]})
+                live["domains"] = deepcopy(routes)
+                return routes[-1]
+            return deepcopy(routes) if kwargs["path"] == "/api/domain.byComposeId" else []
+
+        self.provider_read.side_effect = provider
+        self.payload = {
+            "mode": "apply",
+            "operation": "reconcile-compose-domain",
+            "context": "staged-site",
+            "instance": "prod",
+            "target_id": compose_id,
+            "domains": reviewed,
+            "runtime_port": self.staged.runtime_port,
+            "reason": "Add the reviewed routes before the first release.",
+            "confirmation": "APPLY DOKPLOY TARGET SETUP",
+        }
+        with patch(
+            "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+            side_effect=lambda *_: deepcopy(live),
+        ):
+            continued = await self.post(idempotency_key="reviewed-hostnames")
+        self.assertEqual(continued.status_code, 202, continued.text)
+        self.assertEqual([route["host"] for route in routes], reviewed)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name="staged-site", instance_name="prod"
+            ).domains,
+            tuple(reviewed),
+        )
+        return routes
+
+    async def test_new_placement_created_hostname_gives_way_to_reviewed_routes(self) -> None:
+        self.inventory = []
+        created = await self.post(
+            environment_id="", project_name="staged-project", environment_name="production"
+        )
+        self.assertEqual(created.status_code, 202, created.text)
+        await self.continue_reviewed_hostnames()
+        self.route.assert_not_called()
+
+    async def test_existing_placement_created_hostname_gives_way_to_reviewed_routes(
+        self,
+    ) -> None:
+        created = await self.post()
+        self.assertEqual(created.status_code, 202, created.text)
+        await self.continue_reviewed_hostnames()
+        self.route.assert_not_called()
+
 
 class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
     """The conventional application shape, including replacing a target that never ran."""

@@ -471,7 +471,7 @@ class DirectorTestingDomainSetupTests(_EmptyComposeDomainFixture):
         self.assertEqual(len(self.writes), 1)
 
 
-class DirectorNeverLiveProductionDomainSetupTests(_EmptyComposeDomainFixture):
+class _NeverLiveProductionDomainFixture(_EmptyComposeDomainFixture):
     def setUp(self) -> None:
         super().setUp()
         self.profile = self.profile.model_copy(update={"production_use": "unknown"})
@@ -510,6 +510,8 @@ class DirectorNeverLiveProductionDomainSetupTests(_EmptyComposeDomainFixture):
             for domain in self.payload["domains"]
         ]
 
+
+class DirectorNeverLiveProductionDomainSetupTests(_NeverLiveProductionDomainFixture):
     async def test_owned_never_live_production_gets_only_its_backend_routes(self) -> None:
         await self.plan_apply_and_replay()
         self.assertEqual(self.writes, self.expected_routes())
@@ -732,6 +734,241 @@ class DirectorNeverLiveProductionDomainSetupTests(_EmptyComposeDomainFixture):
         self.assertEqual(lost.status_code, 502, lost.text)
         self.assertEqual(lost.json()["error"]["code"], "dokploy_domain_partial_outcome")
         self.assertEqual(self.read_target(), self.target)
+        recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertEqual(self.writes, self.expected_routes())
+        self.assertEqual(self.read_target().domains, tuple(self.payload["domains"]))
+
+
+CREATED_HOSTNAME = "seeded.example.invalid"
+
+
+class DirectorCreatedHostnameProductionDomainTests(_NeverLiveProductionDomainFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.target = self.target.model_copy(
+            update={"domains": (CREATED_HOSTNAME,), "source_label": CREATE_COMPOSE_SOURCE_LABEL}
+        )
+        self.store.write_dokploy_target_record(self.target)
+
+    def record_creation_receipt(
+        self,
+        *,
+        created: DokployTargetRecord | None = None,
+        created_id: DokployTargetIdRecord | None = None,
+        trace_id: str = "fixture-original-create",
+        **result_changes: Any,
+    ) -> None:
+        from control_plane.contracts.idempotency_record import (
+            LaunchplaneIdempotencyRecord,
+            build_launchplane_idempotency_record_id,
+        )
+        from control_plane.dokploy_compose_allocation import ROUTE
+        from control_plane.dokploy_target_setup_http import dokploy_target_setup_result_payload
+        from control_plane.provider_operations import provider_operation_response_payload
+        from control_plane.workflows.dokploy_target_adoption import DokployTargetAdoptionResult
+
+        setup = dokploy_target_setup_result_payload(
+            DokployTargetAdoptionResult(
+                applied=True,
+                target_record=created or self.target,
+                target_id_record=created_id or self.target_id,
+                provider_target_record=self.target_provider,
+            )
+        )
+        result = {
+            "mode": "apply",
+            "operation": "create-compose",
+            "context": self.context,
+            "instance": "prod",
+            "applied": True,
+            "route_domain_ids": [],
+            "setup": setup,
+            **result_changes,
+        }
+        self.store.write_idempotency_record(
+            LaunchplaneIdempotencyRecord(
+                record_id=build_launchplane_idempotency_record_id(response_trace_id=trace_id),
+                scope="fixture-original-caller",
+                route_path=ROUTE,
+                idempotency_key=trace_id,
+                request_fingerprint=trace_id,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                recorded_at=self.profile.updated_at,
+                response_payload=provider_operation_response_payload(
+                    trace_id=trace_id, records={}, result=result
+                ),
+            )
+        )
+
+    def assert_original_refusal(self, response: Any) -> None:
+        self.assert_no_effects(response, 400)
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "First hostname setup requires an unchanged service-created empty compose.",
+        )
+        self.inventory.assert_not_called()
+
+    async def test_unrouted_created_hostname_gives_way_to_only_the_reviewed_names(self) -> None:
+        self.record_creation_receipt()
+        await self.plan_apply_and_replay()
+        self.assertEqual(self.writes, self.expected_routes())
+        recorded = self.read_target()
+        self.assertEqual(recorded.domains, tuple(self.payload["domains"]))
+        self.assertNotIn(CREATED_HOSTNAME, recorded.hostname_claims)
+        self.assertEqual(
+            recorded.model_dump(exclude={"domains", "updated_at", "source_label"}),
+            self.target.model_dump(exclude={"domains", "updated_at", "source_label"}),
+        )
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+        self.assertEqual(
+            self.store.read_provider_target_record(context_name=self.context, instance_name="prod"),
+            self.target_provider,
+        )
+        self.assertEqual(self.store.list_deployment_records(), ())
+        self.assertEqual(self.store.list_promotion_records(), ())
+
+    async def test_tracked_hostname_without_creation_receipt_keeps_the_record_refusal(
+        self,
+    ) -> None:
+        self.assert_original_refusal(await self.post())
+
+    async def test_receipt_that_does_not_bind_the_unrouted_records_keeps_the_refusal(
+        self,
+    ) -> None:
+        cases: tuple[dict[str, Any], ...] = (
+            {"route_domain_ids": ["created-route"]},
+            {"operation": "adopt"},
+            {"mode": "dry-run"},
+            {"applied": False},
+            {"instance": "testing"},
+            {"context": "other-context"},
+            {"created": self.target.model_copy(update={"updated_at": "2020-01-01T00:00:00Z"})},
+            {"created": self.target.model_copy(update={"domains": ("other.example.invalid",)})},
+            {"created": self.target.model_copy(update={"source_label": "cli:adopt"})},
+            {"created_id": self.target_id.model_copy(update={"target_id": "replaced-compose"})},
+            {
+                "created_id": self.target_id.model_copy(
+                    update={"updated_at": "2020-01-01T00:00:00Z"}
+                )
+            },
+        )
+        for index, changes in enumerate(cases):
+            with self.subTest(changes=changes):
+                self.record_creation_receipt(trace_id=f"unbound-receipt-{index}", **changes)
+                self.assert_original_refusal(await self.post())
+
+    async def test_extra_or_foreign_tracked_names_keep_the_refusal(self) -> None:
+        self.record_creation_receipt()
+        for domains in (
+            (CREATED_HOSTNAME, "extra.example.invalid"),
+            ("foreign.example.invalid",),
+        ):
+            with self.subTest(domains=domains):
+                self.target = self.target.model_copy(update={"domains": domains})
+                self.store.write_dokploy_target_record(self.target)
+                self.assert_original_refusal(await self.post())
+
+    async def test_routed_created_hostname_prevents_route_effects(self) -> None:
+        from control_plane.dokploy.compose import compose_web_domain_route_payload
+
+        self.record_creation_receipt()
+        self.routes = [
+            {
+                "domainId": "seeded-route",
+                **compose_web_domain_route_payload(
+                    compose_id=self.target_id.target_id,
+                    domain_host=CREATED_HOSTNAME,
+                    runtime_port=self.profile.runtime_port,
+                ),
+            }
+        ]
+        self.live["domains"] = deepcopy(self.routes)
+        self.assert_no_effects(await self.post(), 400)
+
+    async def test_created_hostname_in_use_elsewhere_prevents_route_effects(self) -> None:
+        from tests.test_route_binding_record import _route_binding_record
+
+        self.record_creation_receipt()
+        own_lane_url = self.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"base_url": f"https://{CREATED_HOSTNAME}"})
+                    if (lane.context, lane.instance) == (self.context, "prod")
+                    else lane
+                    for lane in self.profile.lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(own_lane_url)
+        self.assert_no_effects(await self.post(), 400)
+        self.store.write_product_profile_record(self.profile)
+        self.store.write_route_binding_record(_route_binding_record(domain=CREATED_HOSTNAME))
+        self.assert_no_effects(await self.post(), 400)
+
+    async def test_created_hostname_keeps_live_use_and_custody_protections(self) -> None:
+        from control_plane.dokploy_target_setup_http import first_production_target_lock_name
+        from tests.test_evidence_ingestion import _deployment_record
+
+        self.record_creation_receipt()
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"production_use": "live"})
+        )
+        self.assert_refused_before_provider(await self.post())
+        self.store.write_product_profile_record(self.profile)
+        record_safety(self.store, self.profile.product, self.context, "prod", usage="in_use")
+        self.assert_no_effects(await self.post(), 400)
+        record_safety(self.store, self.profile.product, self.context, "prod")
+        self.store.reserve_mutation(
+            scope="original-owner",
+            route_path="/v1/dokploy-targets/setup",
+            idempotency_key="original-setup",
+            request_fingerprint="original-setup",
+            lease_owner="original-executor",
+            lease_seconds=300,
+            reconciliation_key="original-setup-binding",
+            provider_target_key=first_production_target_lock_name(self.context),
+        )
+        self.assert_no_effects(await self.post(), 400)
+        self.store.write_deployment_record(_deployment_record(context=self.context))
+        self.assert_no_effects(await self.post(), 400)
+
+    async def test_lost_second_route_recovers_without_keeping_the_created_hostname(
+        self,
+    ) -> None:
+        self.record_creation_receipt()
+        original = self.provider_request
+
+        def provider(**kwargs: Any) -> Any:
+            result = original(**kwargs)
+            if kwargs.get("method") == "POST" and len(self.writes) == 2:
+                raise RuntimeError("Lost response after route creation")
+            return result
+
+        self.inventory.side_effect = provider
+        lost = await self.post()
+        self.assertEqual(lost.status_code, 502, lost.text)
+        self.assertEqual(lost.json()["error"]["code"], "dokploy_domain_partial_outcome")
+        self.assertEqual(self.read_target(), self.target)
+        changed = await self.post(domains=["new.example.invalid"])
+        self.assertEqual(changed.status_code, 400, changed.text)
+        recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertEqual(self.writes, self.expected_routes())
+        self.assertEqual(self.read_target().domains, tuple(self.payload["domains"]))
+
+    async def test_lost_receipt_continues_only_the_same_reviewed_request(self) -> None:
+        self.record_creation_receipt()
+        with patch.object(
+            self.store,
+            "write_idempotency_record",
+            side_effect=RuntimeError("Fixture lost receipt storage"),
+        ):
+            with self.assertRaises(RuntimeError):
+                await self.post()
+        with_created = await self.post(domains=[*self.payload["domains"], CREATED_HOSTNAME])
+        self.assertEqual(with_created.status_code, 400, with_created.text)
         recovered = await self.post()
         self.assertEqual(recovered.status_code, 202, recovered.text)
         self.assertEqual(self.writes, self.expected_routes())

@@ -4387,6 +4387,16 @@ provider result retains recovery evidence. Reinspect it, keep the original
 request and key, and use the same continuation for an exact record-only
 reconciliation; conflicting routes remain refused. General target mutation and Live production remain on their existing paths.
 
+An empty compose can still track hostnames from its own creation request that
+never got a route. The continuation accepts them only when a completed
+creation receipt on the setup route shows the service created this exact target
+and target-id record with those hostnames and no route, and nothing has
+rewritten either record since. The service then records only the reviewed
+hostnames, so it drops a created hostname that was not requested and never
+routes it. A provider route, route binding, another lane's claim or the lane's
+own profile URL for that hostname still refuses. Any other tracked domain
+refuses as before.
+
 Use `operation=prune-compose-domain` only to remove stale provider domain routes
 from an already-tracked Dokploy compose target. The service reads the tracked
 target/id records, requires a compose target, looks up matching Dokploy domain
