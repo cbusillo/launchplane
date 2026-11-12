@@ -23,7 +23,10 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetStaffTestingHold,
 )
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
+    LaunchplaneProductProfileRecord,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.contracts.runtime_key_safety_policy import (
@@ -636,7 +639,7 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
         self.assertEqual(stale.status_code, 409, stale.text)
         self.assertEqual(len(self.store.list_secret_records()), len(before) + 1)
 
-    SHARED_RULE_KEYS = ("ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD")
+    SHARED_RULE_KEYS = tuple(sorted(FRESH_TESTING_LOCAL_CREDENTIAL_KEYS))
 
     def write_shared_rule_naming_other_sites(self) -> None:
         self.store.write_runtime_key_safety_policy_record(
@@ -817,12 +820,13 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
         planned = [
             plan_product_config_authority_bundle(
                 record_store=self.store,
-                payload=self.supplied_prod_secret(name="ODOO_DB_PASSWORD", binding_key=key),
+                payload=self.supplied_prod_secret(name=purpose, binding_key=key),
                 mode="apply",
                 actor="fixture",
                 source_label="test",
             )[1]
-            for key in ("ODOO_DB_PASSWORD", "ALIAS")
+            for purpose in self.SHARED_RULE_KEYS
+            for key in (purpose, "ALIAS")
         ]
         await self.generate_shared_rule_keys()
         before = self.secret_state()
@@ -833,7 +837,8 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
             ):
                 self.store.write_product_authority_bundle(bundle)
         self.assertEqual(self.secret_state(), before)
-        self.assertEqual(self.stored_findings("ODOO_DB_PASSWORD"), [])
+        for purpose in self.SHARED_RULE_KEYS:
+            self.assertEqual(self.stored_findings(purpose), [])
 
     async def test_plain_write_read_before_generation_never_commits_behind_the_generated_binding(
         self,
