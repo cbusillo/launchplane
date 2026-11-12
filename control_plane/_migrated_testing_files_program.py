@@ -13,8 +13,20 @@ if mode in ('prepare','cleanup'):
             raise RuntimeError('Interrupted migrated extraction contains an unsafe path')
         temporary.unlink()
 if mode=='cleanup':
-    for part in ('database','filestore'):
-        (root/(part+'.artifact')).unlink(missing_ok=True)
+    artifacts=[root/(part+suffix) for part in ('database','filestore') for suffix in ('.artifact','.artifact.partial')]
+    for path in artifacts:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise RuntimeError('Migrated cleanup artifact is unsafe')
+    for path in artifacts:
+        path.unlink(missing_ok=True)
+    if root.exists():
+        if any(root.iterdir()):
+            raise RuntimeError('Migrated cleanup is incomplete')
+        descriptor=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     sys.exit(0)
 artifacts={part:root/(part+'.artifact') for part in ('database','filestore')}
 whole={}
