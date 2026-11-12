@@ -724,21 +724,33 @@ class MergeTrainDryRunTests(unittest.TestCase):
         self.assertEqual(result.queue[0].actor_role, "trusted_automation")
         self.assertIn("actor role is not allowed to enqueue", result.queue[0].ineligible_reasons)
 
-    def test_dry_run_ignores_stack_children_that_do_not_target_base_branch(self) -> None:
+    def test_dry_run_reports_stack_children_without_admitting_them_to_flat_queue(self) -> None:
         result = build_merge_train_dry_run_result(
             policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
                 pull_requests=(
-                    _pull_request(8, head_ref="feature/root", base_ref="main"),
-                    _pull_request(9, head_ref="feature/child", base_ref="feature/root"),
+                    _pull_request(
+                        8,
+                        head_ref="feature/root",
+                        repository="cbusillo/sellyouroutboard",
+                    ),
+                    _pull_request(
+                        9,
+                        head_ref="feature/child",
+                        base_ref="feature/root",
+                        repository="cbusillo/sellyouroutboard",
+                    ),
                 ),
             ),
         )
 
         self.assertEqual(result.queue_order, (8,))
         self.assertEqual([entry.number for entry in result.queue], [8])
+        self.assertEqual([entry.number for entry in result.stack_waits], [9])
+        self.assertFalse(result.stack_waits[0].eligible)
+        self.assertIn("#8", "; ".join(result.stack_waits[0].ineligible_reasons))
 
     def test_dry_run_preserves_legacy_snapshot_files_without_base_refs(self) -> None:
         result = build_merge_train_dry_run_result(

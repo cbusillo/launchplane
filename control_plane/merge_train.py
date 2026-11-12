@@ -245,6 +245,9 @@ class MergeTrainDryRunResult(BaseModel):
     blocked_label: str
     queue_order: tuple[int, ...]
     queue: tuple[MergeTrainQueueEntry, ...]
+    stack_waits: tuple[MergeTrainQueueEntry, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     selected_pr: MergeTrainQueueEntry | None = None
     intended_next_action: MergeTrainDryRunAction
     next_action_detail: str
@@ -534,10 +537,72 @@ def build_merge_train_dry_run_result(
         blocked_label=repository_policy.blocked_label,
         queue_order=tuple(entry.number for entry in eligible_entries),
         queue=queue,
+        stack_waits=_stack_wait_entries(repository_policy, snapshot, queue),
         selected_pr=selected_pr,
         intended_next_action=intended_next_action,
         next_action_detail=next_action_detail,
     )
+
+
+def _stack_wait_entries(
+    repository_policy: MergeTrainRepositoryPolicy,
+    snapshot: MergeTrainDryRunSnapshot,
+    root_entries: tuple[MergeTrainQueueEntry, ...],
+) -> tuple[MergeTrainQueueEntry, ...]:
+    entries = {entry.number: entry for entry in root_entries}
+    children = tuple(
+        pr
+        for pr in sorted(snapshot.pull_requests, key=lambda item: (item.created_at, item.number))
+        if not _targets_merge_train_base(pull_request=pr, base_branch=snapshot.base_branch)
+    )
+    for child in children:
+        entries[child.number] = _build_queue_entry(repository_policy, child, skip_blocked=True)
+    result = []
+    for child in children:
+        entry = entries[child.number]
+        reasons = list(entry.ineligible_reasons)
+        ancestor = child
+        seen = {child.number}
+        while not _targets_merge_train_base(
+            pull_request=ancestor, base_branch=snapshot.base_branch
+        ):
+            parents = tuple(
+                pr
+                for pr in snapshot.pull_requests
+                if pr.head_ref == ancestor.base_ref
+                and pr.number not in seen
+                and not _stack_pull_request_reasons(snapshot=snapshot, pull_request=pr)
+            )
+            if len(parents) != 1:
+                reasons.append(
+                    f"waiting for stack base branch {ancestor.base_ref} before landing on {snapshot.base_branch}"
+                )
+                break
+            ancestor = parents[0]
+            seen.add(ancestor.number)
+            parent = ancestor
+            reason = f"waiting for stack parent #{parent.number} before landing on {snapshot.base_branch}"
+            parent_entry = entries[parent.number]
+            if parent_entry.ineligible_reasons:
+                reason += ": " + "; ".join(parent_entry.ineligible_reasons)
+            elif (
+                parent_entry.required_checks_status != "pass"
+                or parent_entry.mergeable != "mergeable"
+                or parent_entry.client_test_notes_error
+            ):
+                reason += f": checks {parent_entry.required_checks_status}, mergeability {parent_entry.mergeable}"
+                if parent_entry.client_test_notes_error:
+                    reason += "; " + parent_entry.client_test_notes_error
+            reasons.append(reason)
+        result.append(
+            entry.model_copy(
+                update={
+                    "eligible": False,
+                    "ineligible_reasons": tuple(reasons),
+                }
+            )
+        )
+    return tuple(result)
 
 
 def merge_train_snapshot_of(

@@ -357,7 +357,11 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.assertEqual(recovery["controller_action"], "recover_candidate_block")
         self.assertEqual(len(self.mutations), 1)
         feedback = build_feedback_payloads(response={"result": recovery})
-        self.assertEqual([row["pull_request_number"] for row in feedback], [self.current.number])
+        self.assertEqual(
+            [row["pull_request_number"] for row in feedback], [self.current.number, child.number]
+        )
+        self.assertEqual(feedback[1]["event"], "waiting")
+        self.assertFalse(feedback[1]["controller_action"])
         self.assertEqual(feedback[0]["event"], "waiting")
         self.assertTrue(feedback[0]["message"])
 
