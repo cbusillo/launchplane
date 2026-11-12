@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Launchplane control-plane contracts and workflows for deployment truth and promotion"
 requires-python = ">=3.13"
 dependencies = [
-    "codex-skills-plan-status @ https://github.com/cbusillo/codex-skills/archive/0fafbf9d6953bd7ecf53fab1bd7550e97947c1dd.tar.gz#subdirectory=skills/github/scripts",
+    "codex-skills-plan-status @ https://github.com/cbusillo/codex-skills/archive/841ec2fc81b53a1acd9ac5ba27a2264d5e832145.tar.gz#subdirectory=skills/github/scripts",
     "pyyaml>=6.0.3",
     "Authlib>=1.7.2",
     "click>=8.4.2",

@@ -1,7 +1,11 @@
+from collections.abc import Callable
+from contextlib import ExitStack, nullcontext
+import json
 import unittest
 from unittest.mock import patch
 
-from control_plane.dokploy import api
+from control_plane.dokploy import api, native_copy_stream
+from control_plane.dokploy.native_copy_stream import run_managed_server_program
 from control_plane import dokploy_empty_automation as automation
 from control_plane.dokploy_inventory import InventoryProject
 from typing import Any
@@ -9,6 +13,8 @@ from typing import Any
 from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
 from tests.test_odoo_first_empty_inputs import FirstEmptyInputsFixture
 from tests.support.http import request
+
+PRIVATE_CAUSE = "private-setup-cause-sentinel"
 
 
 class EmptyAutomationTests(FirstEmptyInputsFixture, unittest.IsolatedAsyncioTestCase):
@@ -556,3 +562,87 @@ class EmptyAutomationTests(FirstEmptyInputsFixture, unittest.IsolatedAsyncioTest
             response = await self.apply_review(review)
         self.assertEqual(response.status_code, 202, response.json())
         self.assertEqual(len(self.writes), 1)
+
+    async def refused_with_cause(self, status_code: int) -> tuple[dict[str, Any], dict[str, Any]]:
+        with self.assertLogs("control_plane.http_error_evidence", "WARNING") as logged:
+            response = await self.post()
+        self.assertEqual(response.status_code, status_code, response.text)
+        body = response.json()
+        (record,) = logged.records
+        event = json.loads(record.getMessage())
+        self.assertEqual(event.pop("trace_id"), body.pop("trace_id"))
+        self.assertNotIn(PRIVATE_CAUSE, response.text + record.getMessage())
+        self.assertEqual(self.writes, [])
+        return body, event
+
+    async def test_each_handled_refusal_keeps_its_safe_cause_behind_one_response(self) -> None:
+        program_failure = native_copy_stream.NativeProgramFailed(
+            PRIVATE_CAUSE, program=f"{PRIVATE_CAUSE}\n{PRIVATE_CAUSE}", program_sites=[2]
+        )
+        original = self.projects[0]
+        foreign = original.model_copy(update={"project_id": "foreign"})
+
+        def program_effect(effect: object) -> Callable[[], None]:
+            return lambda: setattr(self.probe, "side_effect", effect)
+
+        refusals: dict[int, dict[str, Callable[[], None]]] = {
+            403: {
+                "refused_frame": program_effect(
+                    lambda **kwargs: kwargs["receive"]({"type": "denied"})
+                ),
+                "refused_terminal": program_effect(
+                    native_copy_stream.NativeSourceAuthorizationDenied(PRIVATE_CAUSE)
+                ),
+            },
+            503: {
+                "unavailable_terminal": program_effect(
+                    native_copy_stream.NativeSourceUnavailable(PRIVATE_CAUSE)
+                ),
+                "failed_program": program_effect(program_failure),
+            },
+            409: {
+                "invalid_observation": program_effect(ValueError(PRIVATE_CAUSE)),
+                "foreign_project": lambda: self.projects.__setitem__(0, foreign),
+            },
+        }
+        for status_code, causes in refusals.items():
+            bodies: list[dict[str, Any]] = []
+            events: list[dict[str, Any]] = []
+            for name, refuse in causes.items():
+                with self.subTest(status_code=status_code, cause=name):
+                    refuse()
+                    body, event = await self.refused_with_cause(status_code)
+                    bodies.append(body)
+                    events.append(event)
+                    self.assertIn(automation.__name__, {site["module"] for site in event["sites"]})
+                    if name == "failed_program":
+                        self.assertEqual(event["native_programs"][0]["lines"], [2])
+                    self.probe.side_effect = self.observe
+                    self.projects[0] = original
+            self.assertEqual(bodies[0], bodies[1])
+            self.assertNotEqual(events[0], events[1])
+
+    async def test_terminal_open_and_stream_failures_stay_distinct_behind_one_unavailable(
+        self,
+    ) -> None:
+        failures: dict[str, dict[str, object]] = {
+            "terminal_open": {"connect": OSError(PRIVATE_CAUSE)},
+            "program_stream": {
+                "connect": lambda *_args, **_kwargs: nullcontext(object()),
+                "_read_program": OSError(PRIVATE_CAUSE),
+            },
+        }
+        self.probe.side_effect = run_managed_server_program
+        bodies: list[dict[str, Any]] = []
+        events: list[dict[str, Any]] = []
+        for name, effects in failures.items():
+            with self.subTest(failure=name), ExitStack() as stack:
+                for attribute, effect in effects.items():
+                    stack.enter_context(
+                        patch.object(native_copy_stream, attribute, side_effect=effect)
+                    )
+                body, event = await self.refused_with_cause(503)
+                bodies.append(body)
+                events.append(event)
+        self.assertEqual(bodies[0], bodies[1])
+        self.assertNotEqual(events[0], events[1])
