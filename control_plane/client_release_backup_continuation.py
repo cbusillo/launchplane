@@ -31,6 +31,7 @@ from control_plane.provider_operations import build_provider_operation_key
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
+from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromotionOperationRecord
 from control_plane.guest_capture_credentials import guest_capture_metadata
 from control_plane.odoo_business_hours import BusinessHoursHeld, require_release_window
 from control_plane.storage.postgres import PostgresRecordStore
@@ -292,7 +293,7 @@ def require_continuable_backup(
 
 
 def _has_continuation_receipt(
-    operation: VeriReelProdBackupGateOperationRecord,
+    operation: VeriReelProdBackupGateOperationRecord | OdooProdPromotionOperationRecord,
     review: BackupContinuationReview,
     actor: str,
 ) -> bool:
@@ -325,6 +326,18 @@ def continue_release_backup(
     except FileNotFoundError as error:
         raise BackupContinuationRefused("release_record_not_found") from error
     profile = store.read_product_profile_record(product)
+    if profile.driver_id == "odoo":
+        from control_plane.client_release_odoo_continuation import continue_release_odoo_promotion
+
+        return continue_release_odoo_promotion(
+            store=store,
+            root=root,
+            product=product,
+            decision_record_id=decision_record_id,
+            review=review,
+            actor=actor,
+            trace_id=trace_id,
+        )
     if decision.product != product or profile.driver_id != "generic-web":
         raise BackupContinuationRefused("backup_continuation_scope_invalid")
     steps = client_release_steps(decision.release_start)
