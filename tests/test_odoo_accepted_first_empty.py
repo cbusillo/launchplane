@@ -24,6 +24,11 @@ from tests.test_release_review import github_read
 class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
     def setUp(self) -> None:
         super().setUp()
+        from tempfile import TemporaryDirectory
+
+        cache = TemporaryDirectory()
+        self.addCleanup(cache.cleanup)
+        self.cached_root = Path(cache.name).resolve()
         from control_plane.contracts.odoo_online_backup import DEFAULT_ODOO_BACKUP_ROOT
 
         self.runtime = self.runtime.model_copy(
@@ -242,6 +247,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 "decision_reference": "https://github.com/example/product/issues/1#issuecomment-1",
                 "initial_version_test_notes": "Open the initial site and verify a fictional contact and follow-up.",
             }
+            publication.side_effect = [False, True]
             prepared = await request(
                 app,
                 "POST",
@@ -249,8 +255,15 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 headers={"Authorization": "Bearer local-operator-token"},
                 payload=preparation,
             )
-            self.assertEqual(prepared.status_code, 200, prepared.text)
-            ready = prepared.json()["review"]
+            self.assertEqual(prepared.status_code, 409, prepared.text)
+            readback = await request(
+                app,
+                "GET",
+                f"/v1/release-review?product={self.profile.product}",
+                headers={"Authorization": "Bearer local-operator-token"},
+            )
+            self.assertEqual(readback.status_code, 200, readback.text)
+            ready = readback.json()["review"]
             self.assertTrue(ready["checklist_complete"])
             self.assertNotEqual(ready["checklist_digest"], initial.checklist_digest)
             self.assertFalse(
@@ -264,6 +277,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 payload=preparation,
             )
             self.assertEqual(replay.status_code, 200, replay.text)
+            self.assertEqual(publication.call_count, 2)
             self.assertEqual(replay.json()["review"]["checklist_digest"], ready["checklist_digest"])
             altered = await request(
                 app,
@@ -281,15 +295,24 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 payload=payload,
             )
             self.assertEqual(stale.status_code, 409)
-            accepted = await request(
-                app,
-                "POST",
-                "/v1/release-review/decisions",
-                headers=browser_headers(),
-                payload={**payload, "checklist_digest": ready["checklist_digest"]},
-            )
+            from control_plane.release_review import ReleaseEvidenceUnavailable
+
+            with patch(
+                "control_plane.client_release.release_version",
+                side_effect=ReleaseEvidenceUnavailable("production_settings_unavailable"),
+            ):
+                accepted = await request(
+                    app,
+                    "POST",
+                    "/v1/release-review/decisions",
+                    headers=browser_headers(),
+                    payload={**payload, "checklist_digest": ready["checklist_digest"]},
+                )
             self.assertEqual(accepted.status_code, 200, accepted.text)
-            self.assertTrue(accepted.json()["review"]["latest_decision"]["release_start"])
+            self.assertEqual(
+                accepted.json()["review"]["latest_decision"]["release_start"],
+                "promote_with_rollback_drill",
+            )
 
         with (
             patch(
@@ -298,7 +321,9 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                     store=self.store, profile=kwargs["profile"], read=self.read
                 ),
             ),
-            patch("control_plane.release_request.publish_release_invitation", return_value=True),
+            patch(
+                "control_plane.release_request.publish_release_invitation", return_value=True
+            ) as publication,
             patch(
                 "control_plane.http_app.publish_release_decision",
                 return_value="https://github.com/example/product/issues/1",
@@ -328,7 +353,9 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             actor_github_login=self.profile.owner.github_login,
             release_issue_url="https://github.com/example/product/issues/1",
             decided_at=utc_now_timestamp(),
-            release_start=release_start_for_acceptance(store=self.store, profile=self.profile)
+            release_start=release_start_for_acceptance(
+                store=self.store, profile=self.profile, checklist=review.checklist
+            )
             if kind == "accepted"
             else "",
         )
@@ -448,7 +475,10 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 )
                 with self.assertRaises(ReleaseEvidenceUnavailable):
                     release_version(store=self.store, profile=self.profile, instance="prod")
-                release_start_for_acceptance(store=self.store, profile=self.profile)
+                self.assertEqual(
+                    release_start_for_acceptance(store=self.store, profile=self.profile),
+                    "promote_with_rollback_drill",
+                )
 
     def queue_promotion(self, decision: Any, attempt: int = 1) -> Any:
         from control_plane.client_release import _queue_promotion, ClientReleaseStep
@@ -482,6 +512,20 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         self.assertTrue(operation_id)
         return self.store.read_odoo_prod_promotion_operation_record(operation_id)
 
+    def write_rendered_configuration(self) -> dict[str, str]:
+        import hashlib
+
+        code = self.cached_root / str(self.provider_payload["appName"]) / "code"
+        code.mkdir(parents=True, exist_ok=True)
+        rendered_env = f"APP_NAME={self.provider_payload['appName']}\nCOMPOSE_PROJECT_NAME={self.provider_payload['appName']}\n{self.provider_payload['env']}\nDOCKER_CONFIG=/root/.docker"
+        sources = {"env": rendered_env, "compose": str(self.provider_payload["composeFile"])}
+        for name, content in ((".env", rendered_env), ("docker-compose.yml", sources["compose"])):
+            (code / name).write_text(content)
+        return {
+            f"first_empty_rendered_{key}_sha256": hashlib.sha256(value.encode()).hexdigest()
+            for key, value in sources.items()
+        }
+
     def provider_replacement(self, **kwargs: Any) -> Any:
         from control_plane.contracts.odoo_stable_target_replacement import (
             OdooStableTargetReplacementApplyResult,
@@ -508,6 +552,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             f"{key}={value}" for key, value in self.runtime.env.items()
         )
         self.provider_payload["composeFile"] = "services: {}"
+        rendered = self.write_rendered_configuration()
         deployment = _deployment(
             f"fictional-deployment-{self.deployment_counter}", self.artifact.artifact_id
         ).model_copy(
@@ -518,6 +563,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                     status="pass", urls=("https://example.test/web/health",), timeout_seconds=1
                 ),
                 "runtime_source": {
+                    **rendered,
                     "first_empty_release_decision": self.accepted.record_id,
                     "first_empty_release_operation": kwargs["operation_id"],
                     "first_empty_provider_deployment_id": f"fictional-provider-{self.deployment_counter}",
@@ -648,6 +694,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 ]
             if prior is not None:
                 self.docker_state.volumes = prior.volumes
+            self.write_rendered_configuration()
             history.append(
                 {
                     "deploymentId": f"provider-{len(history) + 1}",
@@ -783,7 +830,14 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             park_first_release_web,
         )
 
-        if program == first_release_park_program():
+        from control_plane.dokploy.compose_inventory import (
+            CACHED_COMPOSE_PROGRAM,
+            read_cached_files,
+        )
+
+        if program == CACHED_COMPOSE_PROGRAM:
+            receive({"type": "complete", "result": read_cached_files(self.cached_root, payload)})
+        elif program == first_release_park_program():
             if kwargs.get("dispatch_guard") is not None:
                 kwargs["dispatch_guard"](lambda: None)
             result = park_first_release_web(self.docker_state, payload)
@@ -980,6 +1034,21 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                     else:
                         self.assertIn("database_dump_sha256", gate.evidence)
                 if step.kind == "rollback":
+                    from control_plane.client_release import (
+                        client_release_grant,
+                        client_release_grant_allows,
+                    )
+                    from control_plane.contracts.odoo_prod_promotion_operation import (
+                        ODOO_PROD_PROMOTION_RUN_ACTION,
+                    )
+
+                    grant = client_release_grant(
+                        decision=self.accepted,
+                        action=ODOO_PROD_PROMOTION_RUN_ACTION,
+                        context=self.context,
+                        authorized_at=self.accepted.decided_at,
+                    )
+                    self.assertTrue(client_release_grant_allows(self.store, grant))
                     self.assert_parked_web_only()
                     self.assertFalse(self.docker_state.rows["web-id"]["State"]["Running"])
                     self.assertEqual(
@@ -1087,7 +1156,11 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
     def test_drill_inverse_can_stop_after_settings_edit_but_cannot_repromote_changed_inputs(
         self,
     ) -> None:
-        from control_plane.client_release import advance_client_releases
+        from control_plane.client_release import client_release_grant, client_release_grant_allows
+        from control_plane.contracts.odoo_prod_promotion_operation import (
+            ODOO_PROD_PROMOTION_RUN_ACTION,
+        )
+        from control_plane.release_review import release_version
 
         inverse_id = self.promote_and_queue_inverse()
         self.store.write_runtime_environment_record(
@@ -1097,7 +1170,17 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         inverse = self.store.read_odoo_prod_rollback_operation_record(inverse_id)
         self.assertEqual(inverse.status, "pass", inverse.error_message)
         self.assert_parked_web_only()
-        self.assertFalse(advance_client_releases(store=self.store, control_plane_root=Path(".")))
+        self.assertNotEqual(
+            release_version(store=self.store, profile=self.profile, instance="prod"),
+            self.accepted.checklist.production,
+        )
+        grant = client_release_grant(
+            decision=self.accepted,
+            action=ODOO_PROD_PROMOTION_RUN_ACTION,
+            context=self.context,
+            authorized_at=self.accepted.decided_at,
+        )
+        self.assertFalse(client_release_grant_allows(self.store, grant))
         self.assertEqual(self.modes, ["empty"])
 
     def test_failed_first_deploy_queues_same_acceptance_recovery_without_deleting_data(
@@ -1167,11 +1250,10 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         self.empty_storage_fixture = fixture
+        self.cached_root = fixture.root / "compose"
         self.fail_and_recover(initialized=False)
-        code = fixture.root / "compose" / "example-prod" / "code"
-        code.mkdir(parents=True)
-        (code / "docker-compose.yml").write_text(str(self.provider_payload["composeFile"]))
-        (code / ".env").write_text(str(self.provider_payload["env"]))
+        code = self.cached_root / "example-prod" / "code"
+        self.assertNotEqual((code / ".env").read_text(), self.provider_payload["env"])
         self.enterContext(
             patch.object(
                 api,

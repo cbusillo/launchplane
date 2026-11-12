@@ -597,9 +597,12 @@ def build_release_review(
         if isinstance(production, AbsentProduction):
             from control_plane.initial_version_review import initial_version_review
 
-            initial_version, additional_changes = initial_version_review(
-                store, profile, store.read_artifact_manifest(candidate.artifact_id)
-            )
+            try:
+                initial_version, additional_changes = initial_version_review(
+                    store, profile, store.read_artifact_manifest(candidate.artifact_id)
+                )
+            except (ValueError, click.ClickException) as error:
+                raise ReleaseEvidenceUnavailable("production_settings_unavailable") from error
             items, untracked = (), ()
         else:
             items, untracked = read_release_changes(

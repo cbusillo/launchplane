@@ -96,6 +96,7 @@ from control_plane.generic_web_release_settings import (
 )
 from control_plane.contracts.release_review import (
     AcceptanceReleaseStart,
+    ReleaseChecklist,
     ReleaseReviewDecisionRecord,
     ReleaseStart,
 )
@@ -300,7 +301,10 @@ def client_release_step_operation_id(
 
 
 def release_start_for_acceptance(
-    *, store: object, profile: LaunchplaneProductProfileRecord
+    *,
+    store: object,
+    profile: LaunchplaneProductProfileRecord,
+    checklist: ReleaseChecklist | None = None,
 ) -> AcceptanceReleaseStart:
     """How a Client's acceptance recorded now runs; "" when it starts nothing.
 
@@ -325,11 +329,15 @@ def release_start_for_acceptance(
         from control_plane.contracts.release_review import AbsentProduction
 
         try:
-            original = release_version(
-                store=cast("ReleaseReviewStore", store), profile=profile, instance="prod"
+            original = (
+                checklist.production
+                if checklist is not None
+                else release_version(
+                    store=cast("ReleaseReviewStore", store), profile=profile, instance="prod"
+                )
             )
         except (FileNotFoundError, ValueError):
-            original = None
+            return "promote_with_rollback_drill"
         if isinstance(original, AbsentProduction):
             mode = "promote_with_rollback_drill"
     if mode == "promote_with_rollback_drill" and _product_drill_passed(store, profile):
@@ -1472,7 +1480,9 @@ def _record_standing_acceptance(
             actor_github_id=profile.owner.github_id,
             actor_github_login=profile.owner.github_login,
             decided_at=decided_at,
-            release_start=release_start_for_acceptance(store=store, profile=profile),
+            release_start=release_start_for_acceptance(
+                store=store, profile=profile, checklist=checklist
+            ),
             acceptance_source="director_standing",
         )
     store.create_release_review_decision_record_if_absent(

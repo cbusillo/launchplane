@@ -79,6 +79,7 @@ class CachedComposeSource:
     project_absent: bool
     files: dict[str, CachedComposeFile]
     absent_inputs: frozenset[str]
+    environment_sha256: str = ""
 
 
 def standard_compose_environment(payload: dict[str, Any]) -> bool:
@@ -203,8 +204,10 @@ def read_cached_files(base: Path, request: dict[str, Any]) -> dict[str, Any]:
     app = request["app_name"]
     files = request["files"]
     inputs = request.get("input_names", [])
+    hash_environment = request.get("hash_environment", False)
     if (
-        not isinstance(app, str)
+        type(hash_environment) is not bool
+        or not isinstance(app, str)
         or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", app) is None
         or not isinstance(files, list)
         or len(files) > SOURCE_FILE_COUNT
@@ -252,7 +255,8 @@ def read_cached_files(base: Path, request: dict[str, Any]) -> dict[str, Any]:
             "directory_env": environment,
         }
     absent = []
-    if inputs:
+    environment_sha256 = ""
+    if inputs or hash_environment:
         environment_path = request.get("env_file")
         if (
             not isinstance(environment_path, str)
@@ -263,13 +267,25 @@ def read_cached_files(base: Path, request: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("Unqualified generated environment path.")
         environment_bytes = _read_regular(code / environment_path, SOURCE_ENV_BYTES)
         absent = [key for key in inputs if key.encode() not in environment_bytes]
+        if hash_environment:
+            environment_sha256 = hashlib.sha256(environment_bytes).hexdigest()
+            if (
+                hashlib.sha256(_read_regular(code / environment_path, SOURCE_ENV_BYTES)).hexdigest()
+                != environment_sha256
+            ):
+                raise ValueError("Cached environment changed during observation.")
     if any(
         hashlib.sha256(_read_regular(code / relative, SOURCE_FILE_BYTES)).hexdigest()
         != row["sha256"]
         for relative, row in rows.items()
     ):
         raise ValueError("Cached sources changed during observation.")
-    return {"project_absent": False, "files": rows, "absent_inputs": absent}
+    return {
+        "project_absent": False,
+        "files": rows,
+        "absent_inputs": absent,
+        **({"environment_sha256": environment_sha256} if hash_environment else {}),
+    }
 
 
 CACHED_COMPOSE_PROGRAM = (
@@ -383,7 +399,14 @@ def read_cached_compose_source(
             invalid = True
     if invalid:
         raise ValueError("Cached Compose document set is incomplete.")
-    return CachedComposeSource(absent, files, frozenset(inputs))
+    environment_sha256 = result.get("environment_sha256", "")
+    if not isinstance(environment_sha256, str) or (
+        request.get("hash_environment") is True
+        and not absent
+        and re.fullmatch(r"[a-f0-9]{64}", environment_sha256) is None
+    ):
+        raise ValueError("Cached environment hash is incomplete.")
+    return CachedComposeSource(absent, files, frozenset(inputs), environment_sha256)
 
 
 def _empty_source_checks(payload: dict[str, Any]) -> dict[Predicate, bool]:

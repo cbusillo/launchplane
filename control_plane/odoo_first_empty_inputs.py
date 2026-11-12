@@ -544,9 +544,9 @@ def qualify_first_empty_storage(
         for relative, keys in (
             (
                 "code/docker-compose.yml",
-                ("first_empty_provider_compose_sha256", "converted_compose_sha256"),
+                ("first_empty_rendered_compose_sha256",),
             ),
-            ("code/.env", ("first_empty_provider_env_sha256",)),
+            ("code/.env", ("first_empty_rendered_env_sha256",)),
         ):
             values = sorted(
                 {
@@ -711,6 +711,10 @@ def validate_first_empty_generation(
     return qualified.authority.profile
 
 
+def first_empty_volume_names(volumes: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    return (*volumes, volumes[1] + "-filestore")
+
+
 def first_empty_storage_snapshot(
     docker: Callable[..., str],
     spec: dict[str, Any],
@@ -785,7 +789,7 @@ def first_empty_storage_snapshot(
         entries = sorted(path.name for path in project_root.iterdir())
         if entries:
             expected_files = spec.get("owned_project_files", {})
-            if entries != ["code"] or not isinstance(expected_files, dict) or not expected_files:
+            if entries != ["code"] or not isinstance(expected_files, dict):
                 raise ValueError("Original project has retained files.")
             parent = os.open(project_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
@@ -846,7 +850,7 @@ def first_empty_storage_snapshot(
     volume_root = root / "volumes"
     if not volume_root.is_dir() or volume_root.is_symlink():
         raise ValueError("Docker volume storage is unavailable.")
-    storage_names = (*names, names[1] + "-filestore")
+    storage_names = first_empty_volume_names(names)
     paths = [volume_root / name for name in storage_names]
 
     def overlaps_original(value: str) -> bool:
@@ -1013,6 +1017,8 @@ def first_empty_storage_program(*, compose_root: Path = Path("/etc/dokploy/compo
         + inspect.getsource(docker_daemon_authorization_denied)
         + "\n"
         + inspect.getsource(single_local_swarm_node)
+        + "\n"
+        + inspect.getsource(first_empty_volume_names)
         + "\n"
         + inspect.getsource(first_empty_storage_snapshot)
         + "\nCOMPOSE_ROOT=Path("

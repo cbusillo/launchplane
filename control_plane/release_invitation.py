@@ -996,7 +996,7 @@ def _release_invitation_body(
         change_links.append(_settings_review_note(checklist))
     from control_plane.client_release import release_start_for_acceptance
 
-    mode = release_start_for_acceptance(store=store, profile=profile)
+    mode = release_start_for_acceptance(store=store, profile=profile, checklist=checklist)
     effect = "Accepting records your approval; an admin starts the release."
     if mode:
         effect = "Accepting starts the release to the production site, with a verified backup, checks and automatic rollback."

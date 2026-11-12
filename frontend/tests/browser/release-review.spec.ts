@@ -84,6 +84,15 @@ test("Initial-version notes prepare the exact review through the existing reques
   await expect(button).toBeDisabled();
   const notes = "Open the initial site, add a fictional contact and verify its follow-up reminder.";
   await ask.getByRole("textbox", { name: "Test notes for the complete initial version" }).fill(notes);
+  response.review.blockers.push("The candidate artifact cannot be verified.");
+  await page.reload();
+  await ask.getByRole("textbox", { name: "Why this release is needed" }).fill("The initial version is ready for review.");
+  await ask.getByRole("textbox", { name: "Test notes for the complete initial version" }).fill(notes);
+  await expect(button).toBeDisabled();
+  response.review.blockers.pop();
+  await page.reload();
+  await ask.getByRole("textbox", { name: "Why this release is needed" }).fill("The initial version is ready for review.");
+  await ask.getByRole("textbox", { name: "Test notes for the complete initial version" }).fill(notes);
   await expect(button).toBeEnabled();
   await button.click();
   await expect(ask.getByRole("status")).toBeVisible();

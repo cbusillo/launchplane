@@ -3203,6 +3203,12 @@ def execute_odoo_stable_target_replacement_apply(
             target_type="compose",
             target_id=target_id_record.target_id,
         )
+        if initial_release:
+            from control_plane.odoo_first_release import first_release_rendered_inputs
+
+            runtime_source.update(
+                first_release_rendered_inputs(host=host, token=token, payload=deployed_payload)
+            )
         runtime_source.update(
             {
                 f"post_deploy_{key}": value
@@ -3267,6 +3273,20 @@ def execute_odoo_stable_target_replacement_apply(
     except (click.ClickException, OSError) as error:
         if initial_release and isinstance(error, dokploy_api.DokployDeploymentFailed):
             runtime_source["first_empty_provider_deployment_id"] = error.deployment_id
+            from control_plane.odoo_first_release import first_release_rendered_inputs
+
+            try:
+                rendered_payload = dokploy_api.fetch_dokploy_target_payload(
+                    host=host,
+                    token=token,
+                    target_type="compose",
+                    target_id=target_id_record.target_id,
+                )
+                runtime_source.update(
+                    first_release_rendered_inputs(host=host, token=token, payload=rendered_payload)
+                )
+            except (click.ClickException, OSError, ValueError, TypeError, KeyError):
+                runtime_source["first_empty_rendered_inputs"] = "unavailable"
         if (
             plan.instance == "prod"
             and not production_write_started

@@ -23,6 +23,7 @@ from control_plane.odoo_first_empty_inputs import (
     require_first_release_history,
     _provider_projection,
     first_release_custody,
+    first_empty_volume_names,
     FirstEmptyAuthority,
     FIRST_RELEASE_STOPPED_KEY as FIRST_RELEASE_STOPPED_KEY,
     FIRST_RELEASE_ABSENCE_SOURCE as FIRST_RELEASE_ABSENCE_SOURCE,
@@ -394,6 +395,30 @@ def require_first_release_placement(
         raise ValueError("The initial release's original storage or physical placement changed.")
 
 
+def first_release_rendered_inputs(
+    *, host: str, token: str, payload: api.JsonObject
+) -> dict[str, str]:
+    from control_plane.dokploy.compose_inventory import read_cached_compose_source
+
+    observed = read_cached_compose_source(
+        host=host,
+        token=token,
+        server_id=native_copy_stream.require_registered_remote_server(payload.get("serverId")),
+        request={
+            "app_name": payload.get("appName"),
+            "files": ["docker-compose.yml"],
+            "hash_environment": True,
+            "env_file": ".env",
+        },
+    )
+    if observed.project_absent or not observed.environment_sha256:
+        raise ValueError("The original executor's rendered configuration is unavailable.")
+    return {
+        "first_empty_rendered_env_sha256": observed.environment_sha256,
+        "first_empty_rendered_compose_sha256": observed.files["docker-compose.yml"].sha256,
+    }
+
+
 def stop_first_release(
     store: object,
     root: Path,
@@ -468,7 +493,7 @@ def stop_first_release(
             or hashlib.sha256(str(payload.get(field) or "").encode()).hexdigest() not in expected
         ):
             raise ValueError("The first release's staged provider input changed.")
-    retained_volumes = [*authority.volumes, authority.volumes[1] + "-filestore"]
+    retained_volumes = list(first_empty_volume_names(authority.volumes))
     spec = {
         "project": payload["appName"],
         "volumes": retained_volumes,

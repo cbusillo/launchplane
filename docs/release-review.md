@@ -60,10 +60,14 @@ backup gates remain ordinary verified captures.
 
 A conclusive deploy failure before a stack exists may retain only the original
 executor's exact configuration files. A later accepted initial release proves
-their hashes, exclusive ownership, terminal provider history and physically
+their rendered-file hashes, exclusive ownership, terminal provider history and physically
 empty storage again. Any retained database content or unowned file refuses that
 empty route. A recovered stack with data takes the ordinary logical backup and
 uses existing-data mode, including across subsequent initial acceptances.
+The private cached-source reader records the generated compose and environment
+hashes after the original deployment, since provider rendering can add environment
+fields. It returns no environment values. Missing or changed rendered receipts
+refuse configuration-only reuse and retain the original operation for reconciliation.
 
 Service routes and acceptance/standing-Director settings are unchanged. Direct
 target replacement Apply cannot substitute for first-release acceptance. A failed

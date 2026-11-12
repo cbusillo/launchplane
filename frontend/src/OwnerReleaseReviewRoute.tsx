@@ -229,6 +229,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const checklist = response?.review.checklist;
   const initial = checklist?.initial_version;
   const initialNeedsNotes = !!initial && !initial.client_test_notes.trim();
+  const canPrepareInitialNotes = initialNeedsNotes && response?.review.blockers.length === 1;
   const productionVersion = checklist && !("state" in checklist.production) ? checklist.production : null;
   const latestDecision = response?.review.latest_decision;
   const noNewRelease = response?.review.no_new_release === true;
@@ -357,7 +358,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         <label><span>Why this release is needed</span><textarea value={requestReason} maxLength={1000} disabled={busy} onChange={event => setRequestReason(event.target.value)} /></label>
         {initial ? <label><span>Test notes for the complete initial version</span><textarea value={initialNotes} maxLength={16000} disabled={busy} onChange={event => setInitialNotes(event.target.value)} /></label> : null}
         <div className="owner-review-action-buttons">
-          <button className="button" type="button" disabled={busy || incomplete && !initialNeedsNotes || !requestReason.trim() || initialNeedsNotes && !initialNotes.trim()} onClick={() => void askClientNow()}>{response.initial_request_uses_standing_acceptance ? "Request the initial release" : `Ask ${client} to review now`}</button>
+          <button className="button" type="button" disabled={busy || incomplete && !canPrepareInitialNotes || !requestReason.trim() || initialNeedsNotes && !initialNotes.trim()} onClick={() => void askClientNow()}>{response.initial_request_uses_standing_acceptance ? "Request the initial release" : `Ask ${client} to review now`}</button>
         </div>
         {requestSent ? <p role="status" className="owner-review-success">{response.initial_request_uses_standing_acceptance ? "The initial release request is recorded. Follow its progress above." : `A release review request is open for ${client}. Nothing has been deployed.`}</p> : null}
       </section> : null}

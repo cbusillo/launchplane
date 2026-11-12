@@ -357,7 +357,9 @@ def register_release_review_routes(
                 if director_agent_identity(identity) or can_override(profile, identity)
                 else None
             ),
-            release_on_acceptance=release_start_for_acceptance(store=store, profile=profile)
+            release_on_acceptance=release_start_for_acceptance(
+                store=store, profile=profile, checklist=review.checklist
+            )
             or "held",
             live_site_url=prod_lane.base_url if prod_lane is not None else "",
             release_run=release_run(store, profile, review, reviewing_hotfix=hotfix is not None),
@@ -384,7 +386,9 @@ def register_release_review_routes(
             # The hotfix is already live: Accept keeps it; a request for changes rolls back.
             return "rollback" if decision == "changes_requested" else ""
         if decision == "accepted":
-            return release_start_for_acceptance(store=store, profile=profile)
+            return release_start_for_acceptance(
+                store=store, profile=profile, checklist=current.review.checklist
+            )
         return ""
 
     def read_release_review_access(
@@ -642,6 +646,7 @@ def register_release_review_routes(
                 message="An agent must cite the Director request or agreed finish line.",
             )
         current = response(record_store, profile, identity, trace_id)
+        initial_notes = envelope.initial_version_test_notes
         if current.review.checklist_digest != envelope.checklist_digest:
             saved = profile.release_request
             if (
@@ -655,13 +660,19 @@ def register_release_review_routes(
                 and (saved.reason, saved.source, saved.decision_reference)
                 == (envelope.reason, envelope.source, envelope.decision_reference)
             ):
-                return current
-            raise common.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="release_checklist_changed",
-                message="The release checklist changed or is unavailable. Reload it before deciding.",
-            )
+                if (
+                    profile.release_on_acceptance == "director_standing"
+                    or current.review.latest_decision is not None
+                ):
+                    return current
+                initial_notes = ""
+            else:
+                raise common.http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="release_checklist_changed",
+                    message="The release checklist changed or is unavailable. Reload it before deciding.",
+                )
         try:
             opened = (
                 dependencies.adopt_invitation(
@@ -688,7 +699,7 @@ def register_release_review_routes(
                     f"github:{identity.github_id}"
                     if isinstance(identity, GitHubHumanIdentity)
                     else str(getattr(identity, "subject", "")),
-                    envelope.initial_version_test_notes,
+                    initial_notes,
                 )
             )
         except (FileNotFoundError, StopIteration, ValueError, click.ClickException):

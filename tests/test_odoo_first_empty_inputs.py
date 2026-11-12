@@ -1157,6 +1157,7 @@ class FirstEmptyStorageTests(unittest.TestCase):
 
         code = self.root / "compose" / "example-prod" / "code"
         code.mkdir(parents=True)
+        self.snapshot()
         content = b"services: {}"
         compose = code / "docker-compose.yml"
         compose.write_bytes(content)
