@@ -116,12 +116,6 @@ fits this file.
   workflow, grant, or build setting referenced by its repository; ends if a
   Launchplane change forces a product repository change, or a product change
   needs a new Launchplane grant.
-- `CM website live through Launchplane` proves the journey once: Client
-  acceptance at release is built, and three changes in a row that Justin opens
-  as issues reach production with no act by Justin beyond opening the issue
-  and accepting, and none by the Director; ends if Justin has to use GitHub
-  for anything beyond opening an issue, the Director touches Launchplane by
-  hand, or the old approval code still decides a merge.
 - `Merge train that just works` proves an agent's merge lands in one pass
   without a wedge, a hand merge, or main going red on its own, and a Ready
   change runs on testing within 30 minutes; ends if the friction log gains
@@ -132,19 +126,3 @@ fits this file.
   Live product's promotion happens without one.
 - `Retired machinery deleted` proves the retired designs above are gone from
   the code; ends if a deletion breaks a live product.
-- `Director questions in Launchplane` proves the Director sees, answers and
-  finds every question and decision in Launchplane, while agents keep writing
-  them through the catalog's question record unchanged; ends if a question
-  still has to be asked or found somewhere else, or Launchplane needs more
-  upkeep for questions than the catalog's own store did.
-- `One copy of each fact` proves Launchplane reads current facts a git host
-  or provider owns through its driver, instead of keeping a second copy to
-  reconcile, while it keeps its own decisions and the release evidence they rest
-  on; ends if Launchplane becomes a second authority for a fact a provider owns.
-- `A breaking update stops at a preview` proves a shared update, such as an
-  `odoo-devkit` pin, is checked on one preview before any testing lane takes
-  it; ends if one update turns more than one testing lane red.
-- `Previews work the first time` proves that for a week every pull request's
-  preview builds and serves without an agent repairing Launchplane; a correct
-  refusal of an unverified build still counts as working. Ends if a preview
-  needs an agent's repair to serve.
