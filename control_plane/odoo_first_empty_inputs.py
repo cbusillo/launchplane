@@ -341,8 +341,8 @@ def require_first_release_history(
     product = decision.product if decision is not None else product
     custody = first_release_custody(store, product, context, decision)
     profile = store.read_product_profile_record(product)
-    expected_promotions = {}
-    expected_captures = {}
+    expected_promotions: dict[str, ReleaseReviewDecisionRecord] = {}
+    expected_captures: dict[str, ReleaseReviewDecisionRecord] = {}
     for owner in custody.values():
         for step in client_release_steps(owner.release_start):
             operation_id = client_release_step_operation_id(
@@ -355,8 +355,8 @@ def require_first_release_history(
     operations = store.list_odoo_prod_promotion_operation_records(
         product=product, context_name=context, instance_name="prod"
     )
-    backup_owners = {}
-    operation_owners = {}
+    backup_owners: dict[str, ReleaseReviewDecisionRecord] = {}
+    operation_owners: dict[str, ReleaseReviewDecisionRecord] = {}
     for operation in operations:
         promotion_owner = expected_promotions.get(operation.operation_id)
         if (
@@ -712,7 +712,7 @@ def validate_first_empty_generation(
 
 
 def first_empty_volume_names(volumes: tuple[str, ...] | list[str]) -> tuple[str, ...]:
-    return (*volumes, volumes[1] + "-filestore")
+    return *volumes, volumes[1] + "-filestore"
 
 
 def first_empty_storage_snapshot(
@@ -819,13 +819,13 @@ def first_empty_storage_snapshot(
                                     raise ValueError("Original project configuration is unbounded.")
                             after = os.fstat(handle)
 
-                            def file_identity(row: Any) -> tuple[int, int, int, int, int]:
+                            def file_identity(observed: Any) -> tuple[int, int, int, int, int]:
                                 return (
-                                    row.st_dev,
-                                    row.st_ino,
-                                    row.st_size,
-                                    row.st_mtime_ns,
-                                    row.st_ctime_ns,
+                                    observed.st_dev,
+                                    observed.st_ino,
+                                    observed.st_size,
+                                    observed.st_mtime_ns,
+                                    observed.st_ctime_ns,
                                 )
 
                             digest = hashlib.sha256(content).hexdigest()

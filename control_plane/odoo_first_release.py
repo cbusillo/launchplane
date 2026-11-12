@@ -494,17 +494,22 @@ def stop_first_release(
         ):
             raise ValueError("The first release's staged provider input changed.")
     retained_volumes = list(first_empty_volume_names(authority.volumes))
+    owned_deployments = {}
+    for record in deployments:
+        artifact = record.artifact_identity
+        runtime = record.runtime_identity
+        if artifact is None or runtime is None:
+            raise ValueError(
+                "The retained deployment has no verified artifact or runtime identity."
+            )
+        owned_deployments[record.record_id] = {
+            "artifact": artifact.artifact_id,
+            "image": runtime.image_reference,
+        }
     spec = {
         "project": payload["appName"],
         "volumes": retained_volumes,
-        "deployments": {
-            record.record_id: {
-                "artifact": record.artifact_identity.artifact_id,
-                "image": record.runtime_identity.image_reference,
-            }
-            for record in deployments
-            if record.artifact_identity is not None and record.runtime_identity is not None
-        },
+        "deployments": owned_deployments,
         "workflow_ssh_source": api.parse_dokploy_env_text(environment).get("DATA_WORKFLOW_SSH_DIR")
         or DEFAULT_DATA_WORKFLOW_SSH_DIR,
     }

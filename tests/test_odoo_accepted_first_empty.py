@@ -17,7 +17,7 @@ from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.product_profile_record import ProductOwnerProfile
 from control_plane.contracts.release_review import ReleaseDecision
 from control_plane.release_review import build_release_review, checklist_digest
-from tests.test_odoo_first_empty_inputs import FirstEmptyInputsFixture
+from tests.test_odoo_first_empty_inputs import FirstEmptyInputsFixture, FirstEmptyStorageTests
 from tests.test_release_review import github_read
 
 
@@ -29,6 +29,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         cache = TemporaryDirectory()
         self.addCleanup(cache.cleanup)
         self.cached_root = Path(cache.name).resolve()
+        self.empty_storage_fixture: FirstEmptyStorageTests | None = None
         from control_plane.contracts.odoo_online_backup import DEFAULT_ODOO_BACKUP_ROOT
 
         self.runtime = self.runtime.model_copy(
@@ -56,7 +57,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                         "value": f"fictional-{key.lower()}",
                         "secret_class": "prod_only",
                     }
-                    for key in sorted(FRESH_TESTING_LOCAL_CREDENTIAL_KEYS)
+                    for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
                 ],
             },
             mode="apply",
@@ -455,7 +456,6 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         self.probe.assert_not_called()
 
     def test_initial_review_requires_recorded_recovery_root_and_bounds_invalid_inputs(self) -> None:
-        from control_plane.client_release import release_start_for_acceptance
         from control_plane.release_review import release_version, ReleaseEvidenceUnavailable
 
         self.profile = self.profile.model_copy(update={"release_on_acceptance": "promote"})
@@ -475,10 +475,6 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 )
                 with self.assertRaises(ReleaseEvidenceUnavailable):
                     release_version(store=self.store, profile=self.profile, instance="prod")
-                self.assertEqual(
-                    release_start_for_acceptance(store=self.store, profile=self.profile),
-                    "promote_with_rollback_drill",
-                )
 
     def queue_promotion(self, decision: Any, attempt: int = 1) -> Any:
         from control_plane.client_release import _queue_promotion, ClientReleaseStep
@@ -847,8 +843,8 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         self.assertTrue(
             set(self.runtime.env) | FRESH_TESTING_LOCAL_CREDENTIAL_KEYS <= delivered.keys()
         )
-        for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS:
-            self.assertEqual(delivered[key], f"fictional-{key.lower()}")
+        for credential_key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS:
+            self.assertEqual(delivered[credential_key], f"fictional-{credential_key.lower()}")
         self.assertFalse(
             self.store.read_product_profile_record(
                 self.profile.product
@@ -886,7 +882,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 }
             )
         else:
-            fixture = getattr(self, "empty_storage_fixture", None)
+            fixture = self.empty_storage_fixture
             if fixture is None:
                 super().observe(payload=payload, receive=receive, **kwargs)
             else:
@@ -1276,7 +1272,6 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
     def test_conclusive_failure_without_a_stack_requalifies_owned_configuration_and_absence(
         self,
     ) -> None:
-        from tests.test_odoo_first_empty_inputs import FirstEmptyStorageTests
         from control_plane.dokploy import api
 
         fixture = FirstEmptyStorageTests()

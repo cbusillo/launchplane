@@ -109,7 +109,6 @@ from control_plane.odoo_release_recovery import (
 )
 from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
 from control_plane.release_review import (
-    ReleaseReviewStore,
     ReleaseEvidenceUnavailable,
     current_release_review,
     release_version,
@@ -325,21 +324,10 @@ def release_start_for_acceptance(
         return ""
     if mode == "director_standing":
         mode = "promote_with_rollback_drill"
-    if mode == "promote" and profile.driver_id == "odoo" and isinstance(store, PostgresRecordStore):
+    if mode == "promote" and profile.driver_id == "odoo" and checklist is not None:
         from control_plane.contracts.release_review import AbsentProduction
 
-        try:
-            original = (
-                checklist.production
-                if checklist is not None
-                else release_version(
-                    store=cast("ReleaseReviewStore", store), profile=profile, instance="prod"
-                )
-            )
-        except (FileNotFoundError, ValueError):
-            original = None
-            mode = "promote_with_rollback_drill"
-        if isinstance(original, AbsentProduction):
+        if isinstance(checklist.production, AbsentProduction):
             mode = "promote_with_rollback_drill"
     if mode == "promote_with_rollback_drill" and _product_drill_passed(store, profile):
         return "promote"

@@ -357,10 +357,13 @@ def register_release_review_routes(
                 if director_agent_identity(identity) or can_override(profile, identity)
                 else None
             ),
-            release_on_acceptance=release_start_for_acceptance(
-                store=store, profile=profile, checklist=review.checklist
-            )
-            or "held",
+            release_on_acceptance=cast(
+                ReleaseOnAcceptance,
+                release_start_for_acceptance(
+                    store=store, profile=profile, checklist=review.checklist
+                )
+                or "held",
+            ),
             live_site_url=prod_lane.base_url if prod_lane is not None else "",
             release_run=release_run(store, profile, review, reviewing_hotfix=hotfix is not None),
             can_start_temporary_hotfix=director,
