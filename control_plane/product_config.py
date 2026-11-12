@@ -1467,6 +1467,18 @@ def _plan_product_config_secret_write(
         else created_at,
         updated_at=now,
     )
+    # The new version reaches every binding of this secret, so each records its origin.
+    sibling_bindings = (
+        [
+            sibling.model_copy(update={"value_source": value_source, "updated_at": now})
+            for sibling in record_store.list_secret_bindings(integration=integration, limit=None)
+            if sibling.secret_id == secret_id
+            and sibling.binding_id != binding.binding_id
+            and sibling.value_source != value_source
+        ]
+        if existing_record is not None
+        else []
+    )
     action = "created" if existing_record is None else "rotated"
     version_id = control_plane_secrets._version_id(secret_id=secret_id)
     ciphertext, key_id = control_plane_secrets._encrypt_secret_value(plaintext_value)
@@ -1516,7 +1528,7 @@ def _plan_product_config_secret_write(
         "configured_binding": binding,
         "secret_versions": [version],
         "secret_records": [record],
-        "secret_bindings": [binding],
+        "secret_bindings": [binding, *sibling_bindings],
         "secret_audit_events": [event],
     }
 

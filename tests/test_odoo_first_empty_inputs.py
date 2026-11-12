@@ -632,20 +632,20 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
     async def test_only_qualified_generation_passes_a_shared_rule_naming_other_sites(
         self,
     ) -> None:
-        key = "ODOO_DB_PASSWORD"
+        key, sibling_key = "ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD"
         self.store.write_runtime_key_safety_policy_record(
             RuntimeKeySafetyPolicyRecord(
                 record_id="runtime-key-safety-policy-shared-password",
-                status="active",
                 source="test",
                 updated_at="2026-06-01T00:00:00Z",
-                rules=(
+                rules=tuple(
                     RuntimeSecretSafetyRule(
-                        binding_key=key,
+                        binding_key=rule_key,
                         secret_class="shared_safe",
                         allowed_contexts=("unrelated-site",),
                         allowed_instances=("prod",),
-                    ),
+                    )
+                    for rule_key in (key, sibling_key)
                 ),
             )
         )
@@ -684,10 +684,15 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
                 )
         self.assertFalse(self.store.list_secret_records())
 
-        dry = await self.post("runtime_credentials")
+        entries = [
+            {"binding_key": generated, "generate": "odoo_first_empty", "secret_class": "prod_only"}
+            for generated in (key, sibling_key)
+        ]
+        dry = await self.post("runtime_credentials", secrets=entries)
         self.assertEqual(dry.status_code, 202, dry.text)
         applied = await self.post(
             "runtime_credentials",
+            secrets=entries,
             mode="apply",
             reviewed_plan_sha256=dry.json()["result"]["odoo_first_empty"]["plan_sha256"],
             key="shared-rule-original",
@@ -696,10 +701,15 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
         target = RuntimeKeySafetyTarget(
             context=self.context, instance="prod", environment_class="prod"
         )
-        stored = evaluate_runtime_key_safety_from_store(
-            record_store=self.store, target=target, required_binding_keys=(key,)
-        )
-        self.assertEqual(stored.status, "pass", stored.findings)
+
+        def stored_findings(binding_key: str) -> list[str]:
+            evaluation = evaluate_runtime_key_safety_from_store(
+                record_store=self.store, target=target, required_binding_keys=(binding_key,)
+            )
+            return [finding.code for finding in evaluation.findings]
+
+        self.assertEqual(stored_findings(key), [])
+        self.assertEqual(stored_findings(sibling_key), [])
         with self.assertRaises(ProductConfigError) as rotated:
             apply_product_config_bundle(
                 record_store=self.store,
@@ -709,6 +719,28 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
                 source_label="test",
             )
         self.assertEqual(rotated.exception.code, "runtime_key_safety_failed")
+        # A supplied value written under another binding key of the same secret
+        # replaces what the generated binding delivers, so it loses its pass.
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={**lane, "secrets": [{**supplied, "name": key, "binding_key": "ALIAS_ONE"}]},
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        secrets.write_secret_value(
+            record_store=self.store,
+            scope="context_instance",
+            integration="runtime_environment",
+            name=sibling_key,
+            plaintext_value="invented-alias",
+            binding_key="ALIAS_TWO",
+            context_name=self.context,
+            instance_name="prod",
+            actor="fixture",
+        )
+        self.assertEqual(stored_findings(key), ["context_not_allowed"])
+        self.assertEqual(stored_findings(sibling_key), ["context_not_allowed"])
 
     async def test_caller_values_testing_namespace_and_mixed_writes_cannot_enter_first_empty(
         self,

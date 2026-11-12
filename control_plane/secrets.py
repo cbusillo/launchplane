@@ -822,6 +822,12 @@ def write_secret_value(
             updated_at=now,
         )
     )
+    # The new version reaches every binding of this secret, so none keeps an older origin.
+    for sibling in record_store.list_secret_bindings(integration=integration, limit=None):
+        if sibling.secret_id == secret_id and sibling.value_source is not None:
+            record_store.write_secret_binding(
+                sibling.model_copy(update={"value_source": None, "updated_at": now})
+            )
     record_store.write_secret_audit_event(
         SecretAuditEvent(
             event_id=_audit_event_id(secret_id=secret_id, event_type=action),
