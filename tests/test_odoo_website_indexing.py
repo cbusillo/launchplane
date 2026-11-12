@@ -281,6 +281,24 @@ class WebsiteIndexingBindingTests(unittest.TestCase):
         self.native.assert_called_once()
         self.assertEqual(self.writes, 0)
 
+    def test_public_host_route_removed_before_dispatch_refuses_before_effect_checkpoint(
+        self,
+    ) -> None:
+        self._serve_public_host_beside_internal_origin(self._provider_route("example.test"))
+        plan = self.execution.observe()
+        original = self.native.side_effect
+
+        def route_removed(**kwargs: Any) -> Any:
+            self.payload["domains"] = [self._provider_route("example-prod.internal.test")]
+            return original(**kwargs)
+
+        self.native.side_effect = route_removed
+        checkpoint = Mock()
+        with self.assertRaisesRegex(ValueError, "provider binding changed before mutation"):
+            self.execution.observe(reviewed=plan, before_mutation=checkpoint)
+        checkpoint.assert_not_called()
+        self.assertEqual(self.writes, 0)
+
     def test_public_host_without_its_provider_route_on_the_target_never_reaches_native(
         self,
     ) -> None:

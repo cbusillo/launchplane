@@ -346,7 +346,9 @@ class WebsiteIndexingExecution:
             fresh = api.fetch_dokploy_target_payload(
                 host=host, token=token, target_type="compose", target_id=target["target_id"]
             )
-            if any(fresh.get(key) != payload.get(key) for key in ("serverId", "appName", "env")):
+            if any(
+                fresh.get(key) != payload.get(key) for key in ("serverId", "appName", "env")
+            ) or not _origin_routed_by_provider(binding, fresh, target["target_id"]):
                 raise ValueError("Website indexing provider binding changed before mutation.")
             if before_mutation is not None:
                 before_mutation()
