@@ -24,7 +24,10 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetStaffTestingHold,
 )
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
+    LaunchplaneProductProfileRecord,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.contracts.runtime_key_safety_policy import (
@@ -32,10 +35,15 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyTarget,
     RuntimeSecretSafetyRule,
 )
-from control_plane.product_config import ProductConfigError, apply_product_config_bundle
+from control_plane.product_config import (
+    ProductConfigError,
+    apply_product_config_bundle,
+    plan_product_config_authority_bundle,
+)
 from control_plane.runtime_key_safety import evaluate_runtime_key_safety_from_store
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import SecretCopySourceConflictError
 from control_plane.odoo_first_empty_inputs import (
     first_empty_storage_snapshot,
     first_empty_storage_program,
@@ -698,7 +706,7 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
         self.assertEqual(stale.status_code, 409, stale.text)
         self.assertEqual(len(self.store.list_secret_records()), len(before) + 1)
 
-    SHARED_RULE_KEYS = ("ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD")
+    SHARED_RULE_KEYS = tuple(sorted(FRESH_TESTING_LOCAL_CREDENTIAL_KEYS))
 
     def write_shared_rule_naming_other_sites(self) -> None:
         self.store.write_runtime_key_safety_policy_record(
@@ -822,7 +830,7 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
                     actor="fixture",
                     source_label="test",
                 )
-            self.assertEqual(aliased.exception.code, "generated_secret_alias_refused")
+            self.assertEqual(aliased.exception.code, "secret_origin_alias_refused")
         with self.assertRaises(click.ClickException):
             secrets.write_secret_value(
                 record_store=self.store,
@@ -855,14 +863,80 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
             "instance_name": "prod",
             "actor": "fixture",
         }
+
+        def stop_after_the_new_value_is_staged(step_name: str) -> None:
+            if step_name == "write_secret_record":
+                raise RuntimeError("stop")
+
         with (
-            patch.object(self.store, "write_secret_binding", side_effect=RuntimeError("stop")),
+            patch.object(
+                self.store,
+                "_after_product_authority_bundle_step",
+                side_effect=stop_after_the_new_value_is_staged,
+            ),
             self.assertRaises(RuntimeError),
         ):
             secrets.write_secret_value(**rotation)
         self.assertEqual(self.secret_state(), before)
         secrets.write_secret_value(**rotation)
         self.assertEqual(self.stored_findings("ODOO_MASTER_PASSWORD"), ["context_not_allowed"])
+
+    async def test_value_planned_before_generation_never_commits_behind_the_generated_binding(
+        self,
+    ) -> None:
+        planned = [
+            plan_product_config_authority_bundle(
+                record_store=self.store,
+                payload=self.supplied_prod_secret(name=purpose, binding_key=key),
+                mode="apply",
+                actor="fixture",
+                source_label="test",
+            )[1]
+            for purpose in self.SHARED_RULE_KEYS
+            for key in (purpose, "ALIAS")
+        ]
+        await self.generate_shared_rule_keys()
+        before = self.secret_state()
+        for bundle in planned:
+            with (
+                self.subTest(bindings=bundle.secret_bindings),
+                self.assertRaises(SecretCopySourceConflictError),
+            ):
+                self.store.write_product_authority_bundle(bundle)
+        self.assertEqual(self.secret_state(), before)
+        for purpose in self.SHARED_RULE_KEYS:
+            self.assertEqual(self.stored_findings(purpose), [])
+
+    async def test_plain_write_read_before_generation_never_commits_behind_the_generated_binding(
+        self,
+    ) -> None:
+        bindings_read_before_generation = self.store.list_secret_bindings()
+        await self.generate_shared_rule_keys()
+        before = self.secret_state()
+        for key in ("ODOO_DB_PASSWORD", "ALIAS"):
+            with (
+                self.subTest(binding_key=key),
+                patch.object(self.store, "find_secret_record", return_value=None),
+                patch.object(
+                    self.store,
+                    "list_secret_bindings",
+                    return_value=bindings_read_before_generation,
+                ),
+                self.assertRaises(click.ClickException),
+            ):
+                secrets.write_secret_value(
+                    record_store=self.store,
+                    scope="context_instance",
+                    integration="runtime_environment",
+                    name="ODOO_DB_PASSWORD",
+                    plaintext_value="invented-plain",
+                    binding_key=key,
+                    context_name=self.context,
+                    instance_name="prod",
+                    actor="fixture",
+                )
+            self.assertEqual(self.secret_state(), before)
+        self.assertEqual(self.stored_findings("ODOO_DB_PASSWORD"), [])
 
     async def test_caller_values_testing_namespace_and_mixed_writes_cannot_enter_first_empty(
         self,

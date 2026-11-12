@@ -5,7 +5,7 @@ import secrets as random_secrets
 from json import JSONDecodeError
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal, NotRequired, Protocol, TypedDict, cast, get_args
+from typing import Literal, NamedTuple, NotRequired, Protocol, TypedDict, cast, get_args
 
 import click
 from pydantic import BaseModel, ConfigDict, Field
@@ -43,6 +43,7 @@ from control_plane.storage.product_authority_bundle import ProductAuthorityBundl
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundleStore
 from control_plane.storage.product_authority_bundle import RuntimeEnvironmentWrite
 from control_plane.storage.product_authority_bundle import RuntimeEnvironmentSetExpectation
+from control_plane.storage.product_authority_bundle import SecretBindingSetExpectation
 from control_plane.storage.product_authority_bundle import SecretCopySourceExpectation
 from control_plane.storage.product_authority_bundle import SecretDeliverySetExpectation
 from control_plane.workflows.ship import utc_now_timestamp
@@ -517,13 +518,20 @@ def plan_product_config_authority_bundle(
     secret_records: list[SecretRecord] = []
     secret_bindings: list[SecretBinding] = []
     secret_audit_events: list[SecretAuditEvent] = []
+    secret_binding_sets: list[SecretBindingSetExpectation] = []
     adopted_secret_ids: list[str] = []
+    origins_in_request: dict[str, list[tuple[str, SecretValueSource | None]]] = {}
     for index, secret in enumerate(secrets):
-        planned_action, existing_secret_id = _product_config_secret_current_action(
-            record_store=record_store,
-            secret=secret,
+        planned = _product_config_secret_current_action(
+            record_store=record_store, secret=secret, origins_in_request=origins_in_request
         )
-        if secret.get("generate") == "odoo_first_empty" and planned_action != "created":
+        origins_in_request.setdefault(planned.consumers.secret_id, []).append(
+            (
+                cast(str, secret["binding_key"]),
+                cast(SecretValueSource | None, secret["value_source"]),
+            )
+        )
+        if secret.get("generate") == "odoo_first_empty" and planned.action != "created":
             raise ProductConfigError(
                 "First-empty generation cannot rotate an existing secret record."
             )
@@ -586,6 +594,7 @@ def plan_product_config_authority_bundle(
             secret_records.extend(secret_plan["secret_records"])
             secret_bindings.extend(secret_plan["secret_bindings"])
             secret_audit_events.extend(secret_plan["secret_audit_events"])
+            secret_binding_sets.append(planned.consumers)
             secret_bindings.extend(
                 _planned_disabled_runtime_secret_placeholder_retirements(
                     record_store=record_store,
@@ -603,9 +612,9 @@ def plan_product_config_authority_bundle(
             continue
         secret_summaries.append(
             _summarize_product_config_secret_input(
-                action=planned_action,
+                action=planned.action,
                 secret=secret,
-                secret_id=existing_secret_id,
+                secret_id=planned.secret_id,
             )
         )
     runtime_environment_writes: tuple[RuntimeEnvironmentWrite, ...] = ()
@@ -668,6 +677,7 @@ def plan_product_config_authority_bundle(
         secret_records=tuple(secret_records),
         secret_bindings=(*secret_bindings, *disabled_bundle.secret_bindings),
         secret_audit_events=(*secret_audit_events, *disabled_bundle.secret_audit_events),
+        secret_binding_sets=tuple(secret_binding_sets),
     )
     if first_empty_qualification is not None:
         proof = first_empty_qualification
@@ -677,6 +687,7 @@ def plan_product_config_authority_bundle(
                 "secret_versions": bundle.secret_versions,
                 "secret_bindings": bundle.secret_bindings,
                 "secret_audit_events": bundle.secret_audit_events,
+                "secret_binding_sets": bundle.secret_binding_sets,
                 "absent_secret_ids": tuple(record.secret_id for record in bundle.secret_records),
             }
         )
@@ -997,10 +1008,11 @@ def _resolve_provider_secret_adoptions(
     values: dict[int, str] = {}
     for index in adopted_indexes:
         key = str(secrets[index]["binding_key"])
-        existing_action, _ = _product_config_secret_current_action(
-            record_store=record_store, secret=secrets[index]
-        )
-        if key in recorded_keys or key in provider.recorded_keys or existing_action != "created":
+        if (
+            key in recorded_keys
+            or key in provider.recorded_keys
+            or _find_product_config_secret_record(record_store, secrets[index]) is not None
+        ):
             raise ProductConfigError(
                 "A secret named for provider adoption is already supplied by a Launchplane "
                 "record for this lane.",
@@ -1382,30 +1394,54 @@ def _require_product_config_master_key_if_needed(secrets: tuple[dict[str, object
         ) from error
 
 
-def _product_config_secret_current_action(
-    *, record_store: control_plane_secrets.SecretWriteStore, secret: dict[str, object]
-) -> tuple[str, str]:
-    existing_record = record_store.find_secret_record(
+class _PlannedSecretAction(NamedTuple):
+    action: str
+    secret_id: str
+    consumers: SecretBindingSetExpectation
+
+
+def _find_product_config_secret_record(
+    record_store: control_plane_secrets.SecretWriteStore, secret: dict[str, object]
+) -> SecretRecord | None:
+    return record_store.find_secret_record(
         scope=str(secret["scope"]),
         integration=str(secret["integration"]),
         name=str(secret["name"]),
         context=str(secret["context"]),
         instance=str(secret["instance"]),
     )
-    if existing_record is None:
-        return "created", ""
-    if control_plane_secrets.secret_generated_under_another_key(
-        record_store,
-        secret_id=existing_record.secret_id,
-        integration=existing_record.integration,
-        binding_key=cast(str, secret["binding_key"]),
-    ):
-        raise ProductConfigError(
-            "This secret's value was generated by the service under another binding key. "
-            "Write the new value through that binding key.",
-            code="generated_secret_alias_refused",
+
+
+def _product_config_secret_current_action(
+    *,
+    record_store: control_plane_secrets.SecretWriteStore,
+    secret: dict[str, object],
+    origins_in_request: dict[str, list[tuple[str, SecretValueSource | None]]],
+) -> _PlannedSecretAction:
+    existing_record = _find_product_config_secret_record(record_store, secret)
+    secret_id = (
+        existing_record.secret_id
+        if existing_record is not None
+        else control_plane_secrets.expected_secret_id(
+            integration=cast(str, secret["integration"]),
+            name=cast(str, secret["name"]),
+            context=cast(str, secret["context"]),
+            instance=cast(str, secret["instance"]),
         )
-    return "rotated", existing_record.secret_id
+    )
+    try:
+        consumers = control_plane_secrets.secret_value_consumers(
+            record_store,
+            secret_id=secret_id,
+            binding_key=cast(str, secret["binding_key"]),
+            value_source=cast(SecretValueSource | None, secret["value_source"]),
+            writes_in_same_commit=origins_in_request.get(secret_id, []),
+        )
+    except click.ClickException as error:
+        raise ProductConfigError(error.message, code="secret_origin_alias_refused") from error
+    if existing_record is None:
+        return _PlannedSecretAction("created", "", consumers)
+    return _PlannedSecretAction("rotated", secret_id, consumers)
 
 
 def _plan_product_config_secret_write(

@@ -17552,6 +17552,8 @@ def create_launchplane_fastapi_app(
                 product_config_request=product_config_request,
             )
         except SecretCopySourceConflictError as error:
+            if not any(secret.copy_from for secret in product_config_request.secrets):
+                raise secret_consumers_changed_http_error(trace_id=trace_id) from error
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -17804,6 +17806,8 @@ def create_launchplane_fastapi_app(
                 idempotency_request_payload=idempotency_request_payload,
                 expected_product_profile=profile,
             )
+        except SecretCopySourceConflictError as error:
+            raise secret_consumers_changed_http_error(trace_id=trace_id) from error
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -31979,6 +31983,15 @@ def create_launchplane_fastapi_app(
     )
 
     return app
+
+
+def secret_consumers_changed_http_error(*, trace_id: str) -> LaunchplaneHTTPException:
+    return _launchplane_http_error(
+        status_code=409,
+        trace_id=trace_id,
+        code="matching_dry_run_required",
+        message="Lane secret metadata changed. Review a fresh dry-run.",
+    )
 
 
 def runtime_environment_conflict_http_error(

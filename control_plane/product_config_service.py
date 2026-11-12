@@ -264,7 +264,7 @@ def product_config_service_error(
         "secret_copy_refused",
         "runtime_key_safety_target_required",
         "runtime_key_retired",
-        "generated_secret_alias_refused",
+        "secret_origin_alias_refused",
     }:
         # These domain refusals use fixed messages with no caller input or secret data.
         error_message = str(error)
