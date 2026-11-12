@@ -251,11 +251,7 @@ def run_stall_monitor_pass(
                         if progress_key != previous.progress_key
                         else set()
                     )
-                    ready = tuple(
-                        f"{e.number}:{e.head_sha}"
-                        for e in queue.queue
-                        if e.eligible or e.deferred_reasons
-                    )
+                    ready = tuple(f"{e.number}:{e.head_sha}" for e in queue.queue if e.eligible)
                     blocked_heads = {
                         (pr.number, pr.head_sha)
                         for pr in snapshot.pull_requests

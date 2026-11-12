@@ -731,16 +731,26 @@ class MergeTrainDryRunTests(unittest.TestCase):
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
                 pull_requests=(
-                    _pull_request(8, head_ref="feature/root", base_ref="main"),
-                    _pull_request(9, head_ref="feature/child", base_ref="feature/root"),
+                    _pull_request(
+                        8,
+                        head_ref="feature/root",
+                        repository="cbusillo/sellyouroutboard",
+                    ),
+                    _pull_request(
+                        9,
+                        head_ref="feature/child",
+                        base_ref="feature/root",
+                        repository="cbusillo/sellyouroutboard",
+                    ),
                 ),
             ),
         )
 
         self.assertEqual(result.queue_order, (8,))
-        self.assertEqual([entry.number for entry in result.queue], [8, 9])
-        self.assertFalse(result.queue[1].eligible)
-        self.assertIn("#8", "; ".join(result.queue[1].ineligible_reasons))
+        self.assertEqual([entry.number for entry in result.queue], [8])
+        self.assertEqual([entry.number for entry in result.stack_waits], [9])
+        self.assertFalse(result.stack_waits[0].eligible)
+        self.assertIn("#8", "; ".join(result.stack_waits[0].ineligible_reasons))
 
     def test_dry_run_preserves_legacy_snapshot_files_without_base_refs(self) -> None:
         result = build_merge_train_dry_run_result(

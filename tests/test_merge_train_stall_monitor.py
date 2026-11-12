@@ -35,8 +35,6 @@ from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.stores import _sqlite_database_url
 from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
 from tests.test_merge_train_scheduler import _policy_record
-from tests.test_merge_train import _pull_request
-from control_plane.merge_train import MergeTrainDryRunSnapshot
 
 
 def _time(seconds: int) -> str:
@@ -44,59 +42,6 @@ def _time(seconds: int) -> str:
 
 
 class StallObservationTests(TestCase):
-    def test_ready_stack_child_stalls_even_when_parent_is_not_enqueued(self) -> None:
-        policy = _policy_record(
-            ("example/repo", MergeTrainSchedulerPolicy(enabled=True, mutate=True))
-        )
-        parent = _pull_request(8, labels=(), head_ref="feature/root")
-        child = _pull_request(9, head_ref="feature/child", base_ref=parent.head_ref)
-        snapshot = MergeTrainDryRunSnapshot(
-            repository=policy.policy.policies[0].repository,
-            base_branch="main",
-            pull_requests=(parent, child),
-        )
-        client, reporter = Mock(), Mock()
-        client.target_setting_gaps.return_value = ()
-        client.read_merge_train_snapshot.return_value = snapshot
-        with (
-            TemporaryDirectory() as directory,
-            patch(
-                "control_plane.merge_train_stall_monitor.resolve_merge_train_policy_record",
-                return_value=policy,
-            ),
-            patch(
-                "control_plane.merge_train_stall_monitor.GitHubMergeTrainClient",
-                return_value=client,
-            ),
-            patch(
-                "control_plane.merge_train_stall_monitor.resolve_merge_train_github_token",
-                return_value="test-token",
-            ),
-            patch(
-                "control_plane.merge_train_stall_monitor.merge_train_release_hold_reader",
-                return_value=None,
-            ),
-            patch(
-                "control_plane.merge_train_stall_monitor.resolve_stall_workflow",
-                return_value=MergeTrainStallWorkflow(repository="example/control", ref="main"),
-            ),
-        ):
-            root = Path(directory)
-            store = FilesystemRecordStore(root)
-            for seconds in (0, STALL_SECONDS):
-                run_stall_monitor_pass(
-                    store=store,
-                    root=root,
-                    now=lambda: _time(seconds),
-                    notifier_factory=lambda **_: reporter,
-                )
-            observation = store.read_merge_train_stall_record(snapshot.repository).observations[
-                "main"
-            ]
-            self.assertIn(f"{child.number}:{child.head_sha}", observation.ready_since)
-            self.assertIn("ready_change_not_moving", observation.reasons)
-            reporter.notify.assert_called_once()
-
     def test_idle_time_never_counts_toward_new_work_stalling(self) -> None:
         old = self.observe(MergeTrainStallObservation(), 0)
         idle = self.observe(old, STALL_SECONDS * 2, ready=(), busy=False)

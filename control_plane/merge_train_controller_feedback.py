@@ -46,7 +46,6 @@ def build_feedback_payloads(
         repository=repository,
         base_branch=base_branch,
         source=source,
-        controller_record_id=controller_record_id,
     )
     event = _feedback_event(controller_action=controller_action, result=result)
     if event == "skip":
@@ -109,12 +108,11 @@ def _queue_feedback(
     repository: str,
     base_branch: str,
     source: str,
-    controller_record_id: str,
 ) -> list[dict[str, object]]:
     payloads: list[dict[str, object]] = []
     dry_run = _as_dict(result.get("dry_run_result"))
     blocked_label = _string(dry_run.get("blocked_label")).casefold()
-    for value in _as_list(dry_run.get("queue")):
+    for value in (*_as_list(dry_run.get("queue")), *_as_list(dry_run.get("stack_waits"))):
         entry = _as_dict(value)
         if entry.get("eligible") is not False:
             continue
@@ -124,7 +122,12 @@ def _queue_feedback(
             continue
         deferred = _as_list(entry.get("deferred_reasons"))
         handoff = _as_dict(entry.get("ready_handoff"))
-        if not deferred and not (handoff.get("comment_id") and handoff.get("head_sha")):
+        labeled = _string(dry_run.get("enqueue_label")) in _as_list(entry.get("labels"))
+        if (
+            not deferred
+            and not labeled
+            and not (handoff.get("comment_id") and handoff.get("head_sha"))
+        ):
             continue
         reasons = deferred or _as_list(entry.get("ineligible_reasons"))
         if not reasons:
@@ -135,9 +138,9 @@ def _queue_feedback(
                 "repository": repository,
                 "base_branch": base_branch,
                 "pull_request_number": entry["number"],
-                "event": "blocked" if deferred else "waiting",
-                "controller_action": "stack_unsupported" if deferred else "",
-                "controller_record_id": controller_record_id if deferred else "",
+                "event": "waiting",
+                "controller_action": "",
+                "controller_record_id": "",
                 "message": "; ".join(_string(reason) for reason in reasons)
                 + ". Unrelated pull requests can proceed.",
                 "source": source,

@@ -19,14 +19,38 @@ class MergeTrainControllerFeedbackTests(TestCase):
     ) -> None:
         policy = build_test_merge_train_policy(trusted_automation_github_user_ids=(20,))
         repository = policy.policies[0].repository
-        parent = _pull_request(8, labels=(), actor_id=20, head_ref="feature/root")
+        parent = _pull_request(
+            8, labels=(), actor_id=20, head_ref="feature/root", repository=repository
+        )
         child = _pull_request(
-            9, labels=(), actor_id=20, head_ref="feature/child", base_ref=parent.head_ref
+            9,
+            labels=(),
+            actor_id=20,
+            head_ref="feature/child",
+            base_ref=parent.head_ref,
+            repository=repository,
         )
         handoff = MergeTrainReadyHandoff(
             status="ready", head_sha=child.head_sha, actor_id=20, comment_id=100
         )
         child.ready_handoff = handoff
+        grandchild = _pull_request(
+            10,
+            labels=(),
+            actor_id=20,
+            head_ref="feature/leaf",
+            base_ref=child.head_ref,
+            repository=repository,
+        )
+        grandchild.ready_handoff = handoff.model_copy(update={"head_sha": grandchild.head_sha})
+        fork = _pull_request(
+            11,
+            labels=(),
+            actor_id=20,
+            head_ref=parent.head_ref,
+            repository=repository,
+            head_repository="example/fork",
+        )
         for parent_ready in (False, True):
             with self.subTest(parent_ready=parent_ready):
                 if parent_ready:
@@ -34,7 +58,9 @@ class MergeTrainControllerFeedbackTests(TestCase):
                 result = build_merge_train_dry_run_result(
                     policy=policy,
                     snapshot=MergeTrainDryRunSnapshot(
-                        repository=repository, base_branch="main", pull_requests=(parent, child)
+                        repository=repository,
+                        base_branch="main",
+                        pull_requests=(parent, child, grandchild, fork),
                     ),
                     batch_landing=True,
                 )
@@ -55,8 +81,17 @@ class MergeTrainControllerFeedbackTests(TestCase):
                 if not parent_ready:
                     for reason in result.queue[0].ineligible_reasons:
                         self.assertIn(reason, cast(str, message["message"]))
+                        leaf_message = next(
+                            p for p in payloads if p["pull_request_number"] == grandchild.number
+                        )
+                        self.assertIn(reason, cast(str, leaf_message["message"]))
+                self.assertNotIn(f"#{fork.number}", cast(str, message["message"]))
                 self.assertEqual(result.queue_order, (parent.number,) if parent_ready else ())
-                self.assertFalse(next(e for e in result.queue if e.number == child.number).eligible)
+                self.assertEqual([e.number for e in result.queue], [parent.number, fork.number])
+                self.assertFalse(result.stack_waits[0].eligible)
+                self.assertEqual(message["event"], "waiting")
+                self.assertFalse(message["controller_action"])
+                self.assertFalse(message["controller_record_id"])
 
     def test_excluded_ready_gets_its_queue_reason_even_when_train_is_idle(self) -> None:
         repository = "example/site"
