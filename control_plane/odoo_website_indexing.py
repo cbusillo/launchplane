@@ -9,9 +9,11 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.odoo_website_settings import OdooWebsiteIndexing
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, AbsentProduction
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.product_topology_read_model import build_product_environment_topology
 from control_plane.contracts.public_hosts import resolve_public_base_url
 from control_plane.contracts.runtime_identity import parse_runtime_identity_payload
@@ -98,6 +100,45 @@ def production_origin(store: Any, profile: LaunchplaneProductProfileRecord) -> s
     ) or lane.base_url.rstrip("/")
 
 
+def _origin_host_served_by_target(
+    origin: str, route: EnvironmentRouteBindingRecord, dokploy_target: DokployTargetRecord
+) -> bool:
+    host = origin.split("://", 1)[1].rstrip("/")
+    if host in {domain.domain_name for domain in route.domains}:
+        return True
+    pending_hosts = {effect.host for effect in dokploy_target.pending_public_host_effects}
+    return host in dokploy_target.public_hosts and host not in pending_hosts
+
+
+def _origin_routed_by_provider(
+    binding: dict[str, Any], payload: api.JsonObject, target_id: str
+) -> bool:
+    from control_plane.product_public_hosts import public_host_route_matches
+
+    route_hosts = {domain["domain_name"] for domain in binding["route"]["domains"]}
+    host = binding["public_origin"].split("://", 1)[1]
+    if host in route_hosts:
+        return True
+    raw_routes = payload.get("domains")
+    routes = [
+        route
+        for route in (
+            api.as_json_object(raw) for raw in (raw_routes if isinstance(raw_routes, list) else ())
+        )
+        if route is not None
+    ]
+    origin_ports = [
+        route.get("port")
+        for route in routes
+        if route.get("host") in route_hosts and route.get("serviceName") == "web"
+    ]
+    port = origin_ports[0] if origin_ports else None
+    selected = [route for route in routes if route.get("host") == host]
+    if type(port) is not int or any(other != port for other in origin_ports) or len(selected) != 1:
+        return False
+    return public_host_route_matches(selected[0], target_id, port)
+
+
 def indexing_binding(
     store: Any,
     product: str,
@@ -141,8 +182,9 @@ def indexing_binding(
     if production_origin(store, profile) != origin.rstrip("/"):
         raise ValueError("Website indexing origin differs from production.")
     target = store.read_provider_target_record(context_name=context, instance_name="prod")
+    dokploy_target = store.read_dokploy_target_record(context_name=context, instance_name="prod")
     expected_target = ProviderTargetRecord.from_dokploy_records(
-        target_record=store.read_dokploy_target_record(context_name=context, instance_name="prod"),
+        target_record=dokploy_target,
         target_id_record=store.read_dokploy_target_id_record(
             context_name=context, instance_name="prod"
         ),
@@ -159,8 +201,7 @@ def indexing_binding(
         or route.provider_target.target_category != target.target_category
         or route.provider_target.provider_target_type != target.provider_target_type
         or route.provider_target.target_name != target.display_name
-        or origin.split("://", 1)[1].rstrip("/")
-        not in {domain.domain_name for domain in route.domains}
+        or not _origin_host_served_by_target(origin, route, dokploy_target)
     ):
         raise ValueError("Website indexing route and provider target differ.")
     return {
@@ -247,6 +288,8 @@ class WebsiteIndexingExecution:
             or manifest.image.repository != binding["profile"]["image"]["repository"]
         ):
             raise ValueError("Website indexing runtime differs from its artifact authority.")
+        if not _origin_routed_by_provider(binding, payload, target["target_id"]):
+            raise ValueError("Website indexing public host is not routed to the production target.")
         transport_binding = {
             "project": payload["appName"],
             "database": environment["ODOO_DB_NAME"],
@@ -303,7 +346,9 @@ class WebsiteIndexingExecution:
             fresh = api.fetch_dokploy_target_payload(
                 host=host, token=token, target_type="compose", target_id=target["target_id"]
             )
-            if any(fresh.get(key) != payload.get(key) for key in ("serverId", "appName", "env")):
+            if any(
+                fresh.get(key) != payload.get(key) for key in ("serverId", "appName", "env")
+            ) or not _origin_routed_by_provider(binding, fresh, target["target_id"]):
                 raise ValueError("Website indexing provider binding changed before mutation.")
             if before_mutation is not None:
                 before_mutation()
