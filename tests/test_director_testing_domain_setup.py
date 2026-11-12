@@ -804,10 +804,7 @@ class DirectorCreatedHostnameProductionDomainTests(_NeverLiveProductionDomainFix
 
     def assert_original_refusal(self, response: Any) -> None:
         self.assert_no_effects(response, 400)
-        self.assertEqual(
-            response.json()["error"]["message"],
-            "First hostname setup requires an unchanged service-created empty compose.",
-        )
+        self.assertEqual(response.json()["error"]["code"], "invalid_dokploy_target_setup")
         self.inventory.assert_not_called()
 
     async def test_unrouted_created_hostname_gives_way_to_only_the_reviewed_names(self) -> None:
