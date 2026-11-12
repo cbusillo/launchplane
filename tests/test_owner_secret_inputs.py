@@ -875,6 +875,6 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(applied.status_code, 409, applied.text)
         self.assertEqual(applied.json()["error"]["code"], "matching_dry_run_required")
         self.assertEqual(
-            [binding.binding_key for binding in self.store.list_secret_bindings(limit=None)],
+            [binding.binding_key for binding in self.store.list_secret_bindings()],
             ["ALIAS"],
         )

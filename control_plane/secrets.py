@@ -8,6 +8,7 @@ import json
 import os
 import re
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Callable, Literal, Mapping, Protocol
 
@@ -28,7 +29,11 @@ from control_plane.contracts.secret_record import (
 )
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.storage.product_authority_bundle import SecretBindingSetExpectation
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    SecretBindingSetExpectation,
+    SecretCopySourceConflictError,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.npmplus import (
@@ -133,6 +138,8 @@ class SecretWriteStore(SecretReadStore, Protocol):
     def write_secret_binding(self, binding: SecretBinding) -> None: ...
 
     def write_secret_audit_event(self, event: SecretAuditEvent) -> None: ...
+
+    def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None: ...
 
 
 class SecretRotationStore(SecretWriteStore, Protocol):
@@ -779,68 +786,97 @@ def write_secret_value(
             )
             record_store.write_secret_binding(binding)
             return {"status": "ok", "secret_id": secret_id, "action": "unchanged"}
-    secret_value_consumers(
+    consumers = secret_value_consumers(
         record_store, secret_id=secret_id, binding_key=binding_key, value_source=None
     )
     action: SecretWriteAction = "created" if existing_record is None else "rotated"
     version_id = _version_id(secret_id=secret_id)
     ciphertext, key_id = _encrypt_secret_value(plaintext_value)
     created_at = existing_record.created_at if existing_record is not None else now
-    binding = SecretBinding(
-        binding_id=_binding_id(secret_id=secret_id, binding_key=binding_key),
-        secret_id=secret_id,
-        integration=integration,
-        binding_key=binding_key,
-        context=context_name,
-        instance=instance_name,
-        created_at=created_at,
-        updated_at=now,
+    bundle = ProductAuthorityBundle(
+        secret_versions=(
+            SecretVersion(
+                version_id=version_id,
+                secret_id=secret_id,
+                created_at=now,
+                created_by=actor,
+                key_id=key_id,
+                ciphertext=ciphertext,
+                value_origin=value_origin,
+            ),
+        ),
+        secret_records=(
+            SecretRecord(
+                secret_id=secret_id,
+                scope=scope,
+                integration=integration,
+                name=name,
+                context=context_name,
+                instance=instance_name,
+                description=description,
+                current_version_id=version_id,
+                created_at=created_at,
+                updated_at=now,
+                updated_by=actor,
+                last_validated_at=existing_record.last_validated_at
+                if existing_record is not None
+                else "",
+            ),
+        ),
+        secret_bindings=(
+            SecretBinding(
+                binding_id=_binding_id(secret_id=secret_id, binding_key=binding_key),
+                secret_id=secret_id,
+                integration=integration,
+                binding_key=binding_key,
+                context=context_name,
+                instance=instance_name,
+                created_at=created_at,
+                updated_at=now,
+            ),
+        ),
+        secret_audit_events=(
+            SecretAuditEvent(
+                event_id=_audit_event_id(secret_id=secret_id, event_type=action),
+                secret_id=secret_id,
+                event_type="created" if action == "created" else "rotated",
+                recorded_at=now,
+                actor=actor,
+                detail=f"Launchplane {action} managed secret from {source_label}.",
+                metadata={"source": source_label, "binding_key": binding_key},
+            ),
+        ),
+        secret_binding_sets=(consumers,),
     )
-    if existing_record is not None:
-        record_store.write_secret_binding(binding)
-    record_store.write_secret_version(
-        SecretVersion(
-            version_id=version_id,
-            secret_id=secret_id,
-            created_at=now,
-            created_by=actor,
-            key_id=key_id,
-            ciphertext=ciphertext,
-            value_origin=value_origin,
-        )
-    )
-    record_store.write_secret_record(
-        SecretRecord(
-            secret_id=secret_id,
-            scope=scope,
-            integration=integration,
-            name=name,
-            context=context_name,
-            instance=instance_name,
-            description=description,
-            current_version_id=version_id,
-            created_at=created_at,
-            updated_at=now,
-            updated_by=actor,
-            last_validated_at=existing_record.last_validated_at
-            if existing_record is not None
-            else "",
-        )
-    )
-    if existing_record is None:
-        record_store.write_secret_binding(binding)
-    record_store.write_secret_audit_event(
-        SecretAuditEvent(
-            event_id=_audit_event_id(secret_id=secret_id, event_type=action),
-            secret_id=secret_id,
-            event_type="created" if action == "created" else "rotated",
-            recorded_at=now,
-            actor=actor,
-            detail=f"Launchplane {action} managed secret from {source_label}.",
-            metadata={"source": source_label, "binding_key": binding_key},
-        )
-    )
+    if integration == RUNTIME_ENVIRONMENT_SECRET_INTEGRATION:
+        _publish_runtime_secret_value(record_store, bundle)
+    else:
+        _publish_secret_value_in_steps(record_store, bundle)
     return {"status": "ok", "secret_id": secret_id, "action": action, "version_id": version_id}
+
+
+def _publish_runtime_secret_value(
+    record_store: SecretWriteStore, bundle: ProductAuthorityBundle
+) -> None:
+    try:
+        record_store.write_product_authority_bundle(bundle)
+    except SecretCopySourceConflictError as error:
+        raise click.ClickException(
+            "This secret's bindings changed before the write committed. Retry the write."
+        ) from error
+
+
+def _publish_secret_value_in_steps(
+    record_store: SecretWriteStore, bundle: ProductAuthorityBundle
+) -> None:
+    for version in bundle.secret_versions:
+        record_store.write_secret_version(version)
+    for record in bundle.secret_records:
+        record_store.write_secret_record(record)
+    for binding in bundle.secret_bindings:
+        record_store.write_secret_binding(binding)
+    for event in bundle.secret_audit_events:
+        record_store.write_secret_audit_event(event)
 
 
 def secret_value_consumers(
@@ -849,17 +885,20 @@ def secret_value_consumers(
     secret_id: str,
     binding_key: str,
     value_source: SecretValueSource | None,
+    writes_in_same_commit: Iterable[tuple[str, SecretValueSource | None]] = (),
 ) -> SecretBindingSetExpectation:
     consumers = tuple(
-        binding
-        for binding in record_store.list_secret_bindings(limit=None)
-        if binding.secret_id == secret_id
+        binding for binding in record_store.list_secret_bindings() if binding.secret_id == secret_id
+    )
+    recorded_origins = (
+        *((binding.binding_key, binding.value_source) for binding in consumers),
+        *writes_in_same_commit,
     )
     if any(
         _new_value_would_contradict_recorded_origin(
-            binding, binding_key=binding_key, value_source=value_source
+            other_key, other_source, binding_key=binding_key, value_source=value_source
         )
-        for binding in consumers
+        for other_key, other_source in recorded_origins
     ):
         raise click.ClickException(
             "Another binding key of this secret records where its current value came from. "
@@ -869,9 +908,13 @@ def secret_value_consumers(
 
 
 def _new_value_would_contradict_recorded_origin(
-    binding: SecretBinding, *, binding_key: str, value_source: SecretValueSource | None
+    other_key: str,
+    other_source: SecretValueSource | None,
+    *,
+    binding_key: str,
+    value_source: SecretValueSource | None,
 ) -> bool:
-    return binding.binding_key != binding_key and binding.value_source not in {None, value_source}
+    return other_key != binding_key and other_source not in {None, value_source}
 
 
 def expected_secret_binding_id(*, secret_id: str, binding_key: str) -> str:

@@ -520,8 +520,17 @@ def plan_product_config_authority_bundle(
     secret_audit_events: list[SecretAuditEvent] = []
     secret_binding_sets: list[SecretBindingSetExpectation] = []
     adopted_secret_ids: list[str] = []
+    origins_in_request: dict[str, list[tuple[str, SecretValueSource | None]]] = {}
     for index, secret in enumerate(secrets):
-        planned = _product_config_secret_current_action(record_store=record_store, secret=secret)
+        planned = _product_config_secret_current_action(
+            record_store=record_store, secret=secret, origins_in_request=origins_in_request
+        )
+        origins_in_request.setdefault(planned.consumers.secret_id, []).append(
+            (
+                cast(str, secret["binding_key"]),
+                cast(SecretValueSource | None, secret["value_source"]),
+            )
+        )
         if secret.get("generate") == "odoo_first_empty" and planned.action != "created":
             raise ProductConfigError(
                 "First-empty generation cannot rotate an existing secret record."
@@ -1404,25 +1413,29 @@ def _find_product_config_secret_record(
 
 
 def _product_config_secret_current_action(
-    *, record_store: control_plane_secrets.SecretWriteStore, secret: dict[str, object]
+    *,
+    record_store: control_plane_secrets.SecretWriteStore,
+    secret: dict[str, object],
+    origins_in_request: dict[str, list[tuple[str, SecretValueSource | None]]],
 ) -> _PlannedSecretAction:
     existing_record = _find_product_config_secret_record(record_store, secret)
     secret_id = (
         existing_record.secret_id
         if existing_record is not None
         else control_plane_secrets.expected_secret_id(
-            integration=str(secret["integration"]),
-            name=str(secret["name"]),
-            context=str(secret["context"]),
-            instance=str(secret["instance"]),
+            integration=cast(str, secret["integration"]),
+            name=cast(str, secret["name"]),
+            context=cast(str, secret["context"]),
+            instance=cast(str, secret["instance"]),
         )
     )
     try:
         consumers = control_plane_secrets.secret_value_consumers(
             record_store,
             secret_id=secret_id,
-            binding_key=str(secret["binding_key"]),
+            binding_key=cast(str, secret["binding_key"]),
             value_source=cast(SecretValueSource | None, secret["value_source"]),
+            writes_in_same_commit=origins_in_request.get(secret_id, ()),
         )
     except click.ClickException as error:
         raise ProductConfigError(error.message, code="secret_origin_alias_refused") from error

@@ -1379,7 +1379,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         return [finding.code for finding in evaluation.findings]
 
     def secret_state(self) -> tuple[object, ...]:
-        return self.store.list_secret_records(), self.store.list_secret_bindings(limit=None)
+        return self.store.list_secret_records(), self.store.list_secret_bindings()
 
     async def test_copy_under_another_binding_key_never_hides_behind_a_supplied_testing_binding(
         self,
@@ -1454,7 +1454,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [
                 binding.binding_key
-                for binding in self.store.list_secret_bindings(instance_name="testing", limit=None)
+                for binding in self.store.list_secret_bindings(instance_name="testing")
             ],
             ["ALIAS"],
         )
@@ -1477,13 +1477,33 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                 actor="fixture",
                 source_label="test",
             )
-        testing_bindings = self.store.list_secret_bindings(instance_name="testing", limit=None)
+        testing_bindings = self.store.list_secret_bindings(instance_name="testing")
         self.assertEqual(
             sorted((item.binding_key, item.value_source) for item in testing_bindings),
             [("ALIAS", "supplied"), ("DISCORD_TOKEN", "supplied")],
         )
         self.assertEqual(len({item.secret_id for item in testing_bindings}), 1)
         self.assertEqual(self.findings_for_testing_token(), [])
+
+    def test_copy_in_the_same_request_never_hides_behind_a_supplied_testing_binding(
+        self,
+    ) -> None:
+        supplied = self.supplied_testing_token()
+        both = {
+            **supplied,
+            "secrets": [*supplied["secrets"], *self.copy_under_alias()["secrets"]],
+        }
+        before = self.secret_state()
+        with self.assertRaises(ProductConfigError) as refused:
+            apply_product_config_bundle(
+                record_store=self.store,
+                payload=both,
+                mode="apply",
+                actor="fixture",
+                source_label="test",
+            )
+        self.assertEqual(refused.exception.code, "secret_origin_alias_refused")
+        self.assertEqual(self.secret_state(), before)
 
     def test_copy_planned_before_a_supplied_binding_never_commits_behind_it(self) -> None:
         supplied = self.supplied_testing_token()

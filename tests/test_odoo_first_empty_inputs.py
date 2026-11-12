@@ -793,8 +793,17 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
             "instance_name": "prod",
             "actor": "fixture",
         }
+
+        def stop_after_the_new_value_is_staged(step_name: str) -> None:
+            if step_name == "write_secret_record":
+                raise RuntimeError("stop")
+
         with (
-            patch.object(self.store, "write_secret_binding", side_effect=RuntimeError("stop")),
+            patch.object(
+                self.store,
+                "_after_product_authority_bundle_step",
+                side_effect=stop_after_the_new_value_is_staged,
+            ),
             self.assertRaises(RuntimeError),
         ):
             secrets.write_secret_value(**rotation)
@@ -824,6 +833,37 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
             ):
                 self.store.write_product_authority_bundle(bundle)
         self.assertEqual(self.secret_state(), before)
+        self.assertEqual(self.stored_findings("ODOO_DB_PASSWORD"), [])
+
+    async def test_plain_write_read_before_generation_never_commits_behind_the_generated_binding(
+        self,
+    ) -> None:
+        bindings_read_before_generation = self.store.list_secret_bindings()
+        await self.generate_shared_rule_keys()
+        before = self.secret_state()
+        for key in ("ODOO_DB_PASSWORD", "ALIAS"):
+            with (
+                self.subTest(binding_key=key),
+                patch.object(self.store, "find_secret_record", return_value=None),
+                patch.object(
+                    self.store,
+                    "list_secret_bindings",
+                    return_value=bindings_read_before_generation,
+                ),
+                self.assertRaises(click.ClickException),
+            ):
+                secrets.write_secret_value(
+                    record_store=self.store,
+                    scope="context_instance",
+                    integration="runtime_environment",
+                    name="ODOO_DB_PASSWORD",
+                    plaintext_value="invented-plain",
+                    binding_key=key,
+                    context_name=self.context,
+                    instance_name="prod",
+                    actor="fixture",
+                )
+            self.assertEqual(self.secret_state(), before)
         self.assertEqual(self.stored_findings("ODOO_DB_PASSWORD"), [])
 
     async def test_caller_values_testing_namespace_and_mixed_writes_cannot_enter_first_empty(
