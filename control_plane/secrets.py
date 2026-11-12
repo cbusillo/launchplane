@@ -798,8 +798,6 @@ def write_secret_value(
         created_at=created_at,
         updated_at=now,
     )
-    # These writes commit separately, so a rotation drops the binding's recorded origin
-    # before the new value is published; an interrupted write then fails closed.
     if existing_record is not None:
         record_store.write_secret_binding(binding)
     record_store.write_secret_version(
@@ -850,11 +848,6 @@ def write_secret_value(
 def secret_generated_under_another_key(
     record_store: SecretReadStore, *, secret_id: str, integration: str, binding_key: str
 ) -> bool:
-    """Whether another binding key of this secret delivers a service-generated value.
-
-    A new value reaches every binding of its secret, so writing one under a different key
-    would leave that binding marked generated while it delivers the new value.
-    """
     return any(
         binding.secret_id == secret_id
         and binding.binding_key != binding_key

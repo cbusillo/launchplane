@@ -1394,7 +1394,6 @@ def _product_config_secret_current_action(
     )
     if existing_record is None:
         return "created", ""
-    # A new value reaches every binding of its secret, so a generated one keeps its own key.
     if control_plane_secrets.secret_generated_under_another_key(
         record_store,
         secret_id=existing_record.secret_id,
