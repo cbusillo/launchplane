@@ -583,13 +583,13 @@ def _pull_request_numbers(
             )
             if type(number) is int and number > 0
         ]
-    selected_actions = {"wait_for_checks", "block", "update_branch"}
+    selected_actions = {"wait_for_checks", "block", "update_branch", "stack_unsupported"}
     if controller_action in selected_actions and "candidate" not in result:
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
         number = selected.get("number")
         # Ordinary waits and refreshes have a selected PR before any candidate exists.
         if (
-            controller_action in {"wait_for_checks", "update_branch"}
+            controller_action in {"wait_for_checks", "update_branch", "stack_unsupported"}
             or phase == "batch-candidate"
             or "merge_train_batch_candidate_record_id" in result
             or selected.get("owner_review_required") is True

@@ -533,11 +533,53 @@ def build_merge_train_dry_run_result(
         enqueue_label=repository_policy.enqueue_label,
         blocked_label=repository_policy.blocked_label,
         queue_order=tuple(entry.number for entry in eligible_entries),
-        queue=queue,
+        queue=(*queue, *_stack_wait_entries(repository_policy, snapshot, queue)),
         selected_pr=selected_pr,
         intended_next_action=intended_next_action,
         next_action_detail=next_action_detail,
     )
+
+
+def _stack_wait_entries(
+    repository_policy: MergeTrainRepositoryPolicy,
+    snapshot: MergeTrainDryRunSnapshot,
+    root_entries: tuple[MergeTrainQueueEntry, ...],
+) -> tuple[MergeTrainQueueEntry, ...]:
+    entries = {entry.number: entry for entry in root_entries}
+    children = tuple(
+        pr
+        for pr in sorted(snapshot.pull_requests, key=lambda item: (item.created_at, item.number))
+        if not _targets_merge_train_base(pull_request=pr, base_branch=snapshot.base_branch)
+    )
+    for child in children:
+        entries[child.number] = _build_queue_entry(repository_policy, child, skip_blocked=True)
+    result = []
+    for child in children:
+        entry = entries[child.number]
+        parents = tuple(pr for pr in snapshot.pull_requests if pr.head_ref == child.base_ref)
+        reason = f"waiting for stack base branch {child.base_ref} before landing on {snapshot.base_branch}"
+        if len(parents) == 1:
+            parent = parents[0]
+            reason = f"waiting for stack parent #{parent.number} before landing on {snapshot.base_branch}"
+            parent_entry = entries[parent.number]
+            if parent_entry.ineligible_reasons:
+                reason += ": " + "; ".join(parent_entry.ineligible_reasons)
+            elif (
+                parent_entry.required_checks_status != "pass"
+                or parent_entry.mergeable != "mergeable"
+                or parent_entry.client_test_notes_error
+            ):
+                reason += ": " + _next_action_for_selected_pr(repository_policy, parent_entry)[1]
+        result.append(
+            entry.model_copy(
+                update={
+                    "eligible": False,
+                    "ineligible_reasons": (*entry.ineligible_reasons, reason),
+                    "deferred_reasons": (reason,) if entry.eligible else (),
+                }
+            )
+        )
+    return tuple(result)
 
 
 def merge_train_snapshot_of(

@@ -52,6 +52,12 @@ The root's own check or merge conflict is reported first. Existing candidates ke
 their membership checks. Ready handoffs, Client decisions and holds still apply to each PR, and complete
 stacks continue through the existing combination and shared-CI path.
 
+Stack children stay visible in the diagnostic queue with their own readiness
+and parent wait reasons, even when no root is eligible. They never enter flat
+candidate admission. Unsupported stacks report their reason on the selected
+root before a collapse plan exists. Each scheduled snapshot rechecks those
+waits, and otherwise-ready children retain the monitor's thirty-minute clock.
+
 The GitHub Runner defers a pass when the controller returns HTTP 409 with
 `merge_train_controller_lease_held`: another worker owns that train's lease.
 It records the deferral in the job summary, sends no PR feedback, and leaves

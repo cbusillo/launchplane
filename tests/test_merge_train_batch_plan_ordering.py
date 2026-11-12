@@ -95,7 +95,14 @@ class BatchPlanOrderingTests(unittest.IsolatedAsyncioTestCase):
             feedback = build_feedback_payloads(response=payload, phase="batch-candidate")
             self.assertEqual(
                 [(entry["pull_request_number"], entry["event"]) for entry in feedback],
-                [(selected["number"], "blocked")],
+                [
+                    (selected["number"], "blocked"),
+                    (saved.plan.entries[1].pull_request_number, "blocked"),
+                ],
+            )
+            self.assertIn(f"#{selected['number']}", cast(str, feedback[1]["message"]))
+            self.assertIn(
+                "fail" if checks == "fail" else "conflict", cast(str, feedback[1]["message"])
             )
             self.assertEqual(feedback[0]["repository"], saved.plan.repository)
             self.assertEqual(feedback[0]["base_branch"], saved.plan.base_branch)

@@ -14,6 +14,50 @@ from tests.test_merge_train import _pull_request
 
 
 class MergeTrainControllerFeedbackTests(TestCase):
+    def test_ready_stack_child_reports_parent_wait_and_rechecks_without_flat_admission(
+        self,
+    ) -> None:
+        policy = build_test_merge_train_policy(trusted_automation_github_user_ids=(20,))
+        repository = policy.policies[0].repository
+        parent = _pull_request(8, labels=(), actor_id=20, head_ref="feature/root")
+        child = _pull_request(
+            9, labels=(), actor_id=20, head_ref="feature/child", base_ref=parent.head_ref
+        )
+        handoff = MergeTrainReadyHandoff(
+            status="ready", head_sha=child.head_sha, actor_id=20, comment_id=100
+        )
+        child.ready_handoff = handoff
+        for parent_ready in (False, True):
+            with self.subTest(parent_ready=parent_ready):
+                if parent_ready:
+                    parent.ready_handoff = handoff.model_copy(update={"head_sha": parent.head_sha})
+                result = build_merge_train_dry_run_result(
+                    policy=policy,
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository=repository, base_branch="main", pull_requests=(parent, child)
+                    ),
+                    batch_landing=True,
+                )
+                payloads = feedback.build_feedback_payloads(
+                    response={
+                        "result": {
+                            "repository": repository,
+                            "base_branch": "main",
+                            "controller_action": "idle",
+                            "dry_run_result": result.model_dump(mode="json"),
+                        }
+                    }
+                )
+                child_payloads = [p for p in payloads if p["pull_request_number"] == child.number]
+                self.assertEqual(len(child_payloads), 1)
+                message = child_payloads[0]
+                self.assertIn(f"#{parent.number}", cast(str, message["message"]))
+                if not parent_ready:
+                    for reason in result.queue[0].ineligible_reasons:
+                        self.assertIn(reason, cast(str, message["message"]))
+                self.assertEqual(result.queue_order, (parent.number,) if parent_ready else ())
+                self.assertFalse(next(e for e in result.queue if e.number == child.number).eligible)
+
     def test_excluded_ready_gets_its_queue_reason_even_when_train_is_idle(self) -> None:
         repository = "example/site"
         policy = build_test_merge_train_policy(
@@ -592,6 +636,13 @@ class MergeTrainControllerFeedbackTests(TestCase):
 
         self.assertEqual(
             [], feedback.build_feedback_payloads(response=response, phase="batch-candidate")
+        )
+        response["result"]["dry_run_result"]["selected_pr"] = {"number": 7}
+        response["result"]["blocking_reason"] = {"message": "child #8 is held"}
+        payloads = feedback.build_feedback_payloads(response=response, phase="batch-candidate")
+        self.assertEqual([p["pull_request_number"] for p in payloads], [7])
+        self.assertIn(
+            response["result"]["blocking_reason"]["message"], cast(str, payloads[0]["message"])
         )
 
     def test_build_feedback_payloads_uses_stack_phase_identity(self) -> None:
