@@ -1435,7 +1435,7 @@ def _product_config_secret_current_action(
             secret_id=secret_id,
             binding_key=cast(str, secret["binding_key"]),
             value_source=cast(SecretValueSource | None, secret["value_source"]),
-            writes_in_same_commit=origins_in_request.get(secret_id, ()),
+            writes_in_same_commit=origins_in_request.get(secret_id, []),
         )
     except click.ClickException as error:
         raise ProductConfigError(error.message, code="secret_origin_alias_refused") from error
