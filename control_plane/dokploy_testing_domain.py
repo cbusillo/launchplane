@@ -1,7 +1,8 @@
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
+from contextlib import ExitStack
 
 from control_plane.disposable_lanes import recorded_lane_protection
-from control_plane.contracts.public_hosts import retained_hostname_identity
+from control_plane.contracts.public_hosts import normalize_public_hosts, retained_hostname_identity
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -45,26 +46,28 @@ def require_first_testing_target_unprotected(
     product: str,
     context: str,
     provider: ProviderTargetRecord,
+    instance: str = "testing",
 ) -> DisposableLaneSafety | None:
     from control_plane.application_state_volume import require_no_held_state_volume
 
-    require_no_held_state_volume(store, context)
+    if instance == "testing":
+        require_no_held_state_volume(store, context)
     require_lane_target_ownership(
         store.list_dokploy_target_id_records(),
         context=context,
-        instance="testing",
+        instance=instance,
         target_id=provider.target_id,
     )
     if any(
         other.provider_id == provider.provider_id
         and other.target_id == provider.target_id
-        and (other.context, other.instance) != (context, "testing")
+        and (other.context, other.instance) != (context, instance)
         for other in store.list_physical_provider_target_records()
     ):
-        raise ValueError("The testing compose is shared with another lane.")
-    evidence = store.read_disposable_lane_safety(product, context, "testing")
+        raise ValueError("The compose is shared with another lane.")
+    evidence = store.read_disposable_lane_safety(product, context, instance)
     try:
-        target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+        target = store.read_dokploy_target_record(context_name=context, instance_name=instance)
     except FileNotFoundError:
         target = None
     protection = recorded_lane_protection(target, evidence)
@@ -74,7 +77,7 @@ def require_first_testing_target_unprotected(
         or protection.only_copy
         or protection.resources_protected
     ):
-        raise ValueError("Testing use, data custody or resource sharing protects this lane.")
+        raise ValueError("Recorded use, data custody or resource sharing protects this lane.")
     return evidence
 
 
@@ -113,7 +116,7 @@ def require_testing_hostname_claims_available(
     claims = {
         retained_hostname_identity(value)
         for other in targets
-        if (other.context, other.instance) != (target.context, "testing")
+        if (other.context, other.instance) != (target.context, target.instance)
         for value in other.hostname_claims
     } | {
         entry.domain_name
@@ -121,7 +124,7 @@ def require_testing_hostname_claims_available(
         if not (
             allow_current_binding
             and (binding.product, binding.context, binding.instance)
-            == (product, target.context, "testing")
+            == (product, target.context, target.instance)
         )
         for entry in binding.domains
     }
@@ -129,7 +132,8 @@ def require_testing_hostname_claims_available(
         retained_hostname_identity(value)
         for other in profiles
         for lane in other.lanes
-        if (other.product, lane.context, lane.instance) != (product, target.context, "testing")
+        if (other.product, lane.context, lane.instance)
+        != (product, target.context, target.instance)
         for value in (lane.base_url, lane.health_url)
         if retained_hostname_identity(value)
     }
@@ -149,7 +153,7 @@ def require_first_testing_idle(
     current_provider_key: str = "",
 ) -> None:
     if _lane_has_usage_or_data_commitments(store, request):
-        raise ValueError("First testing setup cannot change a lane that has deployed or served.")
+        raise ValueError("First setup cannot change a lane that has deployed or served.")
     reservations = _target_reservations(
         store,
         product=product,
@@ -169,7 +173,7 @@ def require_first_testing_idle(
         != current_provider_key
         for row in reservations
     ):
-        raise ValueError("A provider operation still owns the testing target.")
+        raise ValueError("A provider operation still owns the target.")
 
 
 def match_first_testing_origin(
@@ -205,18 +209,8 @@ def match_first_testing_origin(
     return str(route["domainId"])
 
 
-def setup_empty_testing_domain(
-    *,
-    record_store: PostgresRecordStore,
-    request: DokployTargetSetupEnvelope,
-    host: str,
-    token: str,
-) -> DokployComposeDomainReconcileResult:
-    from control_plane.dokploy_target_setup_http import (
-        fetch_dokploy_target_payload_for_setup,
-    )
-
-    allowed = {
+EMPTY_DOMAIN_FIELDS = frozenset(
+    {
         "schema_version",
         "mode",
         "operation",
@@ -229,16 +223,79 @@ def setup_empty_testing_domain(
         "confirmation",
         "reason",
     }
+)
+
+
+def _requests_reviewed_hostnames(request: DokployTargetSetupEnvelope) -> bool:
+    if request.instance == "testing":
+        return len(request.domains) == 1
+    return request.instance == "prod" and bool(request.domains)
+
+
+def _lane_accepts_first_hostnames(
+    profile: LaunchplaneProductProfileRecord, request: DokployTargetSetupEnvelope
+) -> bool:
+    return (
+        profile.is_active
+        and any(
+            (lane.context, lane.instance) == (request.context, request.instance)
+            for lane in profile.lanes
+        )
+        and request.runtime_port == profile.runtime_port
+        and not (request.instance == "prod" and profile.production_use == "live")
+    )
+
+
+def match_first_origins(
+    routes: object, *, target_id: str, domains: tuple[str, ...], runtime_port: int
+) -> dict[str, str]:
+    if not isinstance(routes, list):
+        raise ValueError("First hostname setup requires a readable provider route list.")
+    matched: dict[str, str] = {}
+    for route in routes:
+        host = route.get("host") if isinstance(route, dict) else None
+        if not isinstance(host, str) or host not in domains or host in matched:
+            raise ValueError("An existing provider route is outside the exact reviewed hostnames.")
+        matched[host] = match_first_testing_origin(
+            [route], target_id=target_id, domain=host, runtime_port=runtime_port
+        )
+    return matched
+
+
+def _lane_lock_names(
+    request: DokployTargetSetupEnvelope, provider: ProviderTargetRecord
+) -> list[str]:
+    from control_plane.dokploy_target_setup_http import first_production_target_lock_name
+
+    names = [testing_event_execution_lock_name(dokploy_generic_web_provider_target_key(provider))]
+    if request.instance == "prod":
+        names.insert(0, first_production_target_lock_name(request.context))
+    return names
+
+
+def setup_empty_lane_domain(
+    *,
+    record_store: PostgresRecordStore,
+    request: DokployTargetSetupEnvelope,
+    host: str,
+    token: str,
+) -> DokployComposeDomainReconcileResult:
+    from control_plane.dokploy_target_setup_http import (
+        fetch_dokploy_target_payload_for_setup,
+        require_no_unresolved_production_setup,
+    )
+
     if (
-        request.model_dump(exclude_defaults=True).keys() - allowed
-        or request.instance != "testing"
-        or len(request.domains) != 1
+        request.model_dump(exclude_defaults=True).keys() - EMPTY_DOMAIN_FIELDS
+        or not _requests_reviewed_hostnames(request)
+        or normalize_public_hosts(request.domains) != request.domains
         or request.mode != "apply"
         or not request.target_id
     ):
         raise ValueError(
-            "First hostname setup requires one exact testing compose target and hostname."
+            "First hostname setup requires one exact owned compose target and its hostnames."
         )
+    instance = request.instance
     profiles = record_store.list_product_profile_records()
     owners = product_context_owner_map(profiles)
     products = owners.get(request.context, frozenset())
@@ -246,29 +303,25 @@ def setup_empty_testing_domain(
         raise ValueError("First hostname setup requires exclusive product ownership.")
     (product,) = products
     profile = record_store.read_product_profile_record(product)
-    if (
-        not profile.is_active
-        or not is_exclusive_product_context(context=request.context, product=product, owners=owners)
-        or not any(
-            (lane.context, lane.instance) == (request.context, "testing") for lane in profile.lanes
+    if not is_exclusive_product_context(
+        context=request.context, product=product, owners=owners
+    ) or not _lane_accepts_first_hostnames(profile, request):
+        raise ValueError(
+            "First hostname setup requires an active owned lane that is not Live, and its runtime port."
         )
-        or request.runtime_port != profile.runtime_port
-    ):
-        raise ValueError("First hostname setup requires an active owned lane and its runtime port.")
     target = record_store.read_dokploy_target_record(
-        context_name=request.context, instance_name="testing"
+        context_name=request.context, instance_name=instance
     )
     target_id = record_store.read_dokploy_target_id_record(
-        context_name=request.context, instance_name="testing"
+        context_name=request.context, instance_name=instance
     )
     provider = record_store.read_provider_target_record(
-        context_name=request.context, instance_name="testing"
+        context_name=request.context, instance_name=instance
     )
     if (
         target.target_type != "compose"
         or target_id.source_label != CREATE_COMPOSE_SOURCE_LABEL
-        or request.target_id
-        and request.target_id != target_id.target_id
+        or request.target_id != target_id.target_id
         or provider.to_deployed_target_reference()
         != ProviderTargetRecord.from_dokploy_records(
             target_record=target, target_id_record=target_id
@@ -285,7 +338,6 @@ def setup_empty_testing_domain(
         raise ValueError(
             "First hostname setup requires an unchanged service-created empty compose."
         )
-    domain = request.domains[0]
     replacement = target.model_copy(
         update={
             "domains": request.domains,
@@ -299,32 +351,39 @@ def setup_empty_testing_domain(
 
     def require_unprotected_binding() -> None:
         require_first_testing_target_unprotected(
-            record_store, product=product, context=request.context, provider=provider
+            record_store,
+            product=product,
+            context=request.context,
+            provider=provider,
+            instance=instance,
         )
         if (
             record_store.read_product_profile_record(product) != profile
             or record_store.read_dokploy_target_record(
-                context_name=request.context, instance_name="testing"
+                context_name=request.context, instance_name=instance
             )
             != target
             or record_store.read_dokploy_target_id_record(
-                context_name=request.context, instance_name="testing"
+                context_name=request.context, instance_name=instance
             )
             != target_id
             or record_store.read_provider_target_record(
-                context_name=request.context, instance_name="testing"
+                context_name=request.context, instance_name=instance
             )
             != provider
         ):
-            raise ValueError("Testing bindings changed during hostname qualification.")
+            raise ValueError("Lane bindings changed during hostname qualification.")
 
-    def matching_route(routes: object) -> str:
-        return match_first_testing_origin(
-            routes, target_id=target_id.target_id, domain=domain, runtime_port=profile.runtime_port
+    def matching_routes(routes: object) -> dict[str, str]:
+        return match_first_origins(
+            routes,
+            target_id=target_id.target_id,
+            domains=request.domains,
+            runtime_port=profile.runtime_port,
         )
 
-    def read_route() -> str:
-        return matching_route(
+    def read_routes() -> dict[str, str]:
+        return matching_routes(
             api.dokploy_request(
                 host=host,
                 token=token,
@@ -333,26 +392,31 @@ def setup_empty_testing_domain(
             )
         )
 
-    def checkpoint() -> str:
+    def checkpoint() -> dict[str, str]:
         require_first_testing_idle(
             record_store, product=product, request=request, provider=provider
         )
+        if instance == "prod":
+            require_no_unresolved_production_setup(
+                record_store, context=request.context, target_id=target_id.target_id
+            )
         require_unprotected_binding()
-        require_first_testing_hostname_available(
-            product=product,
-            target=target,
-            domain=domain,
-            targets=record_store.list_dokploy_target_records(),
-            profiles=record_store.list_product_profile_records(),
-            bindings=record_store.list_route_binding_records(),
-        )
+        for domain in request.domains:
+            require_testing_hostname_claims_available(
+                product=product,
+                target=target,
+                domain=domain,
+                targets=record_store.list_dokploy_target_records(),
+                profiles=record_store.list_product_profile_records(),
+                bindings=record_store.list_route_binding_records(),
+            )
         live = fetch_dokploy_target_payload_for_setup(host, token, "compose", target_id.target_id)
         require_empty_compose_source(live, target_id.target_id)
-        matching_route(live.get("domains"))
+        matching_routes(live.get("domains"))
         _placement({**live, "autoDeploy": False, "domains": []}, target_id.target_id)
         if live.get("env") not in (None, ""):
             raise ValueError("First hostname setup requires empty provider runtime settings.")
-        existing_route = read_route()
+        existing_routes = read_routes()
         require_quiescent_testing_provider_work(
             host=host,
             token=token,
@@ -366,45 +430,55 @@ def setup_empty_testing_domain(
             raise ValueError("Provider placement changed during first hostname checks.")
         require_unprotected_binding()
         check()
-        return existing_route
+        return existing_routes
+
+    def create_route(domain: str) -> str:
+        created = api.as_json_object(
+            api.dokploy_request(
+                host=host,
+                token=token,
+                path="/api/domain.create",
+                method="POST",
+                payload=compose.compose_web_domain_route_payload(
+                    compose_id=target_id.target_id,
+                    domain_host=domain,
+                    runtime_port=profile.runtime_port,
+                ),
+            )
+        )
+        domain_id = (created or {}).get("domainId")
+        if not isinstance(domain_id, str) or not domain_id.strip():
+            raise ValueError("First hostname creation returned no provider route identity.")
+        return domain_id
 
     def apply_provider() -> None:
         nonlocal effect_started, provider_verified
-        existing_route = checkpoint()
-        if existing_route:
-            route_ids.append(existing_route)
-        else:
+        existing_routes = checkpoint()
+        for domain in request.domains:
+            if domain in existing_routes:
+                route_ids.append(existing_routes[domain])
+                continue
             effect_started = True
-            created = api.as_json_object(
-                api.dokploy_request(
-                    host=host,
-                    token=token,
-                    path="/api/domain.create",
-                    method="POST",
-                    payload=compose.compose_web_domain_route_payload(
-                        compose_id=target_id.target_id,
-                        domain_host=domain,
-                        runtime_port=profile.runtime_port,
-                    ),
-                )
-            )
-            domain_id = (created or {}).get("domainId")
-            if not isinstance(domain_id, str) or not domain_id.strip():
-                raise ValueError("First hostname creation returned no provider route identity.")
-            route_ids.append(domain_id)
-        if read_route() != route_ids[0]:
-            raise ValueError("First hostname provider readback does not match the exact route.")
+            route_ids.append(create_route(domain))
+        if read_routes() != dict(zip(request.domains, route_ids, strict=True)):
+            raise ValueError("First hostname provider readback does not match the exact routes.")
         check()
         provider_verified = True
 
-    lock = record_store.testing_replacement_execution_lock(
-        testing_event_execution_lock_name(dokploy_generic_web_provider_target_key(provider))
-    )
     try:
-        with lock as held_check:
-            if held_check is None:
-                raise ValueError("A testing executor for this target is still active.")
-            check: Callable[[], None] = held_check
+        with ExitStack() as locks:
+            held_checks = [
+                locks.enter_context(record_store.testing_replacement_execution_lock(name))
+                for name in _lane_lock_names(request, provider)
+            ]
+            lane_checks = [held for held in held_checks if held is not None]
+            if len(lane_checks) != len(held_checks):
+                raise ValueError("Another executor for this target is still active.")
+
+            def check() -> None:
+                for lane_check in lane_checks:
+                    lane_check()
+
             record_store.complete_dokploy_compose_setup(
                 expected_profile=profile,
                 expected_record=target,
@@ -420,7 +494,9 @@ def setup_empty_testing_domain(
                 request=request,
                 compose_id=target_id.target_id,
                 completed_domain_ids=route_ids,
-                pending_domain=domain,
+                pending_domain=request.domains[len(route_ids)]
+                if len(route_ids) < len(request.domains)
+                else "",
                 stage="first-hostname",
             ) from error
         raise

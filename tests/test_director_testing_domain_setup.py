@@ -11,37 +11,34 @@ from tests.support.disposable_lanes import record_safety
 from tests.test_director_testing_target_creation import _DirectorTestingSetupFixture
 
 
-class DirectorTestingDomainSetupTests(_DirectorTestingSetupFixture):
-    def setUp(self) -> None:
-        super().setUp()
-        self.register_testing_lane()
+class _EmptyComposeDomainFixture(_DirectorTestingSetupFixture):
+    def install_empty_compose(self, instance: str, target_id: str) -> None:
         self.target = DokployTargetRecord(
             context=self.context,
-            instance="testing",
+            instance=instance,
             target_type="compose",
             source_type="raw",
             updated_at=self.profile.updated_at,
         )
         self.target_id = DokployTargetIdRecord(
             context=self.context,
-            instance="testing",
-            target_id="empty-testing-compose",
+            instance=instance,
+            target_id=target_id,
             source_label=CREATE_COMPOSE_SOURCE_LABEL,
             updated_at=self.profile.updated_at,
         )
+        self.target_provider = ProviderTargetRecord.from_dokploy_records(
+            target_record=self.target, target_id_record=self.target_id
+        )
         self.store.write_dokploy_target_record(self.target)
         self.store.write_dokploy_target_id_record(self.target_id)
-        self.store.write_provider_target_record(
-            ProviderTargetRecord.from_dokploy_records(
-                target_record=self.target, target_id_record=self.target_id
-            )
-        )
+        self.store.write_provider_target_record(self.target_provider)
         self.live: dict[str, Any] = {
             "composeId": self.target_id.target_id,
             "environmentId": "empty-environment",
-            "serverId": "testing-server",
-            "appName": "empty-testing",
-            "name": "Empty testing",
+            "serverId": f"{instance}-server",
+            "appName": f"empty-{instance}",
+            "name": f"Empty {instance}",
             "sourceType": "raw",
             "composeType": "docker-compose",
             "composeStatus": "idle",
@@ -64,6 +61,39 @@ class DirectorTestingDomainSetupTests(_DirectorTestingSetupFixture):
         self.inventory = self.enterContext(
             patch("control_plane.dokploy.api.dokploy_request", side_effect=self.provider_request)
         )
+
+    def provider_request(self, **kwargs: Any) -> Any:
+        if kwargs.get("method") == "POST":
+            self.assertEqual(kwargs["path"], "/api/domain.create")
+            self.writes.append(deepcopy(kwargs["payload"]))
+            route = {"domainId": f"created-{kwargs['payload']['host']}", **kwargs["payload"]}
+            self.routes.append(route)
+            self.live["domains"] = deepcopy(self.routes)
+            return route
+        if kwargs["path"] == "/api/domain.byComposeId":
+            return deepcopy(self.routes)
+        return []
+
+    async def plan_apply_and_replay(self) -> None:
+        planned = await self.post(mode="dry-run")
+        self.assertEqual(planned.status_code, 202, planned.text)
+        self.assertEqual(self.writes, [])
+        applied = await self.post()
+        self.assertEqual(applied.status_code, 202, applied.text)
+        replay = await self.post()
+        self.assertEqual(replay.status_code, 202, replay.text)
+
+    def read_target(self) -> DokployTargetRecord:
+        return self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name=self.target.instance
+        )
+
+
+class DirectorTestingDomainSetupTests(_EmptyComposeDomainFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.register_testing_lane()
+        self.install_empty_compose("testing", "empty-testing-compose")
         self.payload = {
             "mode": "apply",
             "operation": "reconcile-compose-domain",
@@ -76,28 +106,10 @@ class DirectorTestingDomainSetupTests(_DirectorTestingSetupFixture):
             "confirmation": "APPLY DOKPLOY TARGET SETUP",
         }
 
-    def provider_request(self, **kwargs: Any) -> Any:
-        if kwargs.get("method") == "POST":
-            self.assertEqual(kwargs["path"], "/api/domain.create")
-            self.writes.append(deepcopy(kwargs["payload"]))
-            route = {"domainId": "created-domain", **kwargs["payload"]}
-            self.routes.append(route)
-            self.live["domains"] = deepcopy(self.routes)
-            return route
-        if kwargs["path"] == "/api/domain.byComposeId":
-            return deepcopy(self.routes)
-        return []
-
     async def test_director_adds_first_hostname_without_deploying_or_changing_production(
         self,
     ) -> None:
-        dry = await self.post(mode="dry-run")
-        self.assertEqual(dry.status_code, 202, dry.text)
-        self.assertEqual(self.writes, [])
-        applied = await self.post()
-        self.assertEqual(applied.status_code, 202, applied.text)
-        replay = await self.post()
-        self.assertEqual(replay.status_code, 202, replay.text)
+        await self.plan_apply_and_replay()
         self.assertEqual(len(self.writes), 1)
         self.assertEqual(self.writes[0]["composeId"], self.target_id.target_id)
         self.assertEqual(self.writes[0]["host"], self.payload["domains"][0])
@@ -457,3 +469,270 @@ class DirectorTestingDomainSetupTests(_DirectorTestingSetupFixture):
         recovered = await self.post()
         self.assertEqual(recovered.status_code, 202, recovered.text)
         self.assertEqual(len(self.writes), 1)
+
+
+class DirectorNeverLiveProductionDomainSetupTests(_EmptyComposeDomainFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.profile = self.profile.model_copy(update={"production_use": "unknown"})
+        self.store.write_product_profile_record(self.profile)
+        self.install_empty_compose("prod", "empty-production-compose")
+        self.payload = {
+            "mode": "apply",
+            "operation": "reconcile-compose-domain",
+            "context": self.context,
+            "instance": "prod",
+            "target_id": self.target_id.target_id,
+            "domains": ["new.example.invalid", "example.invalid"],
+            "runtime_port": self.profile.runtime_port,
+            "reason": "Add the reviewed backend routes before the first release",
+            "confirmation": "APPLY DOKPLOY TARGET SETUP",
+        }
+
+    def assert_no_effects(self, response: Any, status_code: int) -> None:
+        self.assertEqual(response.status_code, status_code, response.text)
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.read_target(), self.target)
+
+    def assert_refused_before_provider(self, response: Any) -> None:
+        self.assert_no_effects(response, 403)
+        self.inventory.assert_not_called()
+
+    def expected_routes(self) -> list[dict[str, Any]]:
+        from control_plane.dokploy.compose import compose_web_domain_route_payload
+
+        return [
+            compose_web_domain_route_payload(
+                compose_id=self.target_id.target_id,
+                domain_host=domain,
+                runtime_port=self.profile.runtime_port,
+            )
+            for domain in self.payload["domains"]
+        ]
+
+    async def test_owned_never_live_production_gets_only_its_backend_routes(self) -> None:
+        await self.plan_apply_and_replay()
+        self.assertEqual(self.writes, self.expected_routes())
+        recorded = self.read_target()
+        self.assertEqual(recorded.domains, tuple(self.payload["domains"]))
+        self.assertEqual(
+            recorded.model_dump(exclude={"domains", "updated_at", "source_label"}),
+            self.target.model_dump(exclude={"domains", "updated_at", "source_label"}),
+        )
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+        self.assertEqual(
+            self.store.read_provider_target_record(context_name=self.context, instance_name="prod"),
+            self.target_provider,
+        )
+        self.assertEqual(self.store.list_deployment_records(), ())
+        self.assertEqual(self.store.list_promotion_records(), ())
+
+    async def test_refused_original_key_continues_only_with_the_same_request(self) -> None:
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"production_use": "live"})
+        )
+        refused = await self.post()
+        self.assert_refused_before_provider(refused)
+        self.store.write_product_profile_record(self.profile)
+        continued = await self.post()
+        self.assertEqual(continued.status_code, 202, continued.text)
+        self.assertEqual(self.writes, self.expected_routes())
+        changed = await self.post(reason="A different request under the original key")
+        self.assertEqual(changed.status_code, 409, changed.text)
+        self.assertEqual(changed.json()["error"]["code"], "idempotency_key_reused")
+        self.assertEqual(self.writes, self.expected_routes())
+
+    async def test_live_owner_is_refused_before_provider_contact(self) -> None:
+        self.profile = self.profile.model_copy(update={"production_use": "live"})
+        self.store.write_product_profile_record(self.profile)
+        self.assert_refused_before_provider(await self.post())
+
+    async def test_unproved_caller_or_shared_context_is_refused_before_provider_contact(
+        self,
+    ) -> None:
+        with scoped_agent_transport():
+            self.assert_refused_before_provider(await self.post())
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"product": "foreign-product"})
+        )
+        self.assert_refused_before_provider(await self.post())
+
+    async def test_caller_supplied_authority_fields_are_rejected(self) -> None:
+        for changes in ({"director_agent": True}, {"production_use": "prelaunch"}):
+            with self.subTest(changes=changes):
+                response = await self.post(**changes)
+                self.assert_no_effects(response, 400)
+                self.assertEqual(response.json()["error"]["code"], "invalid_request")
+                self.inventory.assert_not_called()
+
+    async def test_recorded_use_or_data_protection_prevents_route_effects(self) -> None:
+        for changes in (
+            {"usage": "in_use"},
+            {"data": "only_copy"},
+            {"production_resources": "shared"},
+        ):
+            with self.subTest(changes=changes):
+                record_safety(self.store, self.profile.product, self.context, "prod", **changes)
+                self.assert_no_effects(await self.post(), 400)
+
+    async def test_deployment_history_prevents_route_effects(self) -> None:
+        from tests.test_evidence_ingestion import _deployment_record
+
+        self.store.write_deployment_record(_deployment_record(context=self.context))
+        self.assert_no_effects(await self.post(), 400)
+
+    async def test_served_inventory_prevents_route_effects(self) -> None:
+        from tests.http_app_test_support import _environment_inventory_read_record
+
+        self.store.write_environment_inventory(
+            _environment_inventory_read_record().model_copy(
+                update={"context": self.context, "instance": "prod"}
+            )
+        )
+        self.assert_no_effects(await self.post(), 400)
+
+    async def test_unowned_or_changed_target_binding_prevents_route_effects(self) -> None:
+        for target, target_id in (
+            (self.target.model_copy(update={"env": {"PRIVATE": "value"}}), self.target_id),
+            (
+                self.target.model_copy(update={"domains": ("other.example.invalid",)}),
+                self.target_id,
+            ),
+            (
+                self.target,
+                self.target_id.model_copy(update={"source_label": "cli:dokploy-targets:adopt"}),
+            ),
+        ):
+            with self.subTest(target=target, target_id=target_id):
+                self.store.write_dokploy_target_record(target)
+                self.store.write_dokploy_target_id_record(target_id)
+                response = await self.post()
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(self.writes, [])
+                self.assertEqual(self.read_target(), target)
+        self.store.write_dokploy_target_record(self.target)
+        self.store.write_dokploy_target_id_record(self.target_id)
+        self.assert_no_effects(await self.post(target_id="reviewed-but-replaced-compose"), 400)
+
+    async def test_target_alias_of_another_lane_prevents_route_effects(self) -> None:
+        self.store.write_dokploy_target_id_record(
+            self.target_id.model_copy(update={"context": "other", "instance": "testing"})
+        )
+        self.assert_no_effects(await self.post(), 409)
+
+    async def test_changed_provider_facts_prevent_route_effects(self) -> None:
+        baseline = deepcopy(self.live)
+        for changes in (
+            {"env": "PRIVATE_KEY=value"},
+            {"mounts": [{"type": "bind"}]},
+            {"composeFile": "services: {}"},
+            {"customGitUrl": "https://example.invalid/source.git"},
+            {"composeStatus": "running"},
+            {"domains": [{"domainId": "foreign", "host": "foreign.example.invalid"}]},
+        ):
+            with self.subTest(changes=changes):
+                self.live = {**baseline, **changes}
+                self.assert_no_effects(await self.post(), 400)
+
+    async def test_provider_deployment_history_prevents_route_effects(self) -> None:
+        original = self.provider_request
+        self.inventory.side_effect = lambda **kwargs: (
+            [{"composeId": self.target_id.target_id, "deploymentId": "earlier", "status": "done"}]
+            if kwargs["path"] == "/api/deployment.allByType"
+            else original(**kwargs)
+        )
+        self.assert_no_effects(await self.post(), 400)
+
+    async def test_broader_or_mismatched_inputs_prevent_route_effects(self) -> None:
+        for changes in (
+            {"project_id": "existing-project"},
+            {"environment_id": "existing-environment"},
+            {"server_id": "existing-server"},
+            {"runtime_port": self.profile.runtime_port + 1},
+            {"domains": ["*.example.invalid"]},
+            {"domains": ["Example.invalid"]},
+        ):
+            with self.subTest(changes=changes):
+                response = await self.post(**changes)
+                self.assertGreaterEqual(response.status_code, 400, response.text)
+                self.assertEqual(self.writes, [])
+                self.assertEqual(self.read_target(), self.target)
+
+    async def test_hostname_claimed_elsewhere_prevents_route_effects(self) -> None:
+        from tests.test_route_binding_record import _route_binding_record
+
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="other",
+                instance="prod",
+                domains=(self.payload["domains"][1],),
+                updated_at=self.profile.updated_at,
+            )
+        )
+        self.assert_no_effects(await self.post(), 400)
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="other", instance="prod", updated_at=self.profile.updated_at
+            )
+        )
+        self.store.write_route_binding_record(
+            _route_binding_record(domain=self.payload["domains"][0])
+        )
+        self.assert_no_effects(await self.post(), 400)
+
+    async def test_unresolved_original_setup_keeps_custody(self) -> None:
+        from control_plane.dokploy_target_setup_http import first_production_target_lock_name
+
+        original = self.store.reserve_mutation(
+            scope="original-owner",
+            route_path="/v1/dokploy-targets/setup",
+            idempotency_key="original-setup",
+            request_fingerprint="original-setup",
+            lease_owner="original-executor",
+            lease_seconds=300,
+            reconciliation_key="original-setup-binding",
+            provider_target_key=first_production_target_lock_name(self.context),
+        ).record
+        assert original is not None
+        self.assert_no_effects(await self.post(), 400)
+
+    async def test_active_production_executor_prevents_route_effects(self) -> None:
+        from contextlib import nullcontext
+
+        with patch.object(
+            self.store, "testing_replacement_execution_lock", return_value=nullcontext(None)
+        ):
+            self.assert_no_effects(await self.post(), 400)
+
+    async def test_missing_receipt_recovers_only_the_recorded_exact_hostnames(self) -> None:
+        with patch.object(
+            self.store,
+            "write_idempotency_record",
+            side_effect=RuntimeError("Fixture lost receipt storage"),
+        ):
+            with self.assertRaises(RuntimeError):
+                await self.post()
+        expanded = await self.post(domains=[*self.payload["domains"], "www.example.invalid"])
+        self.assertEqual(expanded.status_code, 400, expanded.text)
+        recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertEqual(self.writes, self.expected_routes())
+
+    async def test_lost_second_route_response_recovers_without_duplicate_routes(self) -> None:
+        original = self.provider_request
+
+        def provider(**kwargs: Any) -> Any:
+            result = original(**kwargs)
+            if kwargs.get("method") == "POST" and len(self.writes) == 2:
+                raise RuntimeError("Lost response after route creation")
+            return result
+
+        self.inventory.side_effect = provider
+        lost = await self.post()
+        self.assertEqual(lost.status_code, 502, lost.text)
+        self.assertEqual(lost.json()["error"]["code"], "dokploy_domain_partial_outcome")
+        self.assertEqual(self.read_target(), self.target)
+        recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertEqual(self.writes, self.expected_routes())
+        self.assertEqual(self.read_target().domains, tuple(self.payload["domains"]))

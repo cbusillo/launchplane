@@ -4364,25 +4364,28 @@ target, and applies each requested domain to Dokploy's `web` service on the
 requested runtime port. Dry-run mode reads the tracked records and provider
 domains and reports the planned tuple without changing them.
 
-The Director agent can use this operation for the first hostname on an empty
-service-created testing compose. Supply one hostname and the product profile's
-runtime port. Apply also names `target_id` from the reviewed service inspection;
-other placement and source inputs are refused. The existing compose-domain
-helper owns review, original-key submission and readback. It must send that
-reviewed target identity, rather than selecting a replacement at apply time.
+The Director agent can use this operation for the first hostnames on an empty
+service-created compose: one hostname on a testing lane, or the reviewed
+hostnames on a production lane whose product is not Live. Supply the product
+profile's runtime port. Apply also names `target_id` from the reviewed service
+inspection; other placement and source inputs are refused. The existing
+compose-domain helper owns review, original-key submission and readback. It
+must send that reviewed target identity, rather than selecting a replacement at
+apply time.
 
 This bounded continuation requires an active product with exclusive context ownership,
 no deployments or serving inventory, empty provider source/settings/mounts/networks,
 no conflicting domains, and no active or unknown provider work. Holds, positive use,
 needed data, retained custody, shared targets and conflicting hostname authority
-refuse it. Lane execution and authority locks fence the provider effect and
-record commit. The operation creates one HTTPS `web` route with the default
-certificate, or records an already-existing route only when every routing field
-matches exactly. It verifies the route before recording the domain; it does not deploy,
+refuse it. On production, a Live product and any unresolved original setup or
+production operation also refuse it. Lane execution and authority locks fence
+the provider effect and record commit. The operation creates one HTTPS `web`
+route with the default certificate per hostname, or records an already-existing
+route only when every routing field matches exactly. It verifies the route before recording the domain; it does not deploy,
 initialize a database, change external ingress, or qualify public TLS. A partial
 provider result retains recovery evidence. Reinspect it, keep the original
 request and key, and use the same continuation for an exact record-only
-reconciliation; conflicting routes remain refused. General target mutation and production remain on their existing paths.
+reconciliation; conflicting routes remain refused. General target mutation and Live production remain on their existing paths.
 
 Use `operation=prune-compose-domain` only to remove stale provider domain routes
 from an already-tracked Dokploy compose target. The service reads the tracked
