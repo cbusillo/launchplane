@@ -121,15 +121,16 @@ def _queue_feedback(
         }:
             continue
         deferred = _as_list(entry.get("deferred_reasons"))
+        reasons = deferred or _as_list(entry.get("ineligible_reasons"))
         handoff = _as_dict(entry.get("ready_handoff"))
         labeled = _string(dry_run.get("enqueue_label")) in _as_list(entry.get("labels"))
         if (
             not deferred
             and not labeled
             and not (handoff.get("comment_id") and handoff.get("head_sha"))
+            and not any(_string(reason).startswith("dependency update ") for reason in reasons)
         ):
             continue
-        reasons = deferred or _as_list(entry.get("ineligible_reasons"))
         if not reasons:
             continue
         payloads.append(

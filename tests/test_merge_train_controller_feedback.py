@@ -118,12 +118,32 @@ class MergeTrainControllerFeedbackTests(TestCase):
             }
         )
         pending = refused.model_copy(update={"actor_id": 20, "required_checks_status": "pending"})
+        dependency_failed = refused.model_copy(
+            update={
+                "actor_id": 20,
+                "ready_handoff": None,
+                "dependency_update_class": "patch_or_minor",
+                "required_checks_status": "fail",
+            }
+        )
+        dependency_review = dependency_failed.model_copy(
+            update={"dependency_update_class": "needs_review", "required_checks_status": "pass"}
+        )
         edited = refused.model_copy(
             update={
                 "ready_handoff": handoff.model_copy(update={"status": "edited", "head_sha": ""}),
             }
         )
-        for change in (refused, stale, blocked, client_wait, pending, edited):
+        for change in (
+            refused,
+            stale,
+            blocked,
+            client_wait,
+            pending,
+            edited,
+            dependency_failed,
+            dependency_review,
+        ):
             for another_candidate in (False, True):
                 with self.subTest(change=change, another_candidate=another_candidate):
                     dry_run = build_merge_train_dry_run_result(
