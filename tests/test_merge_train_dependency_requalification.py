@@ -16,7 +16,6 @@ from control_plane.contracts.merge_train_batch import (
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train import MergeTrainDryRunSnapshot, build_merge_train_dry_run_result
-from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_controller_run_once import _surviving_held_out_entries
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _post_merge_train_controller_run_once
@@ -235,14 +234,6 @@ class DependencyRequalificationTests(unittest.IsolatedAsyncioTestCase):
                     for hold in planned["candidate"]["held_out"]
                 ],
                 [(1, "dependency-head-1", "dependency_not_ready")],
-            )
-            # The author has nothing to do; the head simply waits for the next base.
-            self.assertNotIn(
-                1,
-                [
-                    payload["pull_request_number"]
-                    for payload in build_feedback_payloads(response=planned_response)
-                ],
             )
             await _post(app, request, "build_candidate")
 

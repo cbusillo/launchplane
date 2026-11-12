@@ -217,6 +217,7 @@ class MergeTrainQueueEntry(BaseModel):
     head_sha: str
     labels: tuple[str, ...]
     actor_role: str
+    dependency_update: bool = Field(default=False, exclude_if=lambda value: not value)
     ready_handoff: MergeTrainReadyHandoff | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -1030,6 +1031,7 @@ def _build_queue_entry(
         head_sha=pull_request.head_sha,
         labels=pull_request.labels,
         actor_role=actor_role,
+        dependency_update=is_dependency_update,
         ready_handoff=pull_request.ready_handoff,
         mergeable=pull_request.mergeable,
         requires_individual_landing=pull_request.requires_individual_landing,

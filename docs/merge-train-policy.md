@@ -2607,7 +2607,9 @@ Controller-mode mutate runs and manually dispatched batch-candidate,
 stack-collapse, or batch-landing phases render conservative PR feedback payloads
 from their worker responses and post them through the managed feedback endpoint,
 so queued PRs get one evolving Launchplane status comment as the train builds,
-waits, blocks, or completes. Ordinary check/mergeability waits and branch refreshes
+waits, blocks, or completes. Dependency-update refusals, including updates needing
+agent review, report their reasons even without a Ready handoff or enqueue label.
+Ordinary check/mergeability waits and branch refreshes
 report the selected PR even before any candidate exists, as do current-head Client
 review waits. Refresh feedback distinguishes an applied branch update from a
 requested refresh and does not claim a candidate or label mutation. Controller-mode dry-runs do not
