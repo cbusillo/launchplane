@@ -44,19 +44,20 @@ def _digest_pin_class(
     current_value: str,
     upstream_status: str,
     verified: bool = True,
+    update_type: str = "digest",
 ) -> str:
     identity = 711
     policy = dependency_repository_policy(identity, metadata_format="renovate_metadata")
     policy.enqueue.dependency_update_bots = (
         policy.enqueue.dependency_update_bots[0].model_copy(
-            update={"allowed_update_types": ("digest",)}
+            update={"allowed_update_types": (update_type,)}
         ),
     )
     pull = _github_pull_request(16)
     pull["user"] = {"id": identity, "login": "configured-bot", "type": "Bot"}
     message = renovate_message(
         depName=dep_name,
-        updateType="digest",
+        updateType=update_type,
         currentValue=current_value,
         newValue=current_value,
     )
@@ -141,29 +142,38 @@ class DependencyBotPolicyTests(unittest.TestCase):
                     expected,
                 )
 
-    def test_workspace_devkit_pins_need_forward_proof_of_the_pinned_commits(self) -> None:
-        old = "".join(
+    def test_workspace_pins_need_forward_proof_of_the_pinned_commits(self) -> None:
+        devkit = "".join(
             f'[repos.{slot}]\nrepository = "example/devkit"\nref = "' + "a" * 40 + '"\n'
             for slot in ("devkit", "runtime")
         )
-        for pinned, upstream_status, expected in (
-            ("b" * 40, "ahead", "patch_or_minor"),
-            ("b" * 40, "behind", "needs_review"),
-            ("b" * 40, "diverged", "needs_review"),
-            ("c" * 40, "ahead", "needs_review"),
-        ):
-            with self.subTest(pinned=pinned, upstream_status=upstream_status):
-                self.assertEqual(
-                    _digest_pin_class(
-                        filename="workspace.toml",
-                        old=old,
-                        new=old.replace("a" * 40, pinned),
-                        dep_name="example/devkit",
-                        current_value="main",
-                        upstream_status=upstream_status,
-                    ),
-                    expected,
-                )
+        shared = (
+            '[repos.devkit]\nrepository = "example/devkit"\nref = "' + "d" * 40 + '"\n'
+            '[repos.shared_addons]\nrepository = "example/shared"\nref = "' + "a" * 40 + '"\n'
+        )
+        for old, dep_name in ((devkit, "example/devkit"), (shared, "example/shared")):
+            for pinned, upstream_status, update_type, expected in (
+                ("b" * 40, "ahead", "digest", "patch_or_minor"),
+                ("b" * 40, "behind", "digest", "needs_review"),
+                ("b" * 40, "diverged", "digest", "needs_review"),
+                ("c" * 40, "ahead", "digest", "needs_review"),
+                ("b" * 40, "behind", "minor", "needs_review"),
+            ):
+                with self.subTest(
+                    dep_name=dep_name, pinned=pinned, status=upstream_status, type=update_type
+                ):
+                    self.assertEqual(
+                        _digest_pin_class(
+                            filename="workspace.toml",
+                            old=old,
+                            new=old.replace("a" * 40, pinned),
+                            dep_name=dep_name,
+                            current_value="main",
+                            upstream_status=upstream_status,
+                            update_type=update_type,
+                        ),
+                        expected,
+                    )
 
     def test_add_remove_identity_and_change_allowed_types_without_code_changes(self) -> None:
         identity = 711
