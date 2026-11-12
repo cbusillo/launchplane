@@ -105,6 +105,7 @@ from typing import (
 from pydantic import BaseModel, JsonValue
 
 if TYPE_CHECKING:
+    from control_plane.client_release_backup_continuation import BackupContinuationReview
     from control_plane.clean_testing_snapshot import CleanTestingSnapshot
     from control_plane.merge_train_wake import MergeTrainEventReceipt
     from control_plane.testing_replacement_resources import TestingReplacementResourcesRequest
@@ -18369,6 +18370,92 @@ class PostgresRecordStore(HumanSessionStore):
                 operation_kind="prod_promotion",
             ),
         )
+
+    def continue_pre_effect_odoo_promotion_operation(
+        self,
+        *,
+        expected: OdooProdPromotionOperationRecord,
+        resumed: OdooProdPromotionOperationRecord,
+        root: Path,
+        review: BackupContinuationReview,
+        actor: str,
+    ) -> bool:
+        from control_plane.client_release_odoo_continuation import qualify_odoo_continuation
+        from control_plane.client_release_backup_continuation import BackupContinuationRefused
+        from control_plane.workflows.production_promotion_backup import (
+            _read_operation,
+            _source_key,
+            ODOO_PROMOTION_BACKUP_ACTION,
+        )
+
+        capture = _read_operation(
+            self,
+            expected.product,
+            expected.context,
+            expected.instance,
+            ODOO_PROMOTION_BACKUP_ACTION,
+            expected.request.infrastructure_backup_record_id,
+        )
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session,
+                product=expected.product,
+                context=expected.context,
+                instance=expected.instance,
+            )
+            self._lock_product_authority_bundle_write(session)
+            if not self._try_production_backup_source_lock(session, _source_key(capture)):
+                raise BackupContinuationRefused("backup_source_busy")
+            row = self._locked_release_operation_row(
+                session, LaunchplaneOdooProdPromotionOperationRow, expected.operation_id
+            )
+            current = self._read_payload(
+                model_type=OdooProdPromotionOperationRecord, payload=row.payload
+            )
+            if current != expected:
+                return False
+            if (
+                self._active_odoo_stable_lane_operation_owner(
+                    session,
+                    product=expected.product,
+                    context=expected.context,
+                    instance=expected.instance,
+                )
+                is not None
+            ):
+                raise BackupContinuationRefused("odoo_lane_busy")
+            outer = getattr(self._disposable_authority_context, "observation_read_session", None)
+            self._disposable_authority_context.observation_read_session = session
+            try:
+                evidence = qualify_odoo_continuation(
+                    self,
+                    root,
+                    expected.product,
+                    expected.authorization.release_decision_record_id,
+                    review,
+                    actor,
+                )
+            finally:
+                self._disposable_authority_context.observation_read_session = outer
+            if (
+                evidence.operation != expected
+                or evidence.digest != review.expected_digest
+                or resumed.previous_attempt != expected
+                or resumed.previous_promotion != evidence.promotion
+                or resumed.continuation_digest != evidence.digest
+                or resumed.continuation_actor != actor
+                or resumed.continuation_reason != review.reason
+                or resumed.status != "pending"
+                or resumed.phase != "created"
+                or resumed.attempt != expected.attempt
+                or resumed.result is not None
+                or resumed.checkpoints != (expected.checkpoints[0],)
+            ):
+                raise BackupContinuationRefused("backup_continuation_review_changed")
+            OdooProdPromotionOperationRecord.model_validate(resumed.model_dump(mode="json"))
+            self._sync_release_operation_row(row, resumed)
+            session.commit()
+            return True
 
     def cancel_pending_odoo_prod_promotion_operation_record(
         self, record: OdooProdPromotionOperationRecord
