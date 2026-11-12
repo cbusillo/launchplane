@@ -193,7 +193,9 @@ class ProductConfigRuntimeEnvironmentRecordSummary(BaseModel):
 class ProductConfigRuntimeEnvironmentResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["skipped", "created", "updated", "unchanged"]
+    action: Literal["skipped", "created", "updated", "unchanged"] = Field(
+        json_schema_extra={"x-launchplane-safe-output": True}
+    )
     scope: RuntimeEnvironmentScope
     context: str
     instance: str
@@ -272,8 +274,10 @@ class ProductConfigProviderKeyAdoptionResult(BaseModel):
 class ProductConfigApplySummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    runtime_changed_key_count: int = Field(ge=0)
-    secret_change_count: int = Field(ge=0)
+    runtime_changed_key_count: int = Field(
+        ge=0, json_schema_extra={"x-launchplane-safe-output": True}
+    )
+    secret_change_count: int = Field(ge=0, json_schema_extra={"x-launchplane-safe-output": True})
 
 
 class ProductConfigLiveTarget(BaseModel):
@@ -328,7 +332,7 @@ class ProductConfigApplyResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["ok", "records_applied_live_sync_required"]
-    mode: ProductConfigMode
+    mode: ProductConfigMode = Field(json_schema_extra={"x-launchplane-safe-output": True})
     product: str
     context: str
     instance: str
@@ -616,6 +620,41 @@ def product_config_has_undeclared_runtime_settings(
     values = cast(dict[str, ScalarValue], runtime_input["env"])
     adopted_keys = cast(tuple[str, ...], runtime_input.get("adopt_provider_keys") or ())
     return bool((set(values) | set(adopted_keys)) - declared)
+
+
+def product_config_only_adopts_provider_settings(payload: dict[str, object]) -> bool:
+    runtime = cast(dict[str, object], payload["runtime_env"])
+    keys = cast(tuple[str, ...], runtime.get("adopt_provider_keys") or ())
+    return bool(
+        keys
+        and payload["context"]
+        and payload["instance"]
+        and runtime["scope"] == "instance"
+        and not runtime["env"]
+        and runtime.get("retired_provider_keys") is None
+        and not any(
+            payload.get(field)
+            for field in (
+                "secrets",
+                "disable_secret_bindings",
+                "public_hosts",
+                "odoo_business_hours",
+                "odoo_first_empty",
+            )
+        )
+        and all(not provider_key_adoption.looks_like_credential(key, "") for key in keys)
+    )
+
+
+def product_config_plan_only_records_provider_settings(result: dict[str, object]) -> bool:
+    dispositions = cast(list[dict[str, str]], result["provider_key_adoption"])
+    runtime = cast(dict[str, object], result["runtime_environment"])
+    return bool(dispositions) and (
+        all(item["disposition"] == "adopted" for item in dispositions)
+        and set(cast(list[str], runtime["changed_keys"])) == {item["key"] for item in dispositions}
+        and runtime["retired_provider_keys_before"] == runtime["retired_provider_keys_after"]
+        and not result["secrets"]
+    )
 
 
 def product_environment_config_apply_request(

@@ -2491,6 +2491,27 @@ the active managed-secret root. Concurrent same-key applies that race after the
 initial replay lookup converge by re-reading the completed idempotency record
 after a transactional write conflict and returning the winner as a replay.
 
+#### Record-only live provider adoption
+
+The authenticated Director `local_operator` with existing exact-lane
+`product_config.apply` authority may record undeclared plain settings already
+present on that live production target. The existing schema-v2 request names
+only `runtime_env.adopt_provider_keys`; values come from the service's provider
+reader. Every requested key must receive `adopted`, with no supplied values,
+secrets, retirement, or other configuration intent. Template-default retirement
+and credential-shaped names or values do not qualify.
+
+Apply requires a matching durable dry-run bound to the current target identity,
+product profile, lane configuration, managed-secret metadata and adopted values.
+Older request-only reviews cannot admit this path. Current target, profile,
+ownership and lane-record expectations are rechecked in the existing atomic
+configuration/idempotency transaction. Changed facts require fresh review.
+Responses contain names and dispositions, never provider values. Successful
+record-only adoption returns `ok` with no live-sync next action, because the
+provider already supplies those values. It changes no provider, runtime,
+secret, credential, grant, deployment or release state. Completed same-key
+requests replay their original receipt; a different payload still conflicts.
+
 Runtime writes carry an internal expectation of the original complete record,
 or of its absence. Product config and onboarding validate that expectation
 inside the authority-bundle transaction before replacing the runtime map. A

@@ -1,7 +1,7 @@
 """The environment settings form records a site's own settings and retires provider keys."""
 
 import unittest
-from typing import Any
+from typing import cast, Any
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -171,6 +171,21 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                     )
                     review = await submit("dry-run")
                     self.assertEqual(review.status_code, 202, review.text)
+                    settings = cast(
+                        dict[str, object],
+                        (
+                            cast(dict[str, object], change["runtime_env"])["env"]
+                            if route == "generic"
+                            else change["runtime_settings"]
+                        ),
+                    )
+                    settings["SITE_MODE"] = "unreviewed"
+                    mismatched = await submit("apply", f"mismatched-{route}")
+                    self.assertEqual(mismatched.status_code, 409, mismatched.text)
+                    self.assertEqual(
+                        mismatched.json()["error"]["code"], "matching_dry_run_required"
+                    )
+                    settings["SITE_MODE"] = "log"
                     self.assertEqual(
                         self.store.list_runtime_environment_records(
                             scope="instance", context_name="example-site", instance_name="testing"
