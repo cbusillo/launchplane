@@ -269,6 +269,12 @@ def require_production_promotion_backup(
             promotion.backup_gate.evidence.get("backup_record_id"),
             promotion.backup_gate.evidence.get("infrastructure_backup_record_id"),
         ):
+            from control_plane.client_release_odoo_continuation import (
+                continuation_left_capture_unused,
+            )
+
+            if continuation_left_capture_unused(record_store, promotion):
+                continue
             raise click.ClickException(
                 "Production backup evidence was already used by a promotion."
             )

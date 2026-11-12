@@ -80,6 +80,7 @@ def admit_odoo_prod_promotion_run(
     request: OdooProdPromotionRunRequest,
     release_decision: ReleaseReviewDecisionRecord | None = None,
     continuation_plan: OdooCutoverPlan | None = None,
+    active_promotion_record_id: str = "",
 ) -> OdooProdPromotionRunAdmission:
     """Check ready inputs, release approval, and the verified infrastructure backup."""
 
@@ -199,6 +200,7 @@ def admit_odoo_prod_promotion_run(
             instance=request.to_instance,
             promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
             backup_record_id=request.infrastructure_backup_record_id,
+            active_promotion_record_id=active_promotion_record_id,
             cutover_recovery=recovery,
         )
     except (AttributeError, FileNotFoundError, ValueError, click.ClickException) as error:
