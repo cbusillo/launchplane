@@ -23,6 +23,7 @@ import unittest
 
 from pydantic import ValidationError
 
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord, PublicHostEffect
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 
 
@@ -104,6 +105,13 @@ class IndexingStore(TopologyStore):
         )
         self.profile.image.repository = "ghcr.io/example/odoo"
         self.target = provider_target().model_copy(update={"provider_evidence": {}})
+        self.dokploy_target = DokployTargetRecord(
+            context="example-context",
+            instance="prod",
+            target_name="example-site-prod",
+            public_hosts=("example.test",),
+            updated_at=self.target.updated_at,
+        )
         self.database_url = "sqlite://"
 
     def read_product_profile_record(self, product: str) -> Any:
@@ -118,15 +126,7 @@ class IndexingStore(TopologyStore):
         return self.target
 
     def read_dokploy_target_record(self, **_kwargs: Any) -> Any:
-        from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-
-        return DokployTargetRecord(
-            context="example-context",
-            instance="prod",
-            target_name="example-site-prod",
-            public_hosts=("example.test",),
-            updated_at=self.target.updated_at,
-        )
+        return self.dokploy_target
 
     @staticmethod
     def read_dokploy_target_id_record(**_kwargs: Any) -> Any:
@@ -221,7 +221,7 @@ class WebsiteIndexingBindingTests(unittest.TestCase):
         self.assertEqual(self.writes, 1)
         self.assertEqual(applied["native"], plan["native"])
 
-    def test_missing_stale_disabled_or_wrong_host_route_never_reaches_native_execution(
+    def test_missing_stale_or_disabled_route_never_reaches_native_execution(
         self,
     ) -> None:
         original = self.store.route_binding
@@ -233,12 +233,51 @@ class WebsiteIndexingBindingTests(unittest.TestCase):
             original.model_copy(
                 update={"source": original.source.model_copy(update={"stale_after": expired})}
             ),
-            route_binding(domain_name="other.example"),
         ]
         for route in variants:
             with self.subTest(route=route):
                 self.store.route_binding = route
                 with self.assertRaises(ValueError):
+                    self.execution.observe()
+        self.native.assert_not_called()
+
+    def _route_serving(self, host: str) -> Any:
+        route = self.store.route_binding
+        assert route is not None
+        return route.model_copy(
+            update={"domains": (route.domains[0].model_copy(update={"domain_name": host}),)}
+        )
+
+    def test_public_host_origin_beside_an_internal_route_domain_reaches_the_native_plan(
+        self,
+    ) -> None:
+        self.store.route_binding = self._route_serving("example-prod.internal.test")
+        self.store.dokploy_target = self.store.dokploy_target.model_copy(
+            update={"domains": ("example-prod.internal.test",)}
+        )
+        plan = self.execution.observe()
+        self.assertEqual(plan["native"]["public_origin"], "https://example.test")
+        self.native.assert_called_once()
+        self.assertEqual(self.writes, 0)
+
+    def test_origin_outside_route_domains_and_committed_public_hosts_never_reaches_native(
+        self,
+    ) -> None:
+        self.store.route_binding = self._route_serving("other.example")
+        pending = PublicHostEffect(
+            host="example.test",
+            provider_host="https://provider.example",
+            target_id=self.store.target.target_id,
+            runtime_port=8069,
+        )
+        recorded = self.store.dokploy_target
+        for dokploy_target in (
+            recorded.model_copy(update={"public_hosts": ()}),
+            recorded.model_copy(update={"pending_public_host_effects": (pending,)}),
+        ):
+            with self.subTest(dokploy_target=dokploy_target):
+                self.store.dokploy_target = dokploy_target
+                with self.assertRaisesRegex(ValueError, "route and provider target differ"):
                     self.execution.observe()
         self.native.assert_not_called()
 

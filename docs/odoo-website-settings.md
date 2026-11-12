@@ -184,7 +184,11 @@ This branch executes only the generated indexing receiver under the existing
 Odoo lane reservation, host execution lock and durable provider-operation fence.
 It runs no module updates, broad maintenance, restore or deployment. Missing,
 ambiguous, stale or mismatched product, route, target, runtime, database UUID,
-website or reviewed head evidence refuses the effect. A separate route digest
+website or reviewed head evidence refuses the effect. The public origin's host
+must be a domain on the current route binding or a committed public hostname on
+the same tracked target with no pending public-host effect. Route bindings hold
+only the target's internal domains, so a site with public hostnames is served
+through the second form. A separate route digest
 does not waive topology's `stale_route_authority` warning. Apply locks the
 native website row, checks the reviewed baseline, reads back in the transaction,
 commits and completes native cache notification, then returns its receipt.
