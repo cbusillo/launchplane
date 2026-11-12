@@ -98,7 +98,7 @@ class EmptyAutomationAdapter:
         return nonvalidating_compact_sorted_json_sha256(self.intent())
 
     def require_no_predecessor(self) -> None:
-        from control_plane.dokploy_target_setup_http import first_production_target_lock_name
+        from control_plane.dokploy_target_setup_http import require_no_unresolved_production_setup
 
         own_id = (
             build_launchplane_mutation_reservation_id(
@@ -117,22 +117,12 @@ class EmptyAutomationAdapter:
         )
         if any(row.record_id != own_id for row in held):
             raise ValueError("An original provider operation still owns this target.")
-        for row in self.store.list_held_provider_target_reservations():
-            if row.record_id == own_id:
-                continue
-            origin = self.store.read_provider_target_origin(row)
-            if row.provider_target_key == first_production_target_lock_name(
-                self.request.context
-            ) or (
-                origin is not None
-                and origin.origin.provider_id == "dokploy"
-                and origin.origin.target_id == self.request.target_id
-            ):
-                raise ValueError("An original setup or physical-target operation is unresolved.")
-        if self.store.list_odoo_stable_target_replacement_operation_records(
-            context_name=self.request.context, instance_name="prod"
-        ):
-            raise ValueError("An existing production operation requires its original lifecycle.")
+        require_no_unresolved_production_setup(
+            self.store,
+            context=self.request.context,
+            target_id=self.request.target_id,
+            own_record_id=own_id,
+        )
 
     @contextmanager
     def setup_lock(self) -> Iterator[None]:

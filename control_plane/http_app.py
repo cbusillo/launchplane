@@ -27330,13 +27330,16 @@ def create_launchplane_fastapi_app(
             and not setup_request.replaces_operation_id
             and bool(lane_owner)
         )
+        owner_not_live = (
+            bool(lane_owner)
+            and database_store.read_product_profile_record(lane_owner).production_use != "live"
+        )
         first_production_setup = (
             director_agent_identity(identity)
             and authorization_mode == "apply"
             and setup_request.operation == "create-compose"
             and setup_request.instance == "prod"
-            and bool(lane_owner)
-            and database_store.read_product_profile_record(lane_owner).production_use != "live"
+            and owner_not_live
         )
         empty_automation_setup = (
             setup_request.operation == "disable-empty-compose-auto-deploy"
@@ -27360,12 +27363,16 @@ def create_launchplane_fastapi_app(
             and setup_request.instance == "testing"
             and bool(lane_owner)
         )
-        director_testing_domain = (
+        director_empty_domain = (
             director_agent_identity(identity)
             and authorization_mode == "apply"
             and setup_request.operation == "reconcile-compose-domain"
-            and setup_request.instance == "testing"
             and bool(lane_owner)
+            and (
+                setup_request.instance == "testing"
+                or setup_request.instance == "prod"
+                and owner_not_live
+            )
         )
         if (
             isinstance(identity, TerminalAgentIdentity)
@@ -27375,7 +27382,7 @@ def create_launchplane_fastapi_app(
             and not first_production_setup
             and not empty_automation_setup
             and not director_source_completion
-            and not director_testing_domain
+            and not director_empty_domain
             and not native_onboarding
         ):
             raise _launchplane_http_error(
@@ -27413,7 +27420,7 @@ def create_launchplane_fastapi_app(
         director_source_completion = director_source_completion and (
             isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
         )
-        director_testing_domain = director_testing_domain and (
+        director_empty_domain = director_empty_domain and (
             isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
         )
         can_setup_target = (
@@ -27424,7 +27431,7 @@ def create_launchplane_fastapi_app(
             or first_production_setup
             or empty_automation_setup
             or director_source_completion
-            or director_testing_domain
+            or director_empty_domain
             or native_onboarding
         )
         can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (
@@ -27959,7 +27966,7 @@ def create_launchplane_fastapi_app(
                     record_store=database_store,
                     request=execution_request,
                     director_source_completion=director_source_completion,
-                    director_testing_domain=director_testing_domain,
+                    director_empty_domain=director_empty_domain,
                     # A lane-scoped caller's owner is re-checked when records commit.
                     required_context_owner=(
                         (lane_owner, setup_request.context)

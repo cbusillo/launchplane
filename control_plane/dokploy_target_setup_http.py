@@ -241,6 +241,25 @@ def first_production_target_lock_name(context: str) -> str:
     return f"first-production-target:{context}"
 
 
+def require_no_unresolved_production_setup(
+    record_store: PostgresRecordStore, *, context: str, target_id: str, own_record_id: str = ""
+) -> None:
+    for row in record_store.list_held_provider_target_reservations():
+        if row.record_id == own_record_id:
+            continue
+        origin = record_store.read_provider_target_origin(row)
+        if row.provider_target_key == first_production_target_lock_name(context) or (
+            origin is not None
+            and origin.origin.provider_id == "dokploy"
+            and origin.origin.target_id == target_id
+        ):
+            raise ValueError("An original setup or physical-target operation is unresolved.")
+    if record_store.list_odoo_stable_target_replacement_operation_records(
+        context_name=context, instance_name="prod"
+    ):
+        raise ValueError("An existing production operation requires its original lifecycle.")
+
+
 def require_first_production_target_creation(
     record_store: PostgresRecordStore,
     request: "DokployTargetSetupEnvelope",
@@ -833,7 +852,7 @@ def execute_dokploy_target_setup(
     disposable_before_create: Callable[[str], None] | None = None,
     disposable_placement: tuple[str, str] | None = None,
     director_source_completion: bool = False,
-    director_testing_domain: bool = False,
+    director_empty_domain: bool = False,
     application_mutate: Callable[
         [str, str, str, dict[str, dokploy_api.JsonValue]], dict[str, dokploy_api.JsonValue]
     ]
@@ -862,7 +881,7 @@ def execute_dokploy_target_setup(
             disposable_before_create=disposable_before_create,
             disposable_placement=disposable_placement,
             director_source_completion=director_source_completion,
-            director_testing_domain=director_testing_domain,
+            director_empty_domain=director_empty_domain,
             application_mutate=application_mutate,
             compose_mutate=compose_mutate,
         )
@@ -878,7 +897,7 @@ def _execute_dokploy_target_setup(
     disposable_before_create: Callable[[str], None] | None = None,
     disposable_placement: tuple[str, str] | None = None,
     director_source_completion: bool = False,
-    director_testing_domain: bool = False,
+    director_empty_domain: bool = False,
     compose_mutate: Callable[[str, str, str, dokploy_api.JsonObject], dokploy_api.JsonObject]
     | None = None,
     application_mutate: Callable[
@@ -1013,10 +1032,10 @@ def _execute_dokploy_target_setup(
             else fetch_dokploy_target_payload_for_setup,
             fetch_target_domains=fetch_dokploy_target_domains_for_setup,
         )
-    elif request.operation == "reconcile-compose-domain" and director_testing_domain:
-        from control_plane.dokploy_testing_domain import setup_empty_testing_domain
+    elif request.operation == "reconcile-compose-domain" and director_empty_domain:
+        from control_plane.dokploy_testing_domain import setup_empty_lane_domain
 
-        result = setup_empty_testing_domain(
+        result = setup_empty_lane_domain(
             record_store=record_store, request=request, host=host, token=token
         )
     elif request.operation == "reconcile-compose-domain":
