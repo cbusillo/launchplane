@@ -704,6 +704,20 @@ class DirectorNeverLiveProductionDomainSetupTests(_EmptyComposeDomainFixture):
         ):
             self.assert_no_effects(await self.post(), 400)
 
+    async def test_missing_receipt_recovers_only_the_recorded_exact_hostnames(self) -> None:
+        with patch.object(
+            self.store,
+            "write_idempotency_record",
+            side_effect=RuntimeError("Fixture lost receipt storage"),
+        ):
+            with self.assertRaises(RuntimeError):
+                await self.post()
+        expanded = await self.post(domains=[*self.payload["domains"], "www.example.invalid"])
+        self.assertEqual(expanded.status_code, 400, expanded.text)
+        recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertEqual(self.writes, self.expected_routes())
+
     async def test_lost_second_route_response_recovers_without_duplicate_routes(self) -> None:
         original = self.provider_request
 
