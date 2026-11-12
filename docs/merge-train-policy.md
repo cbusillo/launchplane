@@ -648,8 +648,11 @@ Release checklist readers use the current policy too; recorded engineering notes
 remain readable, but a removed bot cannot supply a new inferred exemption.
 Both formats require a complete immutable same-repository dependency-only diff.
 `workspace.toml` qualifies only when complete immutable TOML documents differ
-solely in exact devkit/runtime ref pins; in train admission each pin must be a
-declared digest update. Shared-addon and other changes keep review. In the verified train-admission path, workflow/action YAML, Compose images and Dockerfile frontend/base-image
+solely in exact `[repos.*]` ref pins. In train admission each changed pin,
+shared addons included, must be a declared digest update proven to move
+forward. Client-note readers have no declared updates and exempt only
+devkit/runtime pins, so a shared-addon pin gets no automatic Client-note
+exemption. Other `workspace.toml` changes keep review. In the verified train-admission path, workflow/action YAML, Compose images and Dockerfile frontend/base-image
 references qualify only when complete immutable before/after documents prove
 that only supported dependency references changed from the PR's merge base.
 Every changed reference must match a named update's exact old/new values or
