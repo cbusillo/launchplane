@@ -3,7 +3,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.release_review import ReleaseVersion
+from control_plane.contracts.release_review import (
+    ReleaseVersion,
+    AbsentProduction,
+    InitialVersionTestNotes,
+)
 
 
 ReleaseRequestSource = Literal["director_request", "finish_line"]
@@ -18,8 +22,13 @@ class ReleaseRequestDecisionRecord(BaseModel):
     repository: str = Field(min_length=1)
     owner_github_id: str = Field(pattern=r"^[0-9]+$")
     checklist_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    production: ReleaseVersion
+    production: ReleaseVersion | AbsentProduction
     candidate: ReleaseVersion
+    initial_version_review: InitialVersionTestNotes | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     client_decision_record_id: str = ""
     source: ReleaseRequestSource
     reason: str = Field(min_length=1, max_length=1000)

@@ -30031,7 +30031,7 @@ def create_launchplane_fastapi_app(
                 profile=profile,
                 decision=decision,
             ),
-            request_release_review=lambda store, profile, review, source, reason, reference, actor: (
+            request_release_review=lambda store, profile, review, source, reason, reference, actor, initial_notes: (
                 request_release_review(
                     store=store,
                     control_plane_root=resolved_control_plane_root,
@@ -30041,6 +30041,7 @@ def create_launchplane_fastapi_app(
                     reason=reason,
                     decision_reference=reference,
                     actor=actor,
+                    initial_version_test_notes=initial_notes,
                 )
             ),
             adopt_invitation=lambda store, profile, digest, issue, comment, dry_run, reason: (

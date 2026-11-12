@@ -8,7 +8,7 @@ from control_plane.contracts.release_request import (
     ReleaseRequestDecisionRecord,
     ReleaseRequestSource,
 )
-from control_plane.contracts.release_review import ReleaseReviewStatus
+from control_plane.contracts.release_review import ReleaseReviewStatus, InitialVersionTestNotes
 from control_plane.generic_web_release_settings import requires_initial_settings_request
 from control_plane.release_invitation import (
     _accepted_release_in_progress,
@@ -17,7 +17,7 @@ from control_plane.release_invitation import (
     _ready,
     publish_release_invitation,
 )
-from control_plane.release_review import ReleaseReviewStore
+from control_plane.release_review import ReleaseReviewStore, current_release_review
 from control_plane.storage.postgres import ProductProfileCompareWriteResult
 
 
@@ -49,14 +49,53 @@ def record_release_request(
     reason: str,
     decision_reference: str,
     actor: str,
+    initial_version_test_notes: str = "",
+    control_plane_root: Path | None = None,
 ) -> LaunchplaneProductProfileRecord:
     from control_plane.client_release import live_temporary_hotfix
 
+    initial_notes = None
+    if initial_version_test_notes:
+        from control_plane.initial_version_review import (
+            initial_version_inputs_sha256,
+        )
+
+        if (
+            review.checklist is None
+            or review.checklist.initial_version is None
+            or control_plane_root is None
+        ):
+            raise ValueError("The initial review checklist is unavailable.")
+        initial_notes = InitialVersionTestNotes(
+            inputs_sha256=initial_version_inputs_sha256(review.checklist),
+            client_test_notes=initial_version_test_notes.strip(),
+        )
+        review = current_release_review(
+            record_store=store,
+            profile=profile,
+            control_plane_root=control_plane_root,
+            initial_version_test_notes=initial_notes,
+        )
+        if (
+            review.checklist is None
+            or review.checklist.initial_version is None
+            or initial_version_inputs_sha256(review.checklist) != initial_notes.inputs_sha256
+        ):
+            raise ValueError("The initial version changed while its notes were prepared.")
+    elif (
+        profile.release_request is not None
+        and review.checklist is not None
+        and review.checklist.initial_version is not None
+    ):
+        initial_notes = profile.release_request.initial_version_review
     standing_settings_request = (
         profile.release_on_acceptance == "director_standing"
         and review.checklist is not None
-        and requires_initial_settings_request(
-            review.checklist.production, review.checklist.candidate
+        and (
+            review.checklist.initial_version is not None
+            or requires_initial_settings_request(
+                review.checklist.production, review.checklist.candidate
+            )
         )
     )
     if not _client_release_requests_enabled(
@@ -89,6 +128,7 @@ def record_release_request(
             checklist_digest=review.checklist_digest,
             production=review.checklist.production,
             candidate=review.checklist.candidate,
+            initial_version_review=initial_notes,
             client_decision_record_id=client_decision_id,
             source=source,
             reason=reason,
@@ -117,6 +157,7 @@ def request_release_review(
     reason: str,
     decision_reference: str,
     actor: str,
+    initial_version_test_notes: str = "",
 ) -> bool:
     saved = record_release_request(
         store=store,
@@ -126,6 +167,8 @@ def request_release_review(
         reason=reason,
         decision_reference=decision_reference,
         actor=actor,
+        initial_version_test_notes=initial_version_test_notes,
+        control_plane_root=control_plane_root,
     )
     if saved.release_on_acceptance == "director_standing":
         return True

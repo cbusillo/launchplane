@@ -15,7 +15,7 @@ from control_plane.contracts.generic_web_release_settings import (
     GenericWebReleaseBaseline,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.release_review import ReleaseVersion
+from control_plane.contracts.release_review import ReleaseVersion, AbsentProduction
 from control_plane.contracts.runtime_identity import (
     COMPOSE_IMAGE_REFERENCE_ENV_KEYS,
     runtime_identity_env,
@@ -27,7 +27,7 @@ ROLLBACK_SETTINGS_KEY = "release_runtime_settings_baseline"
 
 
 def requires_initial_settings_request(
-    production: ReleaseVersion, candidate: ReleaseVersion
+    production: ReleaseVersion | AbsentProduction, candidate: ReleaseVersion
 ) -> bool:
     return production.runtime_settings is None and candidate.runtime_settings is not None
 

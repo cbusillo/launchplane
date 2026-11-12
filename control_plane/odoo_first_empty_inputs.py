@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from collections.abc import Callable
 from datetime import UTC, datetime
 import inspect
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -16,6 +17,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.release_review import AbsentProduction, ReleaseReviewDecisionRecord
 from control_plane.contracts.product_profile_record import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
     LaunchplaneProductProfileRecord,
@@ -58,13 +60,19 @@ class FirstEmptyAuthority:
     volumes: tuple[str, ...]
 
     def fingerprint(self) -> str:
+        bundle = self.bundle.model_dump(mode="json")
+        for profile in bundle["expected_product_profiles"]:
+            profile.pop("release_request", None)
+            profile.pop("updated_at", None)
         return nonvalidating_compact_sorted_json_sha256(
             {
-                "profile": self.profile.model_dump(mode="json"),
+                "profile": self.profile.model_dump(
+                    mode="json", exclude={"release_request", "updated_at"}
+                ),
                 "target": self.target.model_dump(mode="json"),
                 "target_id": self.target_id.model_dump(mode="json"),
                 "provider": self.provider.model_dump(mode="json"),
-                "expectations": self.bundle.model_dump(mode="json"),
+                "expectations": bundle,
                 "volumes": self.volumes,
             }
         )
@@ -78,6 +86,7 @@ class QualifiedFirstEmptyInputs:
     observed_at: datetime
     storage_sha256: str
     provider_spec: dict[str, object]
+    release_decision_record_id: str = ""
 
     def validate(self, product: str, context: str, instance: str) -> None:
         if (product, context, instance) != (
@@ -94,7 +103,12 @@ def resolve_first_empty_authority(
     context: str,
     *,
     pending_deployment: DeploymentRecord | None = None,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
+    inverse_decision: ReleaseReviewDecisionRecord | None = None,
+    allow_release_history: bool = False,
 ) -> FirstEmptyAuthority:
+    if release_decision is not None and inverse_decision is not None:
+        raise ValueError("Forward and inverse authority are separate release boundaries.")
     profile = store.read_product_profile_record(product)
     lane = next(
         (lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "prod")), None
@@ -145,11 +159,20 @@ def resolve_first_empty_authority(
         or safety.production_resources in {"shared", "separation_ready"}
     ):
         raise ValueError("Recorded data, use or custody protects this target.")
-    if (
+    decision = release_decision or inverse_decision
+    if decision is not None:
+        require_first_release_history(store, decision, context)
+    elif allow_release_history:
+        require_first_release_history(store, None, context, product=product)
+    elif (
         store.list_deployment_records(context_name=context, instance_name="prod")
         != ((pending_deployment,) if pending_deployment is not None else ())
         or store.list_promotion_records(context_name=context, to_instance_name="prod")
         or store.list_backup_gate_records(context_name=context, instance_name="prod")
+        or any(
+            record.context == context and record.channel == "prod"
+            for record in store.list_release_tuple_records()
+        )
     ):
         raise ValueError("Production history requires the existing recovery or release route.")
     runtime = store.list_runtime_environment_records()
@@ -199,7 +222,7 @@ def resolve_first_empty_authority(
             "records": tuple(record for record in runtime if runtime_read_set.includes(record)),
         }
     )
-    if any(
+    if inverse_decision is None and any(
         plain_setting_looks_like_credential(key, str(value))
         for record in runtime_read_set.records
         for key, value in record.env.items()
@@ -217,7 +240,210 @@ def resolve_first_empty_authority(
         secret_delivery_read_sets=deliveries,
         runtime_environment_read_sets=(runtime_read_set,),
     )
-    return FirstEmptyAuthority(profile, target, target_id, provider, bundle, volumes)
+    authority = FirstEmptyAuthority(profile, target, target_id, provider, bundle, volumes)
+    if release_decision is not None and (
+        not isinstance(release_decision.checklist.production, AbsentProduction)
+        or release_decision.checklist.production.authority_sha256 != authority.fingerprint()
+    ):
+        raise ValueError("The accepted original target or initial runtime inputs changed.")
+    if decision is not None:
+        initial = decision.checklist.initial_version
+        artifact = store.read_artifact_manifest(decision.checklist.candidate.artifact_id)
+        if (
+            initial is None
+            or initial.artifact_manifest_sha256
+            != nonvalidating_compact_sorted_json_sha256(artifact.model_dump(mode="json"))
+        ):
+            raise ValueError("The accepted initial artifact or its full source inputs changed.")
+    return authority
+
+
+FIRST_RELEASE_STOPPED_KEY = "first_empty_release_stopped"
+FIRST_RELEASE_ABSENCE_SOURCE = "launchplane:odoo-original-absence"
+
+
+def first_release_custody(
+    store: PostgresRecordStore,
+    product: str,
+    context: str,
+    decision: ReleaseReviewDecisionRecord | None = None,
+) -> dict[str, ReleaseReviewDecisionRecord]:
+    identifiers = set()
+    for operation in store.list_odoo_prod_promotion_operation_records(
+        product=product, context_name=context, instance_name="prod"
+    ):
+        identifiers.add(operation.authorization.release_decision_record_id)
+    for capture in store.list_verireel_prod_backup_gate_operation_records(
+        product=product, context_name=context, instance_name="prod"
+    ):
+        if capture.authorization is None:
+            raise ValueError("An unowned capture protects this original target.")
+        identifiers.add(capture.authorization.release_decision_record_id)
+    for deployment in store.list_deployment_records(context_name=context, instance_name="prod"):
+        identifiers.add(deployment.runtime_source.get("first_empty_release_decision", ""))
+    for gate in store.list_backup_gate_records(context_name=context, instance_name="prod"):
+        if gate.source == FIRST_RELEASE_ABSENCE_SOURCE:
+            identifiers.add(gate.evidence.get("release_decision_record_id", ""))
+    try:
+        inventory = store.read_environment_inventory(context_name=context, instance_name="prod")
+    except FileNotFoundError:
+        inventory = None
+    if inventory is not None:
+        marker = inventory.post_deploy_update.evidence.get(FIRST_RELEASE_STOPPED_KEY)
+        if marker:
+            identifiers.add(marker)
+        elif not identifiers and (
+            inventory.artifact_identity is not None
+            or inventory.runtime_identity is not None
+            or inventory.deployment_record_id
+            or inventory.promotion_record_id
+        ):
+            raise ValueError("Recorded production custody is not an original absence.")
+    if decision is not None:
+        identifiers.add(decision.record_id)
+    result = {}
+    for identifier in identifiers:
+        if not identifier:
+            raise ValueError("An unowned record protects this original target.")
+        saved = store.read_release_review_decision_record(product=product, record_id=identifier)
+        if saved.decision != "accepted" or not isinstance(
+            saved.checklist.production, AbsentProduction
+        ):
+            raise ValueError("Original-state custody requires its saved accepted initial release.")
+        if (
+            saved.product != product
+            or saved.checklist.product != product
+            or (decision is not None and identifier == decision.record_id and saved != decision)
+        ):
+            raise ValueError(
+                "The saved initial release no longer identifies its original authority."
+            )
+        result[identifier] = saved
+    return result
+
+
+def require_first_release_history(
+    store: PostgresRecordStore,
+    decision: ReleaseReviewDecisionRecord | None,
+    context: str,
+    *,
+    product: str = "",
+) -> frozenset[str]:
+    from control_plane.client_release import (
+        client_release_steps,
+        client_release_step_operation_id,
+        client_release_grant,
+    )
+    from control_plane.contracts.odoo_prod_promotion_operation import ODOO_PROD_PROMOTION_RUN_ACTION
+    from control_plane.contracts.production_backup_gate import PRODUCTION_BACKUP_GATE_EXECUTE_ACTION
+    from control_plane.workflows.odoo_prod_promotion_inputs import build_odoo_prod_backup_record_id
+
+    product = decision.product if decision is not None else product
+    custody = first_release_custody(store, product, context, decision)
+    profile = store.read_product_profile_record(product)
+    expected_promotions: dict[str, ReleaseReviewDecisionRecord] = {}
+    expected_captures: dict[str, ReleaseReviewDecisionRecord] = {}
+    for owner in custody.values():
+        for step in client_release_steps(owner.release_start):
+            operation_id = client_release_step_operation_id(
+                profile=profile, decision=owner, step=step
+            )
+            if step.kind == "promote":
+                expected_promotions[operation_id] = owner
+            elif step.kind == "backup":
+                expected_captures[operation_id] = owner
+    operations = store.list_odoo_prod_promotion_operation_records(
+        product=product, context_name=context, instance_name="prod"
+    )
+    backup_owners: dict[str, ReleaseReviewDecisionRecord] = {}
+    operation_owners: dict[str, ReleaseReviewDecisionRecord] = {}
+    for operation in operations:
+        promotion_owner = expected_promotions.get(operation.operation_id)
+        if (
+            promotion_owner is None
+            or operation.idempotency_scope != "client-release"
+            or operation.request.expected_artifact_id
+            != promotion_owner.checklist.candidate.artifact_id
+            or operation.authorization
+            != client_release_grant(
+                decision=promotion_owner,
+                action=ODOO_PROD_PROMOTION_RUN_ACTION,
+                context=context,
+                authorized_at=operation.authorization.authorized_at,
+            )
+        ):
+            raise ValueError("A foreign production operation protects this original target.")
+        operation_owners[operation.operation_id] = promotion_owner
+        backup_owners[operation.request.infrastructure_backup_record_id] = promotion_owner
+        backup_owners[
+            build_odoo_prod_backup_record_id(
+                context=context, instance="prod", request_id=operation.request.request_id
+            )
+        ] = promotion_owner
+    for capture in store.list_verireel_prod_backup_gate_operation_records(
+        product=product, context_name=context, instance_name="prod"
+    ):
+        capture_owner = expected_captures.get(capture.operation_id)
+        if (
+            capture_owner is None
+            or capture.authorization is None
+            or capture.authorization
+            != client_release_grant(
+                decision=capture_owner,
+                action=PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
+                context=context,
+                authorized_at=capture.authorization.authorized_at,
+            )
+        ):
+            raise ValueError("A foreign capture operation protects this original target.")
+        backup_owners[capture.backup_record_id] = capture_owner
+    if any(
+        gate.record_id not in backup_owners
+        for gate in store.list_backup_gate_records(context_name=context, instance_name="prod")
+    ):
+        raise ValueError("A foreign backup protects this original target.")
+    deployments = store.list_deployment_records(context_name=context, instance_name="prod")
+    for deployment in deployments:
+        deployment_owner = operation_owners.get(
+            deployment.runtime_source.get("first_empty_release_operation", "")
+        )
+        if (
+            deployment_owner is None
+            or deployment.runtime_source.get("first_empty_release_decision")
+            != deployment_owner.record_id
+            or deployment.artifact_identity is None
+            or deployment.artifact_identity.artifact_id
+            != deployment_owner.checklist.candidate.artifact_id
+            or deployment.runtime_identity is None
+            or deployment.runtime_identity.artifact_id
+            != deployment_owner.checklist.candidate.artifact_id
+            or deployment.runtime_identity.source_git_ref
+            != deployment_owner.checklist.candidate.source_commit
+            or deployment_owner.checklist.initial_version is None
+            or deployment.runtime_identity.image_reference
+            != deployment_owner.checklist.initial_version.image_reference
+        ):
+            raise ValueError("A foreign deployment protects this original target.")
+    if any(
+        promotion.backup_record_id not in backup_owners
+        or promotion.artifact_identity.artifact_id
+        != backup_owners[promotion.backup_record_id].checklist.candidate.artifact_id
+        for promotion in store.list_promotion_records(context_name=context, to_instance_name="prod")
+    ):
+        raise ValueError("A foreign promotion protects this original target.")
+    if any(
+        record.context == context
+        and record.channel == "prod"
+        and record.artifact_id
+        not in {owner.checklist.candidate.artifact_id for owner in custody.values()}
+        for record in store.list_release_tuple_records()
+    ):
+        raise ValueError("Another production release protects this original target.")
+    return frozenset(
+        record.runtime_source["first_empty_provider_deployment_id"]
+        for record in deployments
+        if record.runtime_source.get("first_empty_provider_deployment_id")
+    )
 
 
 def _provider_projection(
@@ -285,6 +511,7 @@ def qualify_first_empty_storage(
     pending_deployment: DeploymentRecord | None = None,
     staged_environment: str | None = None,
     staged_compose: str | None = None,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> QualifiedFirstEmptyInputs:
     if (
         pending_deployment is not None
@@ -293,46 +520,122 @@ def qualify_first_empty_storage(
     ) and (previous is None or previous.intent != "replacement" or intent != "replacement"):
         raise ValueError("Staged inputs require the original executor qualification.")
     authority = resolve_first_empty_authority(
-        store, product, context, pending_deployment=pending_deployment
+        store,
+        product,
+        context,
+        pending_deployment=pending_deployment,
+        release_decision=release_decision,
     )
     if previous is not None and authority != previous.authority:
         raise ValueError("Original profile, target, runtime or binding authority changed.")
-    if intent == "replacement" and not authority.profile.prelaunch_bootstrap_authorized:
+    if (
+        intent == "replacement"
+        and release_decision is None
+        and not authority.profile.prelaunch_bootstrap_authorized
+    ):
         raise ValueError("Empty replacement requires explicit prelaunch bootstrap authority.")
     host, token = source.read_dokploy_config(
         control_plane_root=root, database_url=store.database_url
     )
+    owned_files: dict[str, list[str]] = {}
+    deployments: tuple[DeploymentRecord, ...] = ()
+    if release_decision is not None:
+        deployments = store.list_deployment_records(context_name=context, instance_name="prod")
+        for relative, keys in (
+            (
+                "code/docker-compose.yml",
+                ("first_empty_rendered_compose_sha256",),
+            ),
+            ("code/.env", ("first_empty_rendered_env_sha256",)),
+        ):
+            values = sorted(
+                {
+                    record.runtime_source[key]
+                    for record in deployments
+                    for key in keys
+                    if re.fullmatch(r"[a-f0-9]{64}", record.runtime_source.get(key, ""))
+                }
+            )
+            if values:
+                owned_files[relative] = values
 
     def provider_read() -> dict[str, object]:
         payload = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=authority.target_id.target_id
         )
-        if api.list_deployments_for_target(
+        if (
+            release_decision is not None
+            and payload.get("composeType", "docker-compose") != "docker-compose"
+        ):
+            raise ValueError(
+                "The initial accepted release requires the qualified Compose executor."
+            )
+        history = api.list_deployments_for_target(
             host=host,
             token=token,
             target_type="compose",
             target_id=authority.target_id.target_id,
             require_complete=True,
-        ):
-            raise ValueError("Provider deployment history contradicts first-empty preparation.")
+        )
+        if history:
+            if release_decision is None:
+                raise ValueError("Provider deployment history contradicts first-empty preparation.")
+            owned = require_first_release_history(store, release_decision, context)
+            if any(
+                api.deployment_key(row) not in owned or not api.deployment_is_terminal(row)
+                for row in history
+            ):
+                raise ValueError(
+                    "An unowned or unfinished provider deployment protects this target."
+                )
+        expected_environment, expected_compose = staged_environment, staged_compose
+        if release_decision is not None:
+            for field, key in (
+                ("env", "first_empty_provider_env_sha256"),
+                ("composeFile", "first_empty_provider_compose_sha256"),
+            ):
+                current = payload.get(field)
+                explicit = staged_environment if field == "env" else staged_compose
+                if explicit is not None or current in (None, ""):
+                    continue
+                expected = {
+                    record.runtime_source[key]
+                    for record in deployments
+                    if record.runtime_source.get(key)
+                }
+                if (
+                    not isinstance(current, str)
+                    or hashlib.sha256(current.encode()).hexdigest() not in expected
+                ):
+                    raise ValueError(
+                        "Original staged inputs do not belong to an accepted initial release."
+                    )
+                if field == "env":
+                    expected_environment = current
+                else:
+                    expected_compose = current
         return _provider_projection(
-            payload, authority, staged_environment=staged_environment, staged_compose=staged_compose
+            payload,
+            authority,
+            staged_environment=expected_environment,
+            staged_compose=expected_compose,
         )
 
     spec = provider_read()
     if previous is not None and spec != previous.provider_spec:
         raise ValueError("Original physical target changed.")
     frames: list[dict[str, object]] = []
+    native_spec = {**spec, **({"owned_project_files": owned_files} if owned_files else {})}
     native_copy_stream.run_managed_server_program(
         host=host,
         token=token,
         server_id=cast(str, spec["server"]),
         program=first_empty_storage_program(),
-        payload=spec,
+        payload=native_spec,
         receive=frames.append,
         timeout_seconds=60,
     )
-    expected_binding = nonvalidating_compact_sorted_json_sha256(spec)
+    expected_binding = nonvalidating_compact_sorted_json_sha256(native_spec)
     if any(frame.get("type") == "denied" for frame in frames):
         raise native_copy_stream.NativeSourceAuthorizationDenied("Original storage read refused.")
     storage = frames[0].get("storage") if len(frames) == 1 else None
@@ -345,7 +648,11 @@ def qualify_first_empty_storage(
         or re.fullmatch(r"[a-f0-9]{64}", storage) is None
         or provider_read() != spec
         or resolve_first_empty_authority(
-            store, product, context, pending_deployment=pending_deployment
+            store,
+            product,
+            context,
+            pending_deployment=pending_deployment,
+            release_decision=release_decision,
         )
         != authority
         or (previous is not None and storage != previous.storage_sha256)
@@ -359,7 +666,15 @@ def qualify_first_empty_storage(
             "intent": intent,
         }
     )
-    return QualifiedFirstEmptyInputs(authority, intent, digest, datetime.now(UTC), storage, spec)
+    return QualifiedFirstEmptyInputs(
+        authority,
+        intent,
+        digest,
+        datetime.now(UTC),
+        storage,
+        spec,
+        release_decision.record_id if release_decision is not None else "",
+    )
 
 
 def validate_first_empty_generation(
@@ -396,6 +711,10 @@ def validate_first_empty_generation(
     return qualified.authority.profile
 
 
+def first_empty_volume_names(volumes: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    return *volumes, volumes[1] + "-filestore"
+
+
 def first_empty_storage_snapshot(
     docker: Callable[..., str],
     spec: dict[str, Any],
@@ -403,6 +722,9 @@ def first_empty_storage_snapshot(
     compose_root: Path,
     read_swarm: Callable[[Callable[..., str]], list[dict[str, Any]]],
 ) -> dict[str, object]:
+    import os
+    import stat
+
     def inventory(*arguments: str) -> list[str]:
         values = docker(*arguments).splitlines()
         if (
@@ -460,8 +782,67 @@ def first_empty_storage_snapshot(
     project_root = compose_root / project
     if any(path.is_symlink() for path in (project_root, *project_root.parents)):
         raise ValueError("Original project path is aliased.")
-    if project_root.exists() and (not project_root.is_dir() or any(project_root.iterdir())):
-        raise ValueError("Original project has retained files.")
+    project_files = {}
+    if project_root.exists():
+        if not project_root.is_dir():
+            raise ValueError("Original project has retained files.")
+        entries = sorted(path.name for path in project_root.iterdir())
+        if entries:
+            expected_files = spec.get("owned_project_files", {})
+            if entries != ["code"] or not isinstance(expected_files, dict):
+                raise ValueError("Original project has retained files.")
+            parent = os.open(project_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                code = os.open("code", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                try:
+                    for name in os.listdir(code):
+                        if (
+                            name not in {"docker-compose.yml", ".env"}
+                            or f"code/{name}" not in expected_files
+                        ):
+                            raise ValueError("Original project has unowned retained files.")
+                        handle = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=code)
+                        try:
+                            before = os.fstat(handle)
+                            if (
+                                not stat.S_ISREG(before.st_mode)
+                                or before.st_nlink != 1
+                                or before.st_size > 1024 * 1024
+                            ):
+                                raise ValueError(
+                                    "Original project configuration is aliased or unbounded."
+                                )
+                            content = bytearray()
+                            while chunk := os.read(handle, 65536):
+                                content.extend(chunk)
+                                if len(content) > 1024 * 1024:
+                                    raise ValueError("Original project configuration is unbounded.")
+                            after = os.fstat(handle)
+
+                            def file_identity(observed: Any) -> tuple[int, int, int, int, int]:
+                                return (
+                                    observed.st_dev,
+                                    observed.st_ino,
+                                    observed.st_size,
+                                    observed.st_mtime_ns,
+                                    observed.st_ctime_ns,
+                                )
+
+                            digest = hashlib.sha256(content).hexdigest()
+                            if (
+                                file_identity(before) != file_identity(after)
+                                or digest not in expected_files[f"code/{name}"]
+                            ):
+                                raise ValueError(
+                                    "Original project configuration is not an accepted executor's input."
+                                )
+                            project_files[f"code/{name}"] = digest
+                        finally:
+                            os.close(handle)
+                finally:
+                    os.close(code)
+            finally:
+                os.close(parent)
     root_info = json.loads(docker("info", "--format", "{{json .}}"))
     root = Path(root_info["DockerRootDir"])
     if not root.is_absolute() or any(path.is_symlink() for path in (root, *root.parents)):
@@ -469,7 +850,7 @@ def first_empty_storage_snapshot(
     volume_root = root / "volumes"
     if not volume_root.is_dir() or volume_root.is_symlink():
         raise ValueError("Docker volume storage is unavailable.")
-    storage_names = (*names, names[1] + "-filestore")
+    storage_names = first_empty_volume_names(names)
     paths = [volume_root / name for name in storage_names]
 
     def overlaps_original(value: str) -> bool:
@@ -579,15 +960,15 @@ def first_empty_storage_snapshot(
             or any(backing.iterdir())
         ):
             raise ValueError("Original storage is nonempty, aliased or unavailable.")
-        stat = backing.stat()
-        identity = stat.st_dev, stat.st_ino
+        storage_stat = backing.stat()
+        identity = storage_stat.st_dev, storage_stat.st_ino
         if identity in selected_identities:
             raise ValueError("Original storage purposes alias the same backing directory.")
         selected_identities.add(identity)
         selected[name] = {
-            "device": stat.st_dev,
-            "inode": stat.st_ino,
-            "modified": stat.st_mtime_ns,
+            "device": storage_stat.st_dev,
+            "inode": storage_stat.st_ino,
+            "modified": storage_stat.st_mtime_ns,
             "metadata": row,
         }
     rows = metadata(
@@ -619,6 +1000,7 @@ def first_empty_storage_snapshot(
         "swarm": swarm,
         "selected": selected,
         "project_exists": project_root.exists(),
+        **({"owned_project_files": project_files} if project_files else {}),
         "docker_root": str(root),
     }
 
@@ -635,6 +1017,8 @@ def first_empty_storage_program(*, compose_root: Path = Path("/etc/dokploy/compo
         + inspect.getsource(docker_daemon_authorization_denied)
         + "\n"
         + inspect.getsource(single_local_swarm_node)
+        + "\n"
+        + inspect.getsource(first_empty_volume_names)
         + "\n"
         + inspect.getsource(first_empty_storage_snapshot)
         + "\nCOMPOSE_ROOT=Path("

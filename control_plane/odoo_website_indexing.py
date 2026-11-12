@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_website_settings import OdooWebsiteIndexing
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, AbsentProduction
 from control_plane.contracts.product_topology_read_model import build_product_environment_topology
 from control_plane.contracts.public_hosts import resolve_public_base_url
 from control_plane.contracts.runtime_identity import parse_runtime_identity_payload
@@ -97,14 +98,33 @@ def production_origin(store: Any, profile: LaunchplaneProductProfileRecord) -> s
     ) or lane.base_url.rstrip("/")
 
 
-def indexing_binding(store: Any, product: str, context: str, origin: str) -> dict[str, Any]:
+def indexing_binding(
+    store: Any,
+    product: str,
+    context: str,
+    origin: str,
+    *,
+    initial_release_decision: ReleaseReviewDecisionRecord | None = None,
+) -> dict[str, Any]:
     from control_plane.contracts.deploy_target import ProviderTargetRecord
     from control_plane.route_binding_reconcile import provider_target_projection
 
     profile = resolve_odoo_product_route(
         record_store=store, product=product, context=context, instance="prod"
     )
-    if not profile.is_active or profile.production_use not in {"prelaunch", "live"}:
+    if initial_release_decision is not None:
+        from control_plane.odoo_first_empty_inputs import resolve_first_empty_authority
+
+        if profile.production_use != "unknown" or not isinstance(
+            initial_release_decision.checklist.production, AbsentProduction
+        ):
+            raise ValueError("Initial release indexing requires its unclassified original target.")
+        resolve_first_empty_authority(
+            store, product, context, release_decision=initial_release_decision
+        )
+    if not profile.is_active or (
+        profile.production_use not in {"prelaunch", "live"} and initial_release_decision is None
+    ):
         raise ValueError("Website indexing requires an active product with known production use.")
     lane = next(
         lane for lane in profile.lanes if lane.context == context and lane.instance == "prod"
@@ -171,6 +191,7 @@ class WebsiteIndexingExecution:
     desired_state: Literal["prelaunch", "live"] | None = None
     require_authority: Callable[[], None] | None = None
     expected_artifact_id: str = ""
+    initial_release_decision: ReleaseReviewDecisionRecord | None = None
 
     def observe(
         self,
@@ -178,8 +199,18 @@ class WebsiteIndexingExecution:
         reviewed: dict[str, Any] | None = None,
         before_mutation: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
+        if self.initial_release_decision is not None and (
+            reviewed is not None or self.desired_state != "prelaunch"
+        ):
+            raise ValueError(
+                "Initial-release indexing observation only selects search protection for its qualified executor."
+            )
         binding = indexing_binding(
-            self.store, self.product, self.context, self.request.public_origin
+            self.store,
+            self.product,
+            self.context,
+            self.request.public_origin,
+            initial_release_decision=self.initial_release_decision,
         )
         target = binding["target"]
         host, token = source.read_dokploy_config(
@@ -259,7 +290,13 @@ class WebsiteIndexingExecution:
             if self.require_authority is not None:
                 self.require_authority()
             if (
-                indexing_binding(self.store, self.product, self.context, self.request.public_origin)
+                indexing_binding(
+                    self.store,
+                    self.product,
+                    self.context,
+                    self.request.public_origin,
+                    initial_release_decision=self.initial_release_decision,
+                )
                 != binding
             ):
                 raise ValueError("Website indexing authority changed before mutation.")

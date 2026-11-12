@@ -83,12 +83,16 @@ class OdooProdRollbackTarget(BaseModel):
 
     artifact_id: str
     deployment_record_id: str = ""
+    absent_release_decision_id: str = Field(default="", exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def _validate_target(self) -> "OdooProdRollbackTarget":
         self.artifact_id = self.artifact_id.strip()
         self.deployment_record_id = self.deployment_record_id.strip()
-        if not self.artifact_id:
+        if self.absent_release_decision_id:
+            if self.artifact_id or self.deployment_record_id:
+                raise ValueError("An original-absence target cannot name an earlier deployment.")
+        elif not self.artifact_id:
             raise ValueError("Odoo prod rollback target requires artifact_id.")
         return self
 

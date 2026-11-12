@@ -1,4 +1,6 @@
 from __future__ import annotations
+import hashlib
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 
 from control_plane.odoo_first_empty_inputs import (
     QualifiedFirstEmptyInputs,
@@ -957,6 +959,9 @@ def _assert_prelaunch_rebuild_policy_allows_request(
 ) -> str:
     if request.data_source_mode == "existing":
         return ""
+    if first_empty is not None and first_empty.release_decision_record_id:
+        first_empty.validate(request.product, lane.context, lane.instance)
+        return first_empty.release_decision_record_id
     policy = lane.odoo_prelaunch_rebuild
     if not policy.enabled:
         raise click.ClickException(
@@ -1486,6 +1491,7 @@ def build_odoo_stable_target_replacement_plan(
     request: OdooStableTargetReplacementRequest,
     dokploy_request: DokployRequest | None = None,
     dokploy_config_reader: DokployConfigReader | None = None,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> OdooStableTargetReplacementPlan:
     resolved_dokploy_request = dokploy_request or dokploy_api.dokploy_request
     resolved_dokploy_config_reader = dokploy_config_reader or dokploy_source.read_dokploy_config
@@ -1583,7 +1589,7 @@ def build_odoo_stable_target_replacement_plan(
     if (
         isinstance(record_store, PostgresRecordStore)
         and lane.instance == "prod"
-        and lane.odoo_data_policy.data_authority == "unknown"
+        and (lane.odoo_data_policy.data_authority == "unknown" or release_decision is not None)
         and request.data_source_mode == "empty"
     ):
         try:
@@ -1593,6 +1599,7 @@ def build_odoo_stable_target_replacement_plan(
                 product=profile.product,
                 context=lane.context,
                 intent="replacement",
+                release_decision=release_decision,
             )
             if qualified.authority.profile != profile:
                 raise ValueError("Original product profile changed during planning.")
@@ -2075,6 +2082,21 @@ def _plan_not_ready_code(plan: OdooStableTargetReplacementPlan) -> str:
     return f"plan_not_ready.{plan.blocker_codes[0]}"[:64]
 
 
+def _first_release_rendered_receipt(
+    *, host: str, token: str, target_id: str, payload: dokploy_api.JsonObject | None = None
+) -> dict[str, str]:
+    from control_plane.odoo_first_release import first_release_rendered_inputs
+
+    try:
+        if payload is None:
+            payload = dokploy_api.fetch_dokploy_target_payload(
+                host=host, token=token, target_type="compose", target_id=target_id
+            )
+        return first_release_rendered_inputs(host=host, token=token, payload=payload)
+    except (click.ClickException, OSError, ValueError, TypeError, KeyError):
+        return {"first_empty_rendered_inputs": "unavailable"}
+
+
 def execute_odoo_stable_target_replacement_apply(
     *,
     control_plane_root: Path,
@@ -2090,6 +2112,7 @@ def execute_odoo_stable_target_replacement_apply(
     release_operation: bool = False,
     operation_id: str = "",
     operation_lease_owner: str = "",
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> OdooStableTargetReplacementApplyResult:
     with _failure_stage("plan_build_failed"):
         plan = build_odoo_stable_target_replacement_plan(
@@ -2107,6 +2130,7 @@ def execute_odoo_stable_target_replacement_apply(
                 expected_current_artifact_id=request.expected_current_artifact_id,
             ),
             dokploy_request=dokploy_request,
+            release_decision=release_decision,
         )
     if plan.plan_status != "ready" or plan.current_target is None:
         raise OdooTargetReplacementStageError(
@@ -2124,10 +2148,15 @@ def execute_odoo_stable_target_replacement_apply(
     profile = record_store.read_product_profile_record(request.product)
     lane = _read_lane(profile=profile, instance=request.instance)
     first_empty: QualifiedFirstEmptyInputs | None = None
+    from control_plane.contracts.release_review import AbsentProduction
+
+    initial_release = release_decision is not None and isinstance(
+        release_decision.checklist.production, AbsentProduction
+    )
     if (
         request.instance == "prod"
         and request.data_source_mode == "empty"
-        and lane.odoo_data_policy.data_authority == "unknown"
+        and (lane.odoo_data_policy.data_authority == "unknown" or release_decision is not None)
         and not plan.destructive_backup_required
     ):
         if (
@@ -2146,6 +2175,7 @@ def execute_odoo_stable_target_replacement_apply(
                 product=profile.product,
                 context=lane.context,
                 intent="replacement",
+                release_decision=release_decision,
             )
             if qualified.authority.profile != profile:
                 raise ValueError("Original product profile changed after planning.")
@@ -2307,6 +2337,9 @@ def execute_odoo_stable_target_replacement_apply(
             )
 
     runtime_source: dict[str, str] = {"data_source_mode": plan.data_source_mode}
+    if release_decision is not None:
+        runtime_source["first_empty_release_decision"] = release_decision.record_id
+        runtime_source["first_empty_release_operation"] = operation_id
     if published_copy is not None:
         runtime_source.update(
             {
@@ -2335,6 +2368,37 @@ def execute_odoo_stable_target_replacement_apply(
     def check_backup_proof(
         *, staged_environment: str | None = None, staged_compose: str | None = None
     ) -> None:
+        if initial_release:
+            from control_plane.odoo_first_release import require_first_release_placement
+
+            assert isinstance(record_store, PostgresRecordStore)
+            assert release_decision is not None
+            current_payload = dokploy_api.fetch_dokploy_target_payload(
+                host=host, token=token, target_type="compose", target_id=target_id_record.target_id
+            )
+            require_first_release_placement(
+                record_store, release_decision, plan.context, current_payload
+            )
+            from control_plane.odoo_first_empty_inputs import require_first_release_history
+
+            owned_deployments = require_first_release_history(
+                record_store, release_decision, plan.context
+            )
+            provider_history = dokploy_api.list_deployments_for_target(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=target_id_record.target_id,
+                require_complete=True,
+            )
+            if any(
+                dokploy_api.deployment_key(row) not in owned_deployments
+                or not dokploy_api.deployment_is_terminal(row)
+                for row in provider_history
+            ):
+                raise click.ClickException(
+                    "An unowned or unfinished deployment protects the original target."
+                )
         if first_empty is not None:
             assert isinstance(record_store, PostgresRecordStore)
             try:
@@ -2348,6 +2412,7 @@ def execute_odoo_stable_target_replacement_apply(
                     pending_deployment=pending_first_empty_deployment,
                     staged_environment=staged_environment,
                     staged_compose=staged_compose,
+                    release_decision=release_decision,
                 )
             except (ValueError, FileNotFoundError) as qualification_error:
                 raise click.ClickException(
@@ -2836,6 +2901,74 @@ def execute_odoo_stable_target_replacement_apply(
                     ),
                     desired=desired_build,
                 )
+        legacy_odoo_install_modules = current_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, "")
+        # Rebuild only application-authorized values. Retaining arbitrary provider
+        # keys would preserve worker credentials (including malformed multiline
+        # fragments) from an earlier failed environment write.
+        desired_env_map = {
+            key: value for key, value in current_env_map.items() if key in application_runtime_keys
+        }
+        for key in dokploy_post_deploy.ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS:
+            desired_env_map.pop(key, None)
+        desired_env_map.pop(ODOO_INSTALL_MODULES_ENV_KEY, None)
+        desired_env_map.update(runtime_environment_values)
+        desired_env_map.update(runtime_override_environment)
+        runtime_source["artifact_odoo_version"] = apply_artifact_odoo_version(
+            desired_env_map,
+            artifact_manifest=artifact_manifest,
+            declared_keys=application_runtime_keys | declared_runtime_keys,
+        )
+        addons_path = merge_required_odoo_addons_path(
+            desired_env_map.get(ODOO_ADDONS_PATH_ENV_KEY, "")
+        )
+        if addons_path:
+            desired_env_map[ODOO_ADDONS_PATH_ENV_KEY] = addons_path
+        else:
+            desired_env_map.pop(ODOO_ADDONS_PATH_ENV_KEY, None)
+        explicit_odoo_install_modules = desired_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, "")
+        manifest_odoo_install_modules = artifact_manifest.odoo_install_modules
+        fallback_odoo_install_modules = (
+            "" if manifest_odoo_install_modules else legacy_odoo_install_modules
+        )
+        desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY] = merge_odoo_install_modules(
+            LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+            manifest_odoo_install_modules,
+            fallback_odoo_install_modules,
+            explicit_odoo_install_modules,
+        )
+        runtime_source["required_odoo_modules"] = ",".join(LAUNCHPLANE_REQUIRED_ODOO_MODULES)
+        runtime_source["required_odoo_addon_paths"] = ",".join(
+            LAUNCHPLANE_REQUIRED_ODOO_ADDON_PATHS
+        )
+        runtime_source["odoo_addons_path"] = desired_env_map.get(ODOO_ADDONS_PATH_ENV_KEY, "")
+        runtime_source["artifact_odoo_install_modules"] = ",".join(
+            artifact_manifest.odoo_install_modules
+        )
+        runtime_source["odoo_install_modules"] = desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY]
+        for key, legacy_value in ODOO_DISCARDED_LEGACY_PROVIDER_ENV.items():
+            if desired_env_map.get(key, "").strip() == legacy_value:
+                desired_env_map.pop(key, None)
+        desired_env_map["PLATFORM_CONTEXT"] = plan.context
+        desired_env_map["PLATFORM_INSTANCE"] = plan.instance
+        desired_env_map.update(dict.fromkeys(COMPOSE_IMAGE_REFERENCE_ENV_KEYS, image_reference))
+        desired_env_map.update(runtime_identity_env(runtime_identity))
+        prepared_env_text = dokploy_api.serialize_dokploy_env_text(
+            desired_env_map,
+            target_type="compose",
+            compose_type=str(target_payload.get("composeType") or "docker-compose"),
+            current_env_text=str(target_payload.get("env") or ""),
+        )
+        if release_decision is not None:
+            runtime_source["first_empty_provider_env_sha256"] = hashlib.sha256(
+                prepared_env_text.encode()
+            ).hexdigest()
+            runtime_source["first_empty_provider_compose_sha256"] = hashlib.sha256(
+                compose_file.encode()
+            ).hexdigest()
+        if initial_release:
+            runtime_source["first_empty_provider_deployment_title"] = (
+                f"launchplane:{deployment_record_id}"
+            )
         pending_deployment = build_deployment_record(
             request=ship_request,
             record_id=deployment_record_id,
@@ -2963,63 +3096,6 @@ def execute_odoo_stable_target_replacement_apply(
                 ).items()
             }
         )
-        legacy_odoo_install_modules = current_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, "")
-        # Rebuild only application-authorized values. Retaining arbitrary provider
-        # keys would preserve worker credentials (including malformed multiline
-        # fragments) from an earlier failed environment write.
-        desired_env_map = {
-            key: value for key, value in current_env_map.items() if key in application_runtime_keys
-        }
-        for key in dokploy_post_deploy.ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS:
-            desired_env_map.pop(key, None)
-        desired_env_map.pop(ODOO_INSTALL_MODULES_ENV_KEY, None)
-        desired_env_map.update(runtime_environment_values)
-        desired_env_map.update(runtime_override_environment)
-        runtime_source["artifact_odoo_version"] = apply_artifact_odoo_version(
-            desired_env_map,
-            artifact_manifest=artifact_manifest,
-            declared_keys=application_runtime_keys | declared_runtime_keys,
-        )
-        addons_path = merge_required_odoo_addons_path(
-            desired_env_map.get(ODOO_ADDONS_PATH_ENV_KEY, "")
-        )
-        if addons_path:
-            desired_env_map[ODOO_ADDONS_PATH_ENV_KEY] = addons_path
-        else:
-            desired_env_map.pop(ODOO_ADDONS_PATH_ENV_KEY, None)
-        explicit_odoo_install_modules = desired_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, "")
-        manifest_odoo_install_modules = artifact_manifest.odoo_install_modules
-        fallback_odoo_install_modules = (
-            "" if manifest_odoo_install_modules else legacy_odoo_install_modules
-        )
-        desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY] = merge_odoo_install_modules(
-            LAUNCHPLANE_REQUIRED_ODOO_MODULES,
-            manifest_odoo_install_modules,
-            fallback_odoo_install_modules,
-            explicit_odoo_install_modules,
-        )
-        runtime_source["required_odoo_modules"] = ",".join(LAUNCHPLANE_REQUIRED_ODOO_MODULES)
-        runtime_source["required_odoo_addon_paths"] = ",".join(
-            LAUNCHPLANE_REQUIRED_ODOO_ADDON_PATHS
-        )
-        runtime_source["odoo_addons_path"] = desired_env_map.get(ODOO_ADDONS_PATH_ENV_KEY, "")
-        runtime_source["artifact_odoo_install_modules"] = ",".join(
-            artifact_manifest.odoo_install_modules
-        )
-        runtime_source["odoo_install_modules"] = desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY]
-        for key, legacy_value in ODOO_DISCARDED_LEGACY_PROVIDER_ENV.items():
-            if desired_env_map.get(key, "").strip() == legacy_value:
-                desired_env_map.pop(key, None)
-        desired_env_map["PLATFORM_CONTEXT"] = plan.context
-        desired_env_map["PLATFORM_INSTANCE"] = plan.instance
-        desired_env_map.update(dict.fromkeys(COMPOSE_IMAGE_REFERENCE_ENV_KEYS, image_reference))
-        desired_env_map.update(runtime_identity_env(runtime_identity))
-        prepared_env_text = dokploy_api.serialize_dokploy_env_text(
-            desired_env_map,
-            target_type="compose",
-            compose_type=str(target_payload.get("composeType") or "docker-compose"),
-            current_env_text=str(target_payload.get("env") or ""),
-        )
         dokploy_api.update_dokploy_target_env(
             host=host,
             token=token,
@@ -3081,7 +3157,7 @@ def execute_odoo_stable_target_replacement_apply(
             target_type="compose",
             target_id=target_id_record.target_id,
         )
-        if first_empty is not None:
+        if first_empty is not None or initial_release:
             if provider_effect_checkpoint is not None:
                 provider_effect_checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
             check_backup_proof(staged_environment=prepared_env_text, staged_compose=compose_file)
@@ -3092,6 +3168,11 @@ def execute_odoo_stable_target_replacement_apply(
             target_type="compose",
             target_id=target_id_record.target_id,
             no_cache=request.no_cache,
+            **(
+                {"title": runtime_source["first_empty_provider_deployment_title"]}
+                if initial_release
+                else {}
+            ),
         )
         dokploy_api.wait_for_target_deployment(
             host=host,
@@ -3100,7 +3181,36 @@ def execute_odoo_stable_target_replacement_apply(
             target_id=target_id_record.target_id,
             before_key=dokploy_api.deployment_key(latest_before),
             timeout_seconds=deploy_timeout_seconds,
+            **(
+                {"deployment_title": runtime_source["first_empty_provider_deployment_title"]}
+                if initial_release
+                else {}
+            ),
         )
+        if initial_release:
+            history = dokploy_api.list_deployments_for_target(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=target_id_record.target_id,
+                require_complete=True,
+            )
+            matches = [
+                row
+                for row in history
+                if row.get("title") == runtime_source["first_empty_provider_deployment_title"]
+            ]
+            if (
+                len(matches) != 1
+                or not dokploy_api.deployment_key(matches[0])
+                or not dokploy_api.deployment_is_terminal(matches[0])
+            ):
+                raise click.ClickException(
+                    "The initial release's original provider deployment is unverified."
+                )
+            runtime_source["first_empty_provider_deployment_id"] = dokploy_api.deployment_key(
+                matches[0]
+            )
         runtime_source["provider_deploy_finished_at"] = utc_now_timestamp()
         deployed_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
@@ -3108,6 +3218,15 @@ def execute_odoo_stable_target_replacement_apply(
             target_type="compose",
             target_id=target_id_record.target_id,
         )
+        if initial_release:
+            runtime_source.update(
+                _first_release_rendered_receipt(
+                    host=host,
+                    token=token,
+                    target_id=target_id_record.target_id,
+                    payload=deployed_payload,
+                )
+            )
         runtime_source.update(
             {
                 f"post_deploy_{key}": value
@@ -3170,6 +3289,15 @@ def execute_odoo_stable_target_replacement_apply(
             }
         )
     except (click.ClickException, OSError) as error:
+        if initial_release and isinstance(error, dokploy_api.DokployDeploymentFailed):
+            runtime_source["first_empty_provider_deployment_id"] = error.deployment_id
+            runtime_source.update(
+                _first_release_rendered_receipt(
+                    host=host,
+                    token=token,
+                    target_id=target_id_record.target_id,
+                )
+            )
         if (
             plan.instance == "prod"
             and not production_write_started
@@ -3233,6 +3361,7 @@ def execute_odoo_stable_target_replacement_apply(
                 release_website_settings=release_website_settings,
                 restore_release_website_settings=restore_release_website_settings,
                 release_operation=release_operation,
+                release_decision=release_decision if initial_release else None,
                 rollback=rollback,
                 run_destructive_restore=plan.data_source_mode == "upstream_restore",
                 provider_effect_checkpoint=(
