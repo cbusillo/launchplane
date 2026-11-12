@@ -1407,5 +1407,5 @@ class FirstEmptyStorageStabilityTests(unittest.TestCase):
                 )
                 self.assertEqual(failure.changed_sections, expected)
                 self.assertNotIn(private, str(failure) + repr(failure.changed_sections))
-        unsited = self.failure({"type": "failed", "changed_sections": ["selected"]})
-        self.assertEqual(unsited.changed_sections, ())
+        without_sites = self.failure({"type": "failed", "changed_sections": ["selected"]})
+        self.assertEqual(without_sites.changed_sections, ())
