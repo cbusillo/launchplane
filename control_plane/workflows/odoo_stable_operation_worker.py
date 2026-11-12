@@ -2016,6 +2016,8 @@ def _execute_prod_promotion_operation(
             else None
         )
         return execute_odoo_prod_promotion_run(
+            operation_id=operation.operation_id,
+            operation_lease_owner=lease_owner,
             control_plane_root=control_plane_root_path,
             state_dir=control_plane_root_path / "state",
             database_url=getattr(record_store, "database_url", None),

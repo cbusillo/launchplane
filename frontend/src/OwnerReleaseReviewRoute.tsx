@@ -133,6 +133,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const [overrideReason, setOverrideReason] = useState("");
   const [hotfixReason, setHotfixReason] = useState("");
   const [requestReason, setRequestReason] = useState("");
+  const [initialNotes, setInitialNotes] = useState("");
   const [requestSent, setRequestSent] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -148,6 +149,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     setOverrideReason("");
     setHotfixReason("");
     setRequestReason("");
+    setInitialNotes("");
     setRequestSent(false);
     setRecorded(false);
     setRefreshFailed(false);
@@ -212,7 +214,9 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     setRequestSent(false);
     try {
       if (!fixtureMode) {
-        setResponse(await requestReleaseReview({ product, checklist_digest: response.review.checklist_digest, reason: requestReason }));
+        setResponse(await requestReleaseReview({ product, checklist_digest: response.review.checklist_digest, reason: requestReason,
+          ...(initialNotes.trim() ? { initial_version_test_notes: initialNotes.trim() } : {}),
+        }));
       }
       setRequestSent(true);
     } catch {
@@ -223,6 +227,10 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   }
 
   const checklist = response?.review.checklist;
+  const initial = checklist?.initial_version;
+  const initialNeedsNotes = !!initial && !initial.client_test_notes.trim();
+  const canPrepareInitialNotes = initialNeedsNotes && response?.review.blockers.length === 1;
+  const productionVersion = checklist && !("state" in checklist.production) ? checklist.production : null;
   const latestDecision = response?.review.latest_decision;
   const noNewRelease = response?.review.no_new_release === true;
   const testingUrl = checklist ? safeExternalUrl(checklist.testing_url) : null;
@@ -236,15 +244,16 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const reviewingHotfix = activeHotfix && !response?.can_start_temporary_hotfix;
   const incomplete = !checklist || response?.review.checklist_complete !== true;
   const hasChanges = !!checklist && !noNewRelease && (
-    checklist.production.artifact_id !== checklist.candidate.artifact_id
-    || checklist.production.source_commit !== checklist.candidate.source_commit
-    || (checklist.production.shared_addons_digest ?? "") !== (checklist.candidate.shared_addons_digest ?? "")
-    || runtimeSettingsIdentity(checklist.production.runtime_settings) !== runtimeSettingsIdentity(checklist.candidate.runtime_settings)
+    !productionVersion
+    || productionVersion.artifact_id !== checklist.candidate.artifact_id
+    || productionVersion.source_commit !== checklist.candidate.source_commit
+    || (productionVersion.shared_addons_digest ?? "") !== (checklist.candidate.shared_addons_digest ?? "")
+    || runtimeSettingsIdentity(productionVersion.runtime_settings) !== runtimeSettingsIdentity(checklist.candidate.runtime_settings)
   );
   const changedSettings = Object.entries(checklist?.candidate.runtime_settings?.values ?? {})
-    .filter(([key, value]) => checklist?.production.runtime_settings?.values[key] !== value);
+    .filter(([key, value]) => productionVersion?.runtime_settings?.values[key] !== value);
   const removedSettings = (checklist?.candidate.runtime_settings?.absent_keys ?? [])
-    .filter(key => !checklist?.production.runtime_settings?.absent_keys.includes(key));
+    .filter(key => !productionVersion?.runtime_settings?.absent_keys.includes(key));
   const client = response?.owner_github_login ?? "";
   // A viewer who is not the Client learns first who the Client is and that their
   // own decision cannot start the release.
@@ -291,6 +300,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {response.release_run ? <ReleaseRunProgress run={response.release_run} refreshFailed={refreshFailed} /> : null}
       {checklist && !noNewRelease ? <>
+        {!productionVersion ? <p>No release is recorded for production. Before the first change, Launchplane proves the target is empty and unused. This release creates or resumes the initial site. If it fails, rollback stops the site and keeps its data.</p> : null}
         {checklist.first_live_origin ? <p>Accepting this release puts {checklist.first_live_origin} into live use. After the release succeeds, Launchplane removes its prelaunch search protection.</p> : null}
         {checklist.website_settings ? <section data-website-settings aria-label="Website settings in this release">
           <h3>Website settings</h3>
@@ -299,7 +309,21 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
           <p>Testing and previews keep production analytics and search indexing disabled.</p>
         </section> : null}
         <h3>What to test</h3>
-        <ReleaseItems items={checklist.items} viewerIsOwner={response.viewer_is_owner} emptyMessage={(checklist.shared_sources ?? []).length ? "No product-repository changes. Review the shared components below." : undefined} />
+        {initial ? <section aria-label="Complete initial version">
+          <h4>Complete initial version</h4>
+          <ClientTestNotes notes={initial.client_test_notes} />
+          <details><summary>Included version and sources</summary>
+            <p>Image: <code>{initial.image_reference}</code></p>
+            <ul>{initial.sources.map(source => <li key={`${source.name}/${source.repository}/${source.commit}`}>
+              {source.name}: {source.repository} <code>{source.commit}</code>
+            </li>)}</ul>
+          </details>
+          <details><summary>Setup included in this release</summary>
+            <p>{initial.target_context}: {initial.target_name}</p>
+            <dl>{Object.entries(initial.runtime_values).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
+            <p>Managed credential purposes: {initial.managed_secret_keys.join(", ")}. Values are private.</p>
+          </details>
+        </section> : <ReleaseItems items={checklist.items} viewerIsOwner={response.viewer_is_owner} emptyMessage={(checklist.shared_sources ?? []).length ? "No product-repository changes. Review the shared components below." : undefined} />}
         {(checklist.shared_sources ?? []).map(source => <section key={`${source.repository}/${source.production_commit}/${source.candidate_commit}`} aria-label={`Shared release inputs from ${source.repository}`}>
           <h4>Shared release inputs</h4>
           <p className="owner-review-state">{source.repository}</p>
@@ -329,13 +353,14 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         </div> : null}
       </section> : null}
       {checklist && hasChanges && !activeHotfix && response.can_override && client && !latestDecision ? <section className="owner-review-action" aria-label="Ask the Client now">
-        <h3>Ask {client} to review this release now</h3>
-        <p>Ask {client} to review when you decide this release is needed. Include your reason in plain words; nothing goes live until {client} accepts it. If this review is unchanged, the existing request and its reason stay unchanged.</p>
+        <h3>{response.initial_request_uses_standing_acceptance ? "Request the initial release" : `Ask ${client} to review this release now`}</h3>
+        <p>{response.initial_request_uses_standing_acceptance ? "This request uses your recorded standing acceptance to start the exact version's gated release, including backup, checks and rollback. Review the complete initial version and setup first." : `Ask ${client} to review when you decide this release is needed. Include your reason in plain words; nothing goes live until ${client} accepts it. If this review is unchanged, the existing request and its reason stay unchanged.`}</p>
         <label><span>Why this release is needed</span><textarea value={requestReason} maxLength={1000} disabled={busy} onChange={event => setRequestReason(event.target.value)} /></label>
+        {initial ? <label><span>Test notes for the complete initial version</span><textarea value={initialNotes} maxLength={16000} disabled={busy} onChange={event => setInitialNotes(event.target.value)} /></label> : null}
         <div className="owner-review-action-buttons">
-          <button className="button" type="button" disabled={busy || incomplete || !requestReason.trim()} onClick={() => void askClientNow()}>Ask {client} to review now</button>
+          <button className="button" type="button" disabled={busy || incomplete && !canPrepareInitialNotes || !requestReason.trim() || initialNeedsNotes && !initialNotes.trim()} onClick={() => void askClientNow()}>{response.initial_request_uses_standing_acceptance ? "Request the initial release" : `Ask ${client} to review now`}</button>
         </div>
-        {requestSent ? <p role="status" className="owner-review-success">A release review request is open for {client}. Nothing has been deployed.</p> : null}
+        {requestSent ? <p role="status" className="owner-review-success">{response.initial_request_uses_standing_acceptance ? "The initial release request is recorded. Follow its progress above." : `A release review request is open for ${client}. Nothing has been deployed.`}</p> : null}
       </section> : null}
       {checklist && !noNewRelease && response.can_override && !activeHotfix ? <section className="owner-review-action release-review-override" aria-label="Admin Approval Override">
         <h3>Admin Approval Override</h3>
@@ -370,7 +395,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       {checklist ? <details className="release-review-technical">
         <summary>Technical details</summary>
         <dl>
-          <div><dt>{reviewingHotfix ? "Version the urgent fix replaced:" : "Current production version:"}</dt><dd><code>{checklist.production.source_commit}</code></dd></div>
+          <div><dt>{reviewingHotfix ? "Version the urgent fix replaced:" : "Current production version:"}</dt><dd>{productionVersion ? <code>{productionVersion.source_commit}</code> : "No production release recorded"}</dd></div>
           <div><dt>{noNewRelease ? "Testing version (already in production):" : reviewingHotfix ? "Live urgent fix:" : "Proposed production version:"}</dt><dd><code>{checklist.candidate.source_commit}</code>{reviewingHotfix ? null : <span>Currently in testing</span>}</dd></div>
           {(checklist.shared_sources ?? []).map(source => <div key={`${source.repository}/${source.production_commit}/${source.candidate_commit}`}>
             <dt>Shared components from {source.repository}</dt>

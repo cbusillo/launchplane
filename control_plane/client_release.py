@@ -96,6 +96,7 @@ from control_plane.generic_web_release_settings import (
 )
 from control_plane.contracts.release_review import (
     AcceptanceReleaseStart,
+    ReleaseChecklist,
     ReleaseReviewDecisionRecord,
     ReleaseStart,
 )
@@ -299,7 +300,10 @@ def client_release_step_operation_id(
 
 
 def release_start_for_acceptance(
-    *, store: object, profile: LaunchplaneProductProfileRecord
+    *,
+    store: object,
+    profile: LaunchplaneProductProfileRecord,
+    checklist: ReleaseChecklist | None = None,
 ) -> AcceptanceReleaseStart:
     """How a Client's acceptance recorded now runs; "" when it starts nothing.
 
@@ -320,6 +324,11 @@ def release_start_for_acceptance(
         return ""
     if mode == "director_standing":
         mode = "promote_with_rollback_drill"
+    if mode == "promote" and profile.driver_id == "odoo" and checklist is not None:
+        from control_plane.contracts.release_review import AbsentProduction
+
+        if isinstance(checklist.production, AbsentProduction):
+            mode = "promote_with_rollback_drill"
     if mode == "promote_with_rollback_drill" and _product_drill_passed(store, profile):
         return "promote"
     return mode
@@ -617,7 +626,11 @@ def _client_release_authority(
             ).artifact_id
         )
     except (FileNotFoundError, ValueError):
-        return None
+        from control_plane.contracts.release_review import AbsentProduction
+
+        if not recovering or not isinstance(checklist.production, AbsentProduction):
+            return None
+        production_artifact = ""
     if (
         authorization.context != context
         or authorization.grant
@@ -1456,7 +1469,9 @@ def _record_standing_acceptance(
             actor_github_id=profile.owner.github_id,
             actor_github_login=profile.owner.github_login,
             decided_at=decided_at,
-            release_start=release_start_for_acceptance(store=store, profile=profile),
+            release_start=release_start_for_acceptance(
+                store=store, profile=profile, checklist=checklist
+            ),
             acceptance_source="director_standing",
         )
     store.create_release_review_decision_record_if_absent(
@@ -2193,9 +2208,13 @@ def _queue_rollback(
             None,
         )
     )
-    if deployment is None:
+    from control_plane.contracts.release_review import AbsentProduction
+
+    absent = isinstance(checklist.production, AbsentProduction)
+    if deployment is None and not absent:
         raise ClientReleaseNotReady("rollback_target_missing")
     if profile.driver_id == "generic-web":
+        assert deployment is not None
         grant = client_release_grant(
             decision=decision,
             action="generic_web_rollback.execute",
@@ -2227,9 +2246,19 @@ def _queue_rollback(
         reason=f"Rollback drill for the Client's accepted release {decision.record_id}.",
     )
     try:
-        resolve_odoo_prod_rollback_target(record_store=store, request=request)
+        if not absent:
+            resolve_odoo_prod_rollback_target(record_store=store, request=request)
     except click.ClickException as error:
         raise ClientReleaseNotReady("rollback_not_ready") from error
+    if absent:
+        rollback_target = OdooProdRollbackTarget(
+            artifact_id="", absent_release_decision_id=decision.record_id
+        )
+    else:
+        assert deployment is not None
+        rollback_target = OdooProdRollbackTarget(
+            artifact_id=target_artifact_id, deployment_record_id=deployment.record_id
+        )
     operation = OdooProdRollbackOperationRecord(
         operation_id=client_release_step_operation_id(
             profile=profile, decision=decision, step=step
@@ -2243,9 +2272,7 @@ def _queue_rollback(
             product=profile.product, request=request
         ),
         request=request,
-        target=OdooProdRollbackTarget(
-            artifact_id=target_artifact_id, deployment_record_id=deployment.record_id
-        ),
+        target=rollback_target,
         authorization=client_release_grant(
             decision=decision,
             action=ODOO_PROD_ROLLBACK_ACTION,

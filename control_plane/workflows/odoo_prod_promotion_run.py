@@ -227,6 +227,8 @@ def execute_odoo_prod_promotion_run(
     continuation_plan: OdooCutoverPlan | None = None,
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
     release_decision: ReleaseReviewDecisionRecord | None = None,
+    operation_id: str = "",
+    operation_lease_owner: str = "",
 ) -> OdooProdPromotionRunResult:
     """Run one promotion; the durable worker passes checkpoints, the sync route does not.
 
@@ -343,15 +345,50 @@ def execute_odoo_prod_promotion_run(
     else:
         if continuation_plan is not None:
             raise ValueError("continuation lacks its original ordinary logical backup gate")
-        backup_result = execute_odoo_prod_backup_gate(
-            control_plane_root=control_plane_root,
-            record_store=record_store,
-            request=OdooProdBackupGateRequest(
-                context=request.context,
-                instance=request.to_instance,
-                backup_record_id=inputs_result.backup_record_id,
-                timeout_seconds=request.backup_timeout_seconds,
-            ),
+        from control_plane.contracts.release_review import AbsentProduction
+        from control_plane.odoo_first_release import (
+            capture_first_release_absence,
+            first_release_has_retained_stack,
+            first_release_backup_runtime,
+        )
+
+        absent = release_decision is not None and isinstance(
+            release_decision.checklist.production, AbsentProduction
+        )
+        stopped = (
+            absent
+            and release_decision is not None
+            and first_release_has_retained_stack(
+                record_store, request.context, product=release_decision.product
+            )
+        )
+        backup_request = OdooProdBackupGateRequest(
+            context=request.context,
+            instance=request.to_instance,
+            backup_record_id=inputs_result.backup_record_id,
+            timeout_seconds=request.backup_timeout_seconds,
+        )
+        backup_result = (
+            capture_first_release_absence(
+                record_store,
+                control_plane_root,
+                release_decision,
+                backup_request,
+                operation_id=operation_id,
+                operation_lease_owner=operation_lease_owner,
+            )
+            if absent and not stopped
+            else execute_odoo_prod_backup_gate(
+                control_plane_root=control_plane_root,
+                record_store=record_store,
+                request=backup_request,
+                expected_web_state="exited" if stopped else "running",
+                runtime_values=first_release_backup_runtime(
+                    record_store, release_decision, request.context
+                )
+                if stopped
+                else None,
+            )
         )
     if backup_result.backup_status != "pass":
         return _result_from_inputs(
@@ -392,6 +429,8 @@ def execute_odoo_prod_promotion_run(
         cutover_provider=cutover_provider,
         cutover_plan=cutover_plan,
         release_decision=release_decision,
+        operation_id=operation_id,
+        operation_lease_owner=operation_lease_owner,
     )
     run_status: Literal["pass", "fail"] = (
         "pass"

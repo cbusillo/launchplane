@@ -2,6 +2,86 @@
 title: Client release review
 ---
 
+## First accepted Odoo release
+
+An Odoo product's first accepted release can initialize its original empty
+production target through the existing release worker and replacement executor.
+It requires exclusive ownership, unused/resettable storage, no Live use or
+upstream custody, and current target/runtime/secret-binding evidence. The
+checklist records production as `state: absent`, binds those initial facts and
+recovery inputs, and reviews the complete initial version, its pinned product
+and shared sources, image, runtime setup and Client test notes. It does not
+compare source history against an invented predecessor. Missing provenance or
+initial test notes still blocks acceptance. The
+service performs no provider read while rendering the checklist.
+Absence here means no production release is recorded; physical absence is
+proved inside the accepted operation before initialization.
+
+Read `GET /v1/release-review?product=P`, then prepare the whole-version test notes
+on the existing `POST /v1/release-review/requests` route with
+`initial_version_test_notes` and the returned `checklist_digest`. This records
+the notes against the exact initial input hash and returns a new checklist
+digest. Client acceptance on `POST /v1/release-review/decisions` must use that
+new digest. Repeating the identical original request returns the prepared
+review; changed notes or changed facts need a fresh read. Preparing notes is
+not a Client decision. Under an existing `director_standing` setting, the
+recorded request starts the same gated release using that standing acceptance;
+the request page says so before submission. No setting is enabled by this path.
+
+Acceptance starts the ordinary infrastructure snapshot and PBS capture. Before
+the first deploy, a distinct original-absence recovery witness proves that the
+original provider inputs and storage are still empty. It is not a logical
+database backup: no original database exists. The accepted executor requalifies
+the target before its first write and before dispatch, and delivers the initial
+managed runtime values itself. Prior provider runtime sync, a separate setup
+deploy and the prelaunch review exemption are unnecessary. The acceptance
+supplies the exact initialization intent; no prelaunch rebuild policy or
+confirmation is needed for this qualified accepted-release branch. Other
+replacement callers keep their existing requirements.
+
+The recovery pin means no production version was serving. Automatic recovery and
+the first release's rollback drill stop only that release's web container and
+disable its restart policy. They retain the database, idle script runner,
+volumes, provider configuration and historical release records. The current
+inventory records no serving artifact, with a stopped/retained witness and
+original-operation custody. This restores absence of service, not empty storage.
+A timeout, foreign deployment, changed placement, incomplete witness or
+concurrent inventory write retains the original operation for reconciliation
+rather than replaying it or deleting data.
+
+The drill then takes its second infrastructure capture and a real logical
+database/filestore backup against the retained stopped web container and running
+script runner. It promotes the same accepted candidate in existing-data mode.
+The backup directory must already be recorded in DB-backed runtime settings and
+is bound in the initial checklist, so backup and restore resolve the same root.
+No extra provider sync is needed. Only a currently qualified,
+physically empty original state can use an absence witness. Later data-bearing
+backup gates remain ordinary verified captures.
+
+A conclusive deploy failure before a stack exists may retain only the original
+executor's exact configuration files. A later accepted initial release proves
+their rendered-file hashes, exclusive ownership, terminal provider history and physically
+empty storage again. Any retained database content or unowned file refuses that
+empty route. A recovered stack with data takes the ordinary logical backup and
+uses existing-data mode, including across subsequent initial acceptances.
+The private cached-source reader records the generated compose and environment
+hashes after the original deployment, since provider rendering can add environment
+fields. It returns no environment values. Missing or changed rendered receipts
+refuse configuration-only reuse and retain the original operation for reconciliation.
+
+Service routes and acceptance/standing-Director settings are unchanged. Direct
+target replacement Apply cannot substitute for first-release acceptance. A failed
+initial release preserves its newly created data and original operation; this
+path authorizes no deletion, unreviewed deploy or blind retry of uncertain
+effects.
+
+The inverse never delivers edited runtime inputs. It can stop the original
+owned web after a settings or managed-binding edit, using the immutable recovery
+pin and current custody, placement, use, data and Live checks. Forward capture,
+initialization and repromotion still require the exact accepted fingerprint.
+Changed protected facts retain the hold; changed forward inputs need fresh
+review and acceptance.
+
 ## Recorded source inputs
 
 Odoo release review lists addon, base-image and build-tool commit ranges from
@@ -1401,20 +1481,14 @@ than the recorded one with `409 promotion_required` before any provider call.
 They can still redeploy the current artifact, for example after a settings
 change. A new release goes through promotion, which carries this gate and the
 backup gate; rollback stays the recovery path. Only a product recorded as
-`prelaunch` with explicit authority is exempt, which is also how an initial production lane is
-bootstrapped.
-
-An initial product needs a verified prelaunch production-lane baseline before
-this comparison can run. Missing production records do not prove that no live
-site exists, so the service does not silently interpret missing evidence as a
-first release. Bootstrap a non-live lane explicitly, then request review before
-live activation. The CM baseline must be verified from deployed service records.
-
-Keep release acceptance held while preparing the baseline through the existing
-[operational paths](operations.md). Then use the reviewed Client setting above;
-source delivery does not activate it. Odoo retains its native stopped-run and
-recovery behavior; same-candidate redeploy restart qualification remains specific
-to generic web.
+`prelaunch` with explicit authority retains its separate existing exemption.
+It is not required by the qualified accepted first Odoo release above. That
+release initializes production inside the gated operation; it needs no separate
+pre-release deployment or baseline. Missing records alone never prove absence:
+the metadata, physical storage, ownership, use and provider checks still qualify
+the exact target. Source delivery does not create acceptance or activate a
+product. Same-candidate redeploy restart qualification remains specific to
+generic web.
 
 Release decisions are persisted in `launchplane_release_review_decisions`, with
 file storage reserved for tests and rehearsal. Deployments must migrate the

@@ -79,6 +79,7 @@ class ReleaseReviewRouteDependencies:
             str,
             str,
             str,
+            str,
         ],
         bool,
     ]
@@ -112,6 +113,11 @@ class ReleaseReviewResponse(BaseModel):
     release_request: ReleaseRequestDecisionRecord | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    initial_request_uses_standing_acceptance: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
     # Whether accepting starts the release, the site it goes live on, and what the
@@ -161,6 +167,7 @@ class ReleaseRequestEnvelope(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
     source: ReleaseRequestSource = "director_request"
     decision_reference: str = Field(default="", max_length=2000)
+    initial_version_test_notes: str = Field(default="", max_length=16000)
     adopt_issue_number: int | None = Field(default=None, ge=1)
     adopt_comment_id: int | None = Field(default=None, ge=1)
     dry_run: bool = False
@@ -177,6 +184,8 @@ class ReleaseRequestEnvelope(BaseModel):
             raise ValueError("Receipt adoption requires both the issue and original comment.")
         if self.dry_run and self.adopt_issue_number is None:
             raise ValueError("Dry run is supported for receipt adoption only.")
+        if self.adopt_issue_number is not None and self.initial_version_test_notes:
+            raise ValueError("Initial-version notes require a new exact release request.")
         return self
 
 
@@ -338,13 +347,23 @@ def register_release_review_routes(
             viewer_is_owner=viewer_is_owner,
             can_override=can_override(profile, identity),
             review=review,
+            initial_request_uses_standing_acceptance=bool(
+                review.checklist is not None
+                and review.checklist.initial_version is not None
+                and profile.release_on_acceptance == "director_standing"
+            ),
             release_request=(
                 profile.release_request
                 if director_agent_identity(identity) or can_override(profile, identity)
                 else None
             ),
-            release_on_acceptance=release_start_for_acceptance(store=store, profile=profile)
-            or "held",
+            release_on_acceptance=cast(
+                ReleaseOnAcceptance,
+                release_start_for_acceptance(
+                    store=store, profile=profile, checklist=review.checklist
+                )
+                or "held",
+            ),
             live_site_url=prod_lane.base_url if prod_lane is not None else "",
             release_run=release_run(store, profile, review, reviewing_hotfix=hotfix is not None),
             can_start_temporary_hotfix=director,
@@ -370,7 +389,9 @@ def register_release_review_routes(
             # The hotfix is already live: Accept keeps it; a request for changes rolls back.
             return "rollback" if decision == "changes_requested" else ""
         if decision == "accepted":
-            return release_start_for_acceptance(store=store, profile=profile)
+            return release_start_for_acceptance(
+                store=store, profile=profile, checklist=current.review.checklist
+            )
         return ""
 
     def read_release_review_access(
@@ -628,13 +649,33 @@ def register_release_review_routes(
                 message="An agent must cite the Director request or agreed finish line.",
             )
         current = response(record_store, profile, identity, trace_id)
+        initial_notes = envelope.initial_version_test_notes
         if current.review.checklist_digest != envelope.checklist_digest:
-            raise common.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="release_checklist_changed",
-                message="The release checklist changed or is unavailable. Reload it before deciding.",
-            )
+            saved = profile.release_request
+            if (
+                envelope.initial_version_test_notes
+                and saved is not None
+                and saved.initial_version_review is not None
+                and saved.initial_version_review.inputs_sha256 == envelope.checklist_digest
+                and saved.initial_version_review.client_test_notes
+                == envelope.initial_version_test_notes.strip()
+                and saved.checklist_digest == current.review.checklist_digest
+                and (saved.reason, saved.source, saved.decision_reference)
+                == (envelope.reason, envelope.source, envelope.decision_reference)
+            ):
+                if (
+                    profile.release_on_acceptance == "director_standing"
+                    or current.review.latest_decision is not None
+                ):
+                    return current
+                initial_notes = ""
+            else:
+                raise common.http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="release_checklist_changed",
+                    message="The release checklist changed or is unavailable. Reload it before deciding.",
+                )
         try:
             opened = (
                 dependencies.adopt_invitation(
@@ -661,6 +702,7 @@ def register_release_review_routes(
                     f"github:{identity.github_id}"
                     if isinstance(identity, GitHubHumanIdentity)
                     else str(getattr(identity, "subject", "")),
+                    initial_notes,
                 )
             )
         except (FileNotFoundError, StopIteration, ValueError, click.ClickException):
@@ -672,13 +714,10 @@ def register_release_review_routes(
                 code="release_review_not_opened",
                 message="The release review could not be confirmed. Reload before trying again; a request may already be open. The release must be complete, undecided and waiting only for the Client.",
             )
-        return current.model_copy(
-            update={
-                "release_request": cast(ReleaseReviewStore, record_store)
-                .read_product_profile_record(profile.product)
-                .release_request
-            }
+        saved_profile = cast(ReleaseReviewStore, record_store).read_product_profile_record(
+            profile.product
         )
+        return response(record_store, saved_profile, identity, trace_id)
 
     for path, endpoint, method, operation in (
         ("/v1/release-review", read_release_review, "GET", "read_release_review"),

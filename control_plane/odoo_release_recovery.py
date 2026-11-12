@@ -14,7 +14,7 @@ from control_plane.contracts.odoo_prod_rollback_operation import (
     build_odoo_prod_rollback_operation_id,
     odoo_prod_rollback_request_fingerprint,
 )
-from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, AbsentProduction
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.odoo_cutover_recovery import (
     operation_aborted,
@@ -31,6 +31,15 @@ def pin_odoo_release_recovery_target(
 ) -> dict[str, str]:
     """Pin the checklist's passing production deployment before any deploy effect."""
 
+    if isinstance(decision.checklist.production, AbsentProduction):
+        from control_plane.odoo_first_empty_inputs import resolve_first_empty_authority
+
+        resolve_first_empty_authority(store, decision.product, context, release_decision=decision)
+        return {
+            "recovery_kind": "original_absence",
+            "release_decision_record_id": decision.record_id,
+            "authority_sha256": decision.checklist.production.authority_sha256,
+        }
     deployment = next(
         (
             record
@@ -50,12 +59,32 @@ def pin_odoo_release_recovery_target(
 
 
 def require_odoo_release_recovery_pin(
-    store: PostgresRecordStore, operation: OdooProdPromotionOperationRecord
+    store: PostgresRecordStore,
+    operation: OdooProdPromotionOperationRecord,
+    *,
+    recovering: bool = False,
 ) -> None:
     decision = store.read_release_review_decision_record(
         product=operation.product, record_id=operation.authorization.release_decision_record_id
     )
     pin = operation.checkpoints[0].evidence if operation.checkpoints else {}
+    if isinstance(decision.checklist.production, AbsentProduction):
+        from control_plane.odoo_first_empty_inputs import resolve_first_empty_authority
+
+        expected = {
+            "recovery_kind": "original_absence",
+            "release_decision_record_id": decision.record_id,
+            "authority_sha256": decision.checklist.production.authority_sha256,
+        }
+        if pin != expected:
+            raise ValueError("The original-absence recovery binding changed.")
+        if recovering:
+            resolve_first_empty_authority(
+                store, decision.product, operation.context, inverse_decision=decision
+            )
+        else:
+            pin_odoo_release_recovery_target(store, decision, operation.context)
+        return
     deployment = store.read_deployment_record(pin.get("recovery_deployment_record_id", ""))
     if (
         pin.get("recovery_artifact_id") != decision.checklist.production.artifact_id
@@ -158,11 +187,19 @@ def build_odoo_release_recovery(
             product=source.product, record_id=source.authorization.release_decision_record_id
         )
         pin = source.checkpoints[0].evidence
-        target = OdooProdRollbackTarget(
-            artifact_id=pin["recovery_artifact_id"],
-            deployment_record_id=pin["recovery_deployment_record_id"],
+        target = (
+            OdooProdRollbackTarget(artifact_id="", absent_release_decision_id=decision.record_id)
+            if isinstance(decision.checklist.production, AbsentProduction)
+            else OdooProdRollbackTarget(
+                artifact_id=pin["recovery_artifact_id"],
+                deployment_record_id=pin["recovery_deployment_record_id"],
+            )
         )
-        deployment = store.read_deployment_record(target.deployment_record_id)
+        deployment = (
+            store.read_deployment_record(target.deployment_record_id)
+            if target.deployment_record_id
+            else None
+        )
         promotion = store.read_promotion_record(source.result.promotion_record_id)
     except (FileNotFoundError, KeyError, IndexError, ValueError):
         return None
@@ -175,16 +212,24 @@ def build_odoo_release_recovery(
         or source.request.expected_artifact_id != decision.checklist.candidate.artifact_id
         or source.result.artifact_id != decision.checklist.candidate.artifact_id
         or target.artifact_id != decision.checklist.production.artifact_id
-        or deployment.context != source.context
-        or deployment.instance != source.instance
-        or not deployment_record_passed(deployment)
-        or deployment.artifact_identity is None
-        or deployment.artifact_identity.artifact_id != target.artifact_id
+        or deployment is not None
+        and (
+            deployment.context != source.context
+            or deployment.instance != source.instance
+            or not deployment_record_passed(deployment)
+            or deployment.artifact_identity is None
+            or deployment.artifact_identity.artifact_id != target.artifact_id
+        )
         or promotion.context != source.context
         or promotion.to_instance != source.instance
         or promotion.artifact_identity.artifact_id != source.result.artifact_id
     ):
         return None
+    if target.absent_release_decision_id:
+        try:
+            require_odoo_release_recovery_pin(store, source, recovering=True)
+        except (FileNotFoundError, ValueError):
+            return None
     key = f"{source.operation_id}:failure-recovery"
     request = OdooProdRollbackRequest(
         context=source.context,

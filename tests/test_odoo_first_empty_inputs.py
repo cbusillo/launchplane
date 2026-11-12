@@ -1064,7 +1064,7 @@ class FirstEmptyStorageTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.volume_root = self.root / "docker" / "volumes"
         self.volume_root.mkdir(parents=True)
-        self.spec = {"project": "example-prod", "volumes": ["db", "data", "logs"]}
+        self.spec: dict[str, Any] = {"project": "example-prod", "volumes": ["db", "data", "logs"]}
         self.names: list[str] = []
         self.volume_metadata: dict[str, dict[str, Any]] = {}
         self.containers: dict[str, dict[str, Any]] = {}
@@ -1149,6 +1149,40 @@ class FirstEmptyStorageTests(unittest.TestCase):
                 {"Type": "volume", "Name": "db", "Source": str(self.volume_root / "db" / "_data")}
             ],
         }
+        with self.assertRaises(ValueError):
+            self.snapshot()
+
+    def test_only_exact_owned_executor_files_can_remain_without_original_data(self) -> None:
+        import hashlib
+
+        code = self.root / "compose" / "example-prod" / "code"
+        code.mkdir(parents=True)
+        self.snapshot()
+        content = b"services: {}"
+        compose = code / "docker-compose.yml"
+        compose.write_bytes(content)
+        with self.assertRaises(ValueError):
+            self.snapshot()
+        self.spec["owned_project_files"] = {
+            "code/docker-compose.yml": [hashlib.sha256(content).hexdigest()]
+        }
+        witness = self.snapshot()
+        self.assertEqual(
+            witness["owned_project_files"],
+            {"code/docker-compose.yml": hashlib.sha256(content).hexdigest()},
+        )
+        compose.write_bytes(b"foreign configuration")
+        with self.assertRaises(ValueError):
+            self.snapshot()
+        compose.write_bytes(content)
+        (code / "backup").write_bytes(b"only copy")
+        with self.assertRaises(ValueError):
+            self.snapshot()
+        (code / "backup").unlink()
+        backing = self.volume_root / "db" / "_data"
+        backing.mkdir(parents=True)
+        self.names.append("db")
+        (backing / "PG_VERSION").write_text("fictional database")
         with self.assertRaises(ValueError):
             self.snapshot()
 

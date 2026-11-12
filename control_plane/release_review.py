@@ -7,7 +7,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple, Protocol, cast
+from typing import NamedTuple, Protocol, cast, Literal, overload
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote
 
@@ -39,7 +39,10 @@ from control_plane.contracts.release_review import (
     ReleaseEvidenceReason,
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
+    ReleaseReviewItem,
+    InitialVersionTestNotes,
     ReleaseVersion,
+    AbsentProduction,
     SharedSourceReview,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
@@ -348,19 +351,59 @@ def release_website_settings(
     )
 
 
+@overload
+def release_version(
+    *,
+    store: ReleaseReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    instance: Literal["testing"],
+) -> ReleaseVersion: ...
+
+
+@overload
 def release_version(
     *, store: ReleaseReviewStore, profile: LaunchplaneProductProfileRecord, instance: str
-) -> ReleaseVersion:
+) -> ReleaseVersion | AbsentProduction: ...
+
+
+def release_version(
+    *, store: ReleaseReviewStore, profile: LaunchplaneProductProfileRecord, instance: str
+) -> ReleaseVersion | AbsentProduction:
     lane = next((lane for lane in profile.lanes if lane.instance == instance), None)
     if lane is None:
         if instance == "testing":
             raise ReleaseEvidenceUnavailable("testing_lane_missing")
         raise _identity_missing(instance)
     if profile.driver_id == "odoo":
+        if instance == "prod":
+            from control_plane.odoo_first_release import (
+                first_release_is_stopped,
+                first_release_production,
+            )
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            if isinstance(store, PostgresRecordStore):
+                try:
+                    if first_release_is_stopped(store, lane.context, product=profile.product):
+                        return first_release_production(store, profile.product, lane.context)
+                except (FileNotFoundError, ValueError, click.ClickException) as error:
+                    raise ReleaseEvidenceUnavailable("production_settings_unavailable") from error
         try:
             release = store.read_release_tuple_record(
                 context_name=lane.context, channel_name=instance
             )
+        except FileNotFoundError as error:
+            if instance == "prod":
+                from control_plane.odoo_first_release import first_release_production
+                from control_plane.storage.postgres import PostgresRecordStore
+
+                if isinstance(store, PostgresRecordStore):
+                    try:
+                        return first_release_production(store, profile.product, lane.context)
+                    except (FileNotFoundError, ValueError):
+                        pass
+            raise ReleaseEvidenceUnavailable("release_record_missing") from error
+        try:
             artifact = store.read_artifact_manifest(release.artifact_id)
         except FileNotFoundError as error:
             raise ReleaseEvidenceUnavailable("release_record_missing") from error
@@ -475,7 +518,11 @@ def _generic_web_inventory_release_version(
 
 
 def build_release_review(
-    *, store: ReleaseReviewStore, profile: LaunchplaneProductProfileRecord, read: GitHubRead
+    *,
+    store: ReleaseReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    read: GitHubRead,
+    initial_version_test_notes: InitialVersionTestNotes | None = None,
 ) -> ReleaseReviewStatus:
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
@@ -531,6 +578,9 @@ def build_release_review(
         )
     shared_sources: tuple[SharedSourceReview, ...] = ()
     additional_changes: tuple[str, ...] = ()
+    items: tuple[ReleaseReviewItem, ...]
+    untracked: tuple[str, ...]
+    initial_version = None
     try:
         # Preview drivers write bare repository anchors; readers accept both
         # bare and owner/repo. Keep both within the product's preview context.
@@ -544,16 +594,27 @@ def build_release_review(
             ),
             repository=profile.repository,
         )
-        items, untracked = read_release_changes(
-            repository=profile.repository,
-            production_commit=production.source_commit,
-            candidate_commit=candidate.source_commit,
-            read=read,
-            preview_hosts=preview_hosts,
-            review_label=profile.owner.review_label,
-            policy_store=store,
-        )
-        if profile.driver_id == "odoo":
+        if isinstance(production, AbsentProduction):
+            from control_plane.initial_version_review import initial_version_review
+
+            try:
+                initial_version, additional_changes = initial_version_review(
+                    store, profile, store.read_artifact_manifest(candidate.artifact_id)
+                )
+            except (ValueError, click.ClickException) as error:
+                raise ReleaseEvidenceUnavailable("production_settings_unavailable") from error
+            items, untracked = (), ()
+        else:
+            items, untracked = read_release_changes(
+                repository=profile.repository,
+                production_commit=production.source_commit,
+                candidate_commit=candidate.source_commit,
+                read=read,
+                preview_hosts=preview_hosts,
+                review_label=profile.owner.review_label,
+                policy_store=store,
+            )
+        if profile.driver_id == "odoo" and not isinstance(production, AbsentProduction):
             shared_sources, additional_changes = read_shared_source_changes(
                 production=store.read_artifact_manifest(production.artifact_id),
                 candidate=store.read_artifact_manifest(candidate.artifact_id),
@@ -605,6 +666,7 @@ def build_release_review(
         untracked_commits=untracked,
         shared_sources=shared_sources,
         additional_changes=additional_changes,
+        initial_version=initial_version,
         first_live_origin=first_live_origin,
         production_website_settings=release_website_settings(
             store=store, profile=profile, artifact_id=production.artifact_id, instance="prod"
@@ -617,10 +679,24 @@ def build_release_review(
                 production=store.read_artifact_manifest(production.artifact_id),
                 candidate=store.read_artifact_manifest(candidate.artifact_id),
             )
-            if profile.driver_id == "odoo"
+            if profile.driver_id == "odoo" and not isinstance(production, AbsentProduction)
             else None
         ),
     )
+    if initial_version is not None:
+        from control_plane.initial_version_review import recorded_initial_version_notes
+
+        checklist = recorded_initial_version_notes(
+            checklist,
+            initial_version_test_notes
+            or (
+                profile.release_request.initial_version_review
+                if profile.release_request is not None
+                else None
+            ),
+        )
+    elif initial_version_test_notes is not None:
+        raise ValueError("Initial-version notes cannot prepare an ordinary release.")
     digest = checklist_digest(checklist)
     matching = [
         decision
@@ -750,6 +826,13 @@ def checklist_blockers(
         blockers.append("No Client set for this product.")
     if not checklist.testing_url and profile.public_website != "none":
         blockers.append("The testing site URL is unavailable.")
+    if (
+        checklist.initial_version is not None
+        and not checklist.initial_version.client_test_notes.strip()
+    ):
+        from control_plane.initial_version_review import INITIAL_TEST_NOTES_REQUIRED
+
+        blockers.append(INITIAL_TEST_NOTES_REQUIRED)
     groups = [("", checklist.items, checklist.untracked_commits)] + [
         (f"{source.repository} ", source.items, source.untracked_commits)
         for source in checklist.shared_sources
@@ -794,6 +877,7 @@ def current_release_review(
     profile: LaunchplaneProductProfileRecord,
     include_prelaunch: bool = False,
     trace_id: str = "",
+    initial_version_test_notes: InitialVersionTestNotes | None = None,
 ) -> ReleaseReviewStatus:
     with ExitStack() as credentials:
         if profile.prelaunch_bootstrap_authorized and not include_prelaunch:
@@ -828,6 +912,7 @@ def current_release_review(
                 store=cast(ReleaseReviewStore, record_store),
                 profile=profile,
                 read=read,
+                initial_version_test_notes=initial_version_test_notes,
             )
         # Provider errors may contain private URLs: log and return only the fixed code.
         except ReleaseEvidenceUnavailable as error:

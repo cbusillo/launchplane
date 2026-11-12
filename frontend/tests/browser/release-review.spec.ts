@@ -4,6 +4,104 @@ import type { Request } from "@playwright/test";
 import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
 import { RELEASE_PROGRESS_REFRESH_MS } from "../../src/OwnerReleaseReviewRoute";
 
+test("The first production release keeps acceptance bound while showing no previous version", { tag: "@responsive" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("products");
+  });
+  const checklist = response.review.checklist!;
+  checklist.production = { state: "absent", authority_sha256: "a".repeat(64), recovery_backup_root: "/volumes/data/backups/launchplane" };
+  checklist.initial_version = {
+    sources: [{ name: "Product", repository: response.repository, commit: checklist.candidate.source_commit }],
+    artifact_manifest_sha256: "b".repeat(64), image_reference: "example/product@sha256:" + "c".repeat(64),
+    target_context: "example-production", target_name: "example-prod", runtime_values: { ODOO_DB_NAME: "example" },
+    managed_secret_keys: ["ODOO_DB_PASSWORD"], client_test_notes: "Open the initial site and verify a fictional contact and its follow-up reminder.",
+  };
+  checklist.items = [];
+  checklist.shared_sources = [];
+  response.review.latest_decision = null;
+  response.review.approved = false;
+  response.review.checklist_complete = true;
+  response.release_on_acceptance = "promote_with_rollback_drill";
+  response.release_run = null;
+  const writes: unknown[] = [];
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: response.owner_github_login, github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.route("**/v1/release-review/decisions", route => {
+    writes.push(route.request().postDataJSON());
+    return route.fulfill({ json: response });
+  });
+  await page.goto("/ui/owner-review?product=example-site");
+  const technical = page.locator(".release-review-technical");
+  await technical.getByText("Technical details", { exact: true }).click();
+  const production = technical.locator("dl > div").first().locator("dd");
+  await expect(production.locator("code")).toHaveCount(0);
+  await expect(production).not.toBeEmpty();
+  const decision = page.getByRole("region", { name: "Client release decision", exact: true });
+  const initial = page.getByRole("region", { name: "Complete initial version", exact: true });
+  await expect(initial).toContainText(checklist.initial_version.client_test_notes);
+  await initial.getByText("Setup included in this release", { exact: true }).click();
+  await expect(initial).toContainText("ODOO_DB_NAME");
+  await expect(initial).toContainText(checklist.initial_version.runtime_values.ODOO_DB_NAME);
+  await expect(decision.getByRole("button", { name: "Accept release", exact: true })).toBeEnabled();
+  await decision.getByRole("button", { name: "Accept release", exact: true }).click();
+  await waitForState(() => writes).toMatchObject([{ product: response.product, checklist_digest: response.review.checklist_digest, decision: "accepted", reason: "" }]);
+  await page.screenshot({ path: testInfo.outputPath("first-production-review.png"), fullPage: true });
+});
+
+test("Initial-version notes prepare the exact review through the existing request route", { tag: "@responsive" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=operator");
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("operator");
+  });
+  const checklist = response.review.checklist!;
+  checklist.production = { state: "absent", authority_sha256: "a".repeat(64), recovery_backup_root: "/volumes/data/backups/launchplane" };
+  checklist.initial_version = { sources: [{ name: "Product", repository: response.repository, commit: checklist.candidate.source_commit }], artifact_manifest_sha256: "b".repeat(64), image_reference: "example/product@sha256:" + "c".repeat(64), target_context: "example-production", target_name: "example-prod", runtime_values: { ODOO_DB_NAME: "example" }, managed_secret_keys: ["ODOO_DB_PASSWORD"], client_test_notes: "" };
+  checklist.items = [];
+  checklist.shared_sources = [];
+  response.review.latest_decision = null;
+  response.review.approved = false;
+  response.review.checklist_complete = false;
+  response.release_run = null;
+  const submittedDigest = response.review.checklist_digest;
+  const writes: unknown[] = [];
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-operator", github_id: 9003, role: "admin", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.route("**/v1/release-review/requests", route => {
+    const payload = route.request().postDataJSON();
+    writes.push(payload);
+    checklist.initial_version!.client_test_notes = payload.initial_version_test_notes;
+    response.review.checklist_digest = "d".repeat(64);
+    response.review.checklist_complete = true;
+    return route.fulfill({ json: response });
+  });
+  await page.goto("/ui/owner-review?product=example-site");
+  const ask = page.getByRole("region", { name: "Ask the Client now", exact: true });
+  await ask.getByRole("textbox", { name: "Why this release is needed" }).fill("The initial version is ready for review.");
+  const button = ask.getByRole("button");
+  await expect(button).toBeDisabled();
+  const notes = "Open the initial site, add a fictional contact and verify its follow-up reminder.";
+  await ask.getByRole("textbox", { name: "Test notes for the complete initial version" }).fill(notes);
+  response.review.blockers.push("The candidate artifact cannot be verified.");
+  await page.reload();
+  await ask.getByRole("textbox", { name: "Why this release is needed" }).fill("The initial version is ready for review.");
+  await ask.getByRole("textbox", { name: "Test notes for the complete initial version" }).fill(notes);
+  await expect(button).toBeDisabled();
+  response.review.blockers.pop();
+  await page.reload();
+  await ask.getByRole("textbox", { name: "Why this release is needed" }).fill("The initial version is ready for review.");
+  await ask.getByRole("textbox", { name: "Test notes for the complete initial version" }).fill(notes);
+  await expect(button).toBeEnabled();
+  await button.click();
+  await expect(ask.getByRole("status")).toBeVisible();
+  expect(writes).toMatchObject([{ product: response.product, checklist_digest: submittedDigest, initial_version_test_notes: notes }]);
+  await expect(page.getByRole("region", { name: "Complete initial version", exact: true })).toContainText(notes);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("initial-version-notes.png"), fullPage: true });
+});
+
 test("A settings-only release shows its saved settings and allows the release request", { tag: "@responsive" }, async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=operator");
   const response = await page.evaluate(async () => {

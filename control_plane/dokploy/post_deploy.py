@@ -1456,6 +1456,7 @@ def run_compose_odoo_backup_gate(
     backup_root: str,
     timeout_seconds: int | None = None,
     before_provider_mutation: Callable[[str], None] | None = None,
+    expected_web_state: Literal["running", "exited"] = "running",
 ) -> api.JsonObject:
     normalized_backup_nonce = backup_nonce.strip()
     if not normalized_backup_nonce:
@@ -1506,6 +1507,7 @@ def run_compose_odoo_backup_gate(
         filestore_path=normalized_filestore_path,
         backup_root=normalized_backup_root,
         backup_record_id=backup_record_id,
+        expected_web_state=expected_web_state,
     )
     schedule_payload: api.JsonObject = {
         "name": DOKPLOY_ODOO_BACKUP_GATE_SCHEDULE_NAME,

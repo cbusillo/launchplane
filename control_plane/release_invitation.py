@@ -23,6 +23,7 @@ from control_plane.contracts.release_review import (
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
     ReleaseVersion,
+    AbsentProduction,
 )
 from control_plane.release_invitation_changes import InvitationChange, client_invitation_changes
 from control_plane.release_review import (
@@ -281,7 +282,7 @@ def _accepted_release_in_progress(
     store: ReleaseReviewStore,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord | None,
-    production: ReleaseVersion,
+    production: ReleaseVersion | AbsentProduction,
     candidate: ReleaseVersion,
 ) -> bool:
     if decision is None or decision.decision != "accepted" or not decision.release_start:
@@ -995,7 +996,7 @@ def _release_invitation_body(
         change_links.append(_settings_review_note(checklist))
     from control_plane.client_release import release_start_for_acceptance
 
-    mode = release_start_for_acceptance(store=store, profile=profile)
+    mode = release_start_for_acceptance(store=store, profile=profile, checklist=checklist)
     effect = "Accepting records your approval; an admin starts the release."
     if mode:
         effect = "Accepting starts the release to the production site, with a verified backup, checks and automatic rollback."
@@ -1012,6 +1013,11 @@ def _release_invitation_body(
         action = "review the prepared production settings on the release page" + (
             " and " + action if changes else ""
         )
+    if checklist.initial_version is not None:
+        notes = [
+            "- Complete initial version: review its pinned sources, setup and test notes on the release page."
+        ]
+        action = "review the complete initial version and follow its test notes on the release page"
     return (
         f"{release_candidate_issue_marker(digest)}\n{release_issue_product_marker(profile.product)}\n"
         + f"<!-- launchplane:release-request-decision:{request_decision.record_id} -->\n"
