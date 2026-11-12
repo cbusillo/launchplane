@@ -2,6 +2,7 @@ import os
 import json
 import base64
 import inspect
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -292,6 +293,72 @@ class FirstEmptyInputsHttpTests(FirstEmptyInputsFixture, unittest.IsolatedAsynci
         )
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
+    async def test_refused_original_apply_records_nothing_and_resumes_on_unchanged_facts(
+        self,
+    ) -> None:
+        entries = [
+            {
+                "binding_key": "ODOO_DB_PASSWORD",
+                "generate": "odoo_first_empty",
+                "secret_class": "prod_only",
+            }
+        ]
+        dry = await self.post("runtime_credentials", secrets=entries)
+        self.assertEqual(dry.status_code, 202, dry.text)
+        original = {
+            "secrets": entries,
+            "mode": "apply",
+            "reviewed_plan_sha256": dry.json()["result"]["odoo_first_empty"]["plan_sha256"],
+            "key": "original-apply",
+        }
+        observation_changed = native_copy_stream.NativeProgramFailed(
+            "fixture",
+            program=first_empty_storage_program(),
+            program_sites=[1],
+            changed_sections=["selected"],
+        )
+        for refusal in ("storage_changed", "facts_changed"):
+            with self.subTest(refusal=refusal):
+                self.probe.side_effect = observation_changed
+                if refusal == "facts_changed":
+                    self.probe.side_effect = self.observe
+                    self.storage_identity = "b" * 64
+                with patch(
+                    "control_plane.product_config.random_secrets.token_urlsafe",
+                    side_effect=AssertionError("refused apply generated"),
+                ):
+                    refused = await self.post("runtime_credentials", **original)
+                self.assertEqual(refused.status_code, 409, refused.text)
+                self.assertEqual(
+                    refused.json()["error"]["code"], "first_empty_qualification_required"
+                )
+                self.assertFalse(self.store.list_secret_records())
+                self.assertFalse(self.store.list_secret_bindings())
+        self.probe.side_effect = self.observe
+        self.storage_identity = "a" * 64
+        with patch(
+            "control_plane.product_config.random_secrets.token_urlsafe",
+            return_value="fictional-fresh-password",
+        ) as generate:
+            resumed = await self.post("runtime_credentials", **original)
+        self.assertEqual(resumed.status_code, 202, resumed.text)
+        self.assertFalse(resumed.json().get("replayed"))
+        generate.assert_called_once()
+        records = self.store.list_secret_records()
+        self.assertEqual(len(records), 1)
+        with patch(
+            "control_plane.product_config.random_secrets.token_urlsafe",
+            side_effect=AssertionError("replay generated"),
+        ):
+            replay = await self.post("runtime_credentials", **original)
+            reused = await self.post(
+                "runtime_credentials", **{**original, "reason": "Different original request"}
+            )
+        self.assertTrue(replay.json()["replayed"])
+        self.assertEqual(reused.status_code, 409, reused.text)
+        self.assertEqual(reused.json()["error"]["code"], "idempotency_key_reused")
+        self.assertEqual(self.store.list_secret_records(), records)
 
     async def test_existing_sibling_credentials_survive_new_absent_purpose(self) -> None:
         apply_product_config_bundle(
@@ -1140,3 +1207,205 @@ else:
                             failed_line,
                             inspect.getsource(first_empty_storage_snapshot).splitlines(),
                         )
+
+
+_CHANGING_DOCKER = r"""
+import json,os,sys
+from pathlib import Path
+p=Path(os.environ['FAKE_DOCKER_STATE'])
+s=json.loads(p.read_text())
+a=sys.argv[3:]
+if a[0]=='info':
+    s['snapshot']=s.get('snapshot',0)+1
+    p.write_text(json.dumps(s))
+later=s.get('snapshot',0)>=2
+change=s['change'] if later else ''
+root=s['other_root'] if change=='docker_root' else s['root']
+original=root+'/volumes/db/_data'
+services={'k3x9p2m7q4w8e1r5t6y0u2i3o':{'Name':'unrelated','Mounts':[]}}
+if change=='unrelated_service':
+    services['z8c4v6b2n1m5a7s3d9f0g4h2j']={'Name':'another','Mounts':[]}
+if change=='service_mounts_original':
+    services['z8c4v6b2n1m5a7s3d9f0g4h2j']={'Name':'another','Mounts':[{'Type':'volume','Source':'db'}]}
+volumes={'unrelated':{}}
+if change=='unrelated_volume':
+    volumes['another']={}
+if change=='volume_aliases_original':
+    volumes['another']={'Options':{'type':'none','o':'bind','device':original}}
+if change=='original_volume_created':
+    Path(original).mkdir(parents=True,exist_ok=True)
+    volumes['db']={}
+containers={'foreign':{'Name':'/unrelated','Labels':{},'Mounts':[]},'kept':{'Name':'/kept','Labels':{},'Mounts':[]}}
+if change=='unrelated_container':
+    containers['arrived']={'Name':'/arrived','Labels':{},'Mounts':[{'Type':'volume','Name':'unrelated','Source':root+'/volumes/unrelated/_data'}]}
+if change=='unrelated_container_renamed':
+    containers['foreign']['Name']='/renamed'
+if change=='unrelated_container_removed':
+    del containers['foreign']
+if change=='container_mounts_original':
+    containers['arrived']={'Name':'/arrived','Labels':{},'Mounts':[{'Type':'volume','Name':'db','Source':original}]}
+if change=='container_binds_original':
+    containers['arrived']={'Name':'/arrived','Labels':{},'Mounts':[{'Type':'bind','Source':original+'/../_data'}]}
+if change=='container_joins_project':
+    containers['arrived']={'Name':'/arrived','Labels':{'com.docker.compose.project':'fictional-prod'},'Mounts':[]}
+if a[0]=='info':
+    if change=='project_created':
+        Path(s['compose']+'/fictional-prod').mkdir(parents=True)
+    print(json.dumps({'DockerRootDir':root,'Swarm':{'LocalNodeState':'active'}}))
+elif a[:2]==['node','ls']:
+    print(json.dumps({'ID':'node-original','Self':True}))
+elif a[:2]==['service','ls']:
+    print('\n'.join(identifier[:12] for identifier in services))
+elif a[:2]==['service','inspect']:
+    for reference in a[4:]:
+        identifier=next(identifier for identifier in services if identifier.startswith(reference))
+        print(json.dumps({'ID':identifier,'Labels':{},**services[identifier]}))
+elif a[:2]==['volume','ls']:
+    print('\n'.join(volumes))
+elif a[:2]==['volume','inspect']:
+    for name in a[4:]:
+        print(json.dumps({'Name':name,'Driver':'local','Options':{},'Labels':{},'Mountpoint':root+'/volumes/'+name+'/_data',**volumes[name]}))
+elif a[0]=='ps':
+    print('\n'.join(containers))
+elif a[0]=='inspect':
+    for identifier in a[5:]:
+        print(json.dumps({'Id':identifier,**containers[identifier]}))
+else:
+    raise SystemExit(98)
+"""
+
+
+class FirstEmptyStorageStabilityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        executable = self.root / "bin" / "docker"
+        executable.parent.mkdir()
+        executable.write_text(f"#!{sys.executable}\n" + _CHANGING_DOCKER)
+        executable.chmod(0o755)
+        self.program = first_empty_storage_program(compose_root=self.root / "compose")
+
+    def observe(self, change: str) -> dict[str, Any]:
+        workspace = self.root / change
+        for engine in ("engine", "moved-engine"):
+            (workspace / engine / "volumes").mkdir(parents=True)
+        state = workspace / "state.json"
+        state.write_text(
+            json.dumps(
+                {
+                    "change": change,
+                    "root": str(workspace / "engine"),
+                    "other_root": str(workspace / "moved-engine"),
+                    "compose": str(self.root / "compose"),
+                }
+            )
+        )
+        spec = {"project": "fictional-prod", "volumes": ["db", "data", "logs"]}
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                self.program,
+                base64.b64encode(json.dumps(spec).encode()).decode(),
+                "FRAME:",
+            ],
+            env={"PATH": str(self.root / "bin"), "FAKE_DOCKER_STATE": str(state)},
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=True,
+        )
+        shutil.rmtree(self.root / "compose", ignore_errors=True)
+        frame: dict[str, Any] = json.loads(completed.stdout.removeprefix("FRAME:"))
+        return frame
+
+    def failure(self, frame: dict[str, Any]) -> native_copy_stream.NativeProgramFailed:
+        from tests.test_odoo_testing_native_source import Connection
+
+        with self.assertRaises(native_copy_stream.NativeProgramFailed) as raised:
+            native_copy_stream._read_program(
+                Connection(frame),
+                program=self.program,
+                payload={},
+                timeout_seconds=5,
+                receive=lambda _frame: None,
+            )
+        return raised.exception
+
+    def test_unrelated_server_churn_between_observations_keeps_the_same_storage_witness(
+        self,
+    ) -> None:
+        unchanged = self.observe("none")
+        self.assertEqual(unchanged["type"], "complete", unchanged)
+        for change in (
+            "unrelated_container",
+            "unrelated_container_renamed",
+            "unrelated_container_removed",
+            "unrelated_volume",
+            "unrelated_service",
+        ):
+            with self.subTest(change=change):
+                self.assertEqual(self.observe(change), unchanged)
+
+    def test_a_resource_that_starts_using_original_storage_between_observations_refuses(
+        self,
+    ) -> None:
+        snapshot_lines = inspect.getsource(first_empty_storage_snapshot).splitlines()
+        for change in (
+            "container_mounts_original",
+            "container_binds_original",
+            "container_joins_project",
+            "volume_aliases_original",
+            "service_mounts_original",
+        ):
+            with self.subTest(change=change):
+                frame = self.observe(change)
+                self.assertEqual(frame["type"], "failed", frame)
+                failure = self.failure(frame)
+                self.assertIn(
+                    self.program.splitlines()[failure.program_sites[-1] - 1], snapshot_lines
+                )
+                self.assertEqual(failure.changed_sections, ())
+
+    def test_changed_original_storage_witness_refuses_and_names_only_fixed_sections(
+        self,
+    ) -> None:
+        from control_plane import http_error_evidence
+
+        for change, sections in (
+            ("original_volume_created", ("selected", "volumes")),
+            ("project_created", ("project_exists",)),
+            ("docker_root", ("docker_root",)),
+        ):
+            with self.subTest(change=change):
+                frame = self.observe(change)
+                self.assertEqual(frame["type"], "failed", frame)
+                failure = self.failure(frame)
+                self.assertEqual(failure.changed_sections, sections)
+                with self.assertLogs(http_error_evidence.__name__, "WARNING") as logged:
+                    http_error_evidence.log_handled_error_cause(failure, "fixture-trace")
+                (native,) = json.loads(logged.records[-1].getMessage())["native_programs"]
+                self.assertEqual(native["changed_sections"], list(sections))
+                self.assertEqual(native["lines"], list(failure.program_sites))
+
+    def test_changed_sections_outside_the_fixed_set_are_dropped_whole(self) -> None:
+        private = "private-storage-section-sentinel"
+        for sections, expected in (
+            (["selected", "containers"], ("selected", "containers")),
+            (["other"], ("other",)),
+            (["selected", private], ()),
+            (["selected", "selected"], ()),
+            ([{"section": "selected"}], ()),
+            ([], ()),
+            (private, ()),
+        ):
+            with self.subTest(sections=sections):
+                failure = self.failure(
+                    {"type": "failed", "sites": [1], "changed_sections": sections}
+                )
+                self.assertEqual(failure.changed_sections, expected)
+                self.assertNotIn(private, str(failure) + repr(failure.changed_sections))
+        without_sites = self.failure({"type": "failed", "changed_sections": ["selected"]})
+        self.assertEqual(without_sites.changed_sections, ())

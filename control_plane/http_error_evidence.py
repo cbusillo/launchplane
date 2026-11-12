@@ -105,6 +105,8 @@ def log_handled_error_cause(error: BaseException, trace_id: str, *, operation_id
                     {"field": field, "difference": difference}
                     for field, difference in cause.container_fields
                 ]
+            if cause.changed_sections:
+                native["changed_sections"] = list(cause.changed_sections)
             native_programs.append(native)
         cause = cause.__cause__ or cause.__context__
     evidence: dict[str, object] = {

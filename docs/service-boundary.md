@@ -2301,8 +2301,14 @@ production history refuse qualification. Missing desired records or absence of
 a workload alone never prove empty storage. The supported empty path positively
 checks the selected local volume backing paths, project directory and complete
 local Docker inventory; unsupported or incomplete observations remain unknown.
-No caller-supplied positive fact is accepted. The remote observation is a
-point-in-time read, not an external storage lock.
+No caller-supplied positive fact is accepted. The observation reads the server
+twice. Each read refuses any container, service or volume it lists that uses,
+aliases or holds custody of the original storage. Between the two reads, the
+selected volume backing, the project directory's existence and the Docker root
+must stay the same. Other containers, volumes, services or Swarm rows
+appearing, leaving or being renamed between the reads does not refuse. The
+remote observation is a point-in-time read, not an external storage lock:
+a resource created after the second read lists its kind is not seen.
 
 There is no `data_policy` intent or stored empty/resettable classification.
 The existing prelaunch rebuild policy writer can record empty-rebuild intent on

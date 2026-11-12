@@ -1296,7 +1296,11 @@ paths; values, ciphertext and value hashes are never review or response data.
 A refused qualification keeps the same response for every cause. Its trace's
 `handled_error_cause` service log names the source location of the check that
 refused; a refused storage observation also carries the fixed program's line
-numbers and hash.
+numbers and hash. When both storage reads completed and differed,
+`changed_sections` lists which of `volumes`, `containers`, `services`, `swarm`,
+`selected`, `project_exists` and `docker_root` changed, by those fixed names
+only, with `other` for any section without a fixed name. A refusal inside one
+read has no `changed_sections`.
 
 Use the supported [service-log reader](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/service-log-reader.md)
 and map the trace's location to the installed source revision. Each missing or
