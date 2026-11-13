@@ -2,6 +2,9 @@
 title: Client release review
 ---
 
+Queued forward promotion requires its recorded decision ID and whole-release
+digest to match the current approval; recovery keeps its original binding.
+
 ## First accepted Odoo release
 
 An Odoo product's first accepted release can initialize its original empty

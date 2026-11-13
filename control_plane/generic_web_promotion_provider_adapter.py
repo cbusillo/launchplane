@@ -1,6 +1,7 @@
 """The shared durable generic-web promotion adapter for HTTP and Client releases."""
 
 import hashlib
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 
 from collections.abc import Callable
@@ -112,6 +113,7 @@ class GenericWebProdPromotionProviderMutationAdapter:
         deploy_provider: GenericWebDeployProvider | None = None,
         validate_before_checkpoint: Callable[[], None] | None = None,
         settle_pre_effect_failure: bool = False,
+        release_decision: ReleaseReviewDecisionRecord | None = None,
     ) -> None:
         self._control_plane_root = control_plane_root
         self._record_store = record_store
@@ -125,6 +127,7 @@ class GenericWebProdPromotionProviderMutationAdapter:
         )
         self._validate_before_checkpoint = validate_before_checkpoint
         self._settle_pre_effect_failure = settle_pre_effect_failure
+        self._release_decision = release_decision
         self._resolved_deploy_target: GenericWebResolvedDeployTarget | None = None
 
     def resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
@@ -279,6 +282,7 @@ class GenericWebProdPromotionProviderMutationAdapter:
                     provider_operation_title=provider_operation_title(provider_operation_key),
                     deployment_record_id=self._deployment_record_id(provider_operation_key),
                     provider_effect_checkpoint=checkpoint_provider_effect,
+                    release_decision=self._release_decision,
                 )
         except StarletteHTTPException as error:
             raise ProviderMutationRejectedError(error) from error

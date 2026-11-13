@@ -398,6 +398,119 @@ class ReleaseReviewTests(unittest.TestCase):
                 artifact_id="other-artifact",
             )
 
+    def test_promotion_admission_rejects_an_accepted_decision_after_production_base_reverts(
+        self,
+    ) -> None:
+        from datetime import datetime, timedelta
+        from control_plane.workflows.odoo_prod_promotion import (
+            OdooProdPromotionRequest,
+            OdooProdPromotionStore,
+            execute_odoo_prod_promotion,
+        )
+        from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
+        from control_plane.workflows.odoo_prod_promotion_run import (
+            OdooProdPromotionRunRequest,
+            OdooProdPromotionRunStore,
+            execute_odoo_prod_promotion_run,
+        )
+
+        accepted = decision(self.store)
+        self.store.write_release_review_decision_record(accepted)
+        original = self.store.read_release_tuple_record(
+            context_name="example-site", channel_name="prod"
+        )
+        other = self.store.read_artifact_manifest(original.artifact_id).model_copy(
+            update={"artifact_id": "another-production-artifact"}
+        )
+        self.store.write_artifact_manifest(other)
+        self.store.write_release_tuple_record(
+            original.model_copy(update={"artifact_id": other.artifact_id})
+        )
+        substituted = decision(
+            self.store,
+            date=(datetime.fromisoformat(accepted.decided_at) + timedelta(seconds=1)).isoformat(),
+        )
+        self.store.write_release_review_decision_record(substituted)
+        self.store.write_release_tuple_record(original)
+        review = self.review()
+        self.assertEqual(review.latest_decision, accepted)
+        self.assertNotEqual(accepted.checklist_digest, substituted.checklist_digest)
+        self.assertEqual(
+            accepted.checklist.candidate.artifact_id, substituted.checklist.candidate.artifact_id
+        )
+        inputs = OdooProdPromotionInputsResult(
+            context="example-site",
+            request_id="release",
+            input_status="ready",
+            artifact_id=substituted.checklist.candidate.artifact_id,
+            source_git_ref=substituted.checklist.candidate.source_commit,
+            backup_record_id="backup",
+            from_instance="testing",
+            to_instance="prod",
+        )
+        with (
+            patch("control_plane.release_review.current_release_review", return_value=review),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion.resolve_profile_cutover_plan",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.resolve_profile_cutover_plan",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.require_production_promotion_backup"
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.resolve_odoo_prod_promotion_inputs",
+                return_value=inputs,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion.require_production_promotion_backup"
+            ) as backup,
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.execute_odoo_prod_backup_gate",
+                side_effect=AssertionError("Unaccepted release reached logical backup"),
+            ) as logical_backup,
+        ):
+            with self.assertRaises(click.ClickException):
+                execute_odoo_prod_promotion(
+                    control_plane_root=Path(self.directory.name),
+                    state_dir=Path(self.directory.name),
+                    database_url=None,
+                    record_store=cast(OdooProdPromotionStore, self.store),
+                    request=OdooProdPromotionRequest(
+                        context="example-site",
+                        product=accepted.product,
+                        artifact_id=accepted.checklist.candidate.artifact_id,
+                        backup_record_id="backup",
+                    ),
+                    release_decision=substituted,
+                )
+            admission = execute_odoo_prod_promotion_run(
+                control_plane_root=Path(self.directory.name),
+                state_dir=Path(self.directory.name),
+                database_url=None,
+                record_store=cast(OdooProdPromotionRunStore, cast(object, self.store)),
+                request=OdooProdPromotionRunRequest(
+                    context="example-site", product=accepted.product, request_id="release"
+                ),
+                release_decision=substituted,
+            )
+            self.assertEqual(admission.run_status, "blocked")
+            backup.assert_not_called()
+            logical_backup.assert_not_called()
+            self.assertEqual(
+                require_release_approval(
+                    control_plane_root=Path(self.directory.name),
+                    record_store=self.store,
+                    product=accepted.product,
+                    artifact_id=accepted.checklist.candidate.artifact_id,
+                    release_decision=accepted,
+                ),
+                accepted,
+            )
+
     def test_direct_deploy_can_redeploy_but_not_change_live_production(self) -> None:
         def direct_deploy(instance: str, artifact_id: str) -> None:
             require_unchanged_production_artifact(

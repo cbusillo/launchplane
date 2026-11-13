@@ -20,6 +20,7 @@ from control_plane.generic_web_source_qualification import (
     qualified_generic_web_source_inventory,
 )
 from control_plane.release_review import require_release_approval
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -275,6 +276,7 @@ def execute_generic_web_prod_promotion(
     provider_operation_title: str = "",
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> GenericWebProdPromotionResult:
     from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
 
@@ -290,6 +292,7 @@ def execute_generic_web_prod_promotion(
             provider_operation_title=provider_operation_title,
             deployment_record_id=deployment_record_id,
             provider_effect_checkpoint=provider_effect_checkpoint,
+            release_decision=release_decision,
         )
 
 
@@ -303,6 +306,7 @@ def _execute_generic_web_prod_promotion_unserialized(
     provider_operation_title: str = "",
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> GenericWebProdPromotionResult:
     profile, source_lane, destination_lane = resolve_generic_web_promotion_lanes(
         record_store=record_store,
@@ -314,7 +318,6 @@ def _execute_generic_web_prod_promotion_unserialized(
         request=request,
         source_lane=source_lane,
     )
-    release_decision = None
     if not request.dry_run:
         release_decision = require_release_approval(
             control_plane_root=control_plane_root,
@@ -322,6 +325,7 @@ def _execute_generic_web_prod_promotion_unserialized(
             product=profile.product,
             artifact_id=request.artifact_id,
             source_commit=request.source_git_ref,
+            release_decision=release_decision,
         )
     from control_plane.generic_web_release_settings import desired_release_settings
 

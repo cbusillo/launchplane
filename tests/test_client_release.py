@@ -1846,7 +1846,12 @@ class ClientReleaseTests(ClientReleaseFixture):
         stub_verified_promotion_backup(self, "control_plane.workflows.odoo_prod_promotion_run")
         stub_verified_promotion_backup(self, "control_plane.workflows.odoo_prod_promotion")
         for module in ("odoo_prod_promotion_run", "odoo_prod_promotion"):
-            stack.enter_context(patch(f"control_plane.workflows.{module}.require_release_approval"))
+            stack.enter_context(
+                patch(
+                    f"control_plane.workflows.{module}.require_release_approval",
+                    side_effect=lambda **kwargs: kwargs.get("release_decision"),
+                )
+            )
 
         def inputs(**kwargs: Any) -> OdooProdPromotionInputsResult:
             return self._admission(**kwargs).inputs_result.model_copy(
