@@ -951,6 +951,7 @@ def require_release_approval(
     product: str,
     artifact_id: str = "",
     source_commit: str = "",
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> ReleaseReviewDecisionRecord | None:
     profile = cast(ReleaseReviewStore, record_store).read_product_profile_record(product)
     review = current_release_review(
@@ -961,6 +962,8 @@ def require_release_approval(
             "Production already runs the testing version; no new release to promote."
         )
     if not review.required:
+        if release_decision is not None:
+            raise click.ClickException("No current release approval covers the supplied decision.")
         return None
     if not review.approved or review.checklist is None:
         raise click.ClickException(
@@ -971,6 +974,8 @@ def require_release_approval(
         source_commit and source_commit != candidate.source_commit
     ):
         raise click.ClickException("Promotion no longer matches the approved testing release.")
+    if release_decision is not None and release_decision != review.latest_decision:
+        raise click.ClickException("The supplied decision differs from the approved release.")
     return review.latest_decision
 
 

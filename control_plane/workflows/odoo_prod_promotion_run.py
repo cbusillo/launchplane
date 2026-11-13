@@ -151,7 +151,7 @@ def admit_odoo_prod_promotion_run(
                 or continuation_plan.new.binding.environment_id != request.to_instance
             ):
                 raise ValueError("continuation requires its exact persisted admitted cutover")
-        current_decision = (
+        release_decision = (
             release_decision
             if continuation_plan is not None
             else require_release_approval(
@@ -160,9 +160,9 @@ def admit_odoo_prod_promotion_run(
                 product=request.product,
                 artifact_id=inputs_result.artifact_id,
                 source_commit=inputs_result.source_git_ref,
+                release_decision=release_decision,
             )
         )
-        release_decision = release_decision or current_decision
         admitted_plan = resolve_profile_cutover_plan(
             record_store,
             product=request.product,

@@ -158,7 +158,7 @@ def execute_odoo_prod_promotion(
     del state_dir, database_url
     product = _resolve_product_profile_key(product=request.product, context=request.context)
     recovery = persisted_cutover(record_store, cutover_plan)
-    current_decision = (
+    release_decision = (
         release_decision
         if recovery is not None
         else require_release_approval(
@@ -167,9 +167,9 @@ def execute_odoo_prod_promotion(
             product=product,
             artifact_id=request.artifact_id,
             source_commit=request.source_git_ref,
+            release_decision=release_decision,
         )
     )
-    release_decision = release_decision or current_decision
     if release_decision is not None and (
         release_decision.product != product
         or release_decision.checklist.candidate.artifact_id != request.artifact_id

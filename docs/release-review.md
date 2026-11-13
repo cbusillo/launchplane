@@ -2,6 +2,11 @@
 title: Client release review
 ---
 
+Odoo forward promotion and queued admission resolve approval through the same
+release-review check. A supplied decision must equal the current approved
+decision, including its settings and production base, before backup admission.
+Persisted cutover recovery retains its original plan and decision binding.
+
 ## First accepted Odoo release
 
 An Odoo product's first accepted release can initialize its original empty

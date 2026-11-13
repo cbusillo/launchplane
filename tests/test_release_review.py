@@ -398,6 +398,87 @@ class ReleaseReviewTests(unittest.TestCase):
                 artifact_id="other-artifact",
             )
 
+    def test_promotion_cannot_substitute_a_decision_for_the_same_artifact(self) -> None:
+        accepted = decision(self.store)
+        self.store.write_release_review_decision_record(accepted)
+        review = self.review()
+        substitutes = (
+            accepted.model_copy(update={"record_id": "another-decision"}),
+            accepted.model_copy(update={"actor_github_id": "99999"}),
+            accepted.model_copy(
+                update={
+                    "checklist": accepted.checklist.model_copy(
+                        update={"first_live_origin": "https://different.example.com"}
+                    )
+                }
+            ),
+        )
+        with patch("control_plane.release_review.current_release_review", return_value=review):
+            for supplied in substitutes:
+                with self.subTest(supplied=supplied), self.assertRaises(click.ClickException):
+                    require_release_approval(
+                        control_plane_root=Path(self.directory.name),
+                        record_store=self.store,
+                        product=accepted.product,
+                        artifact_id=accepted.checklist.candidate.artifact_id,
+                        release_decision=supplied,
+                    )
+            self.assertEqual(
+                require_release_approval(
+                    control_plane_root=Path(self.directory.name),
+                    record_store=self.store,
+                    product=accepted.product,
+                    artifact_id=accepted.checklist.candidate.artifact_id,
+                    release_decision=accepted,
+                ),
+                accepted,
+            )
+
+    def test_odoo_promotion_rejects_substituted_settings_before_provider_admission(self) -> None:
+        from control_plane.workflows.odoo_prod_promotion import (
+            OdooProdPromotionRequest,
+            OdooProdPromotionStore,
+            execute_odoo_prod_promotion,
+        )
+        from typing import cast
+
+        accepted = decision(self.store)
+        self.store.write_release_review_decision_record(accepted)
+        substituted = accepted.model_copy(
+            update={
+                "checklist": accepted.checklist.model_copy(
+                    update={"first_live_origin": "https://different.example.com"}
+                )
+            }
+        )
+        with (
+            patch(
+                "control_plane.release_review.current_release_review", return_value=self.review()
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion.resolve_profile_cutover_plan",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion.require_production_promotion_backup"
+            ) as backup,
+        ):
+            with self.assertRaises(click.ClickException):
+                execute_odoo_prod_promotion(
+                    control_plane_root=Path(self.directory.name),
+                    state_dir=Path(self.directory.name),
+                    database_url=None,
+                    record_store=cast(OdooProdPromotionStore, self.store),
+                    request=OdooProdPromotionRequest(
+                        context="example-site",
+                        product=accepted.product,
+                        artifact_id=accepted.checklist.candidate.artifact_id,
+                        backup_record_id="backup",
+                    ),
+                    release_decision=substituted,
+                )
+            backup.assert_not_called()
+
     def test_direct_deploy_can_redeploy_but_not_change_live_production(self) -> None:
         def direct_deploy(instance: str, artifact_id: str) -> None:
             require_unchanged_production_artifact(
