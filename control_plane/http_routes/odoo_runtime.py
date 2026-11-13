@@ -7,7 +7,7 @@ from typing import Annotated, Iterator, Literal, cast
 
 import click
 from fastapi import Depends, Path, Query, Request, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane import odoo_runtime_reads as reads
@@ -33,8 +33,10 @@ from control_plane.odoo_import_diagnostics import (
 )
 from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideApplyPhase,
+    OdooOverrideApplyStatus,
     OdooWebsiteBootstrapPayload,
 )
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.dokploy import api
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.odoo_post_deploy_http import OdooInstanceOverrideStore
@@ -91,6 +93,17 @@ class OdooWebsiteBootstrapResponse(BaseModel):
     apply_on: tuple[OdooOverrideApplyPhase, ...]
     updated_at: str
     source_label: str
+    last_apply_status: OdooOverrideApplyStatus = Field(
+        json_schema_extra={"x-launchplane-safe-output": True}
+    )
+    last_apply_at: str = Field(json_schema_extra={"x-launchplane-safe-output": True})
+    last_apply_website_settings_verified: bool = Field(
+        json_schema_extra={"x-launchplane-safe-output": True}
+    )
+    last_apply_website_settings_artifact_id: str | None = Field(
+        json_schema_extra={"x-launchplane-safe-output": True}
+    )
+    last_apply_website_settings: OdooWebsiteSettingsIntent | None
 
 
 class OdooImportDiagnosticResponse(BaseModel):
@@ -369,6 +382,15 @@ def register_odoo_runtime_read_routes(
                 apply_on=record.apply_on,
                 updated_at=record.updated_at,
                 source_label=record.source_label,
+                last_apply_status=record.last_apply.status,
+                last_apply_at=record.last_apply.applied_at,
+                last_apply_website_settings_verified=record.last_apply.website_settings_verified,
+                last_apply_website_settings_artifact_id=(
+                    record.last_apply.website_settings.artifact_id
+                    if record.last_apply.website_settings is not None
+                    else None
+                ),
+                last_apply_website_settings=record.last_apply.website_settings,
             )
 
     def testing_profile(
@@ -748,7 +770,7 @@ def register_odoo_runtime_read_routes(
             read_environment_website_bootstrap,
             OdooWebsiteBootstrapResponse,
             "read_environment_website_bootstrap",
-            "Read persisted Odoo website bootstrap settings",
+            "Read persisted Odoo website bootstrap and last recorded website settings",
         ),
     ):
         app.add_api_route(

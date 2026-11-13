@@ -1522,6 +1522,62 @@
       {
         "idempotency": "none",
         "identity_dependencies": [
+          "read_owner_review_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_release_review",
+        "path": "/v1/release-review",
+        "purpose": "Read a product's release review checklist and decision state within existing product-profile read access; no effects.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "321f43da4c9e8f8af0d54f29924b3045c9805343c31cadab585fc71b400e3bd0",
+        "supported_surfaces": [
+          "operator_ui",
+          "service_api",
+          "generic_caller"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_environment_website_bootstrap",
+        "path": "/v1/products/{product}/environments/{environment}/website-bootstrap",
+        "purpose": "Read an Odoo lane's persisted website bootstrap and the website settings its last post-deploy recorded, with verification state and artifact; no effects.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "410",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "bda440dc848ec2970ab784f3481355d193967dc63a108fcbfe4365d34ee80ee4",
+        "supported_surfaces": [
+          "service_api",
+          "generic_caller"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
           "read_identity"
         ],
         "method": "GET",
@@ -1567,8 +1623,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "0a0f035c2fed7d3e6195ccd33fe1bdb01ad8e2bf"
+    "source_commit_sha": "7dcc86bab5e9309438e1a51a85d4cc33c28834e4"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "5d00b66310f037aa569000914033beed2a9e2f8f98670b41b1bea81e3528c568"
+  "semantic_digest_sha256": "8c47eb1df1bfabdfa86d8fc3160e4b2d3c8ebceecaa2d1340fcca92e74da738c"
 }

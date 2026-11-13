@@ -346,6 +346,16 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
                 "instance": "testing",
                 "updated_at": "2026-09-24T12:00:00Z",
                 "source_label": "operator",
+                "last_apply": {
+                    "attempted": True,
+                    "status": "pass",
+                    "applied_at": "2026-09-24T12:05:00Z",
+                    "website_settings_verified": False,
+                    "website_settings": {
+                        "artifact_id": "artifact-example-1",
+                        "settings": {"website_id": 1, "public_origin": "https://example.invalid"},
+                    },
+                },
                 "website_bootstrap": {
                     "name": "Example",
                     "company_email": "sender@example.invalid",
@@ -379,6 +389,18 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             record.model_dump(mode="json")["website_bootstrap"],
         )
         self.assertEqual(response.json()["updated_at"], record.updated_at)
+        self.assertEqual(
+            {key: value for key, value in response.json().items() if key.startswith("last_apply")},
+            {
+                "last_apply_status": "pass",
+                "last_apply_at": "2026-09-24T12:05:00Z",
+                "last_apply_website_settings_verified": False,
+                "last_apply_website_settings_artifact_id": "artifact-example-1",
+                "last_apply_website_settings": record.model_dump(mode="json")["last_apply"][
+                    "website_settings"
+                ],
+            },
+        )
         self.assertNotIn("private-value", response.text)
         self.assertNotIn("private-binding", response.text)
         self.assertNotIn("config_parameters", response.json())
