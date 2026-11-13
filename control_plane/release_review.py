@@ -944,6 +944,20 @@ def _unavailable(
     return unavailable_release_review(code)
 
 
+def review_covers_decision(
+    review: ReleaseReviewStatus,
+    decision: ReleaseReviewDecisionRecord,
+    *,
+    require_publication: bool = True,
+) -> bool:
+    return bool(
+        (review.approved if require_publication else review.checklist_complete)
+        and review.checklist_digest == decision.checklist_digest
+        and review.latest_decision is not None
+        and review.latest_decision.record_id == decision.record_id
+    )
+
+
 def require_release_approval(
     *,
     control_plane_root: Path,
@@ -974,7 +988,7 @@ def require_release_approval(
         source_commit and source_commit != candidate.source_commit
     ):
         raise click.ClickException("Promotion no longer matches the approved testing release.")
-    if release_decision is not None and release_decision != review.latest_decision:
+    if release_decision is not None and not review_covers_decision(review, release_decision):
         raise click.ClickException("The supplied decision differs from the approved release.")
     return review.latest_decision
 

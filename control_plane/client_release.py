@@ -113,6 +113,7 @@ from control_plane.release_review import (
     current_release_review,
     release_version,
     recorded_generic_web_testing_version,
+    review_covers_decision,
 )
 from control_plane.release_review_record import publish_release_decision
 from control_plane.generic_web_promotion_http import (
@@ -1615,6 +1616,7 @@ def _run_generic_web_promotion(
         validate_before_effect=validate_before_effect,
         validate_before_checkpoint=validate_checkpoint,
         settle_pre_effect_failure=True,
+        release_decision=decision,
     )
     # This is Launchplane's own worker, never a route or a caller promotion grant.
     # The shared runner fences the provider target, heartbeats, preserves uncertain
@@ -2029,11 +2031,6 @@ def _require_current_release(
         control_plane_root=control_plane_root, record_store=store, profile=profile
     )
     if profile.driver_id == "generic-web":
-        if (
-            review.latest_decision is not None
-            and review.latest_decision.record_id != decision.record_id
-        ):
-            raise ClientReleaseNotReady("release_not_accepted")
         if review.unavailable_reason in {
             "candidate_identity_missing",
             "candidate_operation_unresolved",
@@ -2046,12 +2043,7 @@ def _require_current_release(
                 raise ClientReleaseNotReady("release_changed")
             if review.checklist.candidate != checklist.candidate:
                 raise GenericWebPromotionSourceRefused("The accepted testing release changed.")
-    if (
-        not (review.approved if require_publication else review.checklist_complete)
-        or review.checklist_digest != decision.checklist_digest
-        or review.latest_decision is None
-        or review.latest_decision.record_id != decision.record_id
-    ):
+    if not review_covers_decision(review, decision, require_publication=require_publication):
         raise ClientReleaseNotReady("release_not_accepted")
 
 

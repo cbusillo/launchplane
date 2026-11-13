@@ -1397,6 +1397,44 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             (accepted,),
         )
 
+    def test_settings_revert_after_admission_cannot_change_the_operations_decision(self) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+        from control_plane.generic_web_promotion_http import (
+            execute_generic_web_prod_promotion_result,
+        )
+
+        original = RuntimeEnvironmentRecord(
+            scope="instance",
+            context=self.context,
+            instance="prod",
+            env={"APP_CHANNEL": "first"},
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        self.store.write_runtime_environment_record(original)
+        self.switch("promote")
+        first = self.accept(suffix="-first")
+        self.store.write_runtime_environment_record(
+            original.model_copy(update={"env": {"APP_CHANNEL": "second"}})
+        )
+        second = self.accept(suffix="-second")
+        self.assertNotEqual(first.checklist_digest, second.checklist_digest)
+        self.assertTrue(self.advance())
+        self.capture()
+
+        def revert_settings(**kwargs: Any) -> Any:
+            self.store.write_runtime_environment_record(original)
+            return execute_generic_web_prod_promotion_result(**kwargs)
+
+        with patch(
+            "control_plane.generic_web_promotion_provider_adapter.execute_generic_web_prod_promotion_result",
+            side_effect=revert_settings,
+        ) as forward:
+            self.advance()
+        forward.assert_called_once()
+        self.assertFalse(self.provider.deployed_artifacts)
+        self.assertFalse(self.provider.delivered_settings)
+        self.assertEqual(self.review().latest_decision, first)
+
     def test_settings_release_drill_restores_baseline_then_reapplies_the_accepted_snapshot(
         self,
     ) -> None:

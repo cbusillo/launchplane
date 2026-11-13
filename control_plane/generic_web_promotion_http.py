@@ -11,6 +11,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.outbox_delivery import (
     OutboxDeliveryRecord,
     build_outbox_dedupe_key,
@@ -243,6 +244,7 @@ def execute_generic_web_prod_promotion_result(
     provider_operation_title: str = "",
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> tuple[GenericWebProdPromotionRecords, GenericWebProdPromotionResult]:
     driver_result = execute_generic_web_prod_promotion(
         control_plane_root=control_plane_root,
@@ -253,6 +255,7 @@ def execute_generic_web_prod_promotion_result(
         provider_operation_title=provider_operation_title,
         deployment_record_id=deployment_record_id,
         provider_effect_checkpoint=provider_effect_checkpoint,
+        release_decision=release_decision,
     )
     result = GenericWebProdPromotionResult.model_validate(
         _scrub_retired_target_type_alias(driver_result.model_dump(mode="json"))
