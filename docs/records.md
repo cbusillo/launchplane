@@ -2690,7 +2690,11 @@ run` is the foreground loop intended for an external process supervisor, and
   website intent plus metadata for the whole override record. Website intent is
   null when the record only has other overrides. It does not return config
   parameters, addon settings, or secrets, and does not contact the runtime
-  provider. Missing records return 404.
+  provider. Missing records return 404. It also returns the website settings
+  the lane's last post-deploy recorded (`last_apply_*`): the apply status and
+  time, whether those settings were verified, their artifact and their values.
+  Release review builds its production website settings from them. Agents read both
+  this route and `GET /v1/release-review` through the generic caller.
 - The supported admin write path is a thin dispatch workflow pinned to an
   immutable reusable worker. The worker persists through the service route,
   records only redacted request-shape evidence, and checks that the returned
