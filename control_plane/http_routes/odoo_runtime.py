@@ -93,8 +93,6 @@ class OdooWebsiteBootstrapResponse(BaseModel):
     apply_on: tuple[OdooOverrideApplyPhase, ...]
     updated_at: str
     source_label: str
-    # The website settings the last post-deploy recorded; release review builds
-    # production's settings from these, not from a pending prepared intent.
     last_apply_status: OdooOverrideApplyStatus = Field(
         json_schema_extra={"x-launchplane-safe-output": True}
     )

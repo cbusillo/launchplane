@@ -389,7 +389,6 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             record.model_dump(mode="json")["website_bootstrap"],
         )
         self.assertEqual(response.json()["updated_at"], record.updated_at)
-        # The recorded settings a rollback reapplies, distinguishable from none or verified.
         self.assertEqual(
             {key: value for key, value in response.json().items() if key.startswith("last_apply")},
             {
