@@ -174,6 +174,8 @@ def _onboarding_lane_profile(
         manifest_values["health_monitoring"] = monitoring_owner.health_monitoring
     if existing is not None:
         manifest_values.pop("odoo_prelaunch_rebuild")
+    if lane.odoo_cutover is None:
+        manifest_values.pop("odoo_cutover")
     payload.update(manifest_values)
     payload["health_url"] = _lane_health_url(manifest=manifest, lane=lane)
     return ProductLaneProfile.model_validate(payload)

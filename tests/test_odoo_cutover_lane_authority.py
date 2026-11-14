@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 import unittest
 from unittest.mock import Mock, patch
 
@@ -69,6 +70,23 @@ class OdooLaneAuthorityTests(unittest.TestCase):
             updated_at=datetime.now(UTC).isoformat(),
         )
         self.assertIsNone(changed.lanes[0].odoo_cutover)
+
+    def test_onboarding_manifest_writes_and_then_keeps_the_lane_record(self) -> None:
+        payload = {**_manifest_payload(), "driver_id": "odoo"}
+        lanes = [dict(lane) for lane in cast(list[dict[str, object]], payload["lanes"])]
+        lanes[0]["odoo_cutover"] = lane_authority().model_dump(mode="json")
+        written = build_product_profile_record(
+            manifest=ProductOnboardingManifest.model_validate({**payload, "lanes": lanes}),
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        self.assertEqual(written.lanes[0].odoo_cutover, lane_authority())
+        self.assertIsNone(written.lanes[1].odoo_cutover)
+        kept = build_product_profile_record(
+            manifest=ProductOnboardingManifest.model_validate(payload),
+            existing_profile=written,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        self.assertEqual(kept.lanes[0].odoo_cutover, lane_authority())
 
     def test_replacement_blocks_configured_and_recorded_slots_before_provider_access(self) -> None:
         for configured in (True, False):

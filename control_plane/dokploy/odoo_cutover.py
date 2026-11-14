@@ -87,7 +87,7 @@ class DokployOdooCutoverProvider:
             lane.route_id != plan.route_id
             or lane.host != plan.host
             or lane.database != plan.old.binding.database
-            or lane.database_uuid != plan.old.runtime_identity.database_uuid
+            or lane.database_uuid != plan.database_uuid
             or lane.writers != plan.writers
             or lane.host_runtime != plan.host_runtime
             or {(slot.slot_id, slot.compose_id, slot.private_url) for slot in lane.slots}

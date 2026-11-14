@@ -39,6 +39,13 @@ class OdooSlot(FrozenRecord):
     runtime_identity: RuntimeIdentity
 
 
+def serves_legacy_identity(slot: OdooSlot) -> bool:
+    identity = slot.runtime_identity
+    return not (
+        identity.slot or identity.release_id or identity.image_digest or identity.database_uuid
+    )
+
+
 class OdooCutoverPlan(FrozenRecord):
     release_id: str = Field(min_length=1)
     route_id: str = Field(pattern=r"^[a-zA-Z0-9_-]+$")
@@ -54,6 +61,10 @@ class OdooCutoverPlan(FrozenRecord):
     host_runtime: OdooCutoverHostRuntime | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+
+    @property
+    def database_uuid(self) -> str:
+        return self.new.runtime_identity.database_uuid
 
     @property
     def rollback_website_settings(self) -> OdooWebsiteSettingsIntent | None:
@@ -104,17 +115,21 @@ class OdooCutoverPlan(FrozenRecord):
                 or slot.runtime_identity.artifact_id != artifact.artifact_id
                 or slot.runtime_identity.source_git_ref != artifact.source_commit
                 or slot.runtime_identity.image_reference != slot.image
-                or slot.runtime_identity.image_digest != artifact.image.digest
-                or slot.runtime_identity.slot != slot.slot_id
-                or not slot.runtime_identity.database_uuid
                 or slot.runtime_identity.instance != slot.binding.environment_id
+                or not (
+                    slot is self.old
+                    and serves_legacy_identity(slot)
+                    or slot.runtime_identity.image_digest == artifact.image.digest
+                    and slot.runtime_identity.slot == slot.slot_id
+                    and slot.runtime_identity.database_uuid
+                )
             ):
                 raise ValueError("slot identity must match its exact release artifact")
         for field in ("product_id", "environment_id", "release_id", "database"):
             if getattr(self.old.binding, field) != getattr(self.new.binding, field):
                 raise ValueError("slots must share the authoritative lane/database binding")
         if (
-            self.old.runtime_identity.database_uuid != self.new.runtime_identity.database_uuid
+            self.old.runtime_identity.database_uuid not in {"", self.database_uuid}
             or self.new.runtime_identity.release_id != self.release_id
             or self.old.private_url == self.new.private_url
         ):

@@ -31,7 +31,7 @@ def verify_odoo_slot_readiness(
     if (
         contract.get("host") != plan.host
         or contract.get("database") != slot.binding.database
-        or contract.get("database_uuid") != slot.runtime_identity.database_uuid
+        or contract.get("database_uuid") != plan.database_uuid
         or contract.get("runtime_identity") != identity
         or not retained_assets_verified
         or not writers_fenced

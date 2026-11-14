@@ -138,14 +138,12 @@ class NativeWriterObserver:
             json.dumps(
                 {
                     "database": self.plan.old.binding.database,
-                    "database_uuid": self.plan.old.runtime_identity.database_uuid,
+                    "database_uuid": self.plan.database_uuid,
                 }
             ),
         )
         value: dict[str, Any] = json.loads(output)
-        if value.get(
-            "database_uuid"
-        ) != self.plan.old.runtime_identity.database_uuid or not isinstance(
+        if value.get("database_uuid") != self.plan.database_uuid or not isinstance(
             value.get("sessions"), list
         ):
             raise ValueError("native writer database observation is incomplete")

@@ -482,7 +482,7 @@ class BoundOdooCutoverHost:
                 json.dumps(
                     {
                         "database": slot.binding.database,
-                        "database_uuid": slot.runtime_identity.database_uuid,
+                        "database_uuid": self.plan.database_uuid,
                         "credential_commit_id": "",
                         "modules": list(self.runtime.modules),
                     }
@@ -1058,7 +1058,7 @@ class BoundOdooCutoverHost:
         }
         request = {
             "database": slot.binding.database,
-            "database_uuid": slot.runtime_identity.database_uuid,
+            "database_uuid": self.plan.database_uuid,
             "credential_commit_id": maintenance.credential_commit_id if maintenance else "",
             "modules": list(self.runtime.modules),
             "release": release,
@@ -1082,7 +1082,7 @@ class BoundOdooCutoverHost:
         contract = {
             "schema_version": 1,
             "database": slot.binding.database,
-            "database_uuid": slot.runtime_identity.database_uuid,
+            "database_uuid": self.plan.database_uuid,
             "host": plan.host,
             "website_id": self.runtime.website_id,
             "runtime_identity": identity,
@@ -1276,7 +1276,7 @@ class BoundOdooCutoverHost:
             runner=self.runner(plan.old),
             record_id=backup_id,
             dump=directory + "/" + plan.old.binding.database + ".dump",
-            database_uuid=plan.old.runtime_identity.database_uuid,
+            database_uuid=plan.database_uuid,
             dump_sha256=capture.database_dump_sha256,
             database=plan.old.binding.database,
             filestore=directory + "/" + plan.old.binding.database + "-filestore.tar.gz",
@@ -1384,7 +1384,7 @@ class BoundOdooCutoverHost:
             runner=self.runner(plan.old),
             record_id=backup_id,
             dump=directory + "/" + plan.old.binding.database + ".dump",
-            database_uuid=plan.old.runtime_identity.database_uuid,
+            database_uuid=plan.database_uuid,
             dump_sha256=capture.database_dump_sha256,
             database=plan.old.binding.database,
             filestore=directory + "/" + plan.old.binding.database + "-filestore.tar.gz",
