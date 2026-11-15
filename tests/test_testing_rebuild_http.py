@@ -5,6 +5,7 @@ from threading import Event
 from typing import Any
 import unittest
 from dataclasses import replace
+from contextlib import nullcontext
 from functools import partial
 from email.message import Message
 from urllib.error import HTTPError
@@ -133,29 +134,35 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             }
         )
         for instance in ("testing", "prod"):
-            for artifact_id in (verified.artifact_id, source.manifest_artifact_id):
-                for stored in (True, False):
-                    with (
-                        self.subTest(instance=instance, artifact_id=artifact_id, stored=stored),
-                        patch.object(
-                            self.store,
-                            "read_artifact_manifest",
-                            return_value=verified.model_copy(update={"artifact_id": artifact_id}),
-                            side_effect=None if stored else FileNotFoundError(artifact_id),
+            for artifact_id, stored, allowed in (
+                (verified.artifact_id, True, True),
+                (source.manifest_artifact_id, True, True),
+                (verified.artifact_id, False, True),
+                (source.manifest_artifact_id, False, False),
+                ("unknown-build", False, False),
+            ):
+                with (
+                    self.subTest(instance=instance, artifact_id=artifact_id, stored=stored),
+                    patch.object(
+                        self.store,
+                        "read_artifact_manifest",
+                        return_value=verified.model_copy(update={"artifact_id": artifact_id}),
+                        side_effect=None if stored else FileNotFoundError(artifact_id),
+                    ),
+                    self.assertRaises(ValueError) if not allowed else nullcontext(),
+                ):
+                    admission._validate_target_replacement_apply_artifact_authority(
+                        operation_store=self.store,
+                        replacement_request=self.fixture.operation.request.model_copy(
+                            update={
+                                "instance": instance,
+                                "artifact_id": artifact_id,
+                                "source_git_ref": verified.source_commit,
+                            }
                         ),
-                    ):
-                        admission._validate_target_replacement_apply_artifact_authority(
-                            operation_store=self.store,
-                            replacement_request=self.fixture.operation.request.model_copy(
-                                update={
-                                    "instance": instance,
-                                    "artifact_id": artifact_id,
-                                    "source_git_ref": verified.source_commit,
-                                }
-                            ),
-                            context=self.fixture.operation.context,
-                            verified_manifest=verified,
-                        )
+                        context=self.fixture.operation.context,
+                        verified_manifest=verified,
+                    )
 
     def test_replacement_build_identity_refuses_changed_digest_or_source_on_both_lanes(
         self,
