@@ -2791,11 +2791,12 @@ it was produced with, even after main moves on; that build must still be a
 verified release of the default branch's first-parent history, and the pair must
 match its image. Reconciliation then moves testing forward on the restored data.
 
-A production-copy rebuild also verifies the explicitly selected build and attempt
-instead of substituting the latest testing build. This lets testing rehearse the
-build currently running on production while newer testing builds exist. It uses
-the native production copy, not a selected production backup-gate record; restoring
-a verified production backup remains the separate production-only restore operation.
+Terminal production-copy rebuild plans and admission also verify the explicitly
+selected release build and attempt instead of substituting the latest testing
+build; preview builds are refused. This lets testing rehearse production's build
+while newer testing builds exist. It uses the native production copy, not a selected
+production backup-gate record; restoring a verified production backup remains the
+separate production-only restore operation.
 
 Once the normal worker has recorded its private candidate application, the
 original authenticated testing caller uploads one part at a time to
