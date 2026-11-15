@@ -123,6 +123,42 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             )
         )
 
+    def test_production_copy_verifies_requested_build_instead_of_latest_testing_build(self) -> None:
+        replacement = self.fixture.operation.request.model_copy(
+            update={
+                "artifact_id": self.manifest.artifact_id,
+                "source_git_ref": self.manifest.source_commit,
+                "data_source_mode": "production_restore",
+                "allow_empty_data": False,
+            }
+        )
+        self.latest.return_value = VerifiedBuildArtifact(
+            manifest=self.manifest.model_copy(update={"artifact_id": "newer-testing-build"})
+        )
+        selected = VerifiedBuildArtifact(manifest=self.manifest)
+        with (
+            patch(
+                "control_plane.product_reconcile.verified_testing_rebuild_artifact",
+                return_value=selected,
+            ) as verify,
+            patch.object(preflight, "_inspect_execution", side_effect=lambda *args: args[4]),
+        ):
+            plan, verified = preflight.inspect_current_testing_rebuild(
+                root=self.fixture.root, store=self.store, request=replacement, actor="fixture-agent"
+            )
+        verify.assert_called_once_with(
+            self.store,
+            self.fixture.intent.profile,
+            next(lane for lane in self.fixture.intent.profile.lanes if lane.instance == "testing"),
+            artifact_id=replacement.artifact_id,
+            source_git_ref=replacement.source_git_ref,
+        )
+        self.assertEqual((plan.artifact_id, verified), (replacement.artifact_id, selected))
+        self.latest.assert_not_called()
+        self.assertEqual(self.fixture.effects, [])
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(replacement.artifact_id)
+
     def test_historical_candidate_preflight_and_worker_revalidate_the_same_manifest(self) -> None:
         from control_plane import testing_rebuild_service as worker
         from control_plane.build_provenance import verify_requested_build_artifact
