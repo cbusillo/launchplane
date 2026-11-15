@@ -133,6 +133,10 @@ def inspect_current_testing_rebuild(
                     source_git_ref=request.source_git_ref,
                 )
                 if request.migrated_source is not None
+                or (
+                    driver.profile.driver_id == "odoo"
+                    and request.data_source_mode == "production_restore"
+                )
                 else latest_verified_testing_release(store, driver.profile, driver.lane)
             )
         except (BuildProvenanceError, ProductReconcileError) as error:

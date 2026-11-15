@@ -11,6 +11,7 @@ from urllib.error import HTTPError
 from unittest.mock import Mock, patch
 
 from httpx2 import Response
+from pydantic import ValidationError
 
 from control_plane.build_provenance import VerifiedBuildArtifact
 from control_plane.contracts.artifact_identity import ArtifactSourceBuild
@@ -122,6 +123,61 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                 side_effect=self.latest,
             )
         )
+
+    def test_production_copy_uses_selected_release_and_refuses_preview_build(self) -> None:
+        replacement = self.fixture.operation.request.model_copy(
+            update={
+                "artifact_id": self.manifest.artifact_id,
+                "source_git_ref": self.manifest.source_commit,
+                "data_source_mode": "production_restore",
+                "allow_empty_data": False,
+            }
+        )
+        self.latest.return_value = VerifiedBuildArtifact(
+            manifest=self.manifest.model_copy(update={"artifact_id": "newer-testing-build"})
+        )
+        selected = VerifiedBuildArtifact(manifest=self.manifest)
+        with (
+            patch(
+                "control_plane.product_reconcile.verified_testing_rebuild_artifact",
+                return_value=selected,
+            ) as verify,
+            patch.object(preflight, "_inspect_execution", side_effect=lambda *args: args[4]),
+        ):
+            plan, verified = preflight.inspect_current_testing_rebuild(
+                root=self.fixture.root, store=self.store, request=replacement, actor="fixture-agent"
+            )
+            self.assertEqual((plan.artifact_id, verified), (replacement.artifact_id, selected))
+            source = self.manifest.source_build
+            assert source is not None
+            verify.return_value = VerifiedBuildArtifact(
+                manifest=self.manifest.model_copy(
+                    update={
+                        "source_build": source.model_copy(
+                            update={
+                                "purpose": "preview",
+                                "event": "pull_request",
+                                "pull_request_number": 9,
+                            }
+                        )
+                    }
+                )
+            )
+            with self.assertRaises(ValidationError):
+                preflight.inspect_current_testing_rebuild(
+                    root=self.fixture.root,
+                    store=self.store,
+                    request=replacement,
+                    actor="fixture-agent",
+                )
+        verify.assert_called_with(
+            self.store,
+            self.fixture.intent.profile,
+            next(lane for lane in self.fixture.intent.profile.lanes if lane.instance == "testing"),
+            artifact_id=replacement.artifact_id,
+            source_git_ref=replacement.source_git_ref,
+        )
+        self.latest.assert_not_called()
 
     def test_historical_candidate_preflight_and_worker_revalidate_the_same_manifest(self) -> None:
         from control_plane import testing_rebuild_service as worker
