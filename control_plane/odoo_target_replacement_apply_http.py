@@ -336,7 +336,21 @@ def _validate_target_replacement_apply_artifact_authority(
         return
     if verified_manifest is not None:
         manifest = verified_manifest
-        if manifest.artifact_id != artifact_id:
+        try:
+            selected = operation_store.read_artifact_manifest(artifact_id)
+        except FileNotFoundError as error:
+            verified_names = {manifest.artifact_id}
+            if manifest.source_build is not None:
+                verified_names.add(manifest.source_build.manifest_artifact_id)
+            if artifact_id not in verified_names:
+                raise ValueError(
+                    "Odoo target replacement artifact manifest was not found."
+                ) from error
+            selected = manifest
+        if (manifest.image.digest, manifest.source_commit) != (
+            selected.image.digest,
+            selected.source_commit,
+        ):
             raise ValueError("The verified artifact differs from the selected build.")
     else:
         try:

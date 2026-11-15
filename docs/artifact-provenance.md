@@ -77,6 +77,10 @@ Input: product, commit SHA, purpose (`release` for ordinary testing and prod,
    record. The record is immutable: a second write with the same key and
    different content fails and overwrites nothing.
 
+Odoo target replacement compares a selected manifest with a verified build by
+image digest and source commit. Its run-based and producer-manifest names may
+identify the same build; neither name permits a different digest or source.
+
 A verified generic-web build is not recorded in the artifact store
 (`verify_generic_web_build`). Its artifact is the immutable image
 `<repository>@<digest>`; the testing deploy records it as the lane's runtime

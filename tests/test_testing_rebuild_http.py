@@ -124,6 +124,74 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             )
         )
 
+    def test_replacement_build_identity_accepts_run_and_manifest_names_on_both_lanes(self) -> None:
+        source = self.manifest.source_build
+        assert source is not None
+        verified = self.manifest.model_copy(
+            update={
+                "artifact_id": f"artifact-{self.fixture.operation.context}-run-{source.run_id}-{source.run_attempt}"
+            }
+        )
+        for instance in ("testing", "prod"):
+            for artifact_id in (verified.artifact_id, source.manifest_artifact_id):
+                for stored in (True, False):
+                    with (
+                        self.subTest(instance=instance, artifact_id=artifact_id, stored=stored),
+                        patch.object(
+                            self.store,
+                            "read_artifact_manifest",
+                            return_value=verified.model_copy(update={"artifact_id": artifact_id}),
+                            side_effect=None if stored else FileNotFoundError(artifact_id),
+                        ),
+                    ):
+                        admission._validate_target_replacement_apply_artifact_authority(
+                            operation_store=self.store,
+                            replacement_request=self.fixture.operation.request.model_copy(
+                                update={
+                                    "instance": instance,
+                                    "artifact_id": artifact_id,
+                                    "source_git_ref": verified.source_commit,
+                                }
+                            ),
+                            context=self.fixture.operation.context,
+                            verified_manifest=verified,
+                        )
+
+    def test_replacement_build_identity_refuses_changed_digest_or_source_on_both_lanes(
+        self,
+    ) -> None:
+        for instance in ("testing", "prod"):
+            for artifact_id in (self.manifest.artifact_id, "another-build-name"):
+                for changed in (
+                    self.manifest.model_copy(
+                        update={
+                            "image": self.manifest.image.model_copy(
+                                update={"digest": "sha256:" + "f" * 64}
+                            )
+                        }
+                    ),
+                    self.manifest.model_copy(update={"source_commit": "f" * 40}),
+                ):
+                    with (
+                        self.subTest(instance=instance, artifact_id=artifact_id, changed=changed),
+                        patch.object(
+                            self.store, "read_artifact_manifest", return_value=self.manifest
+                        ),
+                        self.assertRaises(ValueError),
+                    ):
+                        admission._validate_target_replacement_apply_artifact_authority(
+                            operation_store=self.store,
+                            replacement_request=self.fixture.operation.request.model_copy(
+                                update={
+                                    "instance": instance,
+                                    "artifact_id": artifact_id,
+                                    "source_git_ref": changed.source_commit,
+                                }
+                            ),
+                            context=self.fixture.operation.context,
+                            verified_manifest=changed,
+                        )
+
     def test_production_copy_uses_selected_release_and_refuses_preview_build(self) -> None:
         replacement = self.fixture.operation.request.model_copy(
             update={
