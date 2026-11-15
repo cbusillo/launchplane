@@ -76,6 +76,8 @@ Input: product, commit SHA, purpose (`release` for ordinary testing and prod,
    `artifact_id` is data, never a key, so a PR build cannot claim a release's
    record. The record is immutable: a second write with the same key and
    different content fails and overwrites nothing.
+   Odoo target replacement compares stored and verified builds by image digest
+   and source commit, so different names for the same build do not cause a mismatch.
 
 A verified generic-web build is not recorded in the artifact store
 (`verify_generic_web_build`). Its artifact is the immutable image
