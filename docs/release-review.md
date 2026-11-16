@@ -91,8 +91,13 @@ Repository discovery and merge holds use all recorded inputs independently of
 whether another input has complete provenance. There is no repository catalog.
 
 Missing, ambiguous or unpinned source evidence appears as UNKNOWN and blocks
-Client acceptance while known ranges remain visible. New or removed inputs and
-changed floating selectors still need review coverage. Replacing a floating selector
+Client acceptance while known ranges remain visible. An added, removed or
+repository-replaced input is covered by a product PR in the release range that
+changed `workspace.toml` or `artifact-inputs.toml`, has valid Client test notes,
+and has the Client's latest accepted decision for its exact head. The checklist
+lists the transitions with that PR. Otherwise the existing blocker remains;
+ordinary release acceptance cannot waive missing coverage. Changed floating
+selectors still need review coverage. Replacing a floating selector
 with an immutable addon pin uses the same verified source range and Client notes;
 a missing selector does not remove the exact addon source or its review coverage.
 Missing or invalid addon evidence and incomplete shared ranges still block.
