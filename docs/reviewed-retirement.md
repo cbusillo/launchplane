@@ -55,9 +55,10 @@ An existing admin can review with `secret.list`. Apply requires existing
 `product_config.apply` authority for the exact selected scope, product and
 context. The signed-in immutable-ID administrator keeps its existing scopes.
 The authenticated Director `local_operator` can also apply an instance-scoped
-removal for an exclusively owned, enabled product preview context with
-`instance: preview`. That context/instance pair must not alias a stable lane.
-This narrow path for the Director's agent rejects testing, production, context and global
+removal for an exclusively owned non-production stable lane, such as testing,
+or an enabled product preview context with `instance: preview`. A preview
+context/instance pair must not alias a stable lane.
+This narrow path for the Director's agent rejects production, context and global
 selections; other caller credentials, `local_admin`, workflow and terminal credentials
 cannot use it. The trusted Director marker alone does not make a terminal token
 writable, and standing read authority never supplies the required write grant.
