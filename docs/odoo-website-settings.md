@@ -152,6 +152,13 @@ adds or removes only its managed noindex element in native `custom_code_head`,
 preserving other head content, robots rules and the canonical domain. A tag
 proves neither search-result nor sitemap removal; crawlers must be able to fetch it.
 
+For a release whose recorded source and candidate Odoo majors differ, native
+indexing observation runs after the post-deploy data workflow. The conversion
+must preserve the required indexing state: a failed observation, a required
+indexing change, or a selector that differs from accepted website settings
+fails the release. Same-major releases and recovery to the recorded production
+major keep observation before the data workflow and its indexing readback.
+
 For configuration without maintenance, use the authenticated service route
 `POST /v1/drivers/odoo/post-deploy`:
 

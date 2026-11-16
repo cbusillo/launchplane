@@ -378,6 +378,7 @@ def execute_odoo_post_deploy(
 
     indexing_state = ""
     selected_indexing = None
+    deferred_indexing = None
     try:
         if request.instance == "prod" and release_operation:
             from control_plane.odoo_website_indexing import (
@@ -407,7 +408,7 @@ def execute_odoo_post_deploy(
                 else None
             )
             try:
-                native_plan = WebsiteIndexingExecution(
+                indexing_execution = WebsiteIndexingExecution(
                     record_store,
                     control_plane_root,
                     profile.product,
@@ -418,18 +419,44 @@ def execute_odoo_post_deploy(
                     expected_artifact_id=artifact_id,
                     desired_state="prelaunch" if initial_decision is not None else None,
                     initial_release_decision=initial_decision,
-                ).observe()
+                )
+                from control_plane.contracts.odoo_stable_target_replacement import (
+                    artifact_odoo_version,
+                )
+
+                source_version = candidate_version = ""
+                if artifact_id and initial_decision is None:
+                    candidate_version = artifact_odoo_version(
+                        getattr(record_store, "read_artifact_manifest")(artifact_id)
+                    )
+                    if candidate_version:
+                        source_tuple = getattr(record_store, "read_release_tuple_record")(
+                            context_name=request.context, channel_name="prod"
+                        )
+                        source_version = artifact_odoo_version(
+                            getattr(record_store, "read_artifact_manifest")(
+                                source_tuple.artifact_id
+                            )
+                        )
+                if (
+                    source_version
+                    and candidate_version
+                    and source_version.split(".")[0] != candidate_version.split(".")[0]
+                ):
+                    deferred_indexing = indexing_execution
+                else:
+                    native_plan = indexing_execution.observe()
+                    selected_indexing = OdooWebsiteIndexing.model_validate(
+                        {
+                            key: native_plan["native"][key]
+                            for key in ("website_id", "public_origin", "production_use")
+                        }
+                    )
+                    indexing_state = selected_indexing.production_use
             except (ValueError, RuntimeError, FileNotFoundError) as error:
                 raise click.ClickException(
                     "Release indexing binding is unverified: " + str(error)
                 ) from error
-            selected_indexing = OdooWebsiteIndexing.model_validate(
-                {
-                    key: native_plan["native"][key]
-                    for key in ("website_id", "public_origin", "production_use")
-                }
-            )
-            indexing_state = selected_indexing.production_use
             if rendering_record is None:
                 rendering_record = OdooInstanceOverrideRecord(
                     context=request.context, instance="prod", updated_at=utc_now_timestamp()
@@ -630,6 +657,27 @@ def execute_odoo_post_deploy(
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             post_deploy_readback_markers
         )
+        if deferred_indexing is not None:
+            try:
+                native_plan = deferred_indexing.observe()
+                native = native_plan["native"]
+                if native["changed"]:
+                    raise ValueError("Converted database indexing differs from production use.")
+                if accepted_settings is not None and (
+                    native["website_id"] != accepted_settings.settings.website_id
+                    or native["public_origin"] != accepted_settings.settings.public_origin
+                ):
+                    raise ValueError(
+                        "Converted database indexing differs from accepted website settings."
+                    )
+                post_deploy_readback_markers["website_indexing_production_use"] = native[
+                    "production_use"
+                ]
+            except (ValueError, RuntimeError, FileNotFoundError) as error:
+                raise dokploy_post_deploy.OdooPostDeployReadbackFailure(
+                    "Release indexing binding is unverified: " + str(error),
+                    evidence=post_deploy_readback_markers,
+                ) from error
         if (
             indexing_state
             and post_deploy_readback_markers.get("website_indexing_production_use")
