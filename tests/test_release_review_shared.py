@@ -5,6 +5,7 @@ from github_plan_status.client_test_notes import NOTHING_TO_TEST
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from typing import cast
 
 import click
 
@@ -706,8 +707,11 @@ class SharedReleaseReviewTests(unittest.TestCase):
                 self.store.write_product_review_decision_record(accepted.model_copy(update=updates))
                 self.github.input_files, self.github.website_notes = files, notes
                 self.accept()
-                self.assertFalse(self.review().checklist_complete)
-                self.assertFalse(self.review().approved)
+                review = self.review()
+                self.assertFalse(review.checklist_complete)
+                self.assertFalse(review.approved)
+                assert review.checklist is not None
+                self.assertTrue(review.checklist.additional_changes)
 
         self.github.input_files = [{"filename": "workspace.toml", "status": "modified"}]
         self.github.website_notes = "Check the website."
@@ -805,6 +809,17 @@ class SharedReleaseReviewTests(unittest.TestCase):
                         coverage.items[0].pull_request_number, accepted.pull_request_number
                     )
                     self.assertEqual(coverage.items[0].head_sha, accepted.head_sha)
+                    from control_plane.release_invitation_changes import client_invitation_changes
+
+                    changes = client_invitation_changes(
+                        cast(ReleaseReviewStore, cast(object, self.store)),
+                        profile(),
+                        review.checklist,
+                    )
+                    self.assertEqual(len(changes), 1)
+                    change = next(iter(changes.values()))
+                    self.assertEqual(change.batch_pull_request_number, 1)
+                    self.assertTrue(change.feature_name)
 
     def test_repository_forms_normalize_to_the_same_shared_range(self) -> None:
         artifact = self.store.read_artifact_manifest("artifact-prod")

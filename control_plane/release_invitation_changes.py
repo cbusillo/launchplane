@@ -104,7 +104,9 @@ def _release_items(
     store: InvitationEvidenceStore, checklist: ReleaseChecklist
 ) -> list[tuple[str, InvitationChange]]:
     groups = [(checklist.repository, checklist.items)] + [
-        (source.repository, source.items) for source in checklist.shared_sources
+        (source.repository, source.items)
+        for source in checklist.shared_sources
+        if source.repository.casefold() != checklist.repository.casefold()
     ]
     result = []
     for repository, items in groups:
