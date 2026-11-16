@@ -43,7 +43,6 @@ from control_plane.contracts.release_review import (
     InitialVersionTestNotes,
     ReleaseVersion,
     AbsentProduction,
-    SharedSourceReview,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.release_review_github import (
@@ -576,7 +575,6 @@ def build_release_review(
             checklist=checklist,
             checklist_digest=checklist_digest(checklist),
         )
-    shared_sources: tuple[SharedSourceReview, ...] = ()
     additional_changes: tuple[str, ...] = ()
     items: tuple[ReleaseReviewItem, ...]
     untracked: tuple[str, ...]
@@ -609,16 +607,6 @@ def build_release_review(
                 repository=profile.repository,
                 production_commit=production.source_commit,
                 candidate_commit=candidate.source_commit,
-                read=read,
-                preview_hosts=preview_hosts,
-                review_label=profile.owner.review_label,
-                policy_store=store,
-            )
-        if profile.driver_id == "odoo" and not isinstance(production, AbsentProduction):
-            shared_sources, additional_changes = read_shared_source_changes(
-                production=store.read_artifact_manifest(production.artifact_id),
-                candidate=store.read_artifact_manifest(candidate.artifact_id),
-                repository=profile.repository,
                 read=read,
                 preview_hosts=preview_hosts,
                 review_label=profile.owner.review_label,
@@ -664,7 +652,6 @@ def build_release_review(
         candidate=candidate,
         items=tuple(annotated),
         untracked_commits=untracked,
-        shared_sources=shared_sources,
         additional_changes=additional_changes,
         initial_version=initial_version,
         first_live_origin=first_live_origin,
@@ -683,6 +670,23 @@ def build_release_review(
             else None
         ),
     )
+    if profile.driver_id == "odoo" and not isinstance(production, AbsentProduction):
+        try:
+            shared_sources, additional_changes = read_shared_source_changes(
+                production=store.read_artifact_manifest(production.artifact_id),
+                candidate=store.read_artifact_manifest(candidate.artifact_id),
+                repository=profile.repository,
+                read=read,
+                preview_hosts=preview_hosts,
+                review_label=profile.owner.review_label,
+                policy_store=store,
+                product_checklist=checklist,
+            )
+        except (ValueError, click.ClickException) as error:
+            raise ReleaseEvidenceUnavailable("github_read_failed") from error
+        checklist = checklist.model_copy(
+            update={"shared_sources": shared_sources, "additional_changes": additional_changes}
+        )
     if initial_version is not None:
         from control_plane.initial_version_review import recorded_initial_version_notes
 
