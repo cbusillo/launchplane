@@ -425,7 +425,7 @@ def execute_odoo_post_deploy(
                 )
 
                 source_version = candidate_version = ""
-                if artifact_id and initial_decision is None:
+                if artifact_id and initial_decision is None and not rollback:
                     candidate_version = artifact_odoo_version(
                         getattr(record_store, "read_artifact_manifest")(artifact_id)
                     )
@@ -443,7 +443,8 @@ def execute_odoo_post_deploy(
                     and candidate_version
                     and source_version.split(".")[0] != candidate_version.split(".")[0]
                 ):
-                    deferred_indexing = indexing_execution
+                    deferred_indexing = indexing_execution.observe(prepare_for_data_workflow=True)
+                    indexing_state = str(deferred_indexing["indexing"]["production_use"])
                 else:
                     native_plan = indexing_execution.observe()
                     selected_indexing = OdooWebsiteIndexing.model_validate(
@@ -651,33 +652,13 @@ def execute_odoo_post_deploy(
                 fresh_restore_source_environment=fresh_restore_source_environment,
                 prepare_native_source=native_preparer,
                 database_url=getattr(record_store, "database_url", None),
+                deferred_website_indexing=deferred_indexing,
             )
             or {}
         )
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             post_deploy_readback_markers
         )
-        if deferred_indexing is not None:
-            try:
-                native_plan = deferred_indexing.observe()
-                native = native_plan["native"]
-                if native["changed"]:
-                    raise ValueError("Converted database indexing differs from production use.")
-                if accepted_settings is not None and (
-                    native["website_id"] != accepted_settings.settings.website_id
-                    or native["public_origin"] != accepted_settings.settings.public_origin
-                ):
-                    raise ValueError(
-                        "Converted database indexing differs from accepted website settings."
-                    )
-                post_deploy_readback_markers["website_indexing_production_use"] = native[
-                    "production_use"
-                ]
-            except (ValueError, RuntimeError, FileNotFoundError) as error:
-                raise dokploy_post_deploy.OdooPostDeployReadbackFailure(
-                    "Release indexing binding is unverified: " + str(error),
-                    evidence=post_deploy_readback_markers,
-                ) from error
         if (
             indexing_state
             and post_deploy_readback_markers.get("website_indexing_production_use")

@@ -610,19 +610,17 @@ class WebsiteSettingsTests(unittest.TestCase):
             )
 
     def test_major_release_observes_converted_database_and_recovery_keeps_its_order(self) -> None:
-        for candidate_version, rollback, native_changed, native_failure in (
-            ("20.0", False, False, False),
-            ("19.1", False, False, False),
-            ("20.0", True, False, False),
-            ("20.0", False, True, False),
-            ("20.0", False, False, True),
-            ("20.0", True, False, True),
+        for source_version, candidate_version, rollback, native_failure in (
+            ("19.0", "20.0", False, False),
+            ("19.0", "19.1", False, False),
+            ("20.0", "19.0", True, False),
+            ("19.0", "20.0", False, True),
+            ("20.0", "19.0", True, True),
         ):
             with (
                 self.subTest(
                     candidate_version=candidate_version,
                     rollback=rollback,
-                    native_changed=native_changed,
                     native_failure=native_failure,
                 ),
                 TemporaryDirectory() as directory,
@@ -630,7 +628,7 @@ class WebsiteSettingsTests(unittest.TestCase):
                 store = FilesystemRecordStore(state_dir=Path(directory))
                 seed(store)
                 for artifact_id, version in (
-                    ("artifact-prod", "19.0"),
+                    ("artifact-prod", source_version),
                     ("artifact-testing", candidate_version),
                 ):
                     manifest = store.read_artifact_manifest(artifact_id)
@@ -639,22 +637,27 @@ class WebsiteSettingsTests(unittest.TestCase):
                 events: list[str] = []
                 deferred = candidate_version == "20.0" and not rollback
 
-                def observe() -> dict[str, Any]:
+                native_request: dict[str, Any] = {
+                    "mode": "dry-run",
+                    "indexing": {
+                        "public_origin": "https://site.example",
+                        "production_use": "live",
+                    },
+                    "database_uuid": "fixture-database",
+                }
+
+                def observe(*, prepare_for_data_workflow: bool = False) -> dict[str, Any]:
+                    if prepare_for_data_workflow:
+                        events.append("preflight")
+                        return native_request
                     events.append("observe")
-                    if deferred:
-                        self.assertIn("data-workflow", events)
                     if native_failure:
                         raise RuntimeError("Native indexing did not prove its outcome.")
-                    return {
-                        "native": {
-                            "website_id": 1,
-                            "public_origin": "https://site.example",
-                            "production_use": "live",
-                            "changed": native_changed,
-                        }
-                    }
+                    return {"native": {**native_request["indexing"], "website_id": 1}}
 
                 def apply(**kwargs: Any) -> dict[str, str]:
+                    from control_plane.dokploy.post_deploy import OdooPostDeployReadbackFailure
+
                     events.append("data-workflow")
                     payload = json.loads(
                         base64.b64decode(
@@ -664,9 +667,15 @@ class WebsiteSettingsTests(unittest.TestCase):
                         )
                     )
                     self.assertEqual(payload.get("website_indexing") is None, deferred)
-                    return _module_update_evidence(
-                        **({} if deferred else {"website_indexing_production_use": "live"})
-                    )
+                    if deferred:
+                        self.assertEqual(kwargs["deferred_website_indexing"], native_request)
+                        if native_failure:
+                            raise OdooPostDeployReadbackFailure(
+                                "Native indexing failed.", evidence={}
+                            )
+                    else:
+                        self.assertIsNone(kwargs["deferred_website_indexing"])
+                    return _module_update_evidence(website_indexing_production_use="live")
 
                 with (
                     patch(
@@ -694,17 +703,17 @@ class WebsiteSettingsTests(unittest.TestCase):
                         control_plane_root=Path(directory),
                         record_store=store,
                         request=OdooPostDeployRequest(context="example-site", instance="prod"),
-                        artifact_id="artifact-prod" if rollback else "artifact-testing",
+                        artifact_id="artifact-testing",
                         release_operation=True,
                         rollback=rollback,
                     )
                 self.assertEqual(
                     result.post_deploy_status,
-                    "fail" if native_failure or native_changed else "pass",
+                    "fail" if native_failure else "pass",
                 )
                 self.assertEqual(
                     events,
-                    ["data-workflow", "observe"]
+                    ["preflight", "data-workflow"]
                     if deferred
                     else (["observe"] if native_failure else ["observe", "data-workflow"]),
                 )

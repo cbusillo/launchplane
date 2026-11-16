@@ -57,12 +57,30 @@ def render(*, commit: str, source: str) -> str:
             for target in node.targets
         )
     )
+    indexing_selector = """
+def prepare_indexing_request(env: Any, request: dict[str, Any]) -> dict[str, Any]:
+    database_uuid = read_string_parameter(env["ir.config_parameter"].sudo(), "database.uuid")
+    if not database_uuid or (request.get("database_uuid") and database_uuid != request["database_uuid"]):
+        raise RuntimeError("Website indexing database UUID differs from the runtime binding.")
+    if request["indexing"].get("website_id") is None:
+        websites = env["website"].sudo().search([])
+        matching = [website for website in websites if str(website.domain or "").rstrip("/") == request["indexing"]["public_origin"].rstrip("/")]
+        if len(matching) != 1:
+            raise RuntimeError("Website indexing requires one native origin binding.")
+        request["indexing"]["website_id"] = matching[0].id
+    return request["indexing"]
+"""
     native = (
         source
+        + indexing_selector
         + """
 import base64
 import os
 payload = json.loads(base64.b64decode(os.environ["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"])) if os.environ.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64") else None
+deferred_indexing = __DEFERRED_INDEXING__
+if deferred_indexing:
+    payload = dict(payload or {"instance": __INSTANCE__})
+    payload["website_indexing"] = prepare_indexing_request(env, json.loads(deferred_indexing))
 indexing = payload.get("website_indexing") if payload else None
 digest = apply_website_settings(env, payload, instance=__INSTANCE__)
 env.cr.commit()
@@ -79,7 +97,7 @@ import tempfile
 sys.path.insert(0, "/volumes/scripts")
 import run_odoo_startup as startup
 os.environ["ODOO_DB_NAME"] = sys.argv[1]
-program = __NATIVE__.replace("__INSTANCE__", repr(sys.argv[2]))
+program = __NATIVE__.replace("__INSTANCE__", repr(sys.argv[2])).replace("__DEFERRED_INDEXING__", repr(sys.argv[3] if len(sys.argv) > 3 else ""))
 with tempfile.TemporaryDirectory(prefix="launchplane-website-settings-") as config_directory:
     settings = startup._load_settings(argparse.Namespace(config_path=os.path.join(config_directory, "odoo.conf")))
     startup._write_runtime_config(settings)
@@ -88,20 +106,13 @@ with tempfile.TemporaryDirectory(prefix="launchplane-website-settings-") as conf
     compile(wrapper, "website_settings_maintenance", "exec")
     indexing_native = (
         source
+        + indexing_selector
         + """
 import contextlib
 import io
 request = json.loads(__REQUEST__)
+payload = {"instance": "prod", "website_indexing": prepare_indexing_request(env, request)}
 database_uuid = read_string_parameter(env["ir.config_parameter"].sudo(), "database.uuid")
-if not database_uuid or (request.get("database_uuid") and database_uuid != request["database_uuid"]):
-    raise RuntimeError("Website indexing database UUID differs from the runtime binding.")
-if request["indexing"].get("website_id") is None:
-    websites = env["website"].sudo().search([])
-    matching = [website for website in websites if str(website.domain or "").rstrip("/") == request["indexing"]["public_origin"].rstrip("/")]
-    if len(matching) != 1:
-        raise RuntimeError("Website indexing requires one native origin binding.")
-    request["indexing"]["website_id"] = matching[0].id
-payload = {"instance": "prod", "website_indexing": request["indexing"]}
 if request["mode"] == "apply":
     env.cr.execute("SELECT id FROM website WHERE id = %s FOR UPDATE", [request["indexing"]["website_id"]])
     env["website"].invalidate_model(["custom_code_head"])

@@ -10,7 +10,7 @@ import os
 import sys
 import types
 import unittest
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock, patch
@@ -27,7 +27,14 @@ from tests.test_odoo_website_settings import intent
 
 
 class NativeWebsite:
-    _fields = {"google_analytics_key", "cookies_bar", "block_third_party_domains"}
+    id = 1
+    custom_code_head = ""
+    _fields = {
+        "google_analytics_key",
+        "cookies_bar",
+        "block_third_party_domains",
+        "custom_code_head",
+    }
     domain = intent().settings.public_origin
     google_analytics_key = "G-COPIED"
     cookies_bar = False
@@ -104,6 +111,7 @@ def run_legacy_shell(
     instance: str = "prod",
     output: io.StringIO | None = None,
     with_payload: bool = True,
+    deferred_indexing: dict[str, Any] | None = None,
 ) -> str:
     startup = types.ModuleType("run_odoo_startup")
     startup._load_settings = lambda arguments: arguments  # type: ignore[attr-defined]
@@ -120,7 +128,16 @@ def run_legacy_shell(
     output = output if output is not None else io.StringIO()
     with (
         patch.dict(sys.modules, {"run_odoo_startup": startup, "odoo_website_settings": None}),
-        patch.object(sys, "argv", ["program", "fixture-db", instance]),
+        patch.object(
+            sys,
+            "argv",
+            [
+                "program",
+                "fixture-db",
+                instance,
+                json.dumps(deferred_indexing) if deferred_indexing else "",
+            ],
+        ),
         patch.object(sys, "path", list(sys.path)),
         patch.dict(os.environ, {"ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": encoded}),
         redirect_stdout(output),
@@ -130,6 +147,58 @@ def run_legacy_shell(
 
 
 class GeneratedWebsiteConsumerTests(unittest.TestCase):
+    def test_converted_database_indexing_is_resolved_applied_and_verified_before_commit(
+        self,
+    ) -> None:
+        for failure in ("", "uuid", "ambiguous", "selector", "readback"):
+            with self.subTest(failure=failure):
+                env = NativeEnvironment(typed_parameters=True)
+                env.site.custom_code_head = '<script src="/keep.js"></script>'
+                env.cr.savepoint = nullcontext
+                request = {
+                    "database_uuid": "wrong" if failure == "uuid" else env.parameter,
+                    "indexing": {
+                        "public_origin": env.site.domain + "/",
+                        "production_use": "prelaunch",
+                    },
+                }
+                if failure == "ambiguous":
+                    env.websites.search = lambda domain: [env.site, env.site]
+                if failure == "selector":
+                    env.site.id = 2
+                if failure == "readback":
+                    write = env.site.write
+                    self.enterContext(
+                        patch.object(
+                            env.site,
+                            "write",
+                            side_effect=lambda values: write(
+                                {
+                                    key: value
+                                    for key, value in values.items()
+                                    if key != "custom_code_head"
+                                }
+                            ),
+                        )
+                    )
+                output = io.StringIO()
+                if failure:
+                    with self.assertRaises(RuntimeError):
+                        run_legacy_shell(env, deferred_indexing=request, output=output)
+                    env.cr.commit.assert_not_called()
+                    self.assertNotIn("website_indexing_production_use=", output.getvalue())
+                else:
+                    run_legacy_shell(env, deferred_indexing=request, output=output)
+                    env.cr.commit.assert_called_once()
+                    self.assertIn('name="robots" content="noindex"', env.site.custom_code_head)
+                    self.assertTrue(
+                        env.site.custom_code_head.endswith('<script src="/keep.js"></script>')
+                    )
+                    self.assertIn("website_indexing_production_use=prelaunch", output.getvalue())
+                    self.assertIn(
+                        "website_settings_sha256=" + intent().settings.digest, output.getvalue()
+                    )
+
     def test_native20_parameter_api_applies_the_accepted_payload(self) -> None:
         env = NativeEnvironment(typed_parameters=True)
         output = run_legacy_shell(env)

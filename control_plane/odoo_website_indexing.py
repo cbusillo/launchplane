@@ -239,7 +239,10 @@ class WebsiteIndexingExecution:
         *,
         reviewed: dict[str, Any] | None = None,
         before_mutation: Callable[[], None] | None = None,
+        prepare_for_data_workflow: bool = False,
     ) -> dict[str, Any]:
+        if prepare_for_data_workflow and reviewed is not None:
+            raise ValueError("Data workflow indexing preparation cannot apply a reviewed plan.")
         if self.initial_release_decision is not None and (
             reviewed is not None or self.desired_state != "prelaunch"
         ):
@@ -326,6 +329,8 @@ class WebsiteIndexingExecution:
             if reviewed is not None
             else runtime.database_uuid,
         }
+        if prepare_for_data_workflow:
+            return native_request
         if reviewed is not None:
             native_request["reviewed_native"] = reviewed["native"]
 
