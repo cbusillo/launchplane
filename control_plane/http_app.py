@@ -12973,8 +12973,8 @@ def create_launchplane_fastapi_app(
             director_conditional_write
             and control_plane_artifact_scan.is_artifact_scan_activation(existing_profile, profile)
         )
-        snapshot_activation = director_conditional_write and director_preview_snapshot_allowed(
-            existing_profile, profile
+        snapshot_activation = (director_conditional_write or dry_run) and (
+            director_preview_snapshot_allowed(existing_profile, profile)
         )
         storage_update = director_conditional_write and director_testing_storage_allowed(
             existing_profile, profile
@@ -13092,12 +13092,15 @@ def create_launchplane_fastapi_app(
                     ),
                 )
         if dry_run:
-            if not health_url_correction:
+            if not (health_url_correction or snapshot_activation):
                 raise _launchplane_http_error(
                     status_code=400,
                     trace_id=trace_id,
                     code="testing_health_url_correction_required",
-                    message="Profile dry run supports only a testing health fallback correction.",
+                    message=(
+                        "Profile dry run supports only a testing health fallback correction "
+                        "or preview snapshot activation."
+                    ),
                 )
             assert existing_profile is not None
             return accepted_evidence_response(
@@ -13105,7 +13108,8 @@ def create_launchplane_fastapi_app(
                 records={"product_profile": profile.product},
                 result={
                     "dry_run": True,
-                    "testing_health_url_correction": True,
+                    "testing_health_url_correction": health_url_correction,
+                    "preview_snapshot_activation": snapshot_activation,
                     "profile_sha256": product_profile_record_sha256(existing_profile),
                     "replacement_sha256": product_profile_record_sha256(profile),
                 },
