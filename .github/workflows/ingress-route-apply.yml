@@ -42,7 +42,7 @@ permissions:
 
 jobs:
   apply:
-    uses: cbusillo/launchplane/.github/workflows/reusable-ingress-route-apply.yml@b649f41982c478189aabb7c9e5a5e8649279b01b # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-ingress-route-apply.yml@a0061958570f6ce24ab22ab9bdd903efad8b79d5 # main
     with:
       product: ${{ inputs.product }}
       context: ${{ inputs.context }}

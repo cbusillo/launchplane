@@ -30,7 +30,7 @@ permissions:
 
 jobs:
   write:
-    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-website-bootstrap-override.yml@4ec880938c1bdb507cace2f8ebcb92dd2f3f4f24 # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-website-bootstrap-override.yml@a0061958570f6ce24ab22ab9bdd903efad8b79d5 # main
     permissions:
       contents: read
       id-token: write
