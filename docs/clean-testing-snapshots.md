@@ -213,7 +213,9 @@ A Director agent may conditionally set only `preview.clean_testing_snapshot`
 from false to true through the existing `POST /v1/product-profiles` route. Read the
 current profile and strong `ETag`, preserve every other field, and submit that
 exact replacement with `If-Match` and a stable `Idempotency-Key`; read back the
-profile after acceptance or an uncertain response. This opt-in preserves the budget,
+profile after acceptance or an uncertain response. First submit with `?dry_run=true`
+to validate that replacement without saving it. This dry run checks the profile
+change, not snapshot availability or its Odoo version. This opt-in preserves the budget,
 retention bindings, drill state, source settings, Client and release authority.
 The agent rebuilding testing separately qualifies and records its four
 [testing storage requirements](service-boundary.md#testing-storage-requirements)

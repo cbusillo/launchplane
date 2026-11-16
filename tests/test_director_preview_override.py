@@ -47,11 +47,13 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
         self.after = self.before.model_dump(mode="json")
         self.after["preview"]["clean_testing_snapshot"] = True
 
-    async def post(self, payload: dict[str, Any] | None = None) -> Response:
+    async def post(
+        self, payload: dict[str, Any] | None = None, *, dry_run: bool = False
+    ) -> Response:
         return await request(
             self.app,
             "POST",
-            "/v1/product-profiles",
+            f"/v1/product-profiles?dry_run={str(dry_run).lower()}",
             headers=self.headers,
             payload=payload if payload is not None else self.after,
         )
@@ -219,6 +221,10 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_director_opts_into_clean_snapshots_with_existing_budget(self) -> None:
         self.prepare_snapshot_opt_in()
+        reviewed = await self.post(dry_run=True)
+        self.assertEqual(reviewed.status_code, 202, reviewed.text)
+        self.assertTrue(reviewed.json()["result"]["dry_run"])
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
         response = await self.post()
         self.assertEqual(response.status_code, 202, response.text)
         expected = LaunchplaneProductProfileRecord.model_validate(self.after)
@@ -263,15 +269,20 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
         override = deepcopy(self.after)
         override["preview"]["copied_env_keys"] = ["OTHER_SETTING"]
         variants.append(override)
-        for field, value in (("repository", "example/other"), ("display_name", "Other")):
+        for field, value in (
+            ("repository", "example/other"),
+            ("display_name", "Other"),
+            ("production_use", "live"),
+        ):
             variants.append({**deepcopy(self.after), field: value})
         for payload in variants:
-            with self.subTest(payload=payload):
-                response = await self.post(payload)
-                self.assertEqual(response.status_code, 403, response.text)
-                self.assertEqual(
-                    self.store.read_product_profile_record(self.before.product), self.before
-                )
+            for dry_run in (True, False):
+                with self.subTest(payload=payload, dry_run=dry_run):
+                    response = await self.post(payload, dry_run=dry_run)
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(
+                        self.store.read_product_profile_record(self.before.product), self.before
+                    )
 
     async def test_scoped_agent_cannot_opt_in_and_director_cannot_opt_out(self) -> None:
         self.prepare_snapshot_opt_in()
