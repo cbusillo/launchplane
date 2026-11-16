@@ -13,7 +13,7 @@ name: CI
 
 env:
   DOCKER_COMPOSE_VERSION: v5.3.1
-  LAUNCHPLANE_CI_POSTGRES_IMAGE: &postgres_test_image postgres:17@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
+  LAUNCHPLANE_CI_POSTGRES_IMAGE: &postgres_test_image postgres:17@sha256:0d938e975177bef9f1f61f3f9dbcf2e0aa0a139568f66d3415ed8892eb97f6ac
   # Local smoke writes outside the checkout; CI keeps it in the workspace to
   # upload. Relative paths resolve against the checkout, also in the container.
   BROWSER_SMOKE_ARTIFACT_DIR: tmp/browser-smoke
