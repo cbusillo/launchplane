@@ -32571,14 +32571,14 @@ class PostgresRecordStore(HumanSessionStore):
                 scope=request.scope,
                 instances=(request.instance,) if request.instance else (),
             )
-            director_preview = (
+            director_lane = (
                 isinstance(identity, LocalOperatorIdentity)
                 and director_agent_identity(identity)
                 and request.scope == "instance"
-                and request.instance == "preview"
+                and request.instance != "prod"
             )
             if request.mode == "apply":
-                if not (admin or director_preview) or not active.policy.allows(
+                if not (admin or director_lane) or not active.policy.allows(
                     identity=identity,
                     action="product_config.apply",
                     product=request.product,
@@ -32587,7 +32587,7 @@ class PostgresRecordStore(HumanSessionStore):
                     inherit_agent_read_role=False,
                 ):
                     raise PermissionError(
-                        "Removal requires an authorized administrator or preview operator."
+                        "Removal requires an authorized administrator or non-production lane operator."
                     )
             elif not director_agent_identity(identity) and not (
                 admin
@@ -32604,7 +32604,8 @@ class PostgresRecordStore(HumanSessionStore):
             profile = profile_for_request(session)
             if (
                 request.mode == "apply"
-                and director_preview
+                and director_lane
+                and request.instance == "preview"
                 and (
                     profile is None
                     or not profile.preview.enabled

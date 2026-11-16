@@ -110,13 +110,14 @@ def preview_policy() -> LaunchplaneAuthzPolicy:
 
 def preview_removal(
     store: PostgresRecordStore,
+    instance: str = "preview",
 ) -> tuple[RuntimeEnvironmentRecord, RuntimeSettingRemovalRequest]:
     store.write_product_profile_record(
         LaunchplaneProductProfileRecord.model_validate(_odoo_profile_payload_with_prod_lane("site"))
     )
-    record = runtime(scope="instance", context="cm", instance="preview")
+    record = runtime(scope="instance", context="cm", instance=instance)
     store.write_runtime_environment_record(record)
-    return record, request(product="site", scope="instance", context="cm", instance="preview")
+    return record, request(product="site", scope="instance", context="cm", instance=instance)
 
 
 class RuntimeRemovalTests(unittest.TestCase):
@@ -150,13 +151,14 @@ class RuntimeRemovalTests(unittest.TestCase):
 
     def reviewed_preview(
         self,
+        instance: str = "preview",
     ) -> tuple[RuntimeSettingRemovalRequest, LocalOperatorIdentity]:
         replacement = _record(policy=preview_policy(), revision=self.active.revision + 1)
         self.store.compare_and_write_authz_policy_record(
             expected_record=self.active, replacement_record=replacement
         )
         self.active = replacement
-        _, body = preview_removal(self.store)
+        _, body = preview_removal(self.store, instance)
         operator = LocalOperatorIdentity(
             subject="record-reader", token_label="record-reader-label", director_agent=True
         )
@@ -301,13 +303,38 @@ class RuntimeRemovalTests(unittest.TestCase):
         self.assertTrue(result.applied)
         self.assertTrue(result.readback_matches)
 
+    def test_director_operator_removal_allows_testing_and_refuses_production(self) -> None:
+        for instance in ("testing", "prod"):
+            with self.subTest(instance=instance):
+                body, operator = self.reviewed_preview(instance)
+                before = self.store.list_runtime_environment_records()
+                if instance == "prod":
+                    with self.assertRaises(PermissionError):
+                        self.store.runtime_setting_removal(
+                            request=body,
+                            identity=operator,
+                            trace_id="apply",
+                            idempotency_key=instance,
+                        )
+                    self.assertEqual(self.store.list_runtime_environment_records(), before)
+                    continue
+                result = self.store.runtime_setting_removal(
+                    request=body, identity=operator, trace_id="apply", idempotency_key=instance
+                )
+                self.assertTrue(result.applied)
+                readback = self.store.runtime_setting_removal(
+                    request=body.model_copy(update={"mode": "readback"}),
+                    identity=operator,
+                    trace_id="readback",
+                )
+                self.assertTrue(readback.readback_matches)
+
     def test_preview_removal_refuses_other_scopes_and_identity_types(self) -> None:
         body, operator = self.reviewed_preview()
         before = self.store.list_runtime_environment_records()
         for changes in (
             {"scope": "global", "product": "launchplane", "context": "", "instance": ""},
             {"scope": "context", "instance": ""},
-            {"instance": "testing"},
             {"instance": "prod"},
         ):
             with self.subTest(changes=changes), self.assertRaises(PermissionError):
