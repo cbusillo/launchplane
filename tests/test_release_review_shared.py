@@ -9,6 +9,12 @@ from unittest.mock import patch
 import click
 
 from control_plane.contracts.artifact_identity import ArtifactAddonSelector, ArtifactAddonSource
+from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchLandingEntry,
+    MergeTrainBatchLandingPlan,
+    MergeTrainBatchLandingPlanRecord,
+)
 from control_plane.contracts.release_review import (
     ReleaseChecklist,
     ReleaseReviewDecisionRecord,
@@ -35,10 +41,14 @@ class SharedGitHub:
         self.uncovered = False
         self.fail = False
         self.status = "ahead"
+        self.input_files: object = []
+        self.website_notes = "Test the website change."
 
     def read(self, path: str) -> object:
         repository = "/".join(path.split("/")[2:4])
         website = repository == profile().repository
+        if "/files?" in path:
+            return self.input_files
         commits = [f"{number:040x}" for number in range(1, 30)] if website else [HEAD]
         if self.fail and not website:
             raise click.ClickException("private provider error")
@@ -55,8 +65,7 @@ class SharedGitHub:
             {
                 "number": int(sha, 16) if website else 1,
                 "title": "Website change" if website else "Shared staff sign-in",
-                "body": "## Client test notes\n"
-                + ("Test the website change." if website else self.notes),
+                "body": "## Client test notes\n" + (self.website_notes if website else self.notes),
                 "merged_at": "2026-10-04T00:00:00Z",
                 "merge_commit_sha": sha,
                 "head": {"sha": sha},
@@ -95,6 +104,23 @@ class SharedReleaseReviewTests(unittest.TestCase):
 
     def review(self) -> ReleaseReviewStatus:
         return build_release_review(store=self.store, profile=profile(), read=self.github.read)
+
+    def accept_input_change(
+        self, number: int = 1, head_sha: str = f"{1:040x}"
+    ) -> ProductReviewDecisionRecord:
+        record = ProductReviewDecisionRecord(
+            record_id="input-acceptance",
+            product=profile().product,
+            repository=profile().repository,
+            pull_request_number=number,
+            head_sha=head_sha,
+            decision="accepted",
+            owner_github_id=profile().owner.github_id,
+            owner_github_login=profile().owner.github_login,
+            decided_at="2026-10-04T00:00:00Z",
+        )
+        self.store.write_product_review_decision_record(record)
+        return record
 
     def accept(self) -> ReleaseReviewDecisionRecord:
         review = self.review()
@@ -595,6 +621,190 @@ class SharedReleaseReviewTests(unittest.TestCase):
         self.store.write_artifact_manifest(production.model_copy(update={"addon_selectors": ()}))
         self.store.write_artifact_manifest(original)
         self.assertFalse(self.review().checklist_complete)
+
+    def test_input_transitions_need_accepted_product_input_changes(self) -> None:
+        original = self.store.read_artifact_manifest("artifact-testing")
+        replacements = (
+            original.model_copy(
+                update={
+                    "addon_sources": (
+                        *original.addon_sources,
+                        ArtifactAddonSource(repository="example/new", ref=HEAD),
+                    )
+                }
+            ),
+            original.model_copy(
+                update={
+                    "addon_sources": original.addon_sources[:1],
+                    "addon_selectors": original.addon_selectors[:1],
+                }
+            ),
+            original.model_copy(
+                update={
+                    "build_provenance": original.build_provenance.model_copy(
+                        update={
+                            "base_images": tuple(
+                                image.model_copy(update={"source_repository": "example/new-base"})
+                                for image in original.build_provenance.base_images
+                            )
+                        }
+                    )
+                }
+            ),
+        )
+        accepted = self.accept_input_change()
+        for artifact in replacements:
+            self.store.write_artifact_manifest(artifact)
+            for filename in ("workspace.toml", "artifact-inputs.toml"):
+                with self.subTest(artifact=artifact, filename=filename):
+                    self.github.input_files = [{"filename": filename, "status": "modified"}]
+                    self.store.write_product_review_decision_record(accepted)
+                    review = self.review()
+                    self.assertTrue(review.checklist_complete, review.blockers)
+                    assert review.checklist is not None
+                    coverage = next(
+                        source
+                        for source in review.checklist.shared_sources
+                        if source.repository == profile().repository
+                    )
+                    self.assertEqual(
+                        coverage.items[0].pull_request_number, accepted.pull_request_number
+                    )
+                    self.assertTrue(coverage.items[0].already_reviewed)
+                    self.accept()
+                    self.assertTrue(self.review().approved)
+
+    def test_transition_coverage_requires_valid_notes_decisions_and_input_files(self) -> None:
+        artifact = self.store.read_artifact_manifest("artifact-testing")
+        self.store.write_artifact_manifest(
+            artifact.model_copy(
+                update={
+                    "addon_sources": artifact.addon_sources[:1],
+                    "addon_selectors": artifact.addon_selectors[:1],
+                }
+            )
+        )
+        accepted = self.accept_input_change()
+        for updates, files, notes in (
+            ({"head_sha": HEAD}, [{"filename": "workspace.toml"}], "Check the website."),
+            (
+                {"decision": "changes_requested", "reason": "Fix it."},
+                [{"filename": "workspace.toml"}],
+                "Check the website.",
+            ),
+            ({"owner_github_id": "9002"}, [{"filename": "workspace.toml"}], "Check the website."),
+            ({"product": "other-site"}, [{"filename": "workspace.toml"}], "Check the website."),
+            ({"pull_request_number": 999}, [{"filename": "workspace.toml"}], "Check the website."),
+            ({}, [{"filename": "README.md"}], "Check the website."),
+            ({}, {"message": "Unavailable"}, "Check the website."),
+            ({}, [{"filename": "workspace.toml"}], ""),
+            ({}, [{"filename": "workspace.toml"}], "#52 has no Client test notes."),
+        ):
+            with self.subTest(updates=updates, files=files, notes=notes):
+                if isinstance(files, list):
+                    files = [{**file, "status": "modified"} for file in files]
+                self.store.write_product_review_decision_record(accepted.model_copy(update=updates))
+                self.github.input_files, self.github.website_notes = files, notes
+                self.accept()
+                self.assertFalse(self.review().checklist_complete)
+                self.assertFalse(self.review().approved)
+
+        self.github.input_files = [{"filename": "workspace.toml", "status": "modified"}]
+        self.github.website_notes = "Check the website."
+        self.store.write_product_review_decision_record(accepted)
+        self.store.write_product_review_decision_record(
+            accepted.model_copy(
+                update={
+                    "record_id": "later-rejection",
+                    "decision": "changes_requested",
+                    "reason": "Fix the page.",
+                    "decided_at": "2026-10-05T00:00:00Z",
+                }
+            )
+        )
+        self.assertFalse(self.review().checklist_complete)
+
+    def test_accepted_input_change_does_not_cover_ambiguous_or_inconsistent_sources(self) -> None:
+        self.github.input_files = [{"filename": "workspace.toml", "status": "modified"}]
+        self.accept_input_change()
+        artifact = self.store.read_artifact_manifest("artifact-testing")
+        for source in (
+            artifact.addon_sources[0],
+            ArtifactAddonSource(repository="example/new", ref="main"),
+            ArtifactAddonSource(repository=profile().repository, ref=BASE),
+        ):
+            with self.subTest(source=source):
+                self.store.write_artifact_manifest(
+                    artifact.model_copy(
+                        update={
+                            "addon_sources": (*artifact.addon_sources[:1], source),
+                            "addon_selectors": artifact.addon_selectors[:1],
+                        }
+                    )
+                )
+                self.accept()
+                self.assertFalse(self.review().checklist_complete)
+                self.assertFalse(self.review().approved)
+
+    def test_transition_coverage_uses_recorded_batch_constituent_and_accepted_head(self) -> None:
+        artifact = self.store.read_artifact_manifest("artifact-testing")
+        self.store.write_artifact_manifest(
+            artifact.model_copy(
+                update={
+                    "addon_sources": artifact.addon_sources[:1],
+                    "addon_selectors": artifact.addon_selectors[:1],
+                }
+            )
+        )
+        self.github.website_notes = "### #99 Convert the website\n\nCheck the converted website."
+        self.github.input_files = [{"filename": "workspace.toml", "status": "modified"}]
+        accepted = self.accept_input_change(99, HEAD)
+        for expected_head, merge_commit in ((BASE, f"{1:040x}"), (HEAD, BASE), (HEAD, f"{1:040x}")):
+            with self.subTest(expected_head=expected_head, merge_commit=merge_commit):
+                self.store.write_merge_train_batch_landing_plan_record(
+                    MergeTrainBatchLandingPlanRecord(
+                        record_id="input-batch",
+                        source="test",
+                        updated_at=accepted.decided_at,
+                        landing_plan=MergeTrainBatchLandingPlan(
+                            plan_id="input-batch",
+                            batch_id="input-batch",
+                            repository=profile().repository,
+                            base_branch="main",
+                            candidate_ref="launchplane/train/input-batch",
+                            candidate_sha=f"{1:040x}",
+                            policy_key="test",
+                            policy_sha256="f" * 64,
+                            created_at=accepted.decided_at,
+                            candidate_pull_request_number=1,
+                            entries=(
+                                MergeTrainBatchLandingEntry(
+                                    pull_request_number=accepted.pull_request_number,
+                                    position=1,
+                                    expected_head_sha=expected_head,
+                                    expected_base_sha=BASE,
+                                    merge_method="merge",
+                                    status="merged",
+                                    merge_commit_sha=merge_commit,
+                                ),
+                            ),
+                        ),
+                    )
+                )
+                review = self.review()
+                valid = expected_head == accepted.head_sha and merge_commit != BASE
+                self.assertEqual(review.checklist_complete, valid, review.blockers)
+                if valid:
+                    assert review.checklist is not None
+                    coverage = next(
+                        source
+                        for source in review.checklist.shared_sources
+                        if source.repository == profile().repository
+                    )
+                    self.assertEqual(
+                        coverage.items[0].pull_request_number, accepted.pull_request_number
+                    )
+                    self.assertEqual(coverage.items[0].head_sha, accepted.head_sha)
 
     def test_repository_forms_normalize_to_the_same_shared_range(self) -> None:
         artifact = self.store.read_artifact_manifest("artifact-prod")
