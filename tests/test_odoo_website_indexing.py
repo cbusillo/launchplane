@@ -213,6 +213,16 @@ class WebsiteIndexingBindingTests(unittest.TestCase):
             },
         }
 
+    def test_conversion_preflight_checks_binding_without_opening_the_old_database(self) -> None:
+        request = self.execution.observe(prepare_for_data_workflow=True)
+        self.assertEqual(request["database_uuid"], self.runtime.database_uuid)
+        self.assertEqual(request["indexing"]["public_origin"], self.execution.request.public_origin)
+        self.native.assert_not_called()
+        self.store.route_binding = None
+        with self.assertRaises(ValueError):
+            self.execution.observe(prepare_for_data_workflow=True)
+        self.native.assert_not_called()
+
     def test_current_binding_produces_reviewed_native_apply_without_maintenance(self) -> None:
         plan = self.execution.observe()
         self.assertEqual(self.writes, 0)

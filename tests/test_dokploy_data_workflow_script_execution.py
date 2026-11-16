@@ -506,6 +506,7 @@ def _render_post_deploy_script(
     instance: str = "testing",
     workflow_environment_overrides: dict[str, str] | None = None,
     clear_preview_fishbowl_source: bool = False,
+    deferred_website_indexing: dict[str, object] | None = None,
     target_ssh_directory: str = "/srv/preview-source-ssh",
 ) -> str:
     schedule_payloads: list[dict[str, object]] = []
@@ -591,6 +592,7 @@ def _render_post_deploy_script(
             bootstrap_missing_database=bootstrap_missing_database,
             workflow_environment_overrides=workflow_environment_overrides,
             clear_preview_fishbowl_source=clear_preview_fishbowl_source,
+            deferred_website_indexing=deferred_website_indexing,
         )
     if len(schedule_payloads) != 1:
         raise AssertionError(f"expected one schedule upsert, got {len(schedule_payloads)}")
@@ -1623,6 +1625,21 @@ def main(arguments: list[str]) -> int:
                     script, FAKE_WORKFLOW_EXIT="7", FAKE_WEBSITE_SETTINGS_FAILURE=failed
                 )
                 self.assertEqual(run.returncode, 7, run.stdout + run.stderr)
+                self.assertEqual(run.web_restarted, failed == "0", run.docker_log)
+
+    def test_major_release_keeps_web_stopped_when_deferred_indexing_fails(self) -> None:
+        script = _render_post_deploy_script(
+            None,
+            instance="prod",
+            deferred_website_indexing={
+                "database_uuid": "fixture-database",
+                "indexing": {"public_origin": "https://example.test", "production_use": "live"},
+            },
+        )
+        for failed in ("0", "1"):
+            with self.subTest(failed=failed):
+                run = self._run(script, FAKE_WEBSITE_SETTINGS_FAILURE=failed)
+                self.assertEqual(run.returncode == 0, failed == "0", run.stdout + run.stderr)
                 self.assertEqual(run.web_restarted, failed == "0", run.docker_log)
 
     def test_stopped_web_without_a_readback_still_fails(self) -> None:

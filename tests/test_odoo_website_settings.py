@@ -609,6 +609,115 @@ class WebsiteSettingsTests(unittest.TestCase):
                 changed.checklist.website_settings, accepted.checklist.website_settings
             )
 
+    def test_major_release_observes_converted_database_and_recovery_keeps_its_order(self) -> None:
+        for source_version, candidate_version, rollback, native_failure in (
+            ("19.0", "20.0", False, False),
+            ("19.0", "19.1", False, False),
+            ("20.0", "19.0", True, False),
+            ("19.0", "20.0", False, True),
+            ("20.0", "19.0", True, True),
+        ):
+            with (
+                self.subTest(
+                    candidate_version=candidate_version,
+                    rollback=rollback,
+                    native_failure=native_failure,
+                ),
+                TemporaryDirectory() as directory,
+            ):
+                store = FilesystemRecordStore(state_dir=Path(directory))
+                seed(store)
+                for artifact_id, version in (
+                    ("artifact-prod", source_version),
+                    ("artifact-testing", candidate_version),
+                ):
+                    manifest = store.read_artifact_manifest(artifact_id)
+                    manifest.build_flags.values["odoo_version"] = version
+                    store.write_artifact_manifest(manifest)
+                events: list[str] = []
+                deferred = candidate_version == "20.0" and not rollback
+
+                native_request: dict[str, Any] = {
+                    "mode": "dry-run",
+                    "indexing": {
+                        "public_origin": "https://site.example",
+                        "production_use": "live",
+                    },
+                    "database_uuid": "fixture-database",
+                }
+
+                def observe(*, prepare_for_data_workflow: bool = False) -> dict[str, Any]:
+                    if prepare_for_data_workflow:
+                        events.append("preflight")
+                        return native_request
+                    events.append("observe")
+                    if native_failure:
+                        raise RuntimeError("Native indexing did not prove its outcome.")
+                    return {"native": {**native_request["indexing"], "website_id": 1}}
+
+                def apply(**kwargs: Any) -> dict[str, str]:
+                    from control_plane.dokploy.post_deploy import OdooPostDeployReadbackFailure
+
+                    events.append("data-workflow")
+                    payload = json.loads(
+                        base64.b64decode(
+                            kwargs["workflow_environment_overrides"][
+                                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+                            ]
+                        )
+                    )
+                    self.assertEqual(payload.get("website_indexing") is None, deferred)
+                    if deferred:
+                        self.assertEqual(kwargs["deferred_website_indexing"], native_request)
+                        if native_failure:
+                            raise OdooPostDeployReadbackFailure(
+                                "Native indexing failed.", evidence={}
+                            )
+                    else:
+                        self.assertIsNone(kwargs["deferred_website_indexing"])
+                    return _module_update_evidence(website_indexing_production_use="live")
+
+                with (
+                    patch(
+                        "control_plane.odoo_website_indexing.WebsiteIndexingExecution.observe",
+                        side_effect=observe,
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy._resolve_compose_target_definition",
+                        return_value=DokployTargetDefinition(
+                            context="example-site",
+                            instance="prod",
+                            public_hosts=("site.example",),
+                        ),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.example", "test-token"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
+                        side_effect=apply,
+                    ),
+                ):
+                    result = execute_odoo_post_deploy(
+                        control_plane_root=Path(directory),
+                        record_store=store,
+                        request=OdooPostDeployRequest(context="example-site", instance="prod"),
+                        artifact_id="artifact-testing",
+                        release_operation=True,
+                        rollback=rollback,
+                    )
+                self.assertEqual(
+                    result.post_deploy_status,
+                    "fail" if native_failure else "pass",
+                )
+                self.assertEqual(
+                    events,
+                    ["preflight", "data-workflow"]
+                    if deferred
+                    else (["observe"] if native_failure else ["observe", "data-workflow"]),
+                )
+
     def test_release_renderer_uses_accepted_snapshot_and_rollback_clears_forward_settings(
         self,
     ) -> None:

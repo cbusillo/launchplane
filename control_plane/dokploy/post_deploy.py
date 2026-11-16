@@ -763,7 +763,12 @@ def run_compose_post_deploy_update(
     clear_preview_fishbowl_source: bool = False,
     testing_candidate_namespace: str = "",
     database_url: str | None = None,
+    deferred_website_indexing: dict[str, object] | None = None,
 ) -> dict[str, str]:
+    if deferred_website_indexing is not None and (
+        target_definition.instance != "prod" or run_destructive_restore
+    ):
+        raise ValueError("Deferred indexing requires a production release data workflow.")
     if testing_candidate_namespace and (
         target_definition.instance != "testing"
         or target_definition.target_name != testing_candidate_namespace
@@ -836,10 +841,14 @@ def run_compose_post_deploy_update(
         desired_env_map.pop("ODOO_ADDONS_PATH", None)
     resolved_workflow_environment_overrides = dict(workflow_environment_overrides or {})
     require_company_email = False
-    apply_website_settings = target_definition.instance.strip().lower() not in {
-        "prod",
-        "production",
-    }
+    apply_website_settings = (
+        target_definition.instance.strip().lower()
+        not in {
+            "prod",
+            "production",
+        }
+        or deferred_website_indexing is not None
+    )
     encoded_payload = resolved_workflow_environment_overrides.get(
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
     )
@@ -1003,6 +1012,7 @@ def run_compose_post_deploy_update(
         website_settings_instance=target_definition.instance.strip().lower()
         if apply_website_settings
         else "",
+        deferred_website_indexing=deferred_website_indexing,
     )
     fresh_arguments: FreshRestoreScriptArguments | None = None
     if fresh_testing_generation is not None:
@@ -2948,6 +2958,7 @@ def _build_dokploy_data_workflow_script(
     probe_company_email_contract: bool = False,
     clear_preview_fishbowl_source: bool = False,
     website_settings_instance: str = "",
+    deferred_website_indexing: dict[str, object] | None = None,
 ) -> str:
     """The schedule's bash script.
 
@@ -3137,7 +3148,7 @@ enforce_website_settings() {{
     fi
     local settings_status=0
     docker exec -i "${{workflow_environment[@]}}" "${{script_runner_container_id}}" \
-        python3 - "${{database_name}}" "${{website_settings_instance}}" <<'PY' || settings_status=$?
+        python3 - "${{database_name}}" "${{website_settings_instance}}" {shlex.quote(json.dumps(deferred_website_indexing)) if deferred_website_indexing is not None else ""} <<'PY' || settings_status=$?
 {WEBSITE_SETTINGS_PROGRAM}PY
     if [ "${{settings_status}}" -ne 0 ]; then
         return "${{settings_status}}"
