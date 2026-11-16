@@ -22,8 +22,14 @@ name: Product Retirement
         type: string
       expected_target_sha256:
         description: SHA-256 of the exact tracked provider target identifier.
-        required: true
+        required: false
+        default: ""
         type: string
+      no_target:
+        description: Retire unprovisioned records after provider absence is proven; no provider writes.
+        required: false
+        default: false
+        type: boolean
       operator_idempotency_key:
         description: Stable operator-selected key reused for retries of this retirement intent.
         required: true
@@ -49,6 +55,7 @@ name: Product Retirement
       confirmation:
         description: >-
           Exact apply phrase: retire product PRODUCT instance INSTANCE target TARGET_SHA256
+          (or retire product PRODUCT instance INSTANCE with no target).
         required: false
         default: ""
         type: string
@@ -64,6 +71,7 @@ jobs:
       product: ${{ inputs.product }}
       instance: ${{ inputs.instance }}
       expected_target_sha256: ${{ inputs.expected_target_sha256 }}
+      no_target: ${{ inputs.no_target }}
       operator_idempotency_key: ${{ inputs.operator_idempotency_key }}
       reason: ${{ inputs.reason }}
       related_issue: ${{ inputs.related_issue }}
