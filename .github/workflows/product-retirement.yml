@@ -22,8 +22,14 @@ name: Product Retirement
         type: string
       expected_target_sha256:
         description: SHA-256 of the exact tracked provider target identifier.
-        required: true
+        required: false
+        default: ""
         type: string
+      no_target:
+        description: Retire unprovisioned records after provider absence is proven; no provider writes.
+        required: false
+        default: false
+        type: boolean
       operator_idempotency_key:
         description: Stable operator-selected key reused for retries of this retirement intent.
         required: true
@@ -49,13 +55,14 @@ name: Product Retirement
       confirmation:
         description: >-
           Exact apply phrase: retire product PRODUCT instance INSTANCE target TARGET_SHA256
+          (or retire product PRODUCT instance INSTANCE with no target).
         required: false
         default: ""
         type: string
 
 jobs:
   retire:
-    uses: cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml@c922d5f1a0bf3ab17a829196042a96ba89d7b693 # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml@a0061958570f6ce24ab22ab9bdd903efad8b79d5 # main
     permissions:
       contents: read
       id-token: write
@@ -64,6 +71,7 @@ jobs:
       product: ${{ inputs.product }}
       instance: ${{ inputs.instance }}
       expected_target_sha256: ${{ inputs.expected_target_sha256 }}
+      no_target: ${{ inputs.no_target }}
       operator_idempotency_key: ${{ inputs.operator_idempotency_key }}
       reason: ${{ inputs.reason }}
       related_issue: ${{ inputs.related_issue }}
