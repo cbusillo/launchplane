@@ -284,7 +284,7 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
                         self.store.read_product_profile_record(self.before.product), self.before
                     )
 
-    async def test_scoped_agent_cannot_opt_in_and_director_cannot_opt_out(self) -> None:
+    async def test_director_can_toggle_snapshot_policy_but_scoped_agent_cannot(self) -> None:
         self.prepare_snapshot_opt_in()
         with scoped_agent_transport():
             refused = await self.post()
@@ -296,9 +296,33 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
         self.headers["Idempotency-Key"] = "snapshot-opt-out"
         self.after = self.before.model_dump(mode="json")
         self.after["preview"]["clean_testing_snapshot"] = False
-        refused = await self.post()
+        with scoped_agent_transport():
+            refused = await self.post()
         self.assertEqual(refused.status_code, 403, refused.text)
+        reviewed = await self.post(dry_run=True)
+        self.assertEqual(reviewed.status_code, 202, reviewed.text)
         self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
+        accepted = await self.post()
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        self.assertEqual(
+            self.store.read_product_profile_record(self.before.product),
+            LaunchplaneProductProfileRecord.model_validate(self.after),
+        )
+
+    async def test_snapshot_disable_cannot_bundle_another_profile_change(self) -> None:
+        self.before.preview.clean_testing_snapshot = True
+        self.store.write_product_profile_record(self.before)
+        self.headers["If-Match"] = f'"{product_profile_record_sha256(self.before)}"'
+        self.after = self.before.model_dump(mode="json")
+        self.after["preview"]["clean_testing_snapshot"] = False
+        self.after["display_name"] = "Other"
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                refused = await self.post(dry_run=dry_run)
+                self.assertEqual(refused.status_code, 403, refused.text)
+                self.assertEqual(
+                    self.store.read_product_profile_record(self.before.product), self.before
+                )
 
     async def test_conditional_review_and_idempotency_are_required(self) -> None:
         for name in ("If-Match", "Idempotency-Key"):

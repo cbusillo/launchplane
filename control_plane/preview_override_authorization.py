@@ -10,12 +10,11 @@ def director_preview_snapshot_allowed(
         or not existing.is_active
         or existing.driver_id != "odoo"
         or not existing.preview.enabled
-        or existing.preview.clean_testing_snapshot
-        or not replacement.preview.clean_testing_snapshot
+        or existing.preview.clean_testing_snapshot == replacement.preview.clean_testing_snapshot
     ):
         return False
     payload = existing.model_dump(mode="json")
-    payload["preview"]["clean_testing_snapshot"] = True
+    payload["preview"]["clean_testing_snapshot"] = replacement.preview.clean_testing_snapshot
     try:
         expected = LaunchplaneProductProfileRecord.model_validate(payload)
     except ValueError:

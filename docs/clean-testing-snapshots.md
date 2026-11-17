@@ -207,24 +207,28 @@ only new preview filestores use overlays. This does not provide database copy-on
 See [preview memory admission](preview-memory-admission.md#idle-previews) for
 idle-preview sleep and wake mechanics.
 
-## Snapshot opt-in and custody
+## Snapshot policy and custody
 
 A Director agent may conditionally set only `preview.clean_testing_snapshot`
-from false to true through the existing `POST /v1/product-profiles` route. Read the
+from false to true or true to false through the existing `POST /v1/product-profiles` route. Read the
 current profile and strong `ETag`, preserve every other field, and submit that
 exact replacement with `If-Match` and a stable `Idempotency-Key`; read back the
 profile after acceptance or an uncertain response. First submit with `?dry_run=true`
 to validate that replacement without saving it. This dry run checks the profile
-change, not snapshot availability or its Odoo version. This opt-in preserves the budget,
+change, not snapshot availability or its Odoo version. This policy change preserves the budget,
 retention bindings, drill state, source settings, Client and release authority.
 The agent rebuilding testing separately qualifies and records its four
 [testing storage requirements](service-boundary.md#testing-storage-requirements)
 through the same conditional profile route, preserving retention bindings and
 every other field. These changes cannot be combined in one write. A missing
 budget refuses snapshot use before reading a completed snapshot; opting in does
-not admit headroom or start a refresh. Opt-out still requires full profile authority and custody review.
-New preview copies refuse until a reviewed budget exists and an admitted refresh
-publishes a clean snapshot. Existing preview data remains intact. Enable the existing daily
+not admit headroom or start a refresh. While opted in, new preview copies refuse
+until a reviewed budget exists and an admitted refresh publishes a clean snapshot.
+Opt-out also changes source selection and recovery for existing snapshot previews:
+an interrupted snapshot restore may need the flag re-enabled to recover. Without
+snapshot mode, configured `ODOO_UPSTREAM_*` values select upstream restore;
+otherwise fresh previews start from none/bootstrap. Changing the flag itself
+does not delete existing preview data. Enable the existing daily
 drill only with its qualified source, storage budget and custody checks. This changes no production key or access grant.
 
 Capture must attach to qualified sanitized refresh or import completion;
