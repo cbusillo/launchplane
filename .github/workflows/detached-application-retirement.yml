@@ -66,7 +66,7 @@ name: Detached Application Retirement
 jobs:
   retire:
     # yamllint disable-line rule:line-length
-    uses: cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml@11d53d2840a6f1898785d7c8f1553c202caa3fbf  # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml@a0061958570f6ce24ab22ab9bdd903efad8b79d5  # main
     permissions:
       contents: read
       id-token: write

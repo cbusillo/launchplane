@@ -133,8 +133,8 @@ does not waive resource, ownership, executor, review or recovery checks.
 
 Use `POST /v1/product-retirement` for tracked and no-target lane requests.
 The protected [dispatch wrapper](../.github/workflows/product-retirement.yml)
-remains available for its existing tracked-lane inputs; it does not expose
-`no_target` or preview-inclusive retirement. Verify deployed service support
+supports tracked-lane and explicit `no_target` requests. It does not expose
+preview-inclusive retirement. Verify deployed service support
 before using a mode. Source tests alone do not establish activation.
 Tracked requests review one profile-owned lane and its exact target digest.
 That lane must be the profile's only stable lane. Planning

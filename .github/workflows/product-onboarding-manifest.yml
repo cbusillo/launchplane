@@ -74,7 +74,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: cbusillo/launchplane/.github/workflows/reusable-stable-lane-repair.yml@1fae6fda68dd5994f34df227e66b7275b3a9cacb # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-stable-lane-repair.yml@a0061958570f6ce24ab22ab9bdd903efad8b79d5 # main
     with:
       mode: ${{ inputs.mode }}
       product: ${{ inputs.product }}

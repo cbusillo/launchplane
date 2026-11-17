@@ -83,7 +83,7 @@ permissions:
 
 jobs:
   apply:
-    uses: cbusillo/launchplane/.github/workflows/reusable-product-prelaunch-rebuild-policy.yml@f63623c4228b227d2baa3325de3d0a576fc8af9f # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-prelaunch-rebuild-policy.yml@a0061958570f6ce24ab22ab9bdd903efad8b79d5 # main
     with:
       mode: ${{ inputs.mode }}
       product: ${{ inputs.product }}
