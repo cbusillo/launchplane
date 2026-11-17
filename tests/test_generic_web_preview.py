@@ -1389,12 +1389,14 @@ class GenericWebPreviewTests(unittest.TestCase):
             source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
             image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
             preview_id="pr-42",
+            preview_generation_id="preview-syo-pr-42-generation-0002",
         )
         stale_identity = expected_identity.model_copy(
             update={
                 "deployment_record_id": "deployment-20260614T195500Z-syo-pr-42",
                 "artifact_id": "ghcr.io/cbusillo/sellyouroutboard:stale",
                 "source_git_ref": "previous-sha",
+                "preview_generation_id": "preview-syo-pr-42-generation-0001",
             }
         )
         responses = iter(

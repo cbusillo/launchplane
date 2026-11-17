@@ -1174,6 +1174,7 @@ def _preview_runtime_identity_mismatch_is_converging(detail: str) -> bool:
         "deployment_record_id",
         "artifact_id",
         "source_git_ref",
+        "preview_generation_id",
     }
 
 

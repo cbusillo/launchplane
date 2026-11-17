@@ -59,7 +59,7 @@ successful teardown so that retry can repair the record.
 
 Preview refresh readiness should allow the serving runtime identity to converge
 after a provider deploy trigger. A health response that still reports the prior
-deployment/artifact/source identity for the same product, context, preview slug,
+deployment/artifact/source/generation identity for the same product, context, preview slug,
 and environment kind remains a polling signal until the route timeout; a
 different product, context, preview slug, or environment kind remains a hard
 mismatch.
