@@ -9,6 +9,7 @@ from control_plane.dokploy_target_setup_http import CREATE_COMPOSE_SOURCE_LABEL
 from tests.support.auth import scoped_agent_transport
 from tests.support.disposable_lanes import record_safety
 from tests.test_director_testing_target_creation import _DirectorTestingSetupFixture
+from tests.support.http import request
 
 
 class _EmptyComposeDomainFixture(_DirectorTestingSetupFixture):
@@ -810,6 +811,211 @@ class DirectorCreatedHostnameProductionDomainTests(_NeverLiveProductionDomainFix
                 ),
             )
         )
+
+    def correction_payload(self) -> dict[str, object]:
+        return {
+            "product": self.profile.product,
+            "context": self.context,
+            "instance": "prod",
+            "operation": "correct-unused-prod",
+            "base_url": "https://new.example.invalid",
+            "health_url": "https://new.example.invalid/health",
+            "reason": "Use the reviewed prelive address after the created hostname is dropped.",
+        }
+
+    async def post_correction(self, payload: dict[str, object], key: str = "") -> Any:
+        return await request(
+            self.app,
+            "POST",
+            "/v1/product-profiles/stable-lane-repair/apply",
+            headers={
+                "Authorization": "Bearer local-operator-token",
+                **({"Idempotency-Key": key} if key else {}),
+            },
+            payload=payload,
+        )
+
+    async def test_reviewed_url_correction_keeps_original_domain_request_unchanged(self) -> None:
+        self.record_creation_receipt()
+        old_lane = self.profile.lanes[0].model_copy(
+            update={
+                "base_url": f"https://{CREATED_HOSTNAME}",
+                "health_url": f"https://{CREATED_HOSTNAME}/health",
+            }
+        )
+        self.profile = self.profile.model_copy(update={"lanes": (old_lane,)})
+        self.store.write_product_profile_record(self.profile)
+        self.assert_original_refusal(await self.post())
+        planned = await self.post_correction(self.correction_payload())
+        self.assertEqual(planned.status_code, 202, planned.text)
+        self.assertEqual(planned.json()["result"]["base_url_before"], old_lane.base_url)
+        self.assertEqual(planned.json()["result"]["health_url_before"], old_lane.health_url)
+        applied = await self.post_correction(
+            {
+                **self.correction_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
+            },
+            key="reviewed-url-correction",
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        changed = self.store.read_product_profile_record(self.profile.product)
+        self.assertEqual(changed.lanes[0].base_url, self.correction_payload()["base_url"])
+        self.assertEqual(changed.lanes[0].health_url, self.correction_payload()["health_url"])
+        self.assertEqual(changed.source, self.profile.source)
+        self.assertEqual(changed.release_on_acceptance, self.profile.release_on_acceptance)
+        self.assertEqual(self.read_target(), self.target)
+        self.assertEqual(self.writes, [])
+        continued = await self.post()
+        self.assertEqual(continued.status_code, 202, continued.text)
+        self.assertEqual(self.writes, self.expected_routes())
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), changed)
+
+    async def test_url_correction_refuses_live_or_in_use_lane(self) -> None:
+        self.record_creation_receipt()
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"production_use": "live"})
+        )
+        self.assertEqual((await self.post_correction(self.correction_payload())).status_code, 409)
+        self.store.write_product_profile_record(self.profile)
+        record_safety(self.store, self.profile.product, self.context, "prod", usage="in_use")
+        self.assertEqual((await self.post_correction(self.correction_payload())).status_code, 409)
+
+    async def test_url_correction_refuses_any_production_deployment(self) -> None:
+        from control_plane.contracts.deployment_record import DeploymentRecord
+        from control_plane.contracts.promotion_record import DeploymentEvidence
+
+        self.record_creation_receipt()
+        self.store.write_deployment_record(
+            DeploymentRecord(
+                record_id="earlier-production-deploy",
+                context=self.context,
+                instance="prod",
+                source_git_ref="fixture-revision",
+                deploy=DeploymentEvidence(
+                    target_name="empty-production-compose",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    status="fail",
+                ),
+            )
+        )
+        refused = await self.post_correction(self.correction_payload())
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
+    async def test_url_correction_requires_unchanged_creation_receipt_and_both_urls(self) -> None:
+        self.assertEqual((await self.post_correction(self.correction_payload())).status_code, 409)
+        self.record_creation_receipt()
+        refused = await self.post_correction({**self.correction_payload(), "health_url": ""})
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
+    async def test_url_correction_requires_director_agent(self) -> None:
+        self.record_creation_receipt()
+        with scoped_agent_transport():
+            refused = await self.post_correction(self.correction_payload())
+        self.assertEqual(refused.status_code, 403, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "authorization_denied")
+
+    async def test_url_correction_refuses_shared_compose_identity(self) -> None:
+        self.record_creation_receipt()
+        self.store.write_dokploy_target_id_record(
+            self.target_id.model_copy(update={"context": "other"})
+        )
+        refused = await self.post_correction(self.correction_payload())
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
+    async def test_url_correction_refuses_unresolved_original_setup(self) -> None:
+        from control_plane.dokploy_target_setup_http import first_production_target_lock_name
+
+        self.record_creation_receipt()
+        self.store.reserve_mutation(
+            scope="original-owner",
+            route_path="/v1/dokploy-targets/setup",
+            idempotency_key="original-setup",
+            request_fingerprint="original-setup",
+            lease_owner="original-executor",
+            lease_seconds=300,
+            reconciliation_key="original-setup-binding",
+            provider_target_key=first_production_target_lock_name(self.context),
+        )
+        refused = await self.post_correction(self.correction_payload())
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
+    async def test_url_correction_refuses_legacy_in_flight_target_deploy(self) -> None:
+        from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+        from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
+        from control_plane.workflows.generic_web_deploy_provider import (
+            dokploy_generic_web_provider_target_key,
+        )
+
+        self.record_creation_receipt()
+        legacy_hold = LaunchplaneIdempotencyRecord(
+            record_id="legacy-target-deploy",
+            scope="deploy-owner",
+            route_path=GENERIC_WEB_DEPLOY_ROUTE,
+            idempotency_key="first-production-deploy",
+            request_fingerprint="first-production-deploy",
+            state="running",
+            lease_owner="deploy-executor",
+            lease_expires_at="2099-01-01T00:00:00Z",
+            created_at=self.profile.updated_at,
+            updated_at=self.profile.updated_at,
+            reconciliation_key="first-production-deploy-binding",
+            provider_target_key=dokploy_generic_web_provider_target_key(self.target_provider),
+        )
+        with patch.object(
+            self.store, "list_held_provider_target_reservations", return_value=(legacy_hold,)
+        ):
+            refused = await self.post_correction(self.correction_payload())
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "stable_lane_repair_blocked")
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
+    async def test_url_correction_stale_review_has_no_effect(self) -> None:
+        self.record_creation_receipt()
+        planned = await self.post_correction(self.correction_payload())
+        self.assertEqual(planned.status_code, 202, planned.text)
+        changed = self.profile.model_copy(update={"display_name": "New product name"})
+        self.store.write_product_profile_record(changed)
+        refused = await self.post_correction(
+            {
+                **self.correction_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
+            },
+            key="stale-url-review",
+        )
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), changed)
+
+    async def test_url_correction_rechecks_usage_inside_the_profile_write(self) -> None:
+        self.record_creation_receipt()
+        planned = await self.post_correction(self.correction_payload())
+        self.assertEqual(planned.status_code, 202, planned.text)
+        original_write = self.store.compare_and_write_product_profile_record
+
+        def usage_before_write(**kwargs: Any) -> Any:
+            record_safety(self.store, self.profile.product, self.context, "prod", usage="in_use")
+            return original_write(**kwargs)
+
+        with patch.object(
+            self.store, "compare_and_write_product_profile_record", side_effect=usage_before_write
+        ):
+            refused = await self.post_correction(
+                {
+                    **self.correction_payload(),
+                    "mode": "apply",
+                    "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
+                },
+                key="newly-used-production-lane",
+            )
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "unused_production_setup_changed")
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
 
     def assert_original_refusal(self, response: Any) -> None:
         self.assert_no_effects(response, 400)

@@ -46,6 +46,10 @@ class ProductStableLaneRepairReadStore(Protocol):
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetIdRecord: ...
 
+    def require_unused_production_setup(
+        self, *, product: str, context: str, base_url: str, health_url: str
+    ) -> str: ...
+
 
 class ProductStableLaneRepairRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -55,6 +59,8 @@ class ProductStableLaneRepairRequest(BaseModel):
     context: str
     instance: str
     base_url: str = ""
+    health_url: str = ""
+    operation: Literal["fill", "correct-unused-prod"] = "fill"
     mode: ProductStableLaneRepairMode = "dry-run"
     reason: str
     reviewed_plan_sha256: str = ""
@@ -65,6 +71,7 @@ class ProductStableLaneRepairRequest(BaseModel):
         self.context = self.context.strip()
         self.instance = self.instance.strip()
         self.base_url = self.base_url.strip().rstrip("/")
+        self.health_url = self.health_url.strip()
         self.reason = self.reason.strip()
         self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
         for field_name in ("product", "context", "instance", "reason"):
@@ -76,6 +83,14 @@ class ProductStableLaneRepairRequest(BaseModel):
             raise ValueError(
                 "Product stable lane repair apply requires a reviewed 64-character plan SHA-256."
             )
+        if self.operation == "fill" and self.health_url:
+            raise ValueError("Stable lane fill derives its health URL from the tracked target.")
+        if self.operation == "correct-unused-prod" and self.instance != "prod":
+            raise ValueError("Unused production URL correction requires the prod lane.")
+        if self.operation == "correct-unused-prod" and not {"base_url", "health_url"}.issubset(
+            self.model_fields_set
+        ):
+            raise ValueError("Unused production URL correction requires both exact URL values.")
         return self
 
 
@@ -106,6 +121,8 @@ class ProductStableLaneRepairPlan(BaseModel):
     instance: str
     base_url: str
     health_url: str
+    base_url_before: str = ""
+    health_url_before: str = ""
     changed: Literal[True] = True
     applied: bool = False
     target: ProductStableLaneRepairTargetEvidence
@@ -116,6 +133,7 @@ class ProductStableLaneRepairPlan(BaseModel):
     profile_sha256_after: str = ""
     profile_updated_at_before: str
     profile_updated_at_after: str = ""
+    unused_setup_sha256: str = ""
     plan_sha256: str
 
 
@@ -197,6 +215,34 @@ def _health_url(
     return f"{base_url}{health_path}"
 
 
+def _validated_corrected_urls(base_url: str, health_url: str) -> tuple[str, str]:
+    for name, value in (("base_url", base_url), ("health_url", health_url)):
+        if not value:
+            raise ProductStableLaneRepairBoundaryError(
+                "Corrected lane URLs require both HTTPS values."
+            )
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port is not None
+            or parsed.query
+            or parsed.fragment
+            or any(character.isspace() for character in value)
+            or (name == "base_url" and parsed.path not in {"", "/"})
+        ):
+            raise ProductStableLaneRepairBoundaryError(
+                "Corrected lane URLs must be HTTPS without credentials, ports, queries or fragments."
+            )
+    if urlsplit(base_url).hostname != urlsplit(health_url).hostname:
+        raise ProductStableLaneRepairBoundaryError(
+            "Corrected base and health URLs must use the same hostname."
+        )
+    return base_url, health_url
+
+
 def build_product_stable_lane_repair_plan(
     *,
     record_store: ProductStableLaneRepairReadStore,
@@ -214,22 +260,37 @@ def build_product_stable_lane_repair_plan(
         raise ProductStableLaneRepairBoundaryError(
             "Product stable lane repair requires an active product profile."
         )
-    if not product_profile_uses_generic_web_base(profile):
+    if request.operation == "fill" and not product_profile_uses_generic_web_base(profile):
         raise ProductStableLaneRepairBoundaryError(
             "Product stable lane repair requires a generic-web based product profile."
         )
-    # An existing lane is repaired only when its URLs were never recorded; a lane
-    # that already has a base_url is never overwritten.
     existing_lane = next(
         (lane for lane in profile.lanes if lane.instance == request.instance), None
     )
-    if existing_lane is not None and (
-        existing_lane.base_url.strip() or existing_lane.context != request.context
-    ):
+    if existing_lane is not None and existing_lane.context != request.context:
+        raise ProductStableLaneRepairBoundaryError(
+            "Product stable lane repair requires the requested lane instance to be absent, or present in the same context."
+        )
+    if request.operation == "fill" and existing_lane is not None and existing_lane.base_url.strip():
         raise ProductStableLaneRepairBoundaryError(
             "Product stable lane repair requires the requested lane instance to be absent, "
             "or present in the same context with no base_url."
         )
+    unused_setup_sha256 = ""
+    if request.operation == "correct-unused-prod":
+        if existing_lane is None or profile.production_use == "live":
+            raise ProductStableLaneRepairBoundaryError(
+                "URL correction requires an existing never-Live production lane."
+            )
+        try:
+            unused_setup_sha256 = record_store.require_unused_production_setup(
+                product=request.product,
+                context=request.context,
+                base_url=request.base_url,
+                health_url=request.health_url,
+            )
+        except ValueError as error:
+            raise ProductStableLaneRepairBoundaryError(str(error)) from error
     if request.context in profile.historical_contexts:
         raise ProductStableLaneRepairBoundaryError(
             "Product stable lane repair cannot reactivate a historical context."
@@ -265,7 +326,17 @@ def build_product_stable_lane_repair_plan(
             "Product stable lane repair currently requires a tracked Dokploy target."
         )
 
-    if profile.public_website == "none":
+    if request.operation == "correct-unused-prod":
+        assert existing_lane is not None
+        if profile.public_website == "none":
+            raise ProductStableLaneRepairBoundaryError(
+                "A product with no public website cannot register a public base_url."
+            )
+        domains = tuple(_normalized_target_domain(domain) for domain in dokploy_target.domains)
+        base_url, health_url = _validated_corrected_urls(request.base_url, request.health_url)
+        if (base_url, health_url) == (existing_lane.base_url, existing_lane.health_url):
+            raise ProductStableLaneRepairBoundaryError("URL correction must change the lane URLs.")
+    elif profile.public_website == "none":
         if request.base_url:
             raise ProductStableLaneRepairBoundaryError(
                 "A product with no public website cannot register a public base_url."
@@ -291,17 +362,19 @@ def build_product_stable_lane_repair_plan(
             ),
         )
     else:
-        health_url = existing_lane.health_url.strip() or health_url
+        if request.operation == "fill":
+            health_url = existing_lane.health_url.strip() or health_url
         lanes = tuple(
             lane.model_copy(update={"base_url": base_url, "health_url": health_url})
             if lane.instance == request.instance
             else lane
             for lane in profile.lanes
         )
+    profile_update: dict[str, object] = {"lanes": lanes}
+    if request.operation == "fill":
+        profile_update["source"] = PRODUCT_STABLE_LANE_REPAIR_SOURCE
     replacement_profile = LaunchplaneProductProfileRecord.model_validate(
-        profile.model_copy(
-            update={"lanes": lanes, "source": PRODUCT_STABLE_LANE_REPAIR_SOURCE}
-        ).model_dump(mode="json")
+        profile.model_copy(update=profile_update).model_dump(mode="json")
     )
     validate_product_profile_history_transition(
         existing_profile=profile,
@@ -342,11 +415,23 @@ def build_product_stable_lane_repair_plan(
         "health_url": health_url,
         "target": target_evidence.model_dump(mode="json"),
         "profile_sha256_before": profile_sha256,
-        "repair": "restore_lane" if existing_lane is None else "fill_lane_urls",
+        "repair": request.operation
+        if request.operation != "fill"
+        else ("restore_lane" if existing_lane is None else "fill_lane_urls"),
         "preserved_lane_instances": list(preserved_lane_instances),
         "reason": request.reason,
-        "source_label": PRODUCT_STABLE_LANE_REPAIR_SOURCE,
     }
+    if request.operation == "fill":
+        plan_evidence["source_label"] = PRODUCT_STABLE_LANE_REPAIR_SOURCE
+    if request.operation == "correct-unused-prod":
+        assert existing_lane is not None
+        plan_evidence.update(
+            {
+                "base_url_before": existing_lane.base_url,
+                "health_url_before": existing_lane.health_url,
+                "unused_setup_sha256": unused_setup_sha256,
+            }
+        )
     plan_sha256 = nonvalidating_compact_sorted_json_sha256(plan_evidence)
     return (
         ProductStableLaneRepairPlan(
@@ -356,6 +441,9 @@ def build_product_stable_lane_repair_plan(
             instance=request.instance,
             base_url=base_url,
             health_url=health_url,
+            base_url_before=existing_lane.base_url if existing_lane else "",
+            health_url_before=existing_lane.health_url if existing_lane else "",
+            unused_setup_sha256=unused_setup_sha256,
             target=target_evidence,
             preserved_lane_instances=preserved_lane_instances,
             reason=request.reason,

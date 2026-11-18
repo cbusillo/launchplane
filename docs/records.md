@@ -1172,6 +1172,24 @@ context, instance, domain, or target defaults. That operation calls
 `product_onboarding.apply` grant binds to that exact worker revision rather
 than to the manifest's branch identity.
 
+The private `GET /v1/product-profiles/{product}` operation is also available
+through the generic agent caller for an exact current profile read, including
+the recorded lane URLs and profile revision. The existing stable-lane repair
+route accepts `operation: correct-unused-prod` only for a Director agent. Its
+dry-run reviews both replacement URLs against the current URLs, profile and
+unused production setup evidence. Apply requires that plan digest and a fresh
+profile revision. The service refuses a Live lane, a production deployment or
+promotion, a release, backup or route record, an in-use or sole-copy safety
+record, and a shared resource. It requires an unchanged, unrouted production
+target creation receipt and available hostname claims. Only the profile's
+production `base_url` and `health_url` change; the original domain request and
+provider records are left for the separate domain operation to verify later.
+Both replacement URLs must use the same HTTPS hostname. A held original setup
+or a target shared with another lane blocks the correction.
+The correction does not create a route or claim the lane is healthy. The
+Director agent reviews the URL against the unchanged original domain request; that
+request remains the next provider operation and verifies its route separately.
+
 Odoo preview certificate-policy changes use
 `POST /v1/product-profiles/preview-tls/apply`. The route reads the current
 DB-backed profile and can change only `preview.domain_certificate_type`; all

@@ -15677,19 +15677,33 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Product stable lane repair request failed validation.",
             ) from error
-        if not resolved_authz_policy_runtime.allows(
-            identity=identity,
-            action="product_onboarding.apply",
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ) and not (
-            repair_request.mode != "apply"
-            and resolved_authz_policy_runtime.allows(
+        director_url_correction = repair_request.operation == "correct-unused-prod"
+        if director_url_correction and not director_agent_identity(identity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Production URL correction requires a Director agent.",
+            )
+        if (
+            not director_url_correction
+            and not resolved_authz_policy_runtime.allows(
                 identity=identity,
-                action="product_onboarding.plan",
-                product=repair_request.product,
-                context=repair_request.context,
-                target=AuthorizationTarget(scope="instance", instances=(repair_request.instance,)),
+                action="product_onboarding.apply",
+                product="launchplane",
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
+            and not (
+                repair_request.mode != "apply"
+                and resolved_authz_policy_runtime.allows(
+                    identity=identity,
+                    action="product_onboarding.plan",
+                    product=repair_request.product,
+                    context=repair_request.context,
+                    target=AuthorizationTarget(
+                        scope="instance", instances=(repair_request.instance,)
+                    ),
+                )
             )
         ):
             raise _launchplane_http_error(
@@ -15866,6 +15880,10 @@ def create_launchplane_fastapi_app(
             expected_provider_targets=(provider_target,),
             expected_dokploy_targets=(dokploy_target,),
             expected_dokploy_target_ids=(dokploy_target_id,),
+            expected_unused_production_setup_sha256=plan.unused_setup_sha256,
+            unused_production_setup_context=(
+                repair_request.context if repair_request.operation == "correct-unused-prod" else ""
+            ),
         )
         if write_result.status == "replayed":
             if write_result.idempotency_record is None:
@@ -15902,6 +15920,20 @@ def create_launchplane_fastapi_app(
                     "reviewed stable lane repair plan."
                 ),
             )
+        if write_result.status == "history_busy":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="unused_production_setup_busy",
+                message="Another protected operation holds the production lane; no URL was changed.",
+            )
+        if write_result.status == "history_conflict":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="unused_production_setup_changed",
+                message="Production lane use or setup evidence changed before the reviewed URL correction committed.",
+            )
         if write_result.status == "reservation_in_progress":
             raise _launchplane_http_error(
                 status_code=409,
@@ -15918,6 +15950,10 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="mutation_reconciliation_required",
                 message="The product stable lane repair requires reconciliation before retry.",
+            )
+        if write_result.status != "written":
+            raise RuntimeError(
+                f"Unsupported product stable lane repair write status: {write_result.status}"
             )
         return response
 
