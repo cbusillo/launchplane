@@ -78,6 +78,14 @@ class _Store:
             target_record=self.dokploy_target,
             target_id_record=self.dokploy_target_id,
         )
+        self.unused_production_setup = False
+
+    def require_unused_production_setup(
+        self, *, product: str, context: str, base_url: str, health_url: str
+    ) -> str:
+        if not self.unused_production_setup:
+            raise ProductStableLaneRepairBoundaryError("Production setup is in use.")
+        return "a" * 64
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
@@ -105,6 +113,8 @@ def _request(
     mode: str = "dry-run",
     base_url: str = "https://www.example.com",
     reviewed_plan_sha256: str = "",
+    operation: str = "fill",
+    health_url: str = "",
 ) -> ProductStableLaneRepairRequest:
     return ProductStableLaneRepairRequest.model_validate(
         {
@@ -112,6 +122,8 @@ def _request(
             "context": "example-product",
             "instance": "prod",
             "base_url": base_url,
+            "health_url": health_url,
+            "operation": operation,
             "mode": mode,
             "reason": "Restore the missing production lane.",
             "reviewed_plan_sha256": reviewed_plan_sha256,
@@ -120,6 +132,32 @@ def _request(
 
 
 class ProductStableLaneRepairTests(unittest.TestCase):
+    def test_reviewed_unused_prod_url_correction_preserves_other_fields(self) -> None:
+        profile = _profile()
+        original_lane = profile.lanes[0].model_copy(
+            update={
+                "instance": "prod",
+                "base_url": "https://old.example.com",
+                "health_url": "https://old.example.com/api/health",
+            }
+        )
+        profile = profile.model_copy(update={"lanes": (*profile.lanes, original_lane)})
+        store = _Store(profile=profile)
+        store.unused_production_setup = True
+        plan, before, replacement, *_ = build_product_stable_lane_repair_plan(
+            record_store=store,
+            request=_request(
+                operation="correct-unused-prod",
+                base_url="https://www.example.com",
+                health_url="https://www.example.com/api/health",
+            ),
+        )
+        self.assertEqual(plan.base_url_before, original_lane.base_url)
+        self.assertEqual(plan.health_url_before, original_lane.health_url)
+        self.assertEqual(replacement.lanes[0], before.lanes[0])
+        self.assertEqual(replacement.lanes[1].base_url, "https://www.example.com")
+        self.assertEqual(replacement.lanes[1].health_url, "https://www.example.com/api/health")
+
     def test_registers_no_website_lane_without_domains_or_public_urls(self) -> None:
         payload = _profile().model_dump(mode="json")
         payload["public_website"] = "none"

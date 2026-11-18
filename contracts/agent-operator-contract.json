@@ -1488,6 +1488,33 @@
         ]
       },
       {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_product_profile",
+        "path": "/v1/product-profiles/{product}",
+        "purpose": "Read the exact current product profile privately, including lane URLs and its revision, under product-scoped read authority.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "d937b0dc9b03ed8fd647684b84e8a9210ad6a98a26791b48a7717f997f76d4f8",
+        "supported_surfaces": [
+          "service_api",
+          "generic_caller"
+        ]
+      },
+      {
         "idempotency": "apply",
         "identity_dependencies": [
           "read_operator_mutation_identity"
@@ -1499,7 +1526,7 @@
         ],
         "operation_id": "apply_product_stable_lane_repair",
         "path": "/v1/product-profiles/stable-lane-repair/apply",
-        "purpose": "Dry-run or apply a bounded stable-lane profile repair.",
+        "purpose": "Dry-run or apply a bounded stable-lane profile repair or positively qualified unused production URL correction.",
         "response_statuses": [
           "202",
           "400",
@@ -1512,11 +1539,12 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
-        "schema_fingerprint_sha256": "faff07c4535eab350294085d5073abcc7fadb57506d8ef0adf672089397249eb",
+        "schema_fingerprint_sha256": "258867960221ff4df30f44a6f6bd16edfe05d666cae1a04bba084fedaa4d8c27",
         "supported_surfaces": [
           "protected_workflow",
           "operator_ui",
-          "service_api"
+          "service_api",
+          "generic_caller"
         ]
       },
       {
@@ -1567,8 +1595,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "0a0f035c2fed7d3e6195ccd33fe1bdb01ad8e2bf"
+    "source_commit_sha": "cdb31329314c0485765a23458dbe349d9ee56e32"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "5d00b66310f037aa569000914033beed2a9e2f8f98670b41b1bea81e3528c568"
+  "semantic_digest_sha256": "87b9ade0694e4d4c21f256eba7b7608cf75fe253479a89f4f21e1c12e0fad0cc"
 }

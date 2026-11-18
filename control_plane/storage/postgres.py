@@ -9371,7 +9371,13 @@ class PostgresRecordStore(HumanSessionStore):
             )
 
     def list_completed_target_creation_receipts(
-        self, *, route_path: str, context: str, instance: str, target_id: str
+        self,
+        *,
+        route_path: str,
+        context: str,
+        instance: str,
+        target_id: str,
+        shared_session: Any | None = None,
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
         result = LaunchplaneIdempotencyRow.payload["response_payload"]["result"]
         statement = select(LaunchplaneIdempotencyRow).where(
@@ -9382,6 +9388,11 @@ class PostgresRecordStore(HumanSessionStore):
             result["instance"].as_string() == instance,
             result["setup"]["target_id_record"]["target_id"].as_string() == target_id,
         )
+        if shared_session is not None:
+            return tuple(
+                self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+                for row in shared_session.scalars(statement)
+            )
         with self._session_factory() as session:
             return tuple(
                 self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
@@ -28783,6 +28794,139 @@ class PostgresRecordStore(HumanSessionStore):
             session.merge(self._product_profile_row(record))
             session.commit()
 
+    def require_unused_production_setup(
+        self, *, product: str, context: str, base_url: str, health_url: str
+    ) -> str:
+        with self._session_factory() as session:
+            return self._unused_production_setup_evidence_in_session(
+                session,
+                product=product,
+                context=context,
+                base_url=base_url,
+                health_url=health_url,
+            )
+
+    def _unused_production_setup_evidence_in_session(
+        self, session: Any, *, product: str, context: str, base_url: str, health_url: str
+    ) -> str:
+        from control_plane.contracts.product_profile_record import product_context_owner_map
+
+        profiles = tuple(
+            self._read_product_profile_payload(row.payload)
+            for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+        )
+        profile = next((item for item in profiles if item.product == product), None)
+        if (
+            profile is None
+            or not profile.is_active
+            or profile.production_use == "live"
+            or context in profile.historical_contexts
+            or product_context_owner_map(profiles).get(context) != frozenset({product})
+            or not any((lane.context, lane.instance) == (context, "prod") for lane in profile.lanes)
+        ):
+            raise ValueError("Production lane ownership or never-Live status is unqualified.")
+        safety_row = session.get(LaunchplaneDisposableLaneSafetyRow, (product, context, "prod"))
+        safety = (
+            self._read_payload(model_type=DisposableLaneSafety, payload=safety_row.payload)
+            if safety_row is not None
+            else None
+        )
+        if safety is not None and (
+            safety.usage == "in_use"
+            or safety.data == "only_copy"
+            or safety.production_resources in {"shared", "separation_ready"}
+        ):
+            raise ValueError("Recorded use, data custody or shared resources protect this lane.")
+        protected_rows = (
+            session.scalar(
+                select(LaunchplaneDeploymentRow.record_id)
+                .where(
+                    LaunchplaneDeploymentRow.context == context,
+                    LaunchplaneDeploymentRow.instance == "prod",
+                )
+                .limit(1)
+            ),
+            session.scalar(
+                select(LaunchplanePromotionRow.record_id)
+                .where(
+                    LaunchplanePromotionRow.context == context,
+                    LaunchplanePromotionRow.to_instance == "prod",
+                )
+                .limit(1)
+            ),
+            session.get(LaunchplaneInventoryRow, (context, "prod")),
+            session.scalar(
+                select(LaunchplaneBackupGateRow.record_id)
+                .where(
+                    LaunchplaneBackupGateRow.context == context,
+                    LaunchplaneBackupGateRow.instance == "prod",
+                )
+                .limit(1)
+            ),
+            session.get(LaunchplaneReleaseTupleRow, (context, "prod")),
+            session.get(LaunchplaneRouteBindingRow, (product, context, "prod")),
+        )
+        if any(row is not None for row in protected_rows):
+            raise ValueError(
+                "Production deployment, serving, backup or route history protects this lane."
+            )
+        from control_plane.dokploy_testing_domain import require_testing_hostname_claims_available
+
+        target_row = session.get(LaunchplaneDokployTargetRow, (context, "prod"))
+        if target_row is None:
+            raise ValueError("Production URL correction requires a tracked target.")
+        target = self._read_payload(model_type=DokployTargetRecord, payload=target_row.payload)
+        target_id_row = session.get(LaunchplaneDokployTargetIdRow, (context, "prod"))
+        if target_id_row is None:
+            raise ValueError("Production URL correction requires a tracked target identity.")
+        target_id = self._read_payload(
+            model_type=DokployTargetIdRecord, payload=target_id_row.payload
+        )
+        from control_plane.dokploy_compose_allocation import ROUTE as target_creation_route
+        from control_plane.dokploy_testing_domain import _created_unrouted_by_receipt
+
+        receipts = self.list_completed_target_creation_receipts(
+            route_path=target_creation_route,
+            context=context,
+            instance="prod",
+            target_id=target_id.target_id,
+            shared_session=session,
+        )
+        if not any(
+            _created_unrouted_by_receipt(receipt, target=target, target_id=target_id)
+            for receipt in receipts
+        ):
+            raise ValueError(
+                "Production URL correction requires the unchanged empty target creation receipt."
+            )
+        targets = tuple(
+            self._read_payload(model_type=DokployTargetRecord, payload=row.payload)
+            for row in session.scalars(select(LaunchplaneDokployTargetRow)).all()
+        )
+        bindings = tuple(
+            self._read_payload(model_type=EnvironmentRouteBindingRecord, payload=row.payload)
+            for row in session.scalars(select(LaunchplaneRouteBindingRow)).all()
+        )
+        from control_plane.contracts.public_hosts import retained_hostname_identity
+
+        for value in {base_url, health_url} - {""}:
+            require_testing_hostname_claims_available(
+                product=product,
+                target=target,
+                domain=retained_hostname_identity(value),
+                targets=targets,
+                profiles=profiles,
+                bindings=bindings,
+            )
+        return canonical_json_sha256(
+            {
+                "target": target.model_dump(mode="json"),
+                "target_id": target_id.model_dump(mode="json"),
+                "safety": safety.model_dump(mode="json") if safety else None,
+                "receipts": [receipt.record_id for receipt in receipts],
+            }
+        )
+
     def compare_and_write_product_profile_record(
         self,
         *,
@@ -28793,9 +28937,13 @@ class PostgresRecordStore(HumanSessionStore):
         expected_dokploy_targets: tuple[DokployTargetRecord, ...] = (),
         expected_dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = (),
         require_never_live_history: bool = False,
+        expected_unused_production_setup_sha256: str = "",
+        unused_production_setup_context: str = "",
     ) -> ProductProfileCompareWriteResult:
         if expected_record.product != replacement_record.product:
             raise ValueError("Product profile compare-and-write requires matching products.")
+        if bool(expected_unused_production_setup_sha256) != bool(unused_production_setup_context):
+            raise ValueError("Unused production setup evidence requires its exact context.")
         if mutation is not None:
             if not 100 <= mutation.response_status_code <= 599:
                 raise ValueError("DB-only mutation response status must be between 100 and 599.")
@@ -28811,7 +28959,10 @@ class PostgresRecordStore(HumanSessionStore):
         if mutation is None:
             with self._session_factory() as session:
                 if not self._begin_product_profile_compare_write(
-                    session, require_never_live_history=require_never_live_history
+                    session,
+                    require_never_live_history=(
+                        require_never_live_history or bool(expected_unused_production_setup_sha256)
+                    ),
                 ):
                     return ProductProfileCompareWriteResult(status="history_busy")
                 return self._compare_and_write_product_profile_locked(
@@ -28823,12 +28974,17 @@ class PostgresRecordStore(HumanSessionStore):
                     expected_dokploy_targets=expected_dokploy_targets,
                     expected_dokploy_target_ids=expected_dokploy_target_ids,
                     require_never_live_history=require_never_live_history,
+                    expected_unused_production_setup_sha256=expected_unused_production_setup_sha256,
+                    unused_production_setup_context=unused_production_setup_context,
                 )
 
         reservation_insert_error: IntegrityError | None = None
         with self._session_factory() as session:
             if not self._begin_product_profile_compare_write(
-                session, require_never_live_history=require_never_live_history
+                session,
+                require_never_live_history=(
+                    require_never_live_history or bool(expected_unused_production_setup_sha256)
+                ),
             ):
                 return ProductProfileCompareWriteResult(status="history_busy")
             observed_at = self._database_mutation_timestamp(session)
@@ -28864,11 +29020,16 @@ class PostgresRecordStore(HumanSessionStore):
                     expected_dokploy_targets=expected_dokploy_targets,
                     expected_dokploy_target_ids=expected_dokploy_target_ids,
                     require_never_live_history=require_never_live_history,
+                    expected_unused_production_setup_sha256=expected_unused_production_setup_sha256,
+                    unused_production_setup_context=unused_production_setup_context,
                 )
 
         with self._session_factory() as session:
             if not self._begin_product_profile_compare_write(
-                session, require_never_live_history=require_never_live_history
+                session,
+                require_never_live_history=(
+                    require_never_live_history or bool(expected_unused_production_setup_sha256)
+                ),
             ):
                 return ProductProfileCompareWriteResult(status="history_busy")
             reservation_row = session.scalar(
@@ -28952,6 +29113,8 @@ class PostgresRecordStore(HumanSessionStore):
                 expected_dokploy_targets=expected_dokploy_targets,
                 expected_dokploy_target_ids=expected_dokploy_target_ids,
                 require_never_live_history=require_never_live_history,
+                expected_unused_production_setup_sha256=expected_unused_production_setup_sha256,
+                unused_production_setup_context=unused_production_setup_context,
             )
 
     def _begin_product_profile_compare_write(
@@ -28992,6 +29155,8 @@ class PostgresRecordStore(HumanSessionStore):
         expected_dokploy_targets: tuple[DokployTargetRecord, ...] = (),
         expected_dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = (),
         require_never_live_history: bool = False,
+        expected_unused_production_setup_sha256: str = "",
+        unused_production_setup_context: str = "",
     ) -> ProductProfileCompareWriteResult:
         if expected_provider_targets or expected_dokploy_targets or expected_dokploy_target_ids:
             target_expectations_match = (
@@ -29017,7 +29182,7 @@ class PostgresRecordStore(HumanSessionStore):
                     session.commit()
                 return ProductProfileCompareWriteResult(status="changed")
         try:
-            if require_never_live_history:
+            if require_never_live_history or expected_unused_production_setup_sha256:
                 if self._engine.dialect.name == "postgresql":
                     # Include concurrent history insertions, not only existing rows.
                     tables = ", ".join(
@@ -29026,6 +29191,11 @@ class PostgresRecordStore(HumanSessionStore):
                             LaunchplaneDeploymentRow,
                             LaunchplanePromotionRow,
                             LaunchplanePreviewRow,
+                            LaunchplaneInventoryRow,
+                            LaunchplaneBackupGateRow,
+                            LaunchplaneReleaseTupleRow,
+                            LaunchplaneRouteBindingRow,
+                            LaunchplaneDisposableLaneSafetyRow,
                         )
                     )
                     session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
@@ -29034,7 +29204,9 @@ class PostgresRecordStore(HumanSessionStore):
             )
             row = session.scalar(statement)
         except DBAPIError as error:
-            if not require_never_live_history or getattr(error.orig, "sqlstate", None) not in {
+            if not (
+                require_never_live_history or expected_unused_production_setup_sha256
+            ) or getattr(error.orig, "sqlstate", None) not in {
                 "55P03",
                 "40P01",
             }:
@@ -29109,6 +29281,32 @@ class PostgresRecordStore(HumanSessionStore):
                     ),
                 )
             except ValueError:
+                if reservation_row is not None:
+                    session.delete(reservation_row)
+                    session.commit()
+                return ProductProfileCompareWriteResult(status="history_conflict")
+        if expected_unused_production_setup_sha256:
+            try:
+                current_unused_sha256 = self._unused_production_setup_evidence_in_session(
+                    session,
+                    product=current_record.product,
+                    context=unused_production_setup_context,
+                    base_url=next(
+                        lane.base_url
+                        for lane in replacement_record.lanes
+                        if (lane.context, lane.instance)
+                        == (unused_production_setup_context, "prod")
+                    ),
+                    health_url=next(
+                        lane.health_url
+                        for lane in replacement_record.lanes
+                        if (lane.context, lane.instance)
+                        == (unused_production_setup_context, "prod")
+                    ),
+                )
+            except (ValueError, StopIteration):
+                current_unused_sha256 = ""
+            if current_unused_sha256 != expected_unused_production_setup_sha256:
                 if reservation_row is not None:
                     session.delete(reservation_row)
                     session.commit()
