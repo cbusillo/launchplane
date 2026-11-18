@@ -845,6 +845,7 @@ class DirectorCreatedHostnameProductionDomainTests(_NeverLiveProductionDomainFix
         )
         self.profile = self.profile.model_copy(update={"lanes": (old_lane,)})
         self.store.write_product_profile_record(self.profile)
+        self.assert_original_refusal(await self.post())
         planned = await self.post_correction(self.correction_payload())
         self.assertEqual(planned.status_code, 202, planned.text)
         self.assertEqual(planned.json()["result"]["base_url_before"], old_lane.base_url)
@@ -861,9 +862,14 @@ class DirectorCreatedHostnameProductionDomainTests(_NeverLiveProductionDomainFix
         changed = self.store.read_product_profile_record(self.profile.product)
         self.assertEqual(changed.lanes[0].base_url, self.correction_payload()["base_url"])
         self.assertEqual(changed.lanes[0].health_url, self.correction_payload()["health_url"])
+        self.assertEqual(changed.source, self.profile.source)
         self.assertEqual(changed.release_on_acceptance, self.profile.release_on_acceptance)
         self.assertEqual(self.read_target(), self.target)
         self.assertEqual(self.writes, [])
+        continued = await self.post()
+        self.assertEqual(continued.status_code, 202, continued.text)
+        self.assertEqual(self.writes, self.expected_routes())
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), changed)
 
     async def test_url_correction_refuses_live_used_or_deployed_lane(self) -> None:
         self.record_creation_receipt()
@@ -905,6 +911,40 @@ class DirectorCreatedHostnameProductionDomainTests(_NeverLiveProductionDomainFix
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
 
+    async def test_url_correction_requires_director_agent(self) -> None:
+        self.record_creation_receipt()
+        with scoped_agent_transport():
+            refused = await self.post_correction(self.correction_payload())
+        self.assertEqual(refused.status_code, 403, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "authorization_denied")
+
+    async def test_url_correction_refuses_shared_compose_identity(self) -> None:
+        self.record_creation_receipt()
+        self.store.write_dokploy_target_id_record(
+            self.target_id.model_copy(update={"context": "other"})
+        )
+        refused = await self.post_correction(self.correction_payload())
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
+    async def test_url_correction_refuses_unresolved_original_setup(self) -> None:
+        from control_plane.dokploy_target_setup_http import first_production_target_lock_name
+
+        self.record_creation_receipt()
+        self.store.reserve_mutation(
+            scope="original-owner",
+            route_path="/v1/dokploy-targets/setup",
+            idempotency_key="original-setup",
+            request_fingerprint="original-setup",
+            lease_owner="original-executor",
+            lease_seconds=300,
+            reconciliation_key="original-setup-binding",
+            provider_target_key=first_production_target_lock_name(self.context),
+        )
+        refused = await self.post_correction(self.correction_payload())
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
     async def test_url_correction_stale_review_has_no_effect(self) -> None:
         self.record_creation_receipt()
         planned = await self.post_correction(self.correction_payload())
@@ -921,6 +961,31 @@ class DirectorCreatedHostnameProductionDomainTests(_NeverLiveProductionDomainFix
         )
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), changed)
+
+    async def test_url_correction_rechecks_usage_inside_the_profile_write(self) -> None:
+        self.record_creation_receipt()
+        planned = await self.post_correction(self.correction_payload())
+        self.assertEqual(planned.status_code, 202, planned.text)
+        original_write = self.store.compare_and_write_product_profile_record
+
+        def usage_before_write(**kwargs: Any) -> Any:
+            record_safety(self.store, self.profile.product, self.context, "prod", usage="in_use")
+            return original_write(**kwargs)
+
+        with patch.object(
+            self.store, "compare_and_write_product_profile_record", side_effect=usage_before_write
+        ):
+            refused = await self.post_correction(
+                {
+                    **self.correction_payload(),
+                    "mode": "apply",
+                    "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
+                },
+                key="newly-used-production-lane",
+            )
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "unused_production_setup_changed")
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
 
     def assert_original_refusal(self, response: Any) -> None:
         self.assert_no_effects(response, 400)

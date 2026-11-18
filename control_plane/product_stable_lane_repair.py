@@ -236,6 +236,10 @@ def _validated_corrected_urls(base_url: str, health_url: str) -> tuple[str, str]
             raise ProductStableLaneRepairBoundaryError(
                 "Corrected lane URLs must be HTTPS without credentials, ports, queries or fragments."
             )
+    if urlsplit(base_url).hostname != urlsplit(health_url).hostname:
+        raise ProductStableLaneRepairBoundaryError(
+            "Corrected base and health URLs must use the same hostname."
+        )
     return base_url, health_url
 
 
@@ -321,6 +325,10 @@ def build_product_stable_lane_repair_plan(
 
     if request.operation == "correct-unused-prod":
         assert existing_lane is not None
+        if profile.public_website == "none":
+            raise ProductStableLaneRepairBoundaryError(
+                "A product with no public website cannot register a public base_url."
+            )
         domains = tuple(_normalized_target_domain(domain) for domain in dokploy_target.domains)
         base_url, health_url = _validated_corrected_urls(request.base_url, request.health_url)
         if (base_url, health_url) == (existing_lane.base_url, existing_lane.health_url):
@@ -359,10 +367,11 @@ def build_product_stable_lane_repair_plan(
             else lane
             for lane in profile.lanes
         )
+    profile_update: dict[str, object] = {"lanes": lanes}
+    if request.operation == "fill":
+        profile_update["source"] = PRODUCT_STABLE_LANE_REPAIR_SOURCE
     replacement_profile = LaunchplaneProductProfileRecord.model_validate(
-        profile.model_copy(
-            update={"lanes": lanes, "source": PRODUCT_STABLE_LANE_REPAIR_SOURCE}
-        ).model_dump(mode="json")
+        profile.model_copy(update=profile_update).model_dump(mode="json")
     )
     validate_product_profile_history_transition(
         existing_profile=profile,

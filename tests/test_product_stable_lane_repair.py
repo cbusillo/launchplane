@@ -157,6 +157,28 @@ class ProductStableLaneRepairTests(unittest.TestCase):
         self.assertEqual(replacement.lanes[0], before.lanes[0])
         self.assertEqual(replacement.lanes[1].base_url, "https://www.example.com")
         self.assertEqual(replacement.lanes[1].health_url, "https://www.example.com/api/health")
+        self.assertEqual(replacement.source, before.source)
+
+    def test_url_correction_rejects_unrelated_health_host(self) -> None:
+        profile = _profile()
+        prod = profile.lanes[0].model_copy(
+            update={
+                "instance": "prod",
+                "base_url": "https://old.example.com",
+                "health_url": "https://old.example.com/api/health",
+            }
+        )
+        store = _Store(profile=profile.model_copy(update={"lanes": (*profile.lanes, prod)}))
+        store.unused_production_setup = True
+        with self.assertRaisesRegex(ProductStableLaneRepairBoundaryError, "same hostname"):
+            build_product_stable_lane_repair_plan(
+                record_store=store,
+                request=_request(
+                    operation="correct-unused-prod",
+                    base_url="https://www.example.com",
+                    health_url="https://other.example.com/health",
+                ),
+            )
 
     def test_registers_no_website_lane_without_domains_or_public_urls(self) -> None:
         payload = _profile().model_dump(mode="json")

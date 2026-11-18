@@ -9371,13 +9371,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
 
     def list_completed_target_creation_receipts(
-        self,
-        *,
-        route_path: str,
-        context: str,
-        instance: str,
-        target_id: str,
-        shared_session: Any | None = None,
+        self, *, route_path: str, context: str, instance: str, target_id: str
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
         result = LaunchplaneIdempotencyRow.payload["response_payload"]["result"]
         statement = select(LaunchplaneIdempotencyRow).where(
@@ -9388,11 +9382,6 @@ class PostgresRecordStore(HumanSessionStore):
             result["instance"].as_string() == instance,
             result["setup"]["target_id_record"]["target_id"].as_string() == target_id,
         )
-        if shared_session is not None:
-            return tuple(
-                self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
-                for row in shared_session.scalars(statement)
-            )
         with self._session_factory() as session:
             return tuple(
                 self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
@@ -28820,7 +28809,7 @@ class PostgresRecordStore(HumanSessionStore):
             profile is None
             or not profile.is_active
             or profile.production_use == "live"
-            or context in profile.historical_contexts
+            or profile.historical_contexts
             or product_context_owner_map(profiles).get(context) != frozenset({product})
             or not any((lane.context, lane.instance) == (context, "prod") for lane in profile.lanes)
         ):
@@ -28831,26 +28820,30 @@ class PostgresRecordStore(HumanSessionStore):
             if safety_row is not None
             else None
         )
-        if safety is not None and (
-            safety.usage == "in_use"
-            or safety.data == "only_copy"
-            or safety.production_resources in {"shared", "separation_ready"}
-        ):
-            raise ValueError("Recorded use, data custody or shared resources protect this lane.")
         protected_rows = (
             session.scalar(
                 select(LaunchplaneDeploymentRow.record_id)
                 .where(
-                    LaunchplaneDeploymentRow.context == context,
                     LaunchplaneDeploymentRow.instance == "prod",
+                    or_(
+                        LaunchplaneDeploymentRow.context == context,
+                        LaunchplaneDeploymentRow.payload["runtime_identity"]["product"].as_string()
+                        == product,
+                    ),
                 )
                 .limit(1)
             ),
             session.scalar(
                 select(LaunchplanePromotionRow.record_id)
                 .where(
-                    LaunchplanePromotionRow.context == context,
                     LaunchplanePromotionRow.to_instance == "prod",
+                    or_(
+                        LaunchplanePromotionRow.context == context,
+                        LaunchplanePromotionRow.payload["destination_health"][
+                            "observed_runtime_identity"
+                        ]["product"].as_string()
+                        == product,
+                    ),
                 )
                 .limit(1)
             ),
@@ -28865,6 +28858,29 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             session.get(LaunchplaneReleaseTupleRow, (context, "prod")),
             session.get(LaunchplaneRouteBindingRow, (product, context, "prod")),
+            session.scalar(
+                select(LaunchplaneOdooProdBackupRestoreOperationRow.operation_id)
+                .where(
+                    LaunchplaneOdooProdBackupRestoreOperationRow.product == product,
+                    LaunchplaneOdooProdBackupRestoreOperationRow.context == context,
+                    LaunchplaneOdooProdBackupRestoreOperationRow.instance == "prod",
+                )
+                .limit(1)
+            ),
+            session.scalar(
+                select(LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow.operation_id)
+                .where(
+                    LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow.product == product,
+                    LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow.context == context,
+                    LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow.instance == "prod",
+                )
+                .limit(1)
+            ),
+            session.scalar(
+                select(LaunchplaneReleaseReviewDecisionRow.record_id)
+                .where(LaunchplaneReleaseReviewDecisionRow.product == product)
+                .limit(1)
+            ),
         )
         if any(row is not None for row in protected_rows):
             raise ValueError(
@@ -28882,19 +28898,21 @@ class PostgresRecordStore(HumanSessionStore):
         target_id = self._read_payload(
             model_type=DokployTargetIdRecord, payload=target_id_row.payload
         )
-        from control_plane.dokploy_compose_allocation import ROUTE as target_creation_route
-        from control_plane.dokploy_testing_domain import _created_unrouted_by_receipt
-
-        receipts = self.list_completed_target_creation_receipts(
-            route_path=target_creation_route,
-            context=context,
-            instance="prod",
-            target_id=target_id.target_id,
-            shared_session=session,
+        from control_plane.dokploy_testing_domain import (
+            require_first_testing_target_unprotected,
+            unrouted_created_hostnames,
         )
-        if not any(
-            _created_unrouted_by_receipt(receipt, target=target, target_id=target_id)
-            for receipt in receipts
+        from control_plane.dokploy_target_setup_http import require_no_unresolved_production_setup
+
+        provider = self.read_provider_target_record(context_name=context, instance_name="prod")
+        require_first_testing_target_unprotected(
+            self, product=product, context=context, provider=provider, instance="prod"
+        )
+        require_no_unresolved_production_setup(self, context=context, target_id=target_id.target_id)
+        if (
+            not target.domains
+            or unrouted_created_hostnames(self, target=target, target_id=target_id)
+            != target.domains
         ):
             raise ValueError(
                 "Production URL correction requires the unchanged empty target creation receipt."
@@ -28923,7 +28941,7 @@ class PostgresRecordStore(HumanSessionStore):
                 "target": target.model_dump(mode="json"),
                 "target_id": target_id.model_dump(mode="json"),
                 "safety": safety.model_dump(mode="json") if safety else None,
-                "receipts": [receipt.record_id for receipt in receipts],
+                "created_hostnames": target.domains,
             }
         )
 
@@ -29196,6 +29214,14 @@ class PostgresRecordStore(HumanSessionStore):
                             LaunchplaneReleaseTupleRow,
                             LaunchplaneRouteBindingRow,
                             LaunchplaneDisposableLaneSafetyRow,
+                            LaunchplaneDokployTargetRow,
+                            LaunchplaneDokployTargetIdRow,
+                            LaunchplaneProviderTargetRow,
+                            LaunchplaneIdempotencyRow,
+                            LaunchplaneOdooStableTargetReplacementOperationRow,
+                            LaunchplaneOdooProdBackupRestoreOperationRow,
+                            LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
+                            LaunchplaneReleaseReviewDecisionRow,
                         )
                     )
                     session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
@@ -29304,7 +29330,7 @@ class PostgresRecordStore(HumanSessionStore):
                         == (unused_production_setup_context, "prod")
                     ),
                 )
-            except (ValueError, StopIteration):
+            except (FileNotFoundError, ValueError, StopIteration):
                 current_unused_sha256 = ""
             if current_unused_sha256 != expected_unused_production_setup_sha256:
                 if reservation_row is not None:

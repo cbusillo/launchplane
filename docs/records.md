@@ -1184,6 +1184,8 @@ record, and a shared resource. It requires an unchanged, unrouted production
 target creation receipt and available hostname claims. Only the profile's
 production `base_url` and `health_url` change; the original domain request and
 provider records are left for the separate domain operation to verify later.
+Both replacement URLs must use the same HTTPS hostname. A held original setup
+or a target shared with another lane blocks the correction.
 
 Odoo preview certificate-policy changes use
 `POST /v1/product-profiles/preview-tls/apply`. The route reads the current
