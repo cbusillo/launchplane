@@ -282,12 +282,15 @@ def build_product_stable_lane_repair_plan(
             raise ProductStableLaneRepairBoundaryError(
                 "URL correction requires an existing never-Live production lane."
             )
-        unused_setup_sha256 = record_store.require_unused_production_setup(
-            product=request.product,
-            context=request.context,
-            base_url=request.base_url,
-            health_url=request.health_url,
-        )
+        try:
+            unused_setup_sha256 = record_store.require_unused_production_setup(
+                product=request.product,
+                context=request.context,
+                base_url=request.base_url,
+                health_url=request.health_url,
+            )
+        except ValueError as error:
+            raise ProductStableLaneRepairBoundaryError(str(error)) from error
     if request.context in profile.historical_contexts:
         raise ProductStableLaneRepairBoundaryError(
             "Product stable lane repair cannot reactivate a historical context."
@@ -417,8 +420,9 @@ def build_product_stable_lane_repair_plan(
         else ("restore_lane" if existing_lane is None else "fill_lane_urls"),
         "preserved_lane_instances": list(preserved_lane_instances),
         "reason": request.reason,
-        "source_label": PRODUCT_STABLE_LANE_REPAIR_SOURCE,
     }
+    if request.operation == "fill":
+        plan_evidence["source_label"] = PRODUCT_STABLE_LANE_REPAIR_SOURCE
     if request.operation == "correct-unused-prod":
         assert existing_lane is not None
         plan_evidence.update(

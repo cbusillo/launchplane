@@ -871,7 +871,7 @@ class DirectorCreatedHostnameProductionDomainTests(_NeverLiveProductionDomainFix
         self.assertEqual(self.writes, self.expected_routes())
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), changed)
 
-    async def test_url_correction_refuses_live_used_or_deployed_lane(self) -> None:
+    async def test_url_correction_refuses_live_or_in_use_lane(self) -> None:
         self.record_creation_receipt()
         self.store.write_product_profile_record(
             self.profile.model_copy(update={"production_use": "live"})
@@ -943,6 +943,36 @@ class DirectorCreatedHostnameProductionDomainTests(_NeverLiveProductionDomainFix
         )
         refused = await self.post_correction(self.correction_payload())
         self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
+    async def test_url_correction_refuses_legacy_in_flight_target_deploy(self) -> None:
+        from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+        from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
+        from control_plane.workflows.generic_web_deploy_provider import (
+            dokploy_generic_web_provider_target_key,
+        )
+
+        self.record_creation_receipt()
+        legacy_hold = LaunchplaneIdempotencyRecord(
+            record_id="legacy-target-deploy",
+            scope="deploy-owner",
+            route_path=GENERIC_WEB_DEPLOY_ROUTE,
+            idempotency_key="first-production-deploy",
+            request_fingerprint="first-production-deploy",
+            state="running",
+            lease_owner="deploy-executor",
+            lease_expires_at="2099-01-01T00:00:00Z",
+            created_at=self.profile.updated_at,
+            updated_at=self.profile.updated_at,
+            reconciliation_key="first-production-deploy-binding",
+            provider_target_key=dokploy_generic_web_provider_target_key(self.target_provider),
+        )
+        with patch.object(
+            self.store, "list_held_provider_target_reservations", return_value=(legacy_hold,)
+        ):
+            refused = await self.post_correction(self.correction_payload())
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "stable_lane_repair_blocked")
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
 
     async def test_url_correction_stale_review_has_no_effect(self) -> None:

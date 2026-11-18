@@ -15920,7 +15920,14 @@ def create_launchplane_fastapi_app(
                     "reviewed stable lane repair plan."
                 ),
             )
-        if write_result.status in {"history_conflict", "history_busy"}:
+        if write_result.status == "history_busy":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="unused_production_setup_busy",
+                message="Another protected operation holds the production lane; no URL was changed.",
+            )
+        if write_result.status == "history_conflict":
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,

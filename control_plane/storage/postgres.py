@@ -28903,12 +28903,25 @@ class PostgresRecordStore(HumanSessionStore):
             unrouted_created_hostnames,
         )
         from control_plane.dokploy_target_setup_http import require_no_unresolved_production_setup
+        from control_plane.generic_web_testing_exclusion import _target_reservations
+        from control_plane.workflows.generic_web_deploy_provider import (
+            dokploy_generic_web_provider_target_key,
+        )
 
         provider = self.read_provider_target_record(context_name=context, instance_name="prod")
         require_first_testing_target_unprotected(
             self, product=product, context=context, provider=provider, instance="prod"
         )
         require_no_unresolved_production_setup(self, context=context, target_id=target_id.target_id)
+        if _target_reservations(
+            self,
+            product=product,
+            context=context,
+            target_key=dokploy_generic_web_provider_target_key(provider),
+            target_id=target_id.target_id,
+            require_complete=True,
+        ):
+            raise ValueError("A deploy or promotion still owns the production target.")
         if (
             not target.domains
             or unrouted_created_hostnames(self, target=target, target_id=target_id)
@@ -29203,27 +29216,28 @@ class PostgresRecordStore(HumanSessionStore):
             if require_never_live_history or expected_unused_production_setup_sha256:
                 if self._engine.dialect.name == "postgresql":
                     # Include concurrent history insertions, not only existing rows.
-                    tables = ", ".join(
-                        model.__tablename__
-                        for model in (
-                            LaunchplaneDeploymentRow,
-                            LaunchplanePromotionRow,
-                            LaunchplanePreviewRow,
-                            LaunchplaneInventoryRow,
-                            LaunchplaneBackupGateRow,
-                            LaunchplaneReleaseTupleRow,
-                            LaunchplaneRouteBindingRow,
-                            LaunchplaneDisposableLaneSafetyRow,
-                            LaunchplaneDokployTargetRow,
-                            LaunchplaneDokployTargetIdRow,
-                            LaunchplaneProviderTargetRow,
-                            LaunchplaneIdempotencyRow,
-                            LaunchplaneOdooStableTargetReplacementOperationRow,
-                            LaunchplaneOdooProdBackupRestoreOperationRow,
-                            LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
-                            LaunchplaneReleaseReviewDecisionRow,
+                    locked_models = [LaunchplaneDeploymentRow, LaunchplanePromotionRow]
+                    if require_never_live_history:
+                        locked_models.append(LaunchplanePreviewRow)
+                    if expected_unused_production_setup_sha256:
+                        locked_models.extend(
+                            (
+                                LaunchplaneInventoryRow,
+                                LaunchplaneBackupGateRow,
+                                LaunchplaneReleaseTupleRow,
+                                LaunchplaneRouteBindingRow,
+                                LaunchplaneDisposableLaneSafetyRow,
+                                LaunchplaneDokployTargetRow,
+                                LaunchplaneDokployTargetIdRow,
+                                LaunchplaneProviderTargetRow,
+                                LaunchplaneIdempotencyRow,
+                                LaunchplaneOdooStableTargetReplacementOperationRow,
+                                LaunchplaneOdooProdBackupRestoreOperationRow,
+                                LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
+                                LaunchplaneReleaseReviewDecisionRow,
+                            )
                         )
-                    )
+                    tables = ", ".join(model.__tablename__ for model in locked_models)
                     session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
             self._lock_landing_authority(
                 session, landing_authority.product_profile(expected_record.product)

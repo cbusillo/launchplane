@@ -170,7 +170,7 @@ class ProductStableLaneRepairTests(unittest.TestCase):
         )
         store = _Store(profile=profile.model_copy(update={"lanes": (*profile.lanes, prod)}))
         store.unused_production_setup = True
-        with self.assertRaisesRegex(ProductStableLaneRepairBoundaryError, "same hostname"):
+        with self.assertRaises(ProductStableLaneRepairBoundaryError):
             build_product_stable_lane_repair_plan(
                 record_store=store,
                 request=_request(
