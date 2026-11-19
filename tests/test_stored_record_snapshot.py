@@ -259,6 +259,10 @@ class StoredRecordSnapshotTests(unittest.TestCase):
     ) -> None:
         from control_plane.contracts.release_request import ReleaseRequestDecisionRecord
         from control_plane.contracts.release_review import AbsentProduction, ReleaseVersion
+        from control_plane.contracts.stored_record_snapshot import (
+            CompressedStoredRecordSnapshot,
+            StoredRecordSnapshot,
+        )
         from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
 
         first_release_request = ReleaseRequestDecisionRecord(
@@ -280,8 +284,8 @@ class StoredRecordSnapshotTests(unittest.TestCase):
             product_profile_payload("first-release")
         ).model_copy(update={"release_request": first_release_request})
         self.store.write_product_profile_record(profile)
-        snapshots = (
-            self.store.export_stored_record_snapshot(format_version=1),
+        snapshots: tuple[StoredRecordSnapshot | CompressedStoredRecordSnapshot, ...] = (
+            self.store.export_stored_record_snapshot(),
             self.store.export_stored_record_snapshot(format_version=2),
         )
         for format_version, snapshot in enumerate(snapshots, start=1):
