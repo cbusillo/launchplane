@@ -261,7 +261,7 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         from control_plane.contracts.release_review import AbsentProduction, ReleaseVersion
         from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
 
-        request = ReleaseRequestDecisionRecord(
+        first_release_request = ReleaseRequestDecisionRecord(
             record_id="1a" * 32,
             product="first-release",
             repository="example/first-release",
@@ -278,16 +278,19 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         )
         profile = LaunchplaneProductProfileRecord.model_validate(
             product_profile_payload("first-release")
-        ).model_copy(update={"release_request": request})
+        ).model_copy(update={"release_request": first_release_request})
         self.store.write_product_profile_record(profile)
-        for version in (1, 2):
-            snapshot = self.store.export_stored_record_snapshot(format_version=version)
+        snapshots = (
+            self.store.export_stored_record_snapshot(format_version=1),
+            self.store.export_stored_record_snapshot(format_version=2),
+        )
+        for format_version, snapshot in enumerate(snapshots, start=1):
             rows = [
                 row["payload"]
                 for family, row in iter_snapshot_rows(snapshot)
                 if family == "launchplane_product_profiles" and "release_request" in row["payload"]
             ]
-            with self.subTest(format_version=version):
+            with self.subTest(format_version=format_version):
                 (payload,) = rows
                 scrubbed = LaunchplaneProductProfileRecord.model_validate(payload)
                 assert scrubbed.release_request is not None
