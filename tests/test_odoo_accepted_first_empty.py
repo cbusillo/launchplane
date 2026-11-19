@@ -734,12 +734,27 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 self.assertTrue(recorded.runtime_source["first_empty_provider_deployment_id"])
             return result
 
+        # Like the real stack, the first release's web holds Odoo's registry lock while
+        # it installs the empty database, so indexing cannot run until maintenance has
+        # waited for web to finish setting up.
+        database_setup = {"finished": False}
+
         def post_deploy_execution(**kwargs: Any) -> dict[str, str]:
             kwargs["before_provider_mutation"]("post_deploy_target_update")
+            if kwargs.get("await_web_setup"):
+                self.assertEqual(
+                    kwargs["deferred_website_indexing"]["indexing"]["production_use"],
+                    "prelaunch",
+                )
+                database_setup["finished"] = True
             return _module_update_evidence(website_indexing_production_use="prelaunch")
 
         def native_indexing(**kwargs: Any) -> dict[str, Any]:
             request = kwargs["request"]
+            if kwargs.get("check_only"):
+                return {"status": "bound"}
+            if not database_setup["finished"]:
+                return {"status": "failed", "exit_code": 1, "reason": "registry_busy"}
             return {
                 "status": "complete",
                 "native": {

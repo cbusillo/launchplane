@@ -19,6 +19,7 @@ from tests.test_product_topology_read_model import (
     _runtime_identity as runtime_identity,
 )
 
+import json
 import unittest
 
 from pydantic import ValidationError
@@ -622,3 +623,93 @@ class WebsiteIndexingRouteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(applied.status_code, 202, applied.text)
                 self.assertTrue(applied.json()["result"]["committed"])
             self.assertEqual(len(writes), 1)
+
+
+class WebsiteIndexingHostProgramTests(unittest.TestCase):
+    """Run the real host program against a fake ``docker`` on PATH."""
+
+    def run_host(self, *, check_only: bool = False, runner_exec: bool = False) -> dict[str, Any]:
+        import base64
+        import os
+        import subprocess
+        import sys
+        import tempfile
+        import textwrap
+        from control_plane.dokploy.post_deploy import ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY
+        from control_plane.dokploy.website_indexing import WEBSITE_INDEXING_HOST_PROGRAM
+
+        runtime = {"product": "example"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            container = {
+                "Id": "runner-id",
+                "State": {"Running": True},
+                "Config": {
+                    "Env": [
+                        "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + json.dumps(runtime),
+                        "ODOO_DB_NAME=example",
+                    ],
+                    "Image": "registry.example/odoo@sha256:abc",
+                },
+                "ExecIDs": ["busy"] if runner_exec else None,
+            }
+            docker = root / "docker"
+            docker.write_text(
+                textwrap.dedent(
+                    f"""\
+                    #!{sys.executable}
+                    import sys
+                    if sys.argv[1] == "ps":
+                        print("container-id")
+                    elif sys.argv[1] == "inspect":
+                        print({json.dumps(json.dumps([container]))})
+                    else:
+                        open({str(root / "exec")!r}, "w").close()
+                        print("psycopg2.errors.LockNotAvailable: registry_loading password=hidden-value", file=sys.stderr)
+                        sys.exit(1)
+                    """
+                )
+            )
+            docker.chmod(0o755)
+            spec = {
+                "project": "example-prod",
+                "runtime": runtime,
+                "database": "example",
+                "image": "registry.example/odoo@sha256:abc",
+                "request": {"mode": "dry-run"},
+                "program": "",
+                "check_only": check_only,
+            }
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    WEBSITE_INDEXING_HOST_PROGRAM.replace(
+                        str(ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY), directory
+                    ),
+                    base64.b64encode(json.dumps(spec).encode()).decode(),
+                    "frame=",
+                ],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"},
+                check=True,
+            )
+            self.assertNotIn("hidden-value", completed.stdout)
+            (frame,) = completed.stdout.splitlines()
+            result: dict[str, Any] = json.loads(frame.removeprefix("frame="))["result"]
+            result["exec_started"] = (root / "exec").exists()
+            return result
+
+    def test_failed_native_run_returns_exit_code_and_bounded_reason_only(self) -> None:
+        self.assertEqual(
+            self.run_host(),
+            {"status": "failed", "exit_code": 1, "reason": "registry_busy", "exec_started": True},
+        )
+
+    def test_refusal_names_its_check_and_check_only_never_starts_the_program(self) -> None:
+        self.assertEqual(
+            self.run_host(runner_exec=True),
+            {"status": "refused", "reason": "runner_active", "exec_started": False},
+        )
+        self.assertEqual(self.run_host(check_only=True), {"status": "bound", "exec_started": False})
