@@ -301,8 +301,10 @@ class _Scrubber:
                 if value is None
                 else "string"
             )
+            matching = [item for item in candidates if item.get("type") == kind or "$ref" in item]
             schema = next(
-                (item for item in candidates if item.get("type") == kind or "$ref" in item), {}
+                (item for item in matching if _object_fits_schema(value, item, root)),
+                matching[0] if matching else {},
             )
             return self.scrub(value, schema, root, name, declared=declared)
         if isinstance(value, str) and value.strip() in schema.get(
@@ -383,6 +385,23 @@ class _Scrubber:
             self._cached_source_bytes += len(source)
             self._scrubbed_items_by_source[key] = _ScrubbedItem(schema, root, scrubbed)
         return scrubbed
+
+
+def _object_fits_schema(value: Any, schema: Mapping[str, Any], root: Mapping[str, Any]) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if "$ref" in schema:
+        schema = root["$defs"][schema["$ref"].rsplit("/", 1)[-1]]
+    properties = schema.get("properties", {})
+    if schema.get("additionalProperties") is False and not set(value) <= set(properties):
+        return False
+    if not set(schema.get("required", ())) <= set(value):
+        return False
+    return all(
+        value[key] == definition["const"]
+        for key, definition in properties.items()
+        if key in value and "const" in definition
+    )
 
 
 def _normalized(normalize: Callable[[Any], Any], value: object) -> Any:
