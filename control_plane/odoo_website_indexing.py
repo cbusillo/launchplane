@@ -18,7 +18,7 @@ from control_plane.contracts.product_topology_read_model import build_product_en
 from control_plane.contracts.public_hosts import resolve_public_base_url
 from control_plane.contracts.runtime_identity import parse_runtime_identity_payload
 from control_plane.dokploy import api, source
-from control_plane.dokploy.website_indexing import run_native_indexing
+from control_plane.dokploy.website_indexing import indexing_failure_evidence, run_native_indexing
 from control_plane.odoo_product_driver_http import resolve_odoo_product_route
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
@@ -71,7 +71,9 @@ class WebsiteIndexingRequest(BaseModel):
 
 
 class WebsiteIndexingUnknown(RuntimeError):
-    pass
+    def __init__(self, message: str, *, evidence: dict[str, str] | None = None) -> None:
+        super().__init__(message)
+        self.evidence = evidence or {}
 
 
 FIRST_LIVE_SCOPE = "launchplane:client-release"
@@ -330,6 +332,20 @@ class WebsiteIndexingExecution:
             else runtime.database_uuid,
         }
         if prepare_for_data_workflow:
+            if self.initial_release_decision is not None:
+                bound = run_native_indexing(
+                    host=host,
+                    token=token,
+                    server_id=str(payload["serverId"]),
+                    binding=transport_binding,
+                    request=native_request,
+                    check_only=True,
+                )
+                if bound.get("status") != "bound":
+                    raise WebsiteIndexingUnknown(
+                        "Native indexing binding is unverified.",
+                        evidence=indexing_failure_evidence(bound),
+                    )
             return native_request
         if reviewed is not None:
             native_request["reviewed_native"] = reviewed["native"]
@@ -368,7 +384,10 @@ class WebsiteIndexingExecution:
         )
         raw_native = result.get("native")
         if result.get("status") != "complete" or not isinstance(raw_native, dict):
-            raise WebsiteIndexingUnknown("Native indexing did not prove its outcome.")
+            raise WebsiteIndexingUnknown(
+                "Native indexing did not prove its outcome.",
+                evidence=indexing_failure_evidence(result),
+            )
         native_result = dict(raw_native)
         committed = native_result.pop("committed", None)
         database_uuid = native_result.pop("database_uuid", None)

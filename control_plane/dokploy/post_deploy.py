@@ -473,6 +473,14 @@ def schedule_failure_kind(reason: str) -> str:
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
     if key == "website_indexing_production_use":
         return value in {"prelaunch", "live"}
+    if key == "website_indexing_status":
+        return value in {"refused", "failed", "unknown"}
+    if key == "website_indexing_exit_code":
+        return re.fullmatch(r"-?[0-9]{1,3}", value) is not None
+    if key == "website_indexing_reason":
+        from control_plane.dokploy.website_indexing import INDEXING_FAILURE_REASONS
+
+        return value in INDEXING_FAILURE_REASONS
     if key == CAPABILITY_FAILURE_SITES_MARKER:
         sites = value.split(",")
         return 0 < len(sites) <= NATIVE_PROGRAM_SOURCE_SITE_LIMIT and all(
@@ -764,11 +772,14 @@ def run_compose_post_deploy_update(
     testing_candidate_namespace: str = "",
     database_url: str | None = None,
     deferred_website_indexing: dict[str, object] | None = None,
+    await_web_setup: bool = False,
 ) -> dict[str, str]:
     if deferred_website_indexing is not None and (
         target_definition.instance != "prod" or run_destructive_restore
     ):
         raise ValueError("Deferred indexing requires a production release data workflow.")
+    if await_web_setup and deferred_website_indexing is None:
+        raise ValueError("Waiting for web setup requires a first release's deferred indexing.")
     if testing_candidate_namespace and (
         target_definition.instance != "testing"
         or target_definition.target_name != testing_candidate_namespace
@@ -1013,6 +1024,11 @@ def run_compose_post_deploy_update(
         if apply_website_settings
         else "",
         deferred_website_indexing=deferred_website_indexing,
+        web_setup_timeout_seconds=_web_setup_share_of_schedule(
+            resolved_schedule_execution_timeout_seconds
+        )
+        if await_web_setup
+        else 0,
     )
     fresh_arguments: FreshRestoreScriptArguments | None = None
     if fresh_testing_generation is not None:
@@ -2939,6 +2955,25 @@ def compose_data_workflow_is_quiescent(
     )
 
 
+def _web_setup_share_of_schedule(schedule_timeout_seconds: int) -> int:
+    return max(1, schedule_timeout_seconds // 2)
+
+
+def _indexing_reason_shell(output_path: str) -> str:
+    from control_plane.dokploy.website_indexing import INDEXING_FAILURE_PATTERNS
+
+    return (
+        "\n".join(
+            f"        {'if' if index == 0 else 'elif'} grep -Fq "
+            + " ".join(f"-e {shlex.quote(pattern)}" for pattern in patterns)
+            + f' -- "{output_path}"; then\n'
+            + f"            echo website_indexing_reason={reason}"
+            for index, (reason, patterns) in enumerate(INDEXING_FAILURE_PATTERNS)
+        )
+        + "\n        fi"
+    )
+
+
 def _build_dokploy_data_workflow_script(
     *,
     compose_app_name: str,
@@ -2959,6 +2994,7 @@ def _build_dokploy_data_workflow_script(
     clear_preview_fishbowl_source: bool = False,
     website_settings_instance: str = "",
     deferred_website_indexing: dict[str, object] | None = None,
+    web_setup_timeout_seconds: int = 0,
 ) -> str:
     """The schedule's bash script.
 
@@ -3146,10 +3182,18 @@ enforce_website_settings() {{
     if [ -z "${{website_settings_instance}}" ] || [ "${{website_settings_succeeded}}" = "1" ]; then
         return 0
     fi
-    local settings_status=0
+    local settings_status=0 settings_output
+    settings_output=$(mktemp)
     docker exec -i "${{workflow_environment[@]}}" "${{script_runner_container_id}}" \
-        python3 - "${{database_name}}" "${{website_settings_instance}}" {shlex.quote(json.dumps(deferred_website_indexing)) if deferred_website_indexing is not None else ""} <<'PY' || settings_status=$?
+        python3 - "${{database_name}}" "${{website_settings_instance}}" {shlex.quote(json.dumps(deferred_website_indexing)) if deferred_website_indexing is not None else ""} <<'PY' >"${{settings_output}}" 2>&1 || settings_status=$?
 {WEBSITE_SETTINGS_PROGRAM}PY
+    cat "${{settings_output}}"
+    if [ "${{settings_status}}" -ne 0 ] && [ "{int(deferred_website_indexing is not None)}" = "1" ]; then
+        echo "website_indexing_status=failed"
+        echo "website_indexing_exit_code=${{settings_status}}"
+{_indexing_reason_shell("${settings_output}")}
+    fi
+    rm -f "${{settings_output}}"
     if [ "${{settings_status}}" -ne 0 ]; then
         return "${{settings_status}}"
     fi
@@ -3270,6 +3314,21 @@ fi
 if [ "${{clear_stale_lock}}" = "1" ]; then
     echo "Clearing stale data workflow lock ${{data_workflow_lock_path}}"
     docker exec -u root "${{script_runner_container_id}}" rm -f "${{data_workflow_lock_path}}"
+fi
+
+if [ "{web_setup_timeout_seconds}" -gt 0 ]; then
+    echo "Waiting for web container ${{web_container_id}} to finish database setup"
+    web_setup_deadline=$((SECONDS + {web_setup_timeout_seconds}))
+    until [ "$(docker inspect -f '{{{{.State.Health.Status}}}}' "${{web_container_id}}")" = "healthy" ]; do
+        if [ "$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")" != "running" ] \
+            || [ "${{SECONDS}}" -ge "${{web_setup_deadline}}" ]; then
+            echo "website_indexing_status=refused"
+            echo "website_indexing_reason=web_setup_incomplete"
+            echo "Web did not finish setting up the first-release database." >&2
+            exit 1
+        fi
+        sleep 5
+    done
 fi
 
 trap exit_trap EXIT

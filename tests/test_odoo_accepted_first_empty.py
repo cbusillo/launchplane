@@ -734,12 +734,26 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 self.assertTrue(recorded.runtime_source["first_empty_provider_deployment_id"])
             return result
 
+        database_setup = {"finished": False, "bindings_checked": 0, "waited": 0}
+
         def post_deploy_execution(**kwargs: Any) -> dict[str, str]:
             kwargs["before_provider_mutation"]("post_deploy_target_update")
+            if kwargs.get("await_web_setup"):
+                database_setup["waited"] += 1
+                self.assertEqual(
+                    kwargs["deferred_website_indexing"]["indexing"]["production_use"],
+                    "prelaunch",
+                )
+                database_setup["finished"] = True
             return _module_update_evidence(website_indexing_production_use="prelaunch")
 
         def native_indexing(**kwargs: Any) -> dict[str, Any]:
             request = kwargs["request"]
+            if kwargs.get("check_only"):
+                database_setup["bindings_checked"] += 1
+                return {"status": "bound"}
+            if not database_setup["finished"]:
+                return {"status": "failed", "exit_code": 1, "reason": "registry_busy"}
             return {
                 "status": "complete",
                 "native": {
@@ -833,6 +847,8 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             patch.object(replacement, "require_forward_lane_build"),
         ):
             self.complete_drill(expected_first_mode="empty", replacement=execute_real)
+        self.assertGreater(database_setup["waited"], 0)
+        self.assertEqual(database_setup["bindings_checked"], database_setup["waited"])
         self.assertTrue(plan.called)
         self.assertEqual(updates.call_count, 2)
         delivered = api.parse_dokploy_env_text(str(self.provider_payload["env"]))

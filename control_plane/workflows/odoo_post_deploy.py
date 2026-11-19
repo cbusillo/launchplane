@@ -34,7 +34,7 @@ from control_plane.dokploy.connection_isolation import (
     run_connection_isolation,
 )
 from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
-from control_plane.odoo_website_indexing import WebsiteIndexingRequest
+from control_plane.odoo_website_indexing import WebsiteIndexingRequest, WebsiteIndexingUnknown
 from control_plane.dokploy.native_copy_stream import NativeProgramFailed
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
@@ -379,6 +379,7 @@ def execute_odoo_post_deploy(
     indexing_state = ""
     selected_indexing = None
     deferred_indexing = None
+    first_release_setup = False
     try:
         if request.instance == "prod" and release_operation:
             from control_plane.odoo_website_indexing import (
@@ -438,7 +439,8 @@ def execute_odoo_post_deploy(
                                 source_tuple.artifact_id
                             )
                         )
-                if (
+                first_release_setup = initial_decision is not None
+                if first_release_setup or (
                     source_version
                     and candidate_version
                     and source_version.split(".")[0] != candidate_version.split(".")[0]
@@ -455,9 +457,12 @@ def execute_odoo_post_deploy(
                     )
                     indexing_state = selected_indexing.production_use
             except (ValueError, RuntimeError, FileNotFoundError) as error:
-                raise click.ClickException(
-                    "Release indexing binding is unverified: " + str(error)
-                ) from error
+                message = "Release indexing binding is unverified: " + str(error)
+                if isinstance(error, WebsiteIndexingUnknown) and error.evidence:
+                    raise dokploy_post_deploy.OdooPostDeployReadbackFailure(
+                        message, evidence=error.evidence
+                    ) from error
+                raise click.ClickException(message) from error
             if rendering_record is None:
                 rendering_record = OdooInstanceOverrideRecord(
                     context=request.context, instance="prod", updated_at=utc_now_timestamp()
@@ -578,6 +583,9 @@ def execute_odoo_post_deploy(
             override_record_found=override_record_found,
             workflow_intent=workflow_intent,
             required_container_environment_keys=required_workflow_environment_keys,
+            override_evidence=_prefix_post_deploy_readback_evidence(error.evidence)
+            if isinstance(error, dokploy_post_deploy.OdooPostDeployReadbackFailure)
+            else {},
             error_message=str(error),
         )
 
@@ -653,6 +661,7 @@ def execute_odoo_post_deploy(
                 prepare_native_source=native_preparer,
                 database_url=getattr(record_store, "database_url", None),
                 deferred_website_indexing=deferred_indexing,
+                await_web_setup=first_release_setup,
             )
             or {}
         )

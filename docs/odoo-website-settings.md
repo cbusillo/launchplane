@@ -160,6 +160,20 @@ the website by origin, applies the required indexing state and verifies readback
 before web starts. Accepted website settings must select that same website and
 origin. Same-major releases and rollback retain observation before maintenance.
 
+A first release to an empty database uses that same deferred path. Its web
+installs the database when the provider starts it and holds Odoo's registry
+lock while it does, so the release first checks only the container bindings
+(runtime, database, image and an idle runner). Maintenance then waits for web's
+health check before stopping web, applies the `prelaunch` state, and starts web
+only after its readback passes. Web that exits or does not finish setup in the
+schedule's time refuses with `web_setup_incomplete` and is not stopped.
+
+When indexing does not complete, the deployment's post-deploy evidence records
+`website_indexing_status` (`refused`, `failed` or `unknown`), the
+`website_indexing_exit_code` of a failed run and an allowlisted
+`website_indexing_reason`, such as `registry_busy` or `origin_unbound`. These
+fields carry no program output or request content.
+
 For configuration without maintenance, use the authenticated service route
 `POST /v1/drivers/odoo/post-deploy`:
 

@@ -345,6 +345,60 @@ class PrelaunchReleaseTests(release.ClientReleaseFixture):
                 self.assertEqual(result.post_deploy_status, "pass", result.error_message)
                 self.assertEqual(self.protected, state == "prelaunch")
 
+    def test_failed_native_indexing_records_only_its_bounded_outcome(self) -> None:
+        from control_plane.dokploy import DokployTargetDefinition
+        from control_plane.dokploy.website_indexing import indexing_failure_evidence
+        from control_plane.odoo_website_indexing import WebsiteIndexingUnknown
+        from control_plane.workflows.odoo_post_deploy import (
+            execute_odoo_post_deploy,
+            OdooPostDeployRequest,
+        )
+
+        def failed(*_: Any, **__: Any) -> dict[str, Any]:
+            raise WebsiteIndexingUnknown(
+                "Native indexing did not prove its outcome.",
+                evidence=indexing_failure_evidence(
+                    {
+                        "status": "failed",
+                        "exit_code": 1,
+                        "reason": "registry_busy",
+                        "stderr": "psycopg2 password=synthetic-secret",
+                    }
+                ),
+            )
+
+        with (
+            patch.object(WebsiteIndexingExecution, "observe", failed),
+            patch(
+                "control_plane.workflows.odoo_post_deploy._resolve_compose_target_definition",
+                return_value=DokployTargetDefinition(
+                    context=release.CONTEXT, instance="prod", public_hosts=("example.test",)
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update"
+            ) as maintenance,
+        ):
+            result = execute_odoo_post_deploy(
+                control_plane_root=self.root,
+                record_store=self.store,
+                request=OdooPostDeployRequest(context=release.CONTEXT, instance="prod"),
+                artifact_id="artifact-prod",
+                release_operation=True,
+                rollback=True,
+            )
+        maintenance.assert_not_called()
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertEqual(
+            result.override_evidence,
+            {
+                "post_deploy_readback_website_indexing_status": "failed",
+                "post_deploy_readback_website_indexing_exit_code": "1",
+                "post_deploy_readback_website_indexing_reason": "registry_busy",
+            },
+        )
+        self.assertNotIn("synthetic-secret", result.model_dump_json())
+
     def test_completed_deployment_waits_for_indexing_before_reporting_success(self) -> None:
         accepted = self.accept_prelaunch()
         (backup,) = self.advance()
