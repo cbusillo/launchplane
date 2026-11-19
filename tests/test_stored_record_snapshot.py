@@ -254,6 +254,46 @@ class StoredRecordSnapshotTests(unittest.TestCase):
                     LaunchplaneProductProfileRecord.model_validate(row["payload"])
                     self.assertNotIn("PRIVATE_", json.dumps(row["payload"]))
 
+    def test_first_release_request_with_absent_production_stays_readable_after_scrubbing(
+        self,
+    ) -> None:
+        from control_plane.contracts.release_request import ReleaseRequestDecisionRecord
+        from control_plane.contracts.release_review import AbsentProduction, ReleaseVersion
+        from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
+
+        request = ReleaseRequestDecisionRecord(
+            record_id="1a" * 32,
+            product="first-release",
+            repository="example/first-release",
+            owner_github_id="42",
+            checklist_digest="2b" * 32,
+            production=AbsentProduction(
+                authority_sha256="3c" * 32, recovery_backup_root="/volumes/backups/first-release"
+            ),
+            candidate=ReleaseVersion(artifact_id="artifact-first-release", source_commit="4d" * 20),
+            source="director_request",
+            reason="First release.",
+            actor="director",
+            decided_at="2026-11-19T18:03:35+00:00",
+        )
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            product_profile_payload("first-release")
+        ).model_copy(update={"release_request": request})
+        self.store.write_product_profile_record(profile)
+        for version in (1, 2):
+            snapshot = self.store.export_stored_record_snapshot(format_version=version)
+            rows = [
+                row["payload"]
+                for family, row in iter_snapshot_rows(snapshot)
+                if family == "launchplane_product_profiles" and "release_request" in row["payload"]
+            ]
+            with self.subTest(format_version=version):
+                (payload,) = rows
+                scrubbed = LaunchplaneProductProfileRecord.model_validate(payload)
+                assert scrubbed.release_request is not None
+                self.assertIsInstance(scrubbed.release_request.production, AbsentProduction)
+                self.assertNotIn("/volumes/backups/first-release", json.dumps(payload))
+
     def test_invalid_historical_schedule_and_suffix_still_fail_after_scrubbing(self) -> None:
         from control_plane.stored_record_snapshot import _Scrubber
 
