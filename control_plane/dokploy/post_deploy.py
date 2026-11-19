@@ -187,8 +187,6 @@ ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS = (
     "ODOO_UPSTREAM_FILESTORE_PATH",
 )
 DEFAULT_DATA_WORKFLOW_LOCK_PATH = "/volumes/data/.data_workflow_in_progress"
-# Schedule time left for maintenance after a first release's web finishes setup.
-WEB_SETUP_SCHEDULE_RESERVE_SECONDS = 180
 # An upstream restore copies a production database and filestore and may run an
 # OpenUpgrade migration; OPW's first fresh copy took 22 minutes. The execution
 # budget stays bounded and larger than an ordinary deploy timeout.
@@ -1026,9 +1024,8 @@ def run_compose_post_deploy_update(
         if apply_website_settings
         else "",
         deferred_website_indexing=deferred_website_indexing,
-        web_setup_timeout_seconds=max(
-            60, resolved_schedule_execution_timeout_seconds - WEB_SETUP_SCHEDULE_RESERVE_SECONDS
-        )
+        # Half the schedule's time, so maintenance and the readback still fit in it.
+        web_setup_timeout_seconds=max(1, resolved_schedule_execution_timeout_seconds // 2)
         if await_web_setup
         else 0,
     )
@@ -2957,6 +2954,22 @@ def compose_data_workflow_is_quiescent(
     )
 
 
+def _indexing_reason_shell(output_path: str) -> str:
+    """Print the first allowlisted reason whose pattern the indexing output contains."""
+    from control_plane.dokploy.website_indexing import INDEXING_FAILURE_PATTERNS
+
+    return (
+        "\n".join(
+            f"        {'if' if index == 0 else 'elif'} grep -Fq "
+            + " ".join(f"-e {shlex.quote(pattern)}" for pattern in patterns)
+            + f' -- "{output_path}"; then\n'
+            + f"            echo website_indexing_reason={reason}"
+            for index, (reason, patterns) in enumerate(INDEXING_FAILURE_PATTERNS)
+        )
+        + "\n        fi"
+    )
+
+
 def _build_dokploy_data_workflow_script(
     *,
     compose_app_name: str,
@@ -3165,15 +3178,19 @@ enforce_website_settings() {{
     if [ -z "${{website_settings_instance}}" ] || [ "${{website_settings_succeeded}}" = "1" ]; then
         return 0
     fi
-    local settings_status=0
+    local settings_status=0 settings_output
+    settings_output=$(mktemp)
     docker exec -i "${{workflow_environment[@]}}" "${{script_runner_container_id}}" \
-        python3 - "${{database_name}}" "${{website_settings_instance}}" {shlex.quote(json.dumps(deferred_website_indexing)) if deferred_website_indexing is not None else ""} <<'PY' || settings_status=$?
+        python3 - "${{database_name}}" "${{website_settings_instance}}" {shlex.quote(json.dumps(deferred_website_indexing)) if deferred_website_indexing is not None else ""} <<'PY' >"${{settings_output}}" 2>&1 || settings_status=$?
 {WEBSITE_SETTINGS_PROGRAM}PY
+    cat "${{settings_output}}"
+    if [ "${{settings_status}}" -ne 0 ] && [ "{int(deferred_website_indexing is not None)}" = "1" ]; then
+        echo "website_indexing_status=failed"
+        echo "website_indexing_exit_code=${{settings_status}}"
+{_indexing_reason_shell("${settings_output}")}
+    fi
+    rm -f "${{settings_output}}"
     if [ "${{settings_status}}" -ne 0 ]; then
-        if [ "{int(deferred_website_indexing is not None)}" = "1" ]; then
-            echo "website_indexing_status=failed"
-            echo "website_indexing_exit_code=${{settings_status}}"
-        fi
         return "${{settings_status}}"
     fi
     website_settings_succeeded=1

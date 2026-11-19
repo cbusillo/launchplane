@@ -737,11 +737,12 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         # Like the real stack, the first release's web holds Odoo's registry lock while
         # it installs the empty database, so indexing cannot run until maintenance has
         # waited for web to finish setting up.
-        database_setup = {"finished": False}
+        database_setup = {"finished": False, "bindings_checked": 0, "waited": 0}
 
         def post_deploy_execution(**kwargs: Any) -> dict[str, str]:
             kwargs["before_provider_mutation"]("post_deploy_target_update")
             if kwargs.get("await_web_setup"):
+                database_setup["waited"] += 1
                 self.assertEqual(
                     kwargs["deferred_website_indexing"]["indexing"]["production_use"],
                     "prelaunch",
@@ -752,6 +753,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         def native_indexing(**kwargs: Any) -> dict[str, Any]:
             request = kwargs["request"]
             if kwargs.get("check_only"):
+                database_setup["bindings_checked"] += 1
                 return {"status": "bound"}
             if not database_setup["finished"]:
                 return {"status": "failed", "exit_code": 1, "reason": "registry_busy"}
@@ -848,6 +850,9 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             patch.object(replacement, "require_forward_lane_build"),
         ):
             self.complete_drill(expected_first_mode="empty", replacement=execute_real)
+        # Every first release checked its container bindings and waited for web setup.
+        self.assertGreater(database_setup["waited"], 0)
+        self.assertEqual(database_setup["bindings_checked"], database_setup["waited"])
         self.assertTrue(plan.called)
         self.assertEqual(updates.call_count, 2)
         delivered = api.parse_dokploy_env_text(str(self.provider_payload["env"]))

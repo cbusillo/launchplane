@@ -517,6 +517,7 @@ def _render_post_deploy_script(
     clear_preview_fishbowl_source: bool = False,
     deferred_website_indexing: dict[str, object] | None = None,
     await_web_setup: bool = False,
+    schedule_execution_timeout_seconds: int | None = None,
     target_ssh_directory: str = "/srv/preview-source-ssh",
 ) -> str:
     schedule_payloads: list[dict[str, object]] = []
@@ -604,6 +605,7 @@ def _render_post_deploy_script(
             clear_preview_fishbowl_source=clear_preview_fishbowl_source,
             deferred_website_indexing=deferred_website_indexing,
             await_web_setup=await_web_setup,
+            schedule_execution_timeout_seconds=schedule_execution_timeout_seconds,
         )
     if len(schedule_payloads) != 1:
         raise AssertionError(f"expected one schedule upsert, got {len(schedule_payloads)}")
@@ -900,7 +902,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
             "def _load_settings(arguments): return arguments\n"
             "def _write_runtime_config(settings): pass\n"
             "def _run_odoo_shell(settings, program, *, label):\n"
-            "    if os.environ.get('FAKE_WEBSITE_SETTINGS_FAILURE') == '1': raise RuntimeError('native consumer failed')\n"
+            "    if os.environ.get('FAKE_WEBSITE_SETTINGS_FAILURE') == '1': raise RuntimeError(os.environ.get('FAKE_WEBSITE_SETTINGS_ERROR', 'native consumer failed'))\n"
             "    print('website_settings_nonproduction_excluded=true')\n",
             encoding="utf-8",
         )
@@ -1678,11 +1680,41 @@ def main(arguments: list[str]) -> int:
         self.assertNotIn("stop web-id", exited.docker_log)
         self.assertNotIn("exec workflow", exited.docker_log)
 
-        failed = self._run(script, FAKE_WEBSITE_SETTINGS_FAILURE="1")
+        failed = self._run(
+            script,
+            FAKE_WEBSITE_SETTINGS_FAILURE="1",
+            FAKE_WEBSITE_SETTINGS_ERROR="Website indexing requires one native origin binding.",
+        )
         self.assertNotEqual(failed.returncode, 0)
-        self.assertIn("website_indexing_status=failed", failed.stdout)
-        self.assertRegex(failed.stdout, r"website_indexing_exit_code=[1-9]")
         self.assertFalse(failed.web_restarted, failed.docker_log)
+        # The schedule log's last error line is the wrapper's, so the reason must be
+        # derived from the indexing output itself.
+        markers = dokploy_post_deploy.extract_odoo_post_deploy_readback_markers(
+            {"logs": [str(line) for line in failed.stdout.splitlines()]}
+        )
+        self.assertEqual(markers["website_indexing_status"], "failed")
+        self.assertEqual(markers["website_indexing_reason"], "origin_unbound")
+        self.assertRegex(markers["website_indexing_exit_code"], r"^[1-9][0-9]*$")
+
+    def test_first_release_refuses_when_web_never_finishes_setup(self) -> None:
+        script = _render_post_deploy_script(
+            None,
+            instance="prod",
+            deferred_website_indexing={
+                "database_uuid": "",
+                "indexing": {
+                    "public_origin": "https://example.test",
+                    "production_use": "prelaunch",
+                },
+            },
+            await_web_setup=True,
+            schedule_execution_timeout_seconds=2,
+        )
+        run = self._run(script, FAKE_WEB_HEALTH="starting")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("website_indexing_reason=web_setup_incomplete", run.stdout)
+        self.assertNotIn("stop web-id", run.docker_log)
+        self.assertNotIn("exec workflow", run.docker_log)
 
     def test_stopped_web_without_a_readback_still_fails(self) -> None:
         run = self._run(_render_script(instance="prod"), web_status="exited")

@@ -34,7 +34,6 @@ from control_plane.dokploy.connection_isolation import (
     run_connection_isolation,
 )
 from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
-from control_plane.dokploy.website_indexing import indexing_failure_reason
 from control_plane.odoo_website_indexing import WebsiteIndexingRequest, WebsiteIndexingUnknown
 from control_plane.dokploy.native_copy_stream import NativeProgramFailed
 from control_plane.odoo_testing_restore import (
@@ -723,18 +722,7 @@ def execute_odoo_post_deploy(
         if isinstance(error, OSError) and not uncertain:
             raise
         if isinstance(error, dokploy_post_deploy.OdooPostDeployReadbackFailure):
-            post_deploy_readback_markers = dict(error.evidence)
-            reason = (
-                indexing_failure_reason(error.reason)
-                if isinstance(error, dokploy_post_deploy.OdooPostDeployScheduleFailed)
-                else ""
-            )
-            if (
-                post_deploy_readback_markers.get("website_indexing_status") == "failed"
-                and reason
-                and "website_indexing_reason" not in post_deploy_readback_markers
-            ):
-                post_deploy_readback_markers["website_indexing_reason"] = reason
+            post_deploy_readback_markers = error.evidence
         if odoo_override_record is not None and override_should_apply:
             _write_odoo_instance_override_apply_result(
                 record_store=typed_record_store,
