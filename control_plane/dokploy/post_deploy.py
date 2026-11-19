@@ -1024,8 +1024,9 @@ def run_compose_post_deploy_update(
         if apply_website_settings
         else "",
         deferred_website_indexing=deferred_website_indexing,
-        # Half the schedule's time, so maintenance and the readback still fit in it.
-        web_setup_timeout_seconds=max(1, resolved_schedule_execution_timeout_seconds // 2)
+        web_setup_timeout_seconds=_web_setup_share_of_schedule(
+            resolved_schedule_execution_timeout_seconds
+        )
         if await_web_setup
         else 0,
     )
@@ -2954,8 +2955,11 @@ def compose_data_workflow_is_quiescent(
     )
 
 
+def _web_setup_share_of_schedule(schedule_timeout_seconds: int) -> int:
+    return max(1, schedule_timeout_seconds // 2)
+
+
 def _indexing_reason_shell(output_path: str) -> str:
-    """Print the first allowlisted reason whose pattern the indexing output contains."""
     from control_plane.dokploy.website_indexing import INDEXING_FAILURE_PATTERNS
 
     return (
@@ -3313,8 +3317,6 @@ if [ "${{clear_stale_lock}}" = "1" ]; then
 fi
 
 if [ "{web_setup_timeout_seconds}" -gt 0 ]; then
-    # A first release's web installs the empty database before it serves. Stopping
-    # it partway would interrupt that install, so wait for its health check first.
     echo "Waiting for web container ${{web_container_id}} to finish database setup"
     web_setup_deadline=$((SECONDS + {web_setup_timeout_seconds}))
     until [ "$(docker inspect -f '{{{{.State.Health.Status}}}}' "${{web_container_id}}")" = "healthy" ]; do

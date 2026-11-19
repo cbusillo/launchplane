@@ -6,8 +6,6 @@ from control_plane.dokploy.native_copy_stream import run_managed_server_program
 from control_plane.dokploy.post_deploy import ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY
 
 
-# Bounded reasons a failed indexing run may record; the evidence never carries the
-# program's own output.
 INDEXING_FAILURE_PATTERNS = (
     ("registry_busy", ("LockNotAvailable", "registry_loading")),
     ("origin_unbound", ("native origin binding", "native website/origin binding")),
@@ -112,7 +110,6 @@ except Exception:
 
 
 def indexing_failure_evidence(result: dict[str, object]) -> dict[str, str]:
-    """Allowlisted fields of a host result that did not complete."""
     status = result.get("status")
     if status not in {"refused", "failed", "unknown"}:
         status = "unknown"

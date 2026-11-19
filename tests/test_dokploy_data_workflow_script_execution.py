@@ -1687,8 +1687,6 @@ def main(arguments: list[str]) -> int:
         )
         self.assertNotEqual(failed.returncode, 0)
         self.assertFalse(failed.web_restarted, failed.docker_log)
-        # The schedule log's last error line is the wrapper's, so the reason must be
-        # derived from the indexing output itself.
         markers = dokploy_post_deploy.extract_odoo_post_deploy_readback_markers(
             {"logs": [str(line) for line in failed.stdout.splitlines()]}
         )

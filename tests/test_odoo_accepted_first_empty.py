@@ -734,9 +734,6 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 self.assertTrue(recorded.runtime_source["first_empty_provider_deployment_id"])
             return result
 
-        # Like the real stack, the first release's web holds Odoo's registry lock while
-        # it installs the empty database, so indexing cannot run until maintenance has
-        # waited for web to finish setting up.
         database_setup = {"finished": False, "bindings_checked": 0, "waited": 0}
 
         def post_deploy_execution(**kwargs: Any) -> dict[str, str]:
@@ -850,7 +847,6 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             patch.object(replacement, "require_forward_lane_build"),
         ):
             self.complete_drill(expected_first_mode="empty", replacement=execute_real)
-        # Every first release checked its container bindings and waited for web setup.
         self.assertGreater(database_setup["waited"], 0)
         self.assertEqual(database_setup["bindings_checked"], database_setup["waited"])
         self.assertTrue(plan.called)

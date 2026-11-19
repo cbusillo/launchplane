@@ -333,8 +333,6 @@ class WebsiteIndexingExecution:
         }
         if prepare_for_data_workflow:
             if self.initial_release_decision is not None:
-                # The first release's web is still installing, so only its container
-                # bindings are checked now; indexing runs once maintenance holds web.
                 bound = run_native_indexing(
                     host=host,
                     token=token,

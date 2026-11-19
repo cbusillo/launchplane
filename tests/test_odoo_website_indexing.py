@@ -626,8 +626,6 @@ class WebsiteIndexingRouteTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WebsiteIndexingHostProgramTests(unittest.TestCase):
-    """Run the real host program against a fake ``docker`` on PATH."""
-
     def run_host(self, *, check_only: bool = False, runner_exec: bool = False) -> dict[str, Any]:
         import base64
         import os

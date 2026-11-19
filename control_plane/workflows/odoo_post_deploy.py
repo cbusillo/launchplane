@@ -439,8 +439,6 @@ def execute_odoo_post_deploy(
                                 source_tuple.artifact_id
                             )
                         )
-                # A first release's web is still installing the empty database, so its
-                # indexing runs in maintenance after web finishes setting up.
                 first_release_setup = initial_decision is not None
                 if first_release_setup or (
                     source_version
