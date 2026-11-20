@@ -571,12 +571,15 @@ def back_up_first_release_retained_stack(
 ) -> OdooProdBackupGateResult:
     if not isinstance(store, PostgresRecordStore) or decision is None:
         raise ValueError("A retained-stack backup requires its durable accepted release.")
-    runtime = first_release_backup_runtime(store, decision, request.context)
-    before = prove_first_release_retained_stack(store, root, decision, request.context)
+    record_store, accepted = store, decision
+    runtime = first_release_backup_runtime(record_store, accepted, request.context)
+    before = prove_first_release_retained_stack(record_store, root, accepted, request.context)
 
     def require_unchanged_stack() -> None:
         try:
-            after = prove_first_release_retained_stack(store, root, decision, request.context)
+            after = prove_first_release_retained_stack(
+                record_store, root, accepted, request.context
+            )
         except click.ClickException:
             raise
         except Exception as error:
@@ -588,7 +591,7 @@ def back_up_first_release_retained_stack(
 
     return execute_odoo_prod_backup_gate(
         control_plane_root=root,
-        record_store=store,
+        record_store=record_store,
         request=request,
         expected_web_state="exited" if before["web_present"] else "absent",
         runtime_values=runtime,

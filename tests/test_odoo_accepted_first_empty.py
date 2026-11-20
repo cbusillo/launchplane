@@ -1184,49 +1184,43 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             ],
         }
 
-    def test_retained_stack_without_web_refuses_a_stray_writer_before_capture(self) -> None:
-        finished = self.promote_after_vanished_web(self.add_stray_writer)
+    def assert_refused_before_capture(self, change_guest: Callable[[], None]) -> None:
+        finished = self.promote_after_vanished_web(change_guest)
         self.assertEqual(finished.status, "fail")
         self.assertEqual(self.captured_web_states, [])
         self.assertEqual(self.modes, ["empty"])
 
-    def test_retained_stack_without_web_refuses_a_different_runner_image(self) -> None:
-        def change_runner_image() -> None:
-            self.docker_state.rows["script-runner"]["Config"]["Image"] = (
-                "example/odoo@sha256:" + "f" * 64
-            )
-
-        finished = self.promote_after_vanished_web(change_runner_image)
+    def assert_capture_failed(self, during_capture: Callable[[], None]) -> None:
+        self.during_capture = during_capture
+        finished = self.promote_after_vanished_web()
         self.assertEqual(finished.status, "fail")
-        self.assertEqual(self.captured_web_states, [])
+        assert finished.result is not None
+        gate = self.store.read_backup_gate_record(finished.result.backup_record_id)
+        self.assertEqual(gate.status, "fail")
         self.assertEqual(self.modes, ["empty"])
 
     def remove_database(self) -> None:
         del self.docker_state.rows["database"]
 
+    def change_runner_image(self) -> None:
+        self.docker_state.rows["script-runner"]["Config"]["Image"] = (
+            "example/odoo@sha256:" + "f" * 64
+        )
+
+    def test_retained_stack_without_web_refuses_a_stray_writer_before_capture(self) -> None:
+        self.assert_refused_before_capture(self.add_stray_writer)
+
+    def test_retained_stack_without_web_refuses_a_different_runner_image(self) -> None:
+        self.assert_refused_before_capture(self.change_runner_image)
+
     def test_retained_stack_without_web_refuses_a_missing_database(self) -> None:
-        finished = self.promote_after_vanished_web(self.remove_database)
-        self.assertEqual(finished.status, "fail")
-        self.assertEqual(self.captured_web_states, [])
-        self.assertEqual(self.modes, ["empty"])
+        self.assert_refused_before_capture(self.remove_database)
 
     def test_unprovable_stack_after_capture_fails_the_backup(self) -> None:
-        self.during_capture = self.remove_database
-        finished = self.promote_after_vanished_web()
-        self.assertEqual(finished.status, "fail")
-        assert finished.result is not None
-        gate = self.store.read_backup_gate_record(finished.result.backup_record_id)
-        self.assertEqual(gate.status, "fail")
-        self.assertEqual(self.modes, ["empty"])
+        self.assert_capture_failed(self.remove_database)
 
     def test_writer_appearing_during_capture_fails_the_backup(self) -> None:
-        self.during_capture = self.add_stray_writer
-        finished = self.promote_after_vanished_web()
-        self.assertEqual(finished.status, "fail")
-        assert finished.result is not None
-        gate = self.store.read_backup_gate_record(finished.result.backup_record_id)
-        self.assertEqual(gate.status, "fail")
-        self.assertEqual(self.modes, ["empty"])
+        self.assert_capture_failed(self.add_stray_writer)
 
     def test_failure_recovery_stops_owned_web_after_runtime_and_secret_edits(self) -> None:
         from control_plane.product_config import apply_product_config_bundle
