@@ -491,8 +491,8 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         "/v1/product-config/odoo-addon-settings/apply",
-        "Dry-run or apply an Odoo lane's addon settings with secret-binding references.",
-        ("agent_helper", "operator_ui", "service_api"),
+        "Dry-run or apply an Odoo lane's Shopify or Authentik SSO addon settings; secrets only as binding references.",
+        ("agent_helper", "operator_ui", "service_api", "generic_caller"),
         ("dry-run", "apply"),
         "apply",
         ("reviewed_plan_digest",),
