@@ -666,9 +666,14 @@ class OdooAddonSettingsPlanTests(unittest.TestCase):
                 OdooAddonSettingsApplyRequest.model_validate(payload)
 
     def test_authentik_request_rejects_secret_and_insecure_url(self) -> None:
-        for change in ({"client_secret": "private"}, {"base_url": "ftp://auth.example.com"}):
+        for change in (
+            {"client_secret": "private"},
+            {"base_url": "ftp://auth.example.com"},
+            {"base_url": "https://user:private@auth.example.com"},
+            {"base_url": "https://auth.example.com:84433"},
+        ):
             settings = {**_authentik_payload()["authentik_sso"], **change}  # type: ignore[dict-item]
-            with self.subTest(change=sorted(change)), self.assertRaises(ValueError):
+            with self.subTest(change=change), self.assertRaises(ValueError):
                 OdooAddonSettingsApplyRequest.model_validate(
                     _authentik_payload(authentik_sso=settings)
                 )

@@ -226,9 +226,22 @@ class OdooAuthentikSsoAddonSettingsInput(BaseModel):
         for field_name in AUTHENTIK_SSO_SETTINGS:
             setattr(self, field_name, getattr(self, field_name).strip())
         self.base_url = self.base_url.rstrip("/")
-        parts = urllib.parse.urlsplit(self.base_url)
-        if parts.scheme != "https" or not parts.hostname or parts.query or parts.fragment:
-            raise ValueError("Authentik base_url must be an https URL without query or fragment.")
+        # Never echo the URL: it could carry pasted credentials.
+        message = "Authentik base_url must be an https URL with a host and no credentials, query or fragment."
+        try:
+            parts = urllib.parse.urlsplit(self.base_url)
+            usable_port = parts.port != 0
+        except ValueError as error:
+            raise ValueError(message) from error
+        if (
+            parts.scheme != "https"
+            or not parts.hostname
+            or not usable_port
+            or parts.username is not None
+            or parts.query
+            or parts.fragment
+        ):
+            raise ValueError(message)
         if not self.client_id or any(character.isspace() for character in self.client_id):
             raise ValueError("Authentik client_id is required and cannot contain whitespace.")
         return self
