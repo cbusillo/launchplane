@@ -330,11 +330,8 @@ class StoredRecordSnapshotTests(unittest.TestCase):
 
         from control_plane.contracts.release_review import AbsentProduction
 
-        fixture = (
-            Path(__file__).parent
-            / "fixtures"
-            / ("stored_record_snapshot_51349bd_first_release_profile.json")
-        )
+        fixture_name = "stored_record_snapshot_51349bd_first_release_profile.json"
+        fixture = Path(__file__).parent / "fixtures" / fixture_name
         exported = json.loads(fixture.read_text())
         production = exported["payload"]["release_request"]["production"]
 
@@ -353,9 +350,9 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         )
 
         def variant(**production_update: object) -> dict[str, Any]:
-            row: dict[str, Any] = deepcopy(exported)
-            row["payload"]["release_request"]["production"].update(production_update)
-            return row
+            copied: dict[str, Any] = deepcopy(exported)
+            copied["payload"]["release_request"]["production"].update(production_update)
+            return copied
 
         unrelated = deepcopy(exported)
         unrelated["payload"]["release_request"]["production"]["state"] = "absent"
