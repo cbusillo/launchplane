@@ -3476,8 +3476,8 @@ alone is not proof that an existing testing copy has been repaired.
   reconciliation writer; stale setting writes return HTTP 409 for a fresh review.
 - For shared/live Shopify or Authentik SSO addon settings, use
   `POST /v1/product-config/odoo-addon-settings/apply` (contract operation
-  `apply_odoo_addon_settings`) through the Launchplane helper or service API.
-  The request's `addon` names one block, `shopify` (the default) or
+  `apply_odoo_addon_settings`) through the Launchplane helper, the generic
+  caller or the service API. The request's `addon` names one block, `shopify` (the default) or
   `authentik_sso`. It replaces that addon's settings on the lane's
   instance-override record and leaves every other override untouched.
   `authentik_sso` takes literals only: `base_url` (https) and `client_id` are
