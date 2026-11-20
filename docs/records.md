@@ -2675,8 +2675,10 @@ run` is the foreground loop intended for an external process supervisor, and
   `POST /v1/product-config/odoo-addon-settings/apply`, which records
   `shop_url_key`, `api_version` and `test_store` as literals and `api_token` and
   `webhook_key` as secret-binding references, with source label
-  `service:odoo-addon-settings`. See `docs/operations.md` for the refusals and
-  the dry-run digest.
+  `service:odoo-addon-settings`. The same route writes `authentik_sso`
+  literals (`base_url`, `client_id`, `disable_providers`, `group_claim`,
+  `admin_group`). See `docs/operations.md` for the refusals and the dry-run
+  digest.
 - `website_bootstrap` stores the typed devkit website bootstrap payload,
   including site identity, canonical URL, logo path, source metadata, and route
   definitions. Product repos remain the source of that intent; Launchplane

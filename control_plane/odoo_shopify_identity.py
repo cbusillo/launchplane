@@ -163,19 +163,20 @@ def authority(store: ShopifyIdentityStore, product: str) -> ShopifyAuthority:
     for name in ("shop_url_key", "api_version"):
         if settings[name].source != "literal" or not isinstance(settings[name].value, str):
             raise ValueError("Testing settings unavailable")
+    shopify = OdooShopifyAddonSettingsInput(
+        shop_url_key=str(settings["shop_url_key"].value),
+        api_version=str(settings["api_version"].value),
+        test_store=True,
+        api_token_secret_binding_id=settings["api_token"].secret_binding_id,
+        webhook_key_secret_binding_id=settings["webhook_key"].secret_binding_id,
+    )
     request = OdooAddonSettingsApplyRequest(
         mode="dry-run",
         product=product,
         context=testing.context,
         instance=testing.instance,
         reason="Read-only held testing store identity",
-        shopify=OdooShopifyAddonSettingsInput(
-            shop_url_key=str(settings["shop_url_key"].value),
-            api_version=str(settings["api_version"].value),
-            test_store=True,
-            api_token_secret_binding_id=settings["api_token"].secret_binding_id,
-            webhook_key_secret_binding_id=settings["webhook_key"].secret_binding_id,
-        ),
+        shopify=shopify,
     )
     plan, _, _ = build_odoo_addon_settings_plan(record_store=store, request=request)
     binding = _validated_secret_bindings(record_store=store, request=request)["api_token"]
@@ -214,8 +215,8 @@ def authority(store: ShopifyIdentityStore, product: str) -> ShopifyAuthority:
         sort_keys=True,
     )
     return ShopifyAuthority(
-        store_domain(request.shopify.shop_url_key),
-        request.shopify.api_version,
+        store_domain(shopify.shop_url_key),
+        shopify.api_version,
         version,
         snapshot,
     )

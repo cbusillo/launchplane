@@ -5,6 +5,11 @@ and ``test_store`` flag as literals, and points the API token and webhook key at
 existing managed secret bindings. Plaintext secret values never enter this path.
 Each binding must be the one the lane's runtime delivery puts in its container, or
 Odoo refuses the override at startup.
+
+Authentik SSO takes only non-secret literals: the public client's id, the
+Authentik base URL, and the group and provider settings the shared
+``launchplane_settings`` adapter applies. Its sign-in clients are public, so
+there is no secret to reference.
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Literal, Protocol
 
@@ -52,6 +58,8 @@ ODOO_ADDON_SETTINGS_SOURCE_LABEL: Literal["service:odoo-addon-settings"] = (
 )
 
 OdooAddonSettingsMode = Literal["dry-run", "apply"]
+OdooAddonSettingsAddon = Literal["shopify", "authentik_sso"]
+AUTHENTIK_SSO_ADDON_NAME: Literal["authentik_sso"] = "authentik_sso"
 OdooAddonSettingsRefusalCode = Literal[
     "protected_store_key",
     "production_like_store_key",
@@ -67,6 +75,27 @@ SHOPIFY_NON_SECRET_SETTINGS = frozenset(
     {"shop_url_key", "api_version", "test_store", "allow_production", "production_indicators"}
 )
 SHOPIFY_SECRET_BINDING_SETTINGS = ("api_token", "webhook_key")
+AUTHENTIK_SSO_SETTINGS = (
+    "base_url",
+    "client_id",
+    "disable_providers",
+    "group_claim",
+    "admin_group",
+)
+_NON_SECRET_SETTINGS = {
+    SHOPIFY_ADDON_NAME: SHOPIFY_NON_SECRET_SETTINGS,
+    AUTHENTIK_SSO_ADDON_NAME: frozenset(AUTHENTIK_SSO_SETTINGS),
+}
+_NEXT_ACTIONS: dict[str, str] = {
+    SHOPIFY_ADDON_NAME: (
+        "Run Odoo post-deploy for this lane so its database receives the settings, "
+        "then verify the store key and test_store in the lane database."
+    ),
+    AUTHENTIK_SSO_ADDON_NAME: (
+        "Deploy the lane so Odoo startup applies the settings, then check that signed-out "
+        "/web/login shows the Authentik button and its callback uses the lane's public URL."
+    ),
+}
 _SHOPIFY_API_VERSION_PATTERN = re.compile(r"^(?:[0-9]{4}-[0-9]{2}|unstable)$")
 _SHOPIFY_STORE_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]{0,254}$")
 # Shopify credential prefixes. A value with one of these in a literal or binding field is
@@ -181,6 +210,30 @@ class OdooShopifyAddonSettingsInput(BaseModel):
         }
 
 
+class OdooAuthentikSsoAddonSettingsInput(BaseModel):
+    """Non-secret settings for the shared Authentik sign-in adapter; empty ones are omitted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str
+    client_id: str
+    disable_providers: str = ""
+    group_claim: str = ""
+    admin_group: str = ""
+
+    @model_validator(mode="after")
+    def _validate_input(self) -> OdooAuthentikSsoAddonSettingsInput:
+        for field_name in AUTHENTIK_SSO_SETTINGS:
+            setattr(self, field_name, getattr(self, field_name).strip())
+        self.base_url = self.base_url.rstrip("/")
+        parts = urllib.parse.urlsplit(self.base_url)
+        if parts.scheme != "https" or not parts.hostname or parts.query or parts.fragment:
+            raise ValueError("Authentik base_url must be an https URL without query or fragment.")
+        if not self.client_id or any(character.isspace() for character in self.client_id):
+            raise ValueError("Authentik client_id is required and cannot contain whitespace.")
+        return self
+
+
 class OdooAddonSettingsApplyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -188,14 +241,23 @@ class OdooAddonSettingsApplyRequest(BaseModel):
     product: str
     context: str
     instance: str
-    addon: Literal["shopify"] = "shopify"
+    addon: OdooAddonSettingsAddon = "shopify"
     mode: OdooAddonSettingsMode = "dry-run"
     reason: str
     reviewed_plan_sha256: str = ""
-    shopify: OdooShopifyAddonSettingsInput
+    shopify: OdooShopifyAddonSettingsInput | None = None
+    authentik_sso: OdooAuthentikSsoAddonSettingsInput | None = None
 
     @model_validator(mode="after")
     def _validate_request(self) -> OdooAddonSettingsApplyRequest:
+        blocks = {"shopify": self.shopify, AUTHENTIK_SSO_ADDON_NAME: self.authentik_sso}
+        if blocks[self.addon] is None or any(
+            block is not None for addon, block in blocks.items() if addon != self.addon
+        ):
+            raise ValueError(
+                f"Odoo addon settings request for {self.addon} requires exactly its "
+                f"{self.addon} block."
+            )
         self.product = self.product.strip()
         self.context = self.context.strip().lower()
         self.instance = self.instance.strip().lower()
@@ -243,7 +305,7 @@ class OdooAddonSettingsPlan(BaseModel):
     product: str
     context: str
     instance: str
-    addon: Literal["shopify"]
+    addon: OdooAddonSettingsAddon
     production_lane: bool
     record_exists: bool
     changed: bool
@@ -341,6 +403,8 @@ def _validated_secret_bindings(
         instance_name=request.instance,
     )
     validated: dict[str, SecretBinding] = {}
+    if request.shopify is None:
+        return validated
     for setting_name, binding_id in request.shopify.secret_binding_ids().items():
         expected_key = addon_setting_secret_env_key(
             addon_name=SHOPIFY_ADDON_NAME, setting_name=setting_name
@@ -396,17 +460,25 @@ def _validated_secret_bindings(
     return validated
 
 
-def _desired_shopify_settings(
+def _literal_setting(addon: str, setting: str, value: str | bool) -> OdooAddonSettingOverride:
+    return OdooAddonSettingOverride(
+        addon=addon, setting=setting, value=OdooOverrideValue(source="literal", value=value)
+    )
+
+
+def _desired_settings(
     request: OdooAddonSettingsApplyRequest,
 ) -> tuple[OdooAddonSettingOverride, ...]:
-    shopify = request.shopify
-
-    def literal(setting: str, value: str | bool) -> OdooAddonSettingOverride:
-        return OdooAddonSettingOverride(
-            addon=SHOPIFY_ADDON_NAME,
-            setting=setting,
-            value=OdooOverrideValue(source="literal", value=value),
+    if request.authentik_sso is not None:
+        authentik = request.authentik_sso
+        return tuple(
+            _literal_setting(AUTHENTIK_SSO_ADDON_NAME, setting, getattr(authentik, setting))
+            for setting in AUTHENTIK_SSO_SETTINGS
+            if getattr(authentik, setting)
         )
+    if request.shopify is None:
+        raise ValueError("Odoo addon settings request has no settings block.")
+    shopify = request.shopify
 
     def secret(setting: str, binding_id: str) -> OdooAddonSettingOverride:
         return OdooAddonSettingOverride(
@@ -416,11 +488,11 @@ def _desired_shopify_settings(
         )
 
     return (
-        literal("shop_url_key", shopify.shop_url_key),
+        _literal_setting(SHOPIFY_ADDON_NAME, "shop_url_key", shopify.shop_url_key),
         secret("api_token", shopify.api_token_secret_binding_id),
         secret("webhook_key", shopify.webhook_key_secret_binding_id),
-        literal("api_version", shopify.api_version),
-        literal("test_store", shopify.test_store),
+        _literal_setting(SHOPIFY_ADDON_NAME, "api_version", shopify.api_version),
+        _literal_setting(SHOPIFY_ADDON_NAME, "test_store", shopify.test_store),
     )
 
 
@@ -445,7 +517,9 @@ def redacted_addon_setting_evidence(
     # Only settings known to be non-secret expose their literal value. A legacy record
     # that stored a credential as a literal shows presence only.
     visible_value: str | bool | None = None
-    if override.setting in SHOPIFY_NON_SECRET_SETTINGS and isinstance(value.value, str | bool):
+    if override.setting in _NON_SECRET_SETTINGS.get(override.addon, frozenset()) and isinstance(
+        value.value, str | bool
+    ):
         visible_value = value.value
     return OdooAddonSettingEvidence(
         setting=override.setting,
@@ -504,7 +578,7 @@ def _replacement_record(
     preserved_addon_settings = tuple(
         override
         for override in (existing.addon_settings if existing is not None else ())
-        if override.addon != SHOPIFY_ADDON_NAME
+        if override.addon != request.addon
     )
     default_phases: tuple[OdooOverrideApplyPhase, ...] = ("deploy", "promotion")
     apply_on: list[OdooOverrideApplyPhase] = []
@@ -525,43 +599,9 @@ def _replacement_record(
     )
 
 
-def build_odoo_addon_settings_plan(
-    *,
-    record_store: OdooAddonSettingsStore,
-    request: OdooAddonSettingsApplyRequest,
-) -> tuple[OdooAddonSettingsPlan, OdooInstanceOverrideRecord | None, OdooInstanceOverrideRecord]:
-    """Validate the request against current authority and return a digest-bound plan.
-
-    Returns the plan, the current record (or None) and the replacement record.
-    """
-
-    production_lane = odoo_instance_is_production(request.instance)
-    if production_lane and request.shopify.test_store:
-        raise OdooAddonSettingsRefusal(
-            "production_test_store",
-            "Shopify test_store cannot be set on a production lane.",
-        )
-    protected_store_keys = _protected_store_keys(
-        record_store=record_store,
-        product=request.product,
-        context=request.context,
-        instance=request.instance,
-    )
-    _validate_store_key(
-        shop_url_key=request.shopify.shop_url_key, protected_store_keys=protected_store_keys
-    )
-    bindings = _validated_secret_bindings(record_store=record_store, request=request)
-
-    existing = _read_existing_record(
-        record_store=record_store, context=request.context, instance=request.instance
-    )
-    desired = _desired_shopify_settings(request)
-    replacement = _replacement_record(
-        existing=existing,
-        request=request,
-        desired=desired,
-        updated_at=existing.updated_at if existing is not None else _utc_now_timestamp(),
-    )
+def _require_shopify_render(
+    *, replacement: OdooInstanceOverrideRecord, protected_store_keys: tuple[str, ...]
+) -> None:
     try:
         require_shopify_store_separation(replacement, protected_store_keys)
     except click.ClickException as error:
@@ -583,14 +623,58 @@ def build_odoo_addon_settings_plan(
             "Shopify settings did not render an apply action for post-deploy.",
         )
 
-    existing_shopify = tuple(
+
+def build_odoo_addon_settings_plan(
+    *,
+    record_store: OdooAddonSettingsStore,
+    request: OdooAddonSettingsApplyRequest,
+) -> tuple[OdooAddonSettingsPlan, OdooInstanceOverrideRecord | None, OdooInstanceOverrideRecord]:
+    """Validate the request against current authority and return a digest-bound plan.
+
+    Returns the plan, the current record (or None) and the replacement record.
+    """
+
+    production_lane = odoo_instance_is_production(request.instance)
+    shopify = request.shopify
+    protected_store_keys: tuple[str, ...] = ()
+    if shopify is not None:
+        if production_lane and shopify.test_store:
+            raise OdooAddonSettingsRefusal(
+                "production_test_store",
+                "Shopify test_store cannot be set on a production lane.",
+            )
+        protected_store_keys = _protected_store_keys(
+            record_store=record_store,
+            product=request.product,
+            context=request.context,
+            instance=request.instance,
+        )
+        _validate_store_key(
+            shop_url_key=shopify.shop_url_key, protected_store_keys=protected_store_keys
+        )
+    bindings = _validated_secret_bindings(record_store=record_store, request=request)
+
+    existing = _read_existing_record(
+        record_store=record_store, context=request.context, instance=request.instance
+    )
+    desired = _desired_settings(request)
+    replacement = _replacement_record(
+        existing=existing,
+        request=request,
+        desired=desired,
+        updated_at=existing.updated_at if existing is not None else _utc_now_timestamp(),
+    )
+    if shopify is not None:
+        _require_shopify_render(replacement=replacement, protected_store_keys=protected_store_keys)
+
+    existing_addon = tuple(
         override
         for override in (existing.addon_settings if existing is not None else ())
-        if override.addon == SHOPIFY_ADDON_NAME
+        if override.addon == request.addon
     )
     present_binding_ids = frozenset(binding.binding_id for binding in bindings.values())
     changes = _setting_changes(
-        before=existing_shopify, after=desired, present_binding_ids=present_binding_ids
+        before=existing_addon, after=desired, present_binding_ids=present_binding_ids
     )
     changed = any(change.action != "unchanged" for change in changes) or (
         existing is None or tuple(existing.apply_on) != tuple(replacement.apply_on)
@@ -624,10 +708,7 @@ def build_odoo_addon_settings_plan(
         reason=request.reason,
         record_sha256_before=record_sha256_before,
         plan_sha256=plan_sha256,
-        next_actions=(
-            "Run Odoo post-deploy for this lane so its database receives the settings, "
-            "then verify the store key and test_store in the lane database.",
-        ),
+        next_actions=(_NEXT_ACTIONS[request.addon],),
     )
     return plan, existing, replacement
 
@@ -667,10 +748,10 @@ def apply_odoo_addon_settings_plan(
     stored = _read_existing_record(
         record_store=record_store, context=request.context, instance=request.instance
     )
-    stored_shopify = tuple(
+    stored_addon = tuple(
         override
         for override in (stored.addon_settings if stored is not None else ())
-        if override.addon == SHOPIFY_ADDON_NAME
+        if override.addon == request.addon
     )
     present_binding_ids = frozenset(
         binding.binding_id
@@ -681,11 +762,11 @@ def apply_odoo_addon_settings_plan(
     )
     read_back = tuple(
         redacted_addon_setting_evidence(override, present_binding_ids=present_binding_ids)
-        for override in stored_shopify
+        for override in stored_addon
     )
-    desired = _desired_shopify_settings(request)
+    desired = _desired_settings(request)
     read_back_matches = sorted(
-        (override.setting, override.value.model_dump_json()) for override in stored_shopify
+        (override.setting, override.value.model_dump_json()) for override in stored_addon
     ) == sorted((override.setting, override.value.model_dump_json()) for override in desired)
     return plan.model_copy(
         update={
