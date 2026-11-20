@@ -7,13 +7,17 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from tempfile import TemporaryDirectory
+from typing import Any
 
 from alembic import command
+from pydantic import ValidationError
 from sqlalchemy import MetaData, Table, insert, inspect
 from sqlalchemy.engine import Engine, make_url
 
+from control_plane.contracts.release_review import AbsentProduction
 from control_plane.contracts.stored_record_snapshot import (
     SNAPSHOT_MAX_AGE_SECONDS,
     SNAPSHOT_MAX_BYTES,
@@ -105,6 +109,40 @@ def check_restored_records(store: PostgresRecordStore, *, state_dir: Path) -> in
     return count
 
 
+# TEMPORARY (odoo-tenant-tk#44, Director decision Q1457). Exporters before
+# launchplane#6097 scrubbed an AbsentProduction release request under the
+# ReleaseVersion branch, so its `state` literal arrived as an undeclared-string
+# pseudonym and every candidate refused the copy. Only that exact rewrite is put
+# back; any other shape still fails. Remove this rule, its call and its tests
+# once a normal stored-record preflight against an exporter carrying #6097 passes.
+_OLD_EXPORTER_STATE_PSEUDONYM = re.compile(r"snapshot-[0-9a-f]{12}")
+
+
+def restore_old_exporter_absent_state(table: str, row: dict[str, Any]) -> dict[str, Any]:
+    payload = row.get("payload")
+    if table != "launchplane_product_profiles" or not isinstance(payload, dict):
+        return row
+    request = payload.get("release_request")
+    if not isinstance(request, dict):
+        return row
+    production = request.get("production")
+    if (
+        not isinstance(production, dict)
+        or set(production) != set(AbsentProduction.model_fields)
+        or not isinstance(production["state"], str)
+        or not _OLD_EXPORTER_STATE_PSEUDONYM.fullmatch(production["state"])
+    ):
+        return row
+    repaired = {**production, "state": "absent"}
+    try:
+        AbsentProduction.model_validate(repaired)
+    except ValidationError:
+        # A malformed sibling is not the known rewrite; the candidate reader refuses it.
+        return row
+    release_request = {**request, "production": repaired}
+    return {**row, "payload": {**payload, "release_request": release_request}}
+
+
 def restore_snapshot(
     engine: Engine, snapshot: StoredRecordSnapshot | CompressedStoredRecordSnapshot
 ) -> str:
@@ -122,7 +160,7 @@ def restore_snapshot(
             for row_type, _ in SNAPSHOT_RECORD_TYPES
         }
         for name, row in iter_snapshot_rows(snapshot):
-            connection.execute(insert(tables[name]), row)
+            connection.execute(insert(tables[name]), restore_old_exporter_absent_state(name, row))
     return migrate_schema(database_url=database_url)
 
 

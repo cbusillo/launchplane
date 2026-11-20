@@ -1,0 +1,123 @@
+{
+  "display_name": "snapshot-b1520f573ae2",
+  "driver_id": "generic-web",
+  "payload": {
+    "default_branch": "snapshot-ee628f9bbac2",
+    "display_name": "snapshot-b1520f573ae2",
+    "driver_id": "generic-web",
+    "expected_config": {
+      "managed_secret_bindings": [],
+      "runtime_environment_keys": []
+    },
+    "health_path": "/snapshot-008e59eb41ab",
+    "historical_contexts": [],
+    "image": {
+      "repository": "snapshot/52ab1aab6a71"
+    },
+    "lanes": [
+      {
+        "base_url": "https://snapshot-decb155ccd81.invalid",
+        "context": "snapshot-92ce12fe6d08",
+        "health_monitoring": {
+          "checks": [],
+          "monitoring_intent": "prelaunch"
+        },
+        "health_url": "https://snapshot-c889ccec1abd.invalid",
+        "instance": "testing",
+        "odoo_data_policy": {
+          "allowed_rebuild_sources": [],
+          "data_authority": "unknown",
+          "requires_runtime_identity": true,
+          "upstream_source": ""
+        },
+        "odoo_prelaunch_rebuild": {
+          "approval_issue_url": "",
+          "confirmation": "",
+          "data_source_mode": "empty",
+          "enabled": false,
+          "expected_domains": [],
+          "expected_target_name": ""
+        },
+        "odoo_stable_bootstrap": {
+          "approval_issue_url": "",
+          "confirmation": "",
+          "data_source_mode": "empty",
+          "enabled": false,
+          "expected_domains": [],
+          "expected_target_name": "",
+          "require_canonical_verification": true,
+          "require_health_verification": true,
+          "require_logo_verification": true
+        }
+      }
+    ],
+    "lifecycle_state": "active",
+    "owner": {
+      "github_id": "",
+      "github_login": "",
+      "review_label": "snapshot-2c4ca0c59c9f"
+    },
+    "preview": {
+      "app_name_prefix": "",
+      "context": "snapshot-92ce12fe6d08",
+      "copied_env_keys": [],
+      "data_transport_mode": "none",
+      "domain_certificate_type": "none",
+      "enabled": true,
+      "omitted_env_keys": [],
+      "override_env": {},
+      "preview_domain_env_keys": [],
+      "preview_url_env_keys": [],
+      "required_provider_fields": [],
+      "required_template_env_keys": [],
+      "slug_template": "pr-{number}",
+      "template_instance": "testing"
+    },
+    "product": "snapshot-256c8088bf88",
+    "production_use": "unknown",
+    "promotion_workflow": {
+      "artifact_id_input": "artifact_id",
+      "bump_input": "bump",
+      "default_bump": "patch",
+      "deploy_reference_input": "deploy_reference",
+      "dry_run_input": "dry_run",
+      "promotion_intent_input": "promotion_intent_id",
+      "ref": "main",
+      "source_git_ref_input": "source_git_ref",
+      "workflow_id": "promote-prod.yml"
+    },
+    "release_request": {
+      "actor": "snapshot-147ad26c3c4e",
+      "candidate": {
+        "artifact_id": "snapshot-bcd21c56e369",
+        "shared_addons_digest": "",
+        "source_commit": "be6c257c309c22471574cd47618494b290f9d706"
+      },
+      "checklist_digest": "7354c72472a6c159286b5affffdd86423da86f92c0ac0e9bf170fd9ef371d62a",
+      "client_decision_record_id": "",
+      "decided_at": "2026-11-19T18:03:35+00:00",
+      "decision_reference": "",
+      "owner_github_id": "2090946316",
+      "product": "snapshot-256c8088bf88",
+      "production": {
+        "authority_sha256": "cd347fce4fd7081cadc6937c1effeeca15c35118ef4c143a71015e043102e1c6",
+        "recovery_backup_root": "/snapshot-c1461365eca8",
+        "state": "snapshot-ebb66503d73c"
+      },
+      "reason": "snapshot-b44715846714",
+      "record_id": "31beed8d1611ca972fedda05be9dc0e950f051beec09840650ce975def3fb162",
+      "repository": "snapshot/21737a97f743",
+      "source": "director_request"
+    },
+    "repository": "snapshot/98df606858dc",
+    "repository_id": "",
+    "repository_owner_id": "",
+    "runtime_port": 3000,
+    "schema_version": 2,
+    "source": "snapshot-6d6333295d45",
+    "updated_at": "2026-04-30T21:30:00Z"
+  },
+  "product": "snapshot-256c8088bf88",
+  "repository": "snapshot/98df606858dc",
+  "updated_at": "2026-04-30T21:30:00Z"
+}
