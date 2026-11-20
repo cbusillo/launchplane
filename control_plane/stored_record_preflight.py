@@ -115,8 +115,9 @@ def check_restored_records(store: PostgresRecordStore, *, state_dir: Path) -> in
 # pseudonym and every candidate refused the copy. A pseudonym cannot show what
 # the source literal was, so the repair is bound to the one stored request the
 # authorized release-review read showed as a valid AbsentProduction on
-# 2026-11-19; its declared `decided_at` survives scrubbing verbatim. Any other
-# record still fails. Remove this rule, its call, its test and fixture once a
+# 2026-11-19; its declared `decided_at` survives scrubbing verbatim and
+# correlates the copy with that read (it does not identify the exporter build,
+# which the running service cannot add). Any other record still fails. Remove this rule, its call, its test and fixture once a
 # normal stored-record preflight against an exporter carrying #6097 passes.
 _OLD_EXPORTER_STATE_PSEUDONYM = re.compile(r"snapshot-[0-9a-f]{12}")
 CORROBORATED_ABSENT_REQUEST_DECIDED_AT = "2026-11-19T18:03:35.332024+00:00"
