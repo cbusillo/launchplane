@@ -1278,7 +1278,7 @@
         ],
         "operation_id": "apply_odoo_addon_settings",
         "path": "/v1/product-config/odoo-addon-settings/apply",
-        "purpose": "Dry-run or apply an Odoo lane's addon settings with secret-binding references.",
+        "purpose": "Dry-run or apply an Odoo lane's Shopify or Authentik SSO addon settings; secrets only as binding references.",
         "response_statuses": [
           "202",
           "400",
@@ -1296,7 +1296,8 @@
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
-          "service_api"
+          "service_api",
+          "generic_caller"
         ]
       },
       {
@@ -1595,8 +1596,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "1739b98520452b1ec519eb94f1a7418b8de5092e"
+    "source_commit_sha": "f7b0710d7115454b8231c1316bac620099faa0e1"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "f1b84dd342c0392fb4a9ce60c3adaa9a745cdd87579d9fa6f0a666cea3fbc505"
+  "semantic_digest_sha256": "be81d9bee78f513c72bd3340ce925059df681a9e50ceca89090d9d37e1227e16"
 }
