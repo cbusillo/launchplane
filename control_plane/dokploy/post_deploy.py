@@ -1482,7 +1482,7 @@ def run_compose_odoo_backup_gate(
     backup_root: str,
     timeout_seconds: int | None = None,
     before_provider_mutation: Callable[[str], None] | None = None,
-    expected_web_state: Literal["running", "exited"] = "running",
+    expected_web_state: Literal["running", "exited", "absent"] = "running",
 ) -> api.JsonObject:
     normalized_backup_nonce = backup_nonce.strip()
     if not normalized_backup_nonce:
@@ -3503,7 +3503,7 @@ def _build_dokploy_odoo_backup_gate_script(
     filestore_path: str,
     backup_root: str,
     backup_record_id: str,
-    expected_web_state: Literal["running", "exited"] = "running",
+    expected_web_state: Literal["running", "exited", "absent"] = "running",
     cutover_capture_claim: bool = False,
 ) -> str:
     return f"""#!/usr/bin/env bash
@@ -3530,21 +3530,32 @@ resolve_running_container() {{
     printf '%s' "${{container_ids}}"
 }}
 
+list_web_containers() {{
+    docker ps -aq \\
+        --filter "label=com.docker.compose.project=${{compose_project}}" \\
+        --filter "label=com.docker.compose.service=web"
+}}
+
 script_runner_container_id=$(resolve_running_container "script-runner")
-web_container_ids=$(docker ps -aq \\
-    --filter "label=com.docker.compose.project=${{compose_project}}" \\
-    --filter "label=com.docker.compose.service=web")
-if [ -z "${{web_container_ids}}" ] || [[ "${{web_container_ids}}" == *$'\\n'* ]]; then
-    echo "Backup requires exactly one retained web container." >&2; exit 1
-fi
-web_container_id="${{web_container_ids}}"
-if [ "$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")" != "${{expected_web_state}}" ]; then
-    echo "Backup web state differs from the explicitly expected state." >&2; exit 1
-fi
-image_id=$(docker inspect -f '{{{{.Image}}}}' "${{web_container_id}}")
-if [ "${{image_id}}" != "$(docker inspect -f '{{{{.Image}}}}' "${{script_runner_container_id}}")" ]; then
-    echo "Backup web and script-runner image identities must agree." >&2
-    exit 1
+web_container_ids=$(list_web_containers)
+if [ "${{expected_web_state}}" = "absent" ]; then
+    if [ -n "${{web_container_ids}}" ]; then
+        echo "Backup expected no retained web container." >&2; exit 1
+    fi
+    image_id=$(docker inspect -f '{{{{.Image}}}}' "${{script_runner_container_id}}")
+else
+    if [ -z "${{web_container_ids}}" ] || [[ "${{web_container_ids}}" == *$'\\n'* ]]; then
+        echo "Backup requires exactly one retained web container." >&2; exit 1
+    fi
+    web_container_id="${{web_container_ids}}"
+    if [ "$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")" != "${{expected_web_state}}" ]; then
+        echo "Backup web state differs from the explicitly expected state." >&2; exit 1
+    fi
+    image_id=$(docker inspect -f '{{{{.Image}}}}' "${{web_container_id}}")
+    if [ "${{image_id}}" != "$(docker inspect -f '{{{{.Image}}}}' "${{script_runner_container_id}}")" ]; then
+        echo "Backup web and script-runner image identities must agree." >&2
+        exit 1
+    fi
 fi
 backup_dir="${{backup_root}}/${{database_name}}/${{backup_record_id}}"
 script_runner_uid=$(docker exec "${{script_runner_container_id}}" id -u)
@@ -3574,7 +3585,13 @@ docker exec -i \\
 {ONLINE_ODOO_BACKUP_PROGRAM}
 PY
 
-if [ "$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")" != "${{expected_web_state}}" ] || \\
+if [ "${{expected_web_state}}" = "absent" ]; then
+    if [ -n "$(list_web_containers)" ] || \\
+        [ "$(docker inspect -f '{{{{.Image}}}}' "${{script_runner_container_id}}")" != "${{image_id}}" ]; then
+        echo "A web container appeared or the runner image changed during backup." >&2
+        exit 1
+    fi
+elif [ "$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")" != "${{expected_web_state}}" ] || \\
     [ "$(docker inspect -f '{{{{.Image}}}}' "${{web_container_id}}")" != "${{image_id}}" ]; then
     echo "Retained image or expected web state changed during backup." >&2
     exit 1

@@ -51,7 +51,11 @@ rather than replaying it or deleting data.
 
 The drill then takes its second infrastructure capture and a real logical
 database/filestore backup against the retained stopped web container and running
-script runner. It promotes the same accepted candidate in existing-data mode.
+script runner. If the stopped web container is gone, the backup still runs: the
+stack is first proved again, before and after the capture, to hold only the
+witnessed containers of owned deployments with their recorded images, the
+witnessed volumes, and no other web or writer. Any other state refuses. It
+promotes the same accepted candidate in existing-data mode.
 The backup directory must already be recorded in DB-backed runtime settings and
 is bound in the initial checklist, so backup and restore resolve the same root.
 No extra provider sync is needed. Only a currently qualified,

@@ -347,9 +347,9 @@ def execute_odoo_prod_promotion_run(
             raise ValueError("continuation lacks its original ordinary logical backup gate")
         from control_plane.contracts.release_review import AbsentProduction
         from control_plane.odoo_first_release import (
+            back_up_first_release_retained_stack,
             capture_first_release_absence,
             first_release_has_retained_stack,
-            first_release_backup_runtime,
         )
 
         absent = release_decision is not None and isinstance(
@@ -368,8 +368,12 @@ def execute_odoo_prod_promotion_run(
             backup_record_id=inputs_result.backup_record_id,
             timeout_seconds=request.backup_timeout_seconds,
         )
-        backup_result = (
-            capture_first_release_absence(
+        if stopped:
+            backup_result = back_up_first_release_retained_stack(
+                record_store, control_plane_root, release_decision, backup_request
+            )
+        elif absent:
+            backup_result = capture_first_release_absence(
                 record_store,
                 control_plane_root,
                 release_decision,
@@ -377,19 +381,12 @@ def execute_odoo_prod_promotion_run(
                 operation_id=operation_id,
                 operation_lease_owner=operation_lease_owner,
             )
-            if absent and not stopped
-            else execute_odoo_prod_backup_gate(
+        else:
+            backup_result = execute_odoo_prod_backup_gate(
                 control_plane_root=control_plane_root,
                 record_store=record_store,
                 request=backup_request,
-                expected_web_state="exited" if stopped else "running",
-                runtime_values=first_release_backup_runtime(
-                    record_store, release_decision, request.context
-                )
-                if stopped
-                else None,
             )
-        )
     if backup_result.backup_status != "pass":
         return _result_from_inputs(
             request=request,

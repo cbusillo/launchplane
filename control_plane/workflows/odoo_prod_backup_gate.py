@@ -485,7 +485,7 @@ def execute_odoo_prod_backup_gate(
     request: OdooProdBackupGateRequest,
     runtime_values: dict[str, str] | None = None,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
-    expected_web_state: Literal["running", "exited"] = "running",
+    expected_web_state: Literal["running", "exited", "absent"] = "running",
 ) -> OdooProdBackupGateResult:
     typed_record_store = _require_record_store(record_store)
     target_definition = _read_target_definition(
