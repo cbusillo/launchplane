@@ -30,6 +30,8 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         self.addCleanup(cache.cleanup)
         self.cached_root = Path(cache.name).resolve()
         self.empty_storage_fixture: FirstEmptyStorageTests | None = None
+        self.captured_web_states: list[str] = []
+        self.during_capture: Callable[[], None] | None = None
         from control_plane.contracts.odoo_online_backup import DEFAULT_ODOO_BACKUP_ROOT
 
         self.runtime = self.runtime.model_copy(
@@ -927,8 +929,12 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
     def capture_stopped_backup(self, **kwargs: Any) -> dict[str, Any]:
         from tests.test_odoo_prod_backup_gate import _passing_backup_capture_evidence
 
-        self.assertFalse(self.docker_state.rows["web-id"]["State"]["Running"])
-        self.assertEqual(kwargs["expected_web_state"], "exited")
+        web = self.docker_state.rows.get("web-id")
+        self.assertEqual(kwargs["expected_web_state"], "exited" if web else "absent")
+        self.assertFalse(web and web["State"]["Running"])
+        self.captured_web_states.append(kwargs["expected_web_state"])
+        if self.during_capture is not None:
+            self.during_capture()
         return {
             **_passing_backup_capture_evidence(),
             "backup_nonce": kwargs["backup_nonce"],
@@ -936,7 +942,13 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             "database_name": kwargs["database_name"],
         }
 
-    def complete_drill(self, *, expected_first_mode: str, replacement: Any = None) -> None:
+    def complete_drill(
+        self,
+        *,
+        expected_first_mode: str,
+        replacement: Any = None,
+        after_rollback: Callable[[], None] | None = None,
+    ) -> None:
         from datetime import UTC, datetime, timedelta
         from control_plane.client_release import (
             advance_client_releases,
@@ -1100,6 +1112,8 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                         release_version(store=self.store, profile=self.profile, instance="prod"),
                         self.accepted.checklist.production,
                     )
+                    if after_rollback is not None:
+                        after_rollback()
         self.assertFalse(advance_client_releases(store=self.store, control_plane_root=Path(".")))
         run = read_client_release_run(
             store=self.store, profile=self.profile, decision=self.accepted
@@ -1119,6 +1133,94 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         self.assertTrue(all(command[-1] == "web-id" for command in self.docker_state.writes))
         self.assertTrue(self.docker_state.rows["database"]["State"]["Running"])
         self.assertTrue(self.docker_state.rows["script-runner"]["State"]["Running"])
+
+    def remove_parked_web(self) -> None:
+        del self.docker_state.rows["web-id"]
+
+    def test_drill_repromotes_after_parked_web_vanished(self) -> None:
+        self.complete_drill(expected_first_mode="empty", after_rollback=self.remove_parked_web)
+        self.assertEqual(self.captured_web_states, ["absent"])
+
+    def promote_after_vanished_web(self, change_guest: Callable[[], None] | None = None) -> Any:
+        later = None
+
+        def newer_acceptance() -> None:
+            nonlocal later
+            later = self.decide()
+
+        self.fail_and_recover(before_recovery=newer_acceptance)
+        assert later is not None
+        self.remove_parked_web()
+        if change_guest is not None:
+            change_guest()
+        self.accepted = later
+        self.fail_deployment = False
+        operation = self.queue_promotion(later)
+        with patch(
+            "control_plane.workflows.odoo_prod_promotion.execute_odoo_stable_target_replacement_apply",
+            side_effect=self.provider_replacement,
+        ):
+            self.assertTrue(self.run_worker().terminal_write_committed)
+        return self.store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+
+    def test_retained_stack_without_its_parked_web_takes_a_real_backup_and_releases(
+        self,
+    ) -> None:
+        finished = self.promote_after_vanished_web()
+        self.assertEqual(finished.status, "pass", finished.error_message)
+        assert finished.result is not None
+        gate = self.store.read_backup_gate_record(finished.result.backup_record_id)
+        self.assertEqual(gate.status, "pass")
+        self.assertIn("database_dump_sha256", gate.evidence)
+        self.assertEqual(self.captured_web_states, ["absent"])
+        self.assertEqual(self.modes, ["empty", "existing"])
+
+    def add_stray_writer(self) -> None:
+        self.docker_state.rows["stray"] = {
+            "Id": "stray",
+            "Config": {"Labels": {}},
+            "Mounts": [
+                {"Type": "volume", "Name": self.docker_state.rows["database"]["Mounts"][0]["Name"]}
+            ],
+        }
+
+    def assert_refused_before_capture(self, change_guest: Callable[[], None]) -> None:
+        finished = self.promote_after_vanished_web(change_guest)
+        self.assertEqual(finished.status, "fail")
+        self.assertEqual(self.captured_web_states, [])
+        self.assertEqual(self.modes, ["empty"])
+
+    def assert_capture_failed(self, during_capture: Callable[[], None]) -> None:
+        self.during_capture = during_capture
+        finished = self.promote_after_vanished_web()
+        self.assertEqual(finished.status, "fail")
+        assert finished.result is not None
+        gate = self.store.read_backup_gate_record(finished.result.backup_record_id)
+        self.assertEqual(gate.status, "fail")
+        self.assertEqual(self.modes, ["empty"])
+
+    def remove_database(self) -> None:
+        del self.docker_state.rows["database"]
+
+    def change_runner_image(self) -> None:
+        self.docker_state.rows["script-runner"]["Config"]["Image"] = (
+            "example/odoo@sha256:" + "f" * 64
+        )
+
+    def test_retained_stack_without_web_refuses_a_stray_writer_before_capture(self) -> None:
+        self.assert_refused_before_capture(self.add_stray_writer)
+
+    def test_retained_stack_without_web_refuses_a_different_runner_image(self) -> None:
+        self.assert_refused_before_capture(self.change_runner_image)
+
+    def test_retained_stack_without_web_refuses_a_missing_database(self) -> None:
+        self.assert_refused_before_capture(self.remove_database)
+
+    def test_unprovable_stack_after_capture_fails_the_backup(self) -> None:
+        self.assert_capture_failed(self.remove_database)
+
+    def test_writer_appearing_during_capture_fails_the_backup(self) -> None:
+        self.assert_capture_failed(self.add_stray_writer)
 
     def test_failure_recovery_stops_owned_web_after_runtime_and_secret_edits(self) -> None:
         from control_plane.product_config import apply_product_config_bundle

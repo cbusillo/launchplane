@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.release_review import AbsentProduction, ReleaseReviewDecisionRecord
 from control_plane.contracts.odoo_prod_rollback_operation import OdooProdRollbackResult
 from control_plane.contracts.odoo_target_replacement_failures import (
@@ -34,6 +35,7 @@ from control_plane.testing_application_capabilities import single_local_swarm_no
 from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateRequest,
     OdooProdBackupGateResult,
+    execute_odoo_prod_backup_gate,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -314,6 +316,13 @@ def park_first_release_web(docker: Callable[..., str], spec: dict[str, Any]) -> 
     if len(webs) > 1:
         raise ValueError("Web ownership is ambiguous.")
     for web in webs:
+        if spec.get("verify_only"):
+            if (
+                web["State"]["Running"] is not False
+                or web["HostConfig"]["RestartPolicy"]["Name"] != "no"
+            ):
+                raise ValueError("The original web is not parked.")
+            continue
         docker("update", "--restart=no", web["Id"])
         if web["State"]["Running"]:
             docker("stop", "--time", "30", web["Id"])
@@ -334,6 +343,10 @@ def park_first_release_web(docker: Callable[..., str], spec: dict[str, Any]) -> 
         raise ValueError("Retained storage identity changed during parking.")
     return {
         "web_stopped": True,
+        "web_present": bool(webs),
+        "retained_services": sorted(
+            row["Config"]["Labels"]["com.docker.compose.service"] for row in owned
+        ),
         "retained_volumes": sorted(retained_volumes),
         "retained_containers": [row["Id"] for row in owned],
         "retained_storage_sha256": hashlib.sha256(
@@ -419,18 +432,13 @@ def first_release_rendered_inputs(
     }
 
 
-def stop_first_release(
-    store: object,
+def _retained_stack_custody(
+    store: PostgresRecordStore,
     root: Path,
     decision: ReleaseReviewDecisionRecord,
     context: str,
-    checkpoint: Callable[[str], None] | None,
-) -> OdooProdRollbackResult:
-    if not isinstance(store, PostgresRecordStore) or checkpoint is None:
-        raise ValueError("Original-absence rollback requires the existing durable release worker.")
-    authority = resolve_first_empty_authority(
-        store, decision.product, context, inverse_decision=decision
-    )
+    authority: FirstEmptyAuthority,
+) -> tuple[str, str, api.JsonObject, dict[str, Any], DeploymentRecord]:
     deployment_ids = require_first_release_history(store, decision, context)
     custody = first_release_custody(store, decision.product, context, decision)
     deployments = tuple(
@@ -440,12 +448,6 @@ def stop_first_release(
     )
     if not deployments:
         raise ValueError("The original release has no retained deployment custody.")
-    try:
-        original_inventory = store.read_environment_inventory(
-            context_name=context, instance_name="prod"
-        )
-    except FileNotFoundError:
-        original_inventory = None
     host, token = source.read_dokploy_config(
         control_plane_root=root, database_url=store.database_url
     )
@@ -513,6 +515,113 @@ def stop_first_release(
         "workflow_ssh_source": api.parse_dokploy_env_text(environment).get("DATA_WORKFLOW_SSH_DIR")
         or DEFAULT_DATA_WORKFLOW_SSH_DIR,
     }
+    return host, token, payload, spec, current_deployment
+
+
+def prove_first_release_retained_stack(
+    store: PostgresRecordStore,
+    root: Path,
+    decision: ReleaseReviewDecisionRecord,
+    context: str,
+) -> dict[str, Any]:
+    authority = resolve_first_empty_authority(
+        store, decision.product, context, release_decision=decision
+    )
+    host, token, payload, spec, _ = _retained_stack_custody(
+        store, root, decision, context, authority
+    )
+    spec = {**spec, "verify_only": True}
+    frames: list[dict[str, Any]] = []
+    native_copy_stream.run_managed_server_program(
+        host=host,
+        token=token,
+        server_id=native_copy_stream.require_registered_remote_server(payload.get("serverId")),
+        program=first_release_park_program(),
+        payload=spec,
+        receive=frames.append,
+        timeout_seconds=90,
+    )
+    witness = store.read_environment_inventory(
+        context_name=context, instance_name="prod"
+    ).post_deploy_update.evidence
+    frame = frames[0] if len(frames) == 1 else {}
+    result = frame.get("result")
+    if (
+        frame.get("type") != "complete"
+        or frame.get("binding") != nonvalidating_compact_sorted_json_sha256(spec)
+        or not isinstance(result, dict)
+        or result.get("web_stopped") is not True
+        or not isinstance(result.get("web_present"), bool)
+        or not isinstance(result.get("retained_containers"), list)
+        or not set(result["retained_containers"])
+        <= set(json.loads(witness["first_empty_retained_containers"]))
+        or result.get("retained_services")
+        != sorted(["database", "script-runner", *(["web"] if result["web_present"] else [])])
+        or result.get("retained_storage_sha256") != witness["first_empty_retained_storage_sha256"]
+    ):
+        raise ValueError("The retained stack differs from its stopped-release witness.")
+    return result
+
+
+def back_up_first_release_retained_stack(
+    store: object,
+    root: Path,
+    decision: ReleaseReviewDecisionRecord | None,
+    request: OdooProdBackupGateRequest,
+) -> OdooProdBackupGateResult:
+    if not isinstance(store, PostgresRecordStore) or decision is None:
+        raise ValueError("A retained-stack backup requires its durable accepted release.")
+    record_store, accepted = store, decision
+    runtime = first_release_backup_runtime(record_store, accepted, request.context)
+    before = prove_first_release_retained_stack(record_store, root, accepted, request.context)
+
+    def require_unchanged_stack() -> None:
+        try:
+            after = prove_first_release_retained_stack(
+                record_store, root, accepted, request.context
+            )
+        except click.ClickException:
+            raise
+        except Exception as error:
+            raise click.ClickException(
+                "The retained stack could not be proved after the logical backup."
+            ) from error
+        if after != before:
+            raise click.ClickException("The retained stack changed during the logical backup.")
+
+    return execute_odoo_prod_backup_gate(
+        control_plane_root=root,
+        record_store=record_store,
+        request=request,
+        expected_web_state="exited" if before["web_present"] else "absent",
+        runtime_values=runtime,
+        confirm_capture=require_unchanged_stack,
+    )
+
+
+def stop_first_release(
+    store: object,
+    root: Path,
+    decision: ReleaseReviewDecisionRecord,
+    context: str,
+    checkpoint: Callable[[str], None] | None,
+) -> OdooProdRollbackResult:
+    if not isinstance(store, PostgresRecordStore) or checkpoint is None:
+        raise ValueError("Original-absence rollback requires the existing durable release worker.")
+    authority = resolve_first_empty_authority(
+        store, decision.product, context, inverse_decision=decision
+    )
+    try:
+        original_inventory = store.read_environment_inventory(
+            context_name=context, instance_name="prod"
+        )
+    except FileNotFoundError:
+        original_inventory = None
+    host, token, payload, spec, current_deployment = _retained_stack_custody(
+        store, root, decision, context, authority
+    )
+    environment = payload["env"]
+    compose_source = payload["composeFile"]
     frames: list[dict[str, Any]] = []
     record_store = store
 
@@ -572,7 +681,7 @@ def stop_first_release(
             or frames[0].get("binding") != nonvalidating_compact_sorted_json_sha256(spec)
             or frames[0].get("result", {}).get("web_stopped") is not True
             or not isinstance(frames[0]["result"].get("retained_volumes"), list)
-            or not set(frames[0]["result"]["retained_volumes"]) <= set(retained_volumes)
+            or not set(frames[0]["result"]["retained_volumes"]) <= set(spec["volumes"])
             or not isinstance(frames[0]["result"].get("retained_containers"), list)
             or any(
                 not isinstance(identifier, str) or not identifier

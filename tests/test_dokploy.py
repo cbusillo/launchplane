@@ -3856,6 +3856,73 @@ esac
                     )
                 )
 
+    def test_backup_without_retained_web_refuses_any_web_before_or_after_capture(self) -> None:
+        script = dokploy_post_deploy._build_dokploy_odoo_backup_gate_script(
+            compose_app_name="example-prod",
+            backup_nonce="test-nonce",
+            database_name="example",
+            filestore_path="/fake/filestore",
+            backup_root="/fake/backups",
+            backup_record_id="test-backup",
+            expected_web_state="absent",
+        )
+        fake_docker = """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$FAKE_COMMANDS"
+case "$1" in
+    ps)
+        case "$*" in
+            *service=script-runner*) echo runner ;;
+            *service=web*) [ "$(cat "$FAKE_WEBS")" != fail ] && cat "$FAKE_WEBS" ;;
+            *) exit 90 ;;
+        esac ;;
+    inspect)
+        case "$*" in
+            *.Image*runner*) printf 'sha256:%064d\\n' 0 ;;
+            *) exit 90 ;;
+        esac ;;
+    exec)
+        if [[ "$*" == *python3* ]]; then
+            cat >/dev/null
+            printf '%s' "$FAKE_WEB_DURING_CAPTURE" > "$FAKE_WEBS"
+            exit 0
+        fi
+        echo 1000 ;;
+    *) exit 91 ;;
+esac
+"""
+        cases = {
+            "no web": ("", "", 0),
+            "web present": ("web\n", "", 1),
+            "web appears": ("", "web", 1),
+            "final listing fails": ("", "fail", 1),
+        }
+        for name, (webs_before, webs_during, status) in cases.items():
+            with self.subTest(name), TemporaryDirectory() as directory:
+                root = Path(directory)
+                docker = root / "docker"
+                docker.write_text(fake_docker)
+                docker.chmod(0o755)
+                (root / "webs").write_text(webs_before)
+                commands = root / "commands"
+                completed = subprocess.run(
+                    ["bash", "-s"],
+                    input=script,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    env={
+                        **os.environ,
+                        "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
+                        "FAKE_COMMANDS": str(commands),
+                        "FAKE_WEBS": str(root / "webs"),
+                        "FAKE_WEB_DURING_CAPTURE": webs_during,
+                    },
+                )
+                self.assertEqual(completed.returncode, status, completed.stderr)
+                captured = any("python3" in line for line in commands.read_text().splitlines())
+                self.assertEqual(captured, name != "web present")
+
     def test_run_compose_odoo_backup_gate_uses_manual_schedule_with_consistency_script(
         self,
     ) -> None:
