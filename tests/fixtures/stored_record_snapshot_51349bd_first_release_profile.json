@@ -1,28 +1,28 @@
 {
-  "display_name": "snapshot-b1520f573ae2",
+  "display_name": "snapshot-3124efe0fc0f",
   "driver_id": "generic-web",
   "payload": {
-    "default_branch": "snapshot-ee628f9bbac2",
-    "display_name": "snapshot-b1520f573ae2",
+    "default_branch": "snapshot-a0934bfb3df4",
+    "display_name": "snapshot-3124efe0fc0f",
     "driver_id": "generic-web",
     "expected_config": {
       "managed_secret_bindings": [],
       "runtime_environment_keys": []
     },
-    "health_path": "/snapshot-008e59eb41ab",
+    "health_path": "/snapshot-f0498c96975c",
     "historical_contexts": [],
     "image": {
-      "repository": "snapshot/52ab1aab6a71"
+      "repository": "snapshot/78700e016b85"
     },
     "lanes": [
       {
-        "base_url": "https://snapshot-decb155ccd81.invalid",
-        "context": "snapshot-92ce12fe6d08",
+        "base_url": "https://snapshot-5fa9618ee1b9.invalid",
+        "context": "snapshot-8b21258a6448",
         "health_monitoring": {
           "checks": [],
           "monitoring_intent": "prelaunch"
         },
-        "health_url": "https://snapshot-c889ccec1abd.invalid",
+        "health_url": "https://snapshot-6e7790e02e1b.invalid",
         "instance": "testing",
         "odoo_data_policy": {
           "allowed_rebuild_sources": [],
@@ -55,11 +55,11 @@
     "owner": {
       "github_id": "",
       "github_login": "",
-      "review_label": "snapshot-2c4ca0c59c9f"
+      "review_label": "snapshot-0e96b979c419"
     },
     "preview": {
       "app_name_prefix": "",
-      "context": "snapshot-92ce12fe6d08",
+      "context": "snapshot-8b21258a6448",
       "copied_env_keys": [],
       "data_transport_mode": "none",
       "domain_certificate_type": "none",
@@ -73,7 +73,7 @@
       "slug_template": "pr-{number}",
       "template_instance": "testing"
     },
-    "product": "snapshot-256c8088bf88",
+    "product": "snapshot-0b070e49b89c",
     "production_use": "unknown",
     "promotion_workflow": {
       "artifact_id_input": "artifact_id",
@@ -87,37 +87,37 @@
       "workflow_id": "promote-prod.yml"
     },
     "release_request": {
-      "actor": "snapshot-147ad26c3c4e",
+      "actor": "snapshot-3cbbf48ec19d",
       "candidate": {
-        "artifact_id": "snapshot-bcd21c56e369",
+        "artifact_id": "snapshot-9f8d7cb08f8c",
         "shared_addons_digest": "",
-        "source_commit": "be6c257c309c22471574cd47618494b290f9d706"
+        "source_commit": "c3f7a8579791d7b23a7abfdfb891fc1bc4975b32"
       },
-      "checklist_digest": "7354c72472a6c159286b5affffdd86423da86f92c0ac0e9bf170fd9ef371d62a",
+      "checklist_digest": "c83323d859b39248aab8adea796740a48e46c2e8d1f7ebb0d563293b736124bf",
       "client_decision_record_id": "",
-      "decided_at": "2026-11-19T18:03:35+00:00",
+      "decided_at": "2026-11-19T18:03:35.332024+00:00",
       "decision_reference": "",
-      "owner_github_id": "2090946316",
-      "product": "snapshot-256c8088bf88",
+      "owner_github_id": "854672013",
+      "product": "snapshot-0b070e49b89c",
       "production": {
-        "authority_sha256": "cd347fce4fd7081cadc6937c1effeeca15c35118ef4c143a71015e043102e1c6",
-        "recovery_backup_root": "/snapshot-c1461365eca8",
-        "state": "snapshot-ebb66503d73c"
+        "authority_sha256": "d2afde29bea402d32d7ea7e8feb25648c793d1a67e39454d6dc1bf790bd92a45",
+        "recovery_backup_root": "/snapshot-a580c6bf126f",
+        "state": "snapshot-1a39442eeb92"
       },
-      "reason": "snapshot-b44715846714",
-      "record_id": "31beed8d1611ca972fedda05be9dc0e950f051beec09840650ce975def3fb162",
-      "repository": "snapshot/21737a97f743",
+      "reason": "snapshot-15ad6981585b",
+      "record_id": "3a1cf384cf81bf77b1d3114a957062337c64a551ed017da30e8fb88e5f5b80a4",
+      "repository": "snapshot/d0eb38bddefc",
       "source": "director_request"
     },
-    "repository": "snapshot/98df606858dc",
+    "repository": "snapshot/80b40a583f4c",
     "repository_id": "",
     "repository_owner_id": "",
     "runtime_port": 3000,
     "schema_version": 2,
-    "source": "snapshot-6d6333295d45",
+    "source": "snapshot-819680a6c5f0",
     "updated_at": "2026-04-30T21:30:00Z"
   },
-  "product": "snapshot-256c8088bf88",
-  "repository": "snapshot/98df606858dc",
+  "product": "snapshot-0b070e49b89c",
+  "repository": "snapshot/80b40a583f4c",
   "updated_at": "2026-04-30T21:30:00Z"
 }

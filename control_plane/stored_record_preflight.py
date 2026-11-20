@@ -112,10 +112,14 @@ def check_restored_records(store: PostgresRecordStore, *, state_dir: Path) -> in
 # TEMPORARY (odoo-tenant-tk#44, Director decision Q1457). Exporters before
 # launchplane#6097 scrubbed an AbsentProduction release request under the
 # ReleaseVersion branch, so its `state` literal arrived as an undeclared-string
-# pseudonym and every candidate refused the copy. Only that exact rewrite is put
-# back; any other shape still fails. Remove this rule, its call and its tests
-# once a normal stored-record preflight against an exporter carrying #6097 passes.
+# pseudonym and every candidate refused the copy. A pseudonym cannot show what
+# the source literal was, so the repair is bound to the one stored request the
+# authorized release-review read showed as a valid AbsentProduction on
+# 2026-11-19; its declared `decided_at` survives scrubbing verbatim. Any other
+# record still fails. Remove this rule, its call, its test and fixture once a
+# normal stored-record preflight against an exporter carrying #6097 passes.
 _OLD_EXPORTER_STATE_PSEUDONYM = re.compile(r"snapshot-[0-9a-f]{12}")
+CORROBORATED_ABSENT_REQUEST_DECIDED_AT = "2026-11-19T18:03:35.332024+00:00"
 
 
 def restore_old_exporter_absent_state(table: str, row: dict[str, Any]) -> dict[str, Any]:
@@ -123,7 +127,10 @@ def restore_old_exporter_absent_state(table: str, row: dict[str, Any]) -> dict[s
     if table != "launchplane_product_profiles" or not isinstance(payload, dict):
         return row
     request = payload.get("release_request")
-    if not isinstance(request, dict):
+    if (
+        not isinstance(request, dict)
+        or request.get("decided_at") != CORROBORATED_ABSENT_REQUEST_DECIDED_AT
+    ):
         return row
     production = request.get("production")
     if (
