@@ -120,15 +120,6 @@ or migrate them. Startup's resolved policy source must be `db` with the restored
 active record's digest. Authorization-closed startup is a failure, even though
 the recovery behavior keeps the process alive.
 
-Temporarily, the import puts back one known exporter defect: exporters before
-[launchplane#6097](https://github.com/cbusillo/launchplane/pull/6097) replaced
-an absent first-release production's `state` with a `snapshot-<12 hex>`
-pseudonym. Only that exact shape at `release_request.production` in product
-profiles, on the one stored request an authorized release-review read showed
-as a valid absent production, is restored to `absent`; any other record, value
-or malformed sibling still fails. The rule goes once a normal preflight from an exporter carrying #6097
-passes ([odoo-tenant-tk#44](https://github.com/cbusillo/odoo-tenant-tk/issues/44)).
-
 HTTP listeners, workers and schedulers are not started. Excluded families'
 populated migrations, worker startup, monitoring and provider effects are not
 covered. Scrubbed values cannot prove every original value constraint; a field
