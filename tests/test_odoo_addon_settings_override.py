@@ -34,6 +34,7 @@ from control_plane.odoo_instance_overrides import (
     _resolve_shopify_payload_settings,
     addon_setting_secret_env_key,
     build_post_deploy_environment,
+    render_post_deploy_payload,
     shopify_store_key_is_protected,
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
@@ -162,6 +163,26 @@ def _request_payload(
 
 def _request(**kwargs: object) -> OdooAddonSettingsApplyRequest:
     return OdooAddonSettingsApplyRequest.model_validate(_request_payload(**kwargs))  # type: ignore[arg-type]
+
+
+def _authentik_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "product": _PRODUCT,
+        "context": _CONTEXT,
+        "instance": "prod",
+        "addon": "authentik_sso",
+        "mode": "dry-run",
+        "reason": "Give production its Authentik sign-in.",
+        "authentik_sso": {
+            "base_url": "https://auth.example.com/",
+            "client_id": "public-client-id",
+            "disable_providers": "Odoo.com",
+            "group_claim": "groups",
+            "admin_group": "cm-admins",
+        },
+    }
+    payload.update(overrides)
+    return payload
 
 
 class OdooAddonSettingsPlanTests(unittest.TestCase):
@@ -635,6 +656,28 @@ class OdooAddonSettingsPlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _request(reviewed_plan_sha256="a" * 64)
 
+    def test_request_rejects_a_block_other_than_its_addon(self) -> None:
+        for payload in (
+            _authentik_payload(shopify=_request_payload()["shopify"]),
+            _authentik_payload(addon="shopify"),
+            _authentik_payload(authentik_sso=None),
+        ):
+            with self.subTest(addon=payload["addon"]), self.assertRaises(ValueError):
+                OdooAddonSettingsApplyRequest.model_validate(payload)
+
+    def test_authentik_request_rejects_secret_and_insecure_url(self) -> None:
+        for change in (
+            {"client_secret": "private"},
+            {"base_url": "ftp://auth.example.com"},
+            {"base_url": "https://user:private@auth.example.com"},
+            {"base_url": "https://auth.example.com:84433"},
+        ):
+            settings = {**_authentik_payload()["authentik_sso"], **change}  # type: ignore[dict-item]
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                OdooAddonSettingsApplyRequest.model_validate(
+                    _authentik_payload(authentik_sso=settings)
+                )
+
 
 class OdooShopifyResolverTests(unittest.TestCase):
     def test_admin_urls_compare_the_store_identity_instead_of_the_shared_host(self) -> None:
@@ -918,6 +961,58 @@ class OdooAddonSettingsRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(
             "shpat_plaintext_value_should_not_echo",
             json.dumps(response.json()),
+        )
+
+    async def test_authentik_sso_dry_run_then_apply_on_production(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            shopify = OdooAddonSettingOverride(
+                addon="shopify",
+                setting="shop_url_key",
+                value=OdooOverrideValue(source="literal", value=_PROTECTED_KEY),
+            )
+            store.write_odoo_instance_override_record(
+                _existing_record("prod").model_copy(update={"addon_settings": (shopify,)})
+            )
+            app = self._app(store, root, "product_config.plan", "product_config.apply")
+
+            dry_run = await self._post(app, _authentik_payload())
+            self.assertEqual(dry_run.status_code, 202)
+            plan = dry_run.json()["result"]
+            applied = await self._post(
+                app,
+                _authentik_payload(mode="apply", reviewed_plan_sha256=plan["plan_sha256"]),
+                idempotency_key="cm-prod-authentik-apply",
+            )
+            stored = store.read_odoo_instance_override_record(
+                context_name=_CONTEXT, instance_name="prod"
+            )
+            payload = render_post_deploy_payload(stored)
+
+        self.assertEqual(applied.status_code, 202)
+        result = applied.json()["result"]
+        self.assertTrue(result["applied"])
+        self.assertTrue(result["read_back_matches"])
+        self.assertEqual(
+            {item["setting"]: item["value"] for item in result["read_back"]}["base_url"],
+            "https://auth.example.com",
+        )
+        self.assertIn(shopify, stored.addon_settings)
+        self.assertEqual(stored.config_parameters[0].key, "web.base.url")
+        self.assertEqual(
+            {
+                item.setting: item.value.to_wire_dict()
+                for item in payload.addon_settings
+                if item.addon == "authentik_sso"
+            },
+            {
+                "base_url": {"source": "literal", "value": "https://auth.example.com"},
+                "client_id": {"source": "literal", "value": "public-client-id"},
+                "disable_providers": {"source": "literal", "value": "Odoo.com"},
+                "group_claim": {"source": "literal", "value": "groups"},
+                "admin_group": {"source": "literal", "value": "cm-admins"},
+            },
         )
 
 
