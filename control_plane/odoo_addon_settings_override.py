@@ -5,11 +5,6 @@ and ``test_store`` flag as literals, and points the API token and webhook key at
 existing managed secret bindings. Plaintext secret values never enter this path.
 Each binding must be the one the lane's runtime delivery puts in its container, or
 Odoo refuses the override at startup.
-
-Authentik SSO takes only non-secret literals: the public client's id, the
-Authentik base URL, and the group and provider settings the shared
-``launchplane_settings`` adapter applies. Its sign-in clients are public, so
-there is no secret to reference.
 """
 
 from __future__ import annotations
@@ -211,8 +206,6 @@ class OdooShopifyAddonSettingsInput(BaseModel):
 
 
 class OdooAuthentikSsoAddonSettingsInput(BaseModel):
-    """Non-secret settings for the shared Authentik sign-in adapter; empty ones are omitted."""
-
     model_config = ConfigDict(extra="forbid")
 
     base_url: str
@@ -226,7 +219,6 @@ class OdooAuthentikSsoAddonSettingsInput(BaseModel):
         for field_name in AUTHENTIK_SSO_SETTINGS:
             setattr(self, field_name, getattr(self, field_name).strip())
         self.base_url = self.base_url.rstrip("/")
-        # Never echo the URL: it could carry pasted credentials.
         message = "Authentik base_url must be an https URL with a host and no credentials, query or fragment."
         try:
             parts = urllib.parse.urlsplit(self.base_url)

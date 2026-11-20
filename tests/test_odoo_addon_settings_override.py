@@ -998,7 +998,6 @@ class OdooAddonSettingsRouteTests(unittest.IsolatedAsyncioTestCase):
             {item["setting"]: item["value"] for item in result["read_back"]}["base_url"],
             "https://auth.example.com",
         )
-        # The record holds the literal shape the shared adapter reads, beside Shopify.
         self.assertIn(shopify, stored.addon_settings)
         self.assertEqual(stored.config_parameters[0].key, "web.base.url")
         self.assertEqual(
