@@ -301,6 +301,84 @@ class StoredRecordSnapshotTests(unittest.TestCase):
                 self.assertIsInstance(scrubbed.release_request.production, AbsentProduction)
                 self.assertNotIn("/volumes/backups/first-release", json.dumps(payload))
 
+    def _restore_with_profile_rows(
+        self, name: str, profiles: list[dict[str, Any]]
+    ) -> PostgresRecordStore:
+        from sqlalchemy import create_engine
+
+        from control_plane.storage.postgres import LaunchplaneProductProfileRow
+        from control_plane.stored_record_preflight import restore_snapshot
+
+        snapshot = self.store.export_stored_record_snapshot()
+        snapshot.tables[LaunchplaneProductProfileRow.__tablename__] = profiles
+        url = _sqlite_database_url(self.root / name)
+        restored = PostgresRecordStore(database_url=url)
+        self.addCleanup(restored.close)
+        engine = create_engine(url)
+        self.addCleanup(engine.dispose)
+        with (
+            patch(
+                "control_plane.stored_record_preflight.command.upgrade",
+                side_effect=lambda *_sqlite_without_alembic_history: restored.ensure_schema(),
+            ),
+            patch(
+                "control_plane.stored_record_preflight.migrate_schema",
+                return_value="test-revision",
+            ),
+        ):
+            restore_snapshot(engine, snapshot)
+        return restored
+
+    def test_temporary_pre_6097_exporter_absent_state_is_restored_and_nothing_else(self) -> None:
+        from copy import deepcopy
+
+        from control_plane.contracts.release_review import AbsentProduction
+
+        fixture_name = "stored_record_snapshot_51349bd_first_release_profile.json"
+        exported = json.loads((Path(__file__).parent / "fixtures" / fixture_name).read_text())
+        production = exported["payload"]["release_request"]["production"]
+
+        with (
+            patch(
+                "control_plane.stored_record_preflight.temporarily_restore_pre_6097_exporter_absent_state",
+                side_effect=lambda _table, source: source,
+            ),
+            self.assertRaises(ValidationError),
+        ):
+            check_restored_records(
+                self._restore_with_profile_rows("unrepaired.db", [exported]),
+                state_dir=self.root,
+            )
+        restored = self._restore_with_profile_rows("repaired.db", [exported])
+        check_restored_records(restored, state_dir=self.root)
+        (profile,) = restored.list_product_profile_records()
+        assert profile.release_request is not None
+        self.assertEqual(
+            profile.release_request.production,
+            AbsentProduction.model_validate({**production, "state": "absent"}),
+        )
+
+        def variant(request_update: dict[str, Any], **production_update: object) -> dict[str, Any]:
+            copied: dict[str, Any] = deepcopy(exported)
+            copied["payload"]["release_request"].update(request_update)
+            copied["payload"]["release_request"]["production"].update(production_update)
+            return copied
+
+        unrelated = variant({})
+        unrelated["payload"]["lanes"] = "not-a-lane-list"
+        for label, row in (
+            ("uncorroborated request", variant({"decided_at": "2026-11-19T18:03:35+00:00"})),
+            ("malformed sibling", variant({}, authority_sha256="not-a-digest")),
+            ("extra sibling", variant({}, artifact_id="artifact")),
+            ("other state text", variant({}, state="snapshot-not-hex-text")),
+            ("unrelated bad field", unrelated),
+        ):
+            with self.subTest(label), self.assertRaises(ValidationError):
+                check_restored_records(
+                    self._restore_with_profile_rows(f"{label}.db", [row]),
+                    state_dir=self.root,
+                )
+
     def test_invalid_historical_schedule_and_suffix_still_fail_after_scrubbing(self) -> None:
         from control_plane.stored_record_snapshot import _Scrubber
 
