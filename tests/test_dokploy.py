@@ -3873,7 +3873,7 @@ case "$1" in
     ps)
         case "$*" in
             *service=script-runner*) echo runner ;;
-            *service=web*) cat "$FAKE_WEBS" ;;
+            *service=web*) [ "$(cat "$FAKE_WEBS")" != fail ] && cat "$FAKE_WEBS" ;;
             *) exit 90 ;;
         esac ;;
     inspect)
@@ -3895,6 +3895,7 @@ esac
             "no web": ("", "", 0),
             "web present": ("web\n", "", 1),
             "web appears": ("", "web", 1),
+            "final listing fails": ("", "fail", 1),
         }
         for name, (webs_before, webs_during, status) in cases.items():
             with self.subTest(name), TemporaryDirectory() as directory:

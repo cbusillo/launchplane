@@ -344,6 +344,9 @@ def park_first_release_web(docker: Callable[..., str], spec: dict[str, Any]) -> 
     return {
         "web_stopped": True,
         "web_present": bool(webs),
+        "retained_services": sorted(
+            row["Config"]["Labels"]["com.docker.compose.service"] for row in owned
+        ),
         "retained_volumes": sorted(retained_volumes),
         "retained_containers": [row["Id"] for row in owned],
         "retained_storage_sha256": hashlib.sha256(
@@ -552,6 +555,8 @@ def prove_first_release_retained_stack(
         or not isinstance(result.get("retained_containers"), list)
         or not set(result["retained_containers"])
         <= set(json.loads(witness["first_empty_retained_containers"]))
+        or result.get("retained_services")
+        != sorted(["database", "script-runner", *(["web"] if result["web_present"] else [])])
         or result.get("retained_storage_sha256") != witness["first_empty_retained_storage_sha256"]
     ):
         raise ValueError("The retained stack differs from its stopped-release witness.")
@@ -568,32 +573,27 @@ def back_up_first_release_retained_stack(
         raise ValueError("A retained-stack backup requires its durable accepted release.")
     runtime = first_release_backup_runtime(store, decision, request.context)
     before = prove_first_release_retained_stack(store, root, decision, request.context)
-    result = execute_odoo_prod_backup_gate(
+
+    def require_unchanged_stack() -> None:
+        try:
+            after = prove_first_release_retained_stack(store, root, decision, request.context)
+        except click.ClickException:
+            raise
+        except Exception as error:
+            raise click.ClickException(
+                "The retained stack could not be proved after the logical backup."
+            ) from error
+        if after != before:
+            raise click.ClickException("The retained stack changed during the logical backup.")
+
+    return execute_odoo_prod_backup_gate(
         control_plane_root=root,
         record_store=store,
         request=request,
         expected_web_state="exited" if before["web_present"] else "absent",
         runtime_values=runtime,
+        confirm_capture=require_unchanged_stack,
     )
-    if result.backup_status != "pass":
-        return result
-    try:
-        after = prove_first_release_retained_stack(store, root, decision, request.context)
-    except (ValueError, OSError, RuntimeError, KeyError, TypeError) as error:
-        after = {"error": str(error)}
-    if after == before:
-        return result
-    error_message = "The retained stack changed during the logical backup."
-    gate = store.read_backup_gate_record(request.backup_record_id)
-    store.write_backup_gate_record(
-        gate.model_copy(
-            update={
-                "status": "fail",
-                "evidence": {**gate.evidence, "error_message": error_message},
-            }
-        )
-    )
-    return result.model_copy(update={"backup_status": "fail", "error_message": error_message})
 
 
 def stop_first_release(

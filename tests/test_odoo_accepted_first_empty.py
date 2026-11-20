@@ -1201,6 +1201,24 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         self.assertEqual(self.captured_web_states, [])
         self.assertEqual(self.modes, ["empty"])
 
+    def remove_database(self) -> None:
+        del self.docker_state.rows["database"]
+
+    def test_retained_stack_without_web_refuses_a_missing_database(self) -> None:
+        finished = self.promote_after_vanished_web(self.remove_database)
+        self.assertEqual(finished.status, "fail")
+        self.assertEqual(self.captured_web_states, [])
+        self.assertEqual(self.modes, ["empty"])
+
+    def test_unprovable_stack_after_capture_fails_the_backup(self) -> None:
+        self.during_capture = self.remove_database
+        finished = self.promote_after_vanished_web()
+        self.assertEqual(finished.status, "fail")
+        assert finished.result is not None
+        gate = self.store.read_backup_gate_record(finished.result.backup_record_id)
+        self.assertEqual(gate.status, "fail")
+        self.assertEqual(self.modes, ["empty"])
+
     def test_writer_appearing_during_capture_fails_the_backup(self) -> None:
         self.during_capture = self.add_stray_writer
         finished = self.promote_after_vanished_web()

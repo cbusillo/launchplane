@@ -3586,7 +3586,8 @@ docker exec -i \\
 PY
 
 if [ "${{expected_web_state}}" = "absent" ]; then
-    if [ -n "$(list_web_containers)" ] || \\
+    final_web_container_ids=$(list_web_containers)
+    if [ -n "${{final_web_container_ids}}" ] || \\
         [ "$(docker inspect -f '{{{{.Image}}}}' "${{script_runner_container_id}}")" != "${{image_id}}" ]; then
         echo "A web container appeared or the runner image changed during backup." >&2
         exit 1
