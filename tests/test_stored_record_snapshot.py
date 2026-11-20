@@ -316,11 +316,10 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         self.addCleanup(restored.close)
         engine = create_engine(url)
         self.addCleanup(engine.dispose)
-        # SQLite has no hosted migration history; build the current schema instead.
         with (
             patch(
                 "control_plane.stored_record_preflight.command.upgrade",
-                side_effect=lambda *_args: restored.ensure_schema(),
+                side_effect=lambda *_sqlite_without_alembic_history: restored.ensure_schema(),
             ),
             patch(
                 "control_plane.stored_record_preflight.migrate_schema",
@@ -330,8 +329,7 @@ class StoredRecordSnapshotTests(unittest.TestCase):
             restore_snapshot(engine, snapshot)
         return restored
 
-    def test_old_exporter_absent_production_rewrite_is_restored_and_nothing_else(self) -> None:
-        # TEMPORARY: remove with restore_old_exporter_absent_state.
+    def test_temporary_pre_6097_exporter_absent_state_is_restored_and_nothing_else(self) -> None:
         from copy import deepcopy
 
         from control_plane.contracts.release_review import AbsentProduction
@@ -342,7 +340,7 @@ class StoredRecordSnapshotTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.stored_record_preflight.restore_old_exporter_absent_state",
+                "control_plane.stored_record_preflight.temporarily_restore_pre_6097_exporter_absent_state",
                 side_effect=lambda _table, source: source,
             ),
             self.assertRaises(ValidationError),
