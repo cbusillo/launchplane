@@ -55,7 +55,10 @@ script runner. If the stopped web container is gone, the backup still runs: the
 stack is first proved again, before and after the capture, to hold only the
 witnessed containers of owned deployments with their recorded images, the
 witnessed volumes, and no other web or writer. Any other state refuses. It
-promotes the same accepted candidate in existing-data mode.
+promotes the same accepted candidate in existing-data mode. With no serving
+artifact recorded, its build-order check compares with the build this release's
+own passing promote-1 deployment served, so only that exact artifact and image
+pass; any other build is checked against the stopped lane as before.
 The backup directory must already be recorded in DB-backed runtime settings and
 is bound in the initial checklist, so backup and restore resolve the same root.
 No extra provider sync is needed. Only a currently qualified,

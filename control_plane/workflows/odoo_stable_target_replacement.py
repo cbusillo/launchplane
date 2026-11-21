@@ -2876,13 +2876,25 @@ def execute_odoo_stable_target_replacement_apply(
         )
         if not rollback:
             desired_build = LaneBuild(artifact_id, source_git_ref, image_reference)
-            require_forward_lane_build(
-                record_store=record_store,
-                profile=profile,
-                context=plan.context,
-                instance=plan.instance,
-                desired=desired_build,
-            )
+            if release_decision is None or plan.instance != "prod":
+                require_forward_lane_build(
+                    record_store=record_store,
+                    profile=profile,
+                    context=plan.context,
+                    instance=plan.instance,
+                    desired=desired_build,
+                )
+            else:
+                from control_plane.odoo_first_release import first_release_lane_build
+
+                require_forward_build(
+                    record_store=record_store,
+                    profile=profile,
+                    current=first_release_lane_build(
+                        record_store, release_decision, plan.context, desired_build
+                    ),
+                    desired=desired_build,
+                )
             current_identity = _runtime_identity_map(current_env_map)
             if current_identity:
                 if (
