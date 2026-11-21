@@ -84,6 +84,13 @@ def first_release_lane_build(
         return current
     try:
         inventory = store.read_environment_inventory(context_name=context, instance_name="prod")
+        if (
+            inventory.post_deploy_update.evidence.get(FIRST_RELEASE_STOPPED_KEY)
+            != decision.record_id
+            or inventory.artifact_identity is not None
+            or inventory.runtime_identity is not None
+        ):
+            return current
         profile = store.read_product_profile_record(decision.product)
         from control_plane.client_release import ClientReleaseStep, client_release_step_operation_id
 
@@ -98,10 +105,7 @@ def first_release_lane_build(
     except (FileNotFoundError, ValueError):
         return current
     if (
-        inventory.post_deploy_update.evidence.get(FIRST_RELEASE_STOPPED_KEY) == decision.record_id
-        and inventory.artifact_identity is None
-        and inventory.runtime_identity is None
-        and promotion.status == "pass"
+        promotion.status == "pass"
         and served.runtime_source.get("first_empty_release_decision") == decision.record_id
         and served.runtime_source.get("first_empty_release_operation") == promotion.operation_id
         and deployment_record_passed(served)
@@ -111,13 +115,7 @@ def first_release_lane_build(
         and served.runtime_identity.image_reference == desired.image
         and served.source_git_ref == desired.commit
     ):
-        return LaneBuild(
-            artifact_id=desired.artifact_id,
-            commit=desired.commit,
-            image=desired.image,
-            observed_at=served.deploy.started_at,
-            context=context,
-        )
+        return desired
     return current
 
 

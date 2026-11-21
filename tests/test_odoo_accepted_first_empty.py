@@ -1,6 +1,7 @@
 import json
 import re
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -665,22 +666,28 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 }
             )
             self.store.write_artifact_manifest(older)
-            for desired in (
-                LaneBuild(
-                    older.artifact_id, older.source_commit, f"{repository}@{older.image.digest}"
+            served = LaneBuild(
+                self.artifact.artifact_id,
+                self.artifact.source_commit,
+                f"{repository}@{self.artifact.image.digest}",
+            )
+            later_acceptance = self.accepted.model_copy(update={"record_id": "fictional-later"})
+            for decision, desired in (
+                (
+                    self.accepted,
+                    LaneBuild(
+                        older.artifact_id, older.source_commit, f"{repository}@{older.image.digest}"
+                    ),
                 ),
-                LaneBuild(
-                    self.artifact.artifact_id,
-                    self.artifact.source_commit,
-                    f"{repository}@sha256:{'f' * 64}",
-                ),
+                (self.accepted, replace(served, image=f"{repository}@sha256:{'f' * 64}")),
+                (later_acceptance, served),
             ):
                 with self.assertRaises(LaneMovementRefused) as refused:
                     require_forward_build(
                         record_store=self.store,
                         profile=self.profile,
                         current=first_release_lane_build(
-                            self.store, self.accepted, self.context, desired
+                            self.store, decision, self.context, desired
                         ),
                         desired=desired,
                         transport=self.candidate_build_runs(),
@@ -688,7 +695,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 refusals.append(refused.exception.code)
 
         self.exercise_accepted_executor(after_rollback=other_builds_still_refuse)
-        self.assertEqual(refusals, ["build_order_unverified", "build_order_unverified"])
+        self.assertEqual(refusals, ["build_order_unverified"] * 3)
 
     def candidate_source_build(self, run_id: int = 4242) -> ArtifactSourceBuild:
         return ArtifactSourceBuild(
