@@ -1,6 +1,8 @@
 import json
+import re
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from typing import Any, Self
 from collections.abc import Callable
@@ -12,6 +14,7 @@ from control_plane.contracts.artifact_identity import (
     ArtifactBuildToolProvenance,
     ArtifactIdentityManifest,
     ArtifactImageReference,
+    ArtifactSourceBuild,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.product_profile_record import ProductOwnerProfile
@@ -640,7 +643,92 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
     def test_known_deploy_survives_unavailable_rendered_receipt_and_still_drills(self) -> None:
         self.exercise_accepted_executor(rendered_failure=True)
 
-    def exercise_accepted_executor(self, *, rendered_failure: bool = False) -> None:
+    def test_drill_repromotion_proof_covers_only_the_build_promote_one_served(self) -> None:
+        from control_plane.lane_movement import (
+            LaneBuild,
+            LaneMovementRefused,
+            require_forward_build,
+        )
+        from control_plane.odoo_first_release import first_release_lane_build
+
+        repository = self.profile.image.repository
+        refusals: list[str] = []
+
+        def other_builds_still_refuse() -> None:
+            older = self.artifact.model_copy(
+                update={
+                    "artifact_id": "fictional-older",
+                    "image": ArtifactImageReference(
+                        repository=repository, digest="sha256:" + "e" * 64
+                    ),
+                    "source_build": self.candidate_source_build(run_id=4141),
+                }
+            )
+            self.store.write_artifact_manifest(older)
+            for desired in (
+                LaneBuild(
+                    older.artifact_id, older.source_commit, f"{repository}@{older.image.digest}"
+                ),
+                LaneBuild(
+                    self.artifact.artifact_id,
+                    self.artifact.source_commit,
+                    f"{repository}@sha256:{'f' * 64}",
+                ),
+            ):
+                with self.assertRaises(LaneMovementRefused) as refused:
+                    require_forward_build(
+                        record_store=self.store,
+                        profile=self.profile,
+                        current=first_release_lane_build(
+                            self.store, self.accepted, self.context, desired
+                        ),
+                        desired=desired,
+                        transport=self.candidate_build_runs(),
+                    )
+                refusals.append(refused.exception.code)
+
+        self.exercise_accepted_executor(after_rollback=other_builds_still_refuse)
+        self.assertEqual(refusals, ["build_order_unverified", "build_order_unverified"])
+
+    def candidate_source_build(self, run_id: int = 4242) -> ArtifactSourceBuild:
+        return ArtifactSourceBuild(
+            repository=self.profile.repository,
+            repository_id="9001",
+            workflow_path=".github/workflows/build.yml",
+            event="push",
+            purpose="release",
+            run_id=run_id,
+            run_attempt=1,
+            github_artifact_id=4343,
+            manifest_artifact_id="fictional-manifest",
+        )
+
+    def candidate_build_runs(self) -> Any:
+        """GitHub reads for builds of the candidate commit, which all ran before it served."""
+        reads: list[str] = []
+
+        def get_json(path: str) -> Any:
+            reads.append(path)
+            run = re.fullmatch(r"/repos/.+/actions/runs/(\d+)/attempts/(\d+)", path)
+            if run is None:
+                raise AssertionError(f"Unexpected source read {path}")
+            return {
+                "id": int(run[1]),
+                "run_attempt": int(run[2]),
+                "head_sha": "b" * 40,
+                "conclusion": "success",
+                "run_started_at": "2000-01-01T00:00:00Z",
+            }
+
+        self.source_reads = reads
+        return SimpleNamespace(get_json=get_json)
+
+    def exercise_accepted_executor(
+        self,
+        *,
+        rendered_failure: bool = False,
+        after_rollback: Callable[[], None] | None = None,
+    ) -> None:
         from control_plane import runtime_environments
         from control_plane.dokploy import api, compose, source, post_deploy
         from control_plane.runtime_environments import resolve_site_runtime_environment_from_store
@@ -677,7 +765,10 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             ).model_copy(update={"context": self.context})
         )
         self.artifact = self.artifact.model_copy(
-            update={"odoo_install_modules": LAUNCHPLANE_REQUIRED_ODOO_MODULES}
+            update={
+                "odoo_install_modules": LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+                "source_build": self.candidate_source_build(),
+            }
         )
         self.store.write_artifact_manifest(self.artifact)
         history: list[dict[str, str]] = []
@@ -782,6 +873,9 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
 
         from control_plane.odoo_first_release import first_release_rendered_inputs
 
+        drill_source = self.candidate_build_runs()
+        drill_reads = self.source_reads
+
         def rendered_inputs(**kwargs: Any) -> dict[str, str]:
             if rendered_failure:
                 raise ValueError("Fictional cached environment is unavailable")
@@ -846,9 +940,13 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
                 "wait_for_runtime_identity_healthcheck_with_retry",
                 side_effect=health_read,
             ),
-            patch.object(replacement, "require_forward_lane_build"),
+            patch("control_plane.lane_movement._source_transport", return_value=drill_source),
         ):
-            self.complete_drill(expected_first_mode="empty", replacement=execute_real)
+            self.complete_drill(
+                expected_first_mode="empty", replacement=execute_real, after_rollback=after_rollback
+            )
+        # Promote-2 is proved by this run's own records, not by build timing.
+        self.assertFalse(drill_reads)
         self.assertGreater(database_setup["waited"], 0)
         self.assertEqual(database_setup["bindings_checked"], database_setup["waited"])
         self.assertTrue(plan.called)

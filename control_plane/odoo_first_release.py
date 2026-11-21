@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
-from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deployment_record import DeploymentRecord, deployment_record_passed
+from control_plane.lane_movement import LaneBuild, current_lane_build
 from control_plane.contracts.release_review import AbsentProduction, ReleaseReviewDecisionRecord
 from control_plane.contracts.odoo_prod_rollback_operation import OdooProdRollbackResult
 from control_plane.contracts.odoo_target_replacement_failures import (
@@ -64,6 +65,60 @@ def first_release_is_stopped(store: object, context: str, *, product: str) -> bo
         and inventory.deploy.status == "skipped"
         and not inventory.post_deploy_update.evidence.get("first_empty_restored_empty")
     )
+
+
+def first_release_lane_build(
+    store: object, decision: ReleaseReviewDecisionRecord, context: str, desired: LaneBuild
+) -> LaneBuild:
+    """The prod build a first release's forward check compares with.
+
+    The rollback drill parks the candidate's web and clears the lane's build,
+    so its repromotion of the exact build its own promote-1 served compares with
+    that served build. Every other move compares with the lane as recorded.
+    """
+    current = current_lane_build(store, context=context, instance="prod")
+    if (
+        not isinstance(store, PostgresRecordStore)
+        or desired.artifact_id != decision.checklist.candidate.artifact_id
+    ):
+        return current
+    try:
+        inventory = store.read_environment_inventory(context_name=context, instance_name="prod")
+        profile = store.read_product_profile_record(decision.product)
+        from control_plane.client_release import ClientReleaseStep, client_release_step_operation_id
+
+        promotion = store.read_odoo_prod_promotion_operation_record(
+            client_release_step_operation_id(
+                profile=profile, decision=decision, step=ClientReleaseStep("promote", 1)
+            )
+        )
+        served = store.read_deployment_record(
+            promotion.result.deployment_record_id if promotion.result is not None else ""
+        )
+    except (FileNotFoundError, ValueError):
+        return current
+    if (
+        inventory.post_deploy_update.evidence.get(FIRST_RELEASE_STOPPED_KEY) == decision.record_id
+        and inventory.artifact_identity is None
+        and inventory.runtime_identity is None
+        and promotion.status == "pass"
+        and served.runtime_source.get("first_empty_release_decision") == decision.record_id
+        and served.runtime_source.get("first_empty_release_operation") == promotion.operation_id
+        and deployment_record_passed(served)
+        and served.artifact_identity is not None
+        and served.artifact_identity.artifact_id == desired.artifact_id
+        and served.runtime_identity is not None
+        and served.runtime_identity.image_reference == desired.image
+        and served.source_git_ref == desired.commit
+    ):
+        return LaneBuild(
+            artifact_id=desired.artifact_id,
+            commit=desired.commit,
+            image=desired.image,
+            observed_at=served.deploy.started_at,
+            context=context,
+        )
+    return current
 
 
 def first_release_production(
