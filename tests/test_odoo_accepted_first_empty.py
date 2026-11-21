@@ -881,7 +881,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
         from control_plane.odoo_first_release import first_release_rendered_inputs
 
         drill_source = self.candidate_build_runs()
-        drill_reads = self.source_reads
+        build_timing_reads_during_drill = self.source_reads
 
         def rendered_inputs(**kwargs: Any) -> dict[str, str]:
             if rendered_failure:
@@ -952,8 +952,7 @@ class AcceptedFirstEmptyTests(FirstEmptyInputsFixture):
             self.complete_drill(
                 expected_first_mode="empty", replacement=execute_real, after_rollback=after_rollback
             )
-        # Promote-2 is proved by this run's own records, not by build timing.
-        self.assertFalse(drill_reads)
+        self.assertFalse(build_timing_reads_during_drill)
         self.assertGreater(database_setup["waited"], 0)
         self.assertEqual(database_setup["bindings_checked"], database_setup["waited"])
         self.assertTrue(plan.called)
