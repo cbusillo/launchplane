@@ -201,7 +201,7 @@ def render_odoo_raw_compose_file(
     domain_certificate_type: Literal["none", "letsencrypt"] = "none",
     preview_filestore: dict[str, object] | None = None,
     preview_identity: RuntimeIdentity | None = None,
-    preview_workers: int | None = None,
+    workers: int | None = None,
 ) -> str:
     if preview_identity is not None and (
         publish_host_ports
@@ -237,17 +237,19 @@ def render_odoo_raw_compose_file(
     )
     if hold_web_until_integration_readback:
         web_command = json.dumps(web_command)
-    if preview_workers is not None and preview_workers < 0:
-        raise click.ClickException("Preview Odoo workers cannot be negative.")
-    effective_preview_workers = ODOO_DEFAULT_WORKERS if preview_workers is None else preview_workers
-    evented_backend_port = runtime_port if effective_preview_workers == 0 else PREVIEW_EVENTED_PORT
+    if workers is not None and workers < 0:
+        raise click.ClickException("Odoo workers cannot be negative.")
+    # With workers, only Odoo's evented port can bind a websocket; threaded Odoo
+    # serves it on the HTTP port. None means the compose's own ODOO_WORKERS default.
+    effective_workers = ODOO_DEFAULT_WORKERS if workers is None else workers
+    evented_backend_port = runtime_port if effective_workers == 0 else PREVIEW_EVENTED_PORT
     web_route_labels = _render_odoo_web_traefik_labels(
         domain_hosts=domain_hosts,
         runtime_port=runtime_port,
         domain_certificate_type=domain_certificate_type,
         isolated_testing=isolated_testing,
         evented_port=PREVIEW_EVENTED_PORT
-        if preview_identity is not None or preview_workers
+        if preview_identity is not None or effective_workers
         else None,
     )
     web_host_ports = ""
@@ -284,7 +286,7 @@ def render_odoo_raw_compose_file(
         if isolated_testing or not publish_host_ports
         else '    extra_hosts:\n      - "host.docker.internal:host-gateway"\n'
     )
-    workers = f"${{ODOO_WORKERS:-{ODOO_DEFAULT_WORKERS}}}"
+    workers_setting = f"${{ODOO_WORKERS:-{ODOO_DEFAULT_WORKERS}}}"
     cron_threads = '"0"' if isolated_testing else "${ODOO_MAX_CRON_THREADS:-2}"
     extra_secrets = (
         "" if isolated_testing else "secrets:\n  github_token:\n    environment: GITHUB_TOKEN\n"
@@ -315,7 +317,7 @@ x-odoo-env: &odoo-env
   ODOO_ADMIN_PASSWORD: ${{ODOO_ADMIN_PASSWORD:-}}
   ODOO_DB_MAXCONN: ${{ODOO_DB_MAXCONN:-44}}
   ODOO_MAX_CRON_THREADS: {cron_threads}
-  ODOO_WORKERS: {workers}
+  ODOO_WORKERS: {workers_setting}
   ODOO_LIMIT_TIME_CPU: ${{ODOO_LIMIT_TIME_CPU:-600}}
   ODOO_LIMIT_TIME_REAL: ${{ODOO_LIMIT_TIME_REAL:-1800}}
   ODOO_LIMIT_TIME_REAL_CRON: ${{ODOO_LIMIT_TIME_REAL_CRON:-1800}}

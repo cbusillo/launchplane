@@ -2496,10 +2496,17 @@ def _sync_artifact_image_reference_for_target(
         )
         if target_definition is not None:
             target_domains = target_definition.domains
+        try:
+            workers = int(
+                desired_env_map.get("ODOO_WORKERS") or dokploy_compose.ODOO_DEFAULT_WORKERS
+            )
+        except ValueError:
+            raise click.ClickException("ODOO_WORKERS must be an integer.") from None
         compose_file = dokploy_compose.render_odoo_raw_compose_file(
             image_reference=desired_image_reference,
             hold_web_until_integration_readback=web_held_until_integration_readback(instance_name),
             domain_hosts=target_domains,
+            workers=workers,
         )
         runtime_source_evidence = dokploy_compose.sync_dokploy_compose_raw_source(
             host=host,

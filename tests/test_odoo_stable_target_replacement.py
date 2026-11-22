@@ -2555,7 +2555,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             "true",
         )
         self.assertEqual(
-            final_deployment.runtime_source["rendered_traefik_router_label_count"], "8"
+            final_deployment.runtime_source["rendered_traefik_router_label_count"], "16"
         )
         self.assertEqual(
             final_deployment.runtime_source[
@@ -2589,7 +2589,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             "deploy-456",
         )
         self.assertEqual(
-            final_deployment.runtime_source["converted_traefik_router_label_count"], "8"
+            final_deployment.runtime_source["converted_traefik_router_label_count"], "16"
         )
         self.assertEqual(
             final_deployment.runtime_source[
