@@ -140,11 +140,11 @@ def request_addon_runner_containers(
     store: AddonRunnerDispatchStore, *, control_plane_root: Path
 ) -> tuple[str, ...]:
     for record in store.list_outbox_delivery_records(
-        states=("delivered", "failed"),
+        states=("delivered",),
         kind="github_workflow_dispatch",
         aggregate_type="ephemeral_addon_job",
     ):
-        if record.state == "delivered" and record.payload.get("run_status") == "completed":
+        if record.payload.get("run_status") == "completed":
             continue
         try:
             observe_addon_launcher(store, record, control_plane_root=control_plane_root)
@@ -264,7 +264,7 @@ def observe_addon_launcher(
     *,
     control_plane_root: Path,
 ) -> None:
-    if record.state not in {"delivered", "failed"} or not record.external_id.isdecimal():
+    if record.state != "delivered" or not record.external_id.isdecimal():
         return
     repository = repository_full_name(str(record.payload["repository"]))
     expected_title = record.payload["expected_run_title"]
@@ -298,12 +298,6 @@ def observe_addon_launcher(
     success = run.get("conclusion") == "success"
     state = "delivered" if success else "failed"
     error_code = "" if success else "ephemeral_addon_launcher_failed"
-    if (
-        record.state == state
-        and record.error_code == error_code
-        and record.payload.get("run_status") == "completed"
-    ):
-        return
     store.write_outbox_delivery_record(
         record.model_copy(
             update={

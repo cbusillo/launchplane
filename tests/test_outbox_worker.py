@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import click
 
@@ -11,7 +11,8 @@ from control_plane.contracts.outbox_delivery import (
     build_outbox_delivery_id,
     build_outbox_dedupe_key,
 )
-from control_plane.outbox_worker import run_outbox_worker_once
+from control_plane import outbox_worker
+from control_plane.outbox_worker import OutboxWorkerStepResult, run_outbox_worker_once
 from control_plane.storage.postgres import PostgresRecordStore
 
 
@@ -507,6 +508,44 @@ class OutboxWorkerTests(unittest.TestCase):
         self.assertEqual(result.status, "delivered")
         self.assertEqual(completed.state, "delivered")
         self.assertEqual(completed.action, "recorded_local_authorization_recovery_alert")
+
+
+class OutboxWorkerLoopTests(unittest.TestCase):
+    def test_a_slow_addon_scan_does_not_hold_queued_deliveries_to_one_per_scan(self) -> None:
+        clock = [0.0]
+        events: list[str] = []
+        pending = ["first", "second", "third"]
+
+        def slow_scan(*_: object, **__: object) -> tuple[str, ...]:
+            events.append("scan")
+            clock[0] += 3 * outbox_worker.ADDON_RUNNER_SCAN_SECONDS
+            return ()
+
+        def deliver(**_: object) -> OutboxWorkerStepResult:
+            clock[0] += 1
+            if not pending:
+                return OutboxWorkerStepResult(status="idle")
+            events.append(pending.pop(0))
+            return OutboxWorkerStepResult(status="delivered")
+
+        def sleep(seconds: float) -> None:
+            clock[0] += seconds
+
+        store: Any = Mock(spec=PostgresRecordStore)
+        with (
+            patch.object(outbox_worker, "request_addon_runner_containers", side_effect=slow_scan),
+            patch.object(outbox_worker, "run_outbox_worker_once", side_effect=deliver),
+            patch("control_plane.outbox_worker.time.monotonic", side_effect=lambda: clock[0]),
+            patch("control_plane.outbox_worker.time.sleep", side_effect=sleep),
+        ):
+            outbox_worker.run_outbox_worker_loop(
+                record_store=store,
+                control_plane_root=Path("."),
+                lease_owner="worker-a",
+                should_stop=lambda: events.count("scan") >= 2,
+            )
+
+        self.assertEqual(events, ["scan", "first", "second", "third", "scan"])
 
 
 if __name__ == "__main__":

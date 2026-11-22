@@ -59,9 +59,77 @@ class LifecycleWorkflowSourceTests(TestCase):
         self.assertEqual(failed.provider_operation_key, delivery.provider_operation_key)
         store.enqueue_outbox_delivery_with_idempotency.assert_not_called()
 
-    def test_launcher_failure_and_original_run_recovery_are_visible_without_redispatch(
+    def test_settled_launchers_cost_no_provider_reads_and_new_jobs_still_dispatch(
         self,
     ) -> None:
+        settled: list[OutboxDeliveryRecord] = []
+        for job_id, state, conclusion in ((40, "failed", "failure"), (41, "delivered", "success")):
+            launcher = service._addon_runner_delivery(
+                AddonRunnerRequest(
+                    repository="example/repo", run_id=12, run_attempt=1, job_id=job_id
+                ),
+                "example/control",
+                "refs/heads/main",
+            )
+            settled.extend(
+                launcher.model_copy(
+                    update={
+                        "state": state,
+                        "external_id": str(job_id + 100),
+                        "payload": {
+                            **launcher.payload,
+                            "run_status": "completed",
+                            "run_conclusion": conclusion,
+                        },
+                    }
+                )
+                for _ in range(50)
+            )
+        store: Any = Mock()
+        store.list_product_profile_records.return_value = (
+            SimpleNamespace(is_active=True, repository="example/repo"),
+        )
+        store.list_outbox_delivery_records.side_effect = lambda *, states, **_: tuple(
+            record for record in settled if record.state in states
+        )
+        store.read_outbox_delivery_record.side_effect = FileNotFoundError
+        store.enqueue_outbox_delivery_with_idempotency.side_effect = lambda request: (
+            request.delivery
+        )
+        queued_job = build_runner_queue_wait_job(
+            github_id=35,
+            run_id=12,
+            repository="example/repo",
+            workflow_name="Build",
+            job_name="addon-tests",
+            status="queued",
+            labels=("self-hosted", "lp-addon-12-2"),
+        )
+        reader = Mock()
+        reader.read_runner_queue_wait.side_effect = lambda *, workflow_status, **_: SimpleNamespace(
+            jobs=(queued_job,) if workflow_status == "queued" else ()
+        )
+        with (
+            patch.object(service, "read_active_authz_policy_record", return_value=self.policy()),
+            patch.object(
+                service,
+                "runner_lifecycle_token",
+                return_value=nullcontext(SimpleNamespace(token=installation_token())),
+            ),
+            patch.object(service, "GitHubRunnerQueueWaitReader", return_value=reader),
+            patch.object(service, "read_addon_job", return_value={"status": "queued"}),
+            patch.object(service, "launchplane_github_token") as launcher_token,
+            patch.object(service, "github_api_request") as launcher_read,
+        ):
+            dispatched = service.request_addon_runner_containers(
+                store, control_plane_root=Path(".")
+            )
+        launcher_token.assert_not_called()
+        launcher_read.assert_not_called()
+        store.write_outbox_delivery_record.assert_not_called()
+        self.assertEqual(len(dispatched), 1)
+
+    def test_launcher_failure_is_visible_without_redispatch(self) -> None:
         request = AddonRunnerRequest(repository="example/repo", run_id=12, run_attempt=2, job_id=35)
         delivery = service._addon_runner_delivery(request, "example/control", "refs/heads/main")
         delivery = delivery.model_copy(
@@ -97,14 +165,6 @@ class LifecycleWorkflowSourceTests(TestCase):
             self.assertEqual(failed.external_id, delivery.external_id)
             self.assertEqual(failed.provider_operation_key, delivery.provider_operation_key)
             self.assertEqual(failed.payload["run_conclusion"], "failure")
-            store.write_outbox_delivery_record.reset_mock()
-            service.observe_addon_launcher(store, failed, control_plane_root=Path("."))
-            store.write_outbox_delivery_record.assert_not_called()
-            run["conclusion"] = "success"
-            service.observe_addon_launcher(store, failed, control_plane_root=Path("."))
-            recovered = store.write_outbox_delivery_record.call_args.args[0]
-            self.assertEqual(recovered.state, "delivered")
-            self.assertFalse(recovered.error_code)
             self.assertTrue(all(call.kwargs["method"] == "GET" for call in api.call_args_list))
         store.enqueue_outbox_delivery_with_idempotency.assert_not_called()
 
