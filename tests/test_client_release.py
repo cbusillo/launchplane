@@ -169,6 +169,7 @@ class ClientReleaseFixture(unittest.TestCase):
                     store=cast(Any, self.store),
                     profile=kwargs["profile"],
                     read=self.review_read,
+                    standing=kwargs.get("standing", False),
                 ),
             ),
             (
