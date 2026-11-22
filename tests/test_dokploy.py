@@ -4775,6 +4775,36 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         )
         self.assertNotIn("\n  privileged: true\n", compose_file)
 
+    def test_stable_lane_with_workers_routes_websocket_to_the_evented_port(self) -> None:
+        def websocket_ports(workers: int | None = None) -> set[str]:
+            compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+                hold_web_until_integration_readback=False,
+                image_reference="ghcr.io/cbusillo/odoo-tenant-tk@sha256:abc123",
+                domain_hosts=("tk.example.test",),
+                workers=workers,
+            )
+            labels = dict(
+                line.strip().removeprefix('- "').removesuffix('"').split("=", 1)
+                for line in compose_file.splitlines()
+                if line.strip().startswith('- "traefik.http.')
+            )
+            prefix = "traefik.http.routers."
+            return {
+                labels[
+                    f"traefik.http.services.{labels[key[: -len('.rule')] + '.service']}"
+                    + ".loadbalancer.server.port"
+                ]
+                for key, rule in labels.items()
+                if key.startswith(prefix)
+                and key.endswith("-websecure.rule")
+                and "Path(`/websocket`)" in rule
+                and rule.startswith("Host(`tk.example.test`)")
+            }
+
+        self.assertEqual(websocket_ports(), {"8072"})
+        self.assertEqual(websocket_ports(workers=6), {"8072"})
+        self.assertEqual(websocket_ports(workers=0), set())
+
     def test_render_odoo_raw_compose_file_omits_traefik_labels_without_domains(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
             hold_web_until_integration_readback=False,
@@ -4795,6 +4825,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
                 "cm-testing.shinycomputers.com",
             ),
             runtime_port=8069,
+            workers=0,
         )
 
         self.assertEqual(compose_file.count("Host(`cm-testing.shinycomputers.com`)"), 2)

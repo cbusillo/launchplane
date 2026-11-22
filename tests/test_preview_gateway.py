@@ -166,7 +166,7 @@ class PreviewGatewayTests(unittest.IsolatedAsyncioTestCase):
                             publish_host_ports=False,
                             mount_workflow_ssh=False,
                             preview_identity=identity,
-                            preview_workers=workers,
+                            workers=workers,
                         )
                     )["services"]
                     command = services[PREVIEW_GATEWAY_SERVICE]["command"]

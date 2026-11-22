@@ -2463,6 +2463,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             mount_workflow_ssh=True,
             isolated_testing=False,
             domain_certificate_type="none",
+            workers=2,
         )
         sync_source.assert_called_once()
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")
@@ -2555,7 +2556,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             "true",
         )
         self.assertEqual(
-            final_deployment.runtime_source["rendered_traefik_router_label_count"], "8"
+            final_deployment.runtime_source["rendered_traefik_router_label_count"], "16"
         )
         self.assertEqual(
             final_deployment.runtime_source[
@@ -2589,7 +2590,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             "deploy-456",
         )
         self.assertEqual(
-            final_deployment.runtime_source["converted_traefik_router_label_count"], "8"
+            final_deployment.runtime_source["converted_traefik_router_label_count"], "16"
         )
         self.assertEqual(
             final_deployment.runtime_source[
