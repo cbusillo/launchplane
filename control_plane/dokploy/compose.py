@@ -68,7 +68,6 @@ ODOO_DEFAULT_WORKERS = 6
 
 
 def lane_odoo_workers(environment: dict[str, str]) -> int:
-    """The Odoo worker count a lane runs with when its compose gets this environment."""
     try:
         return int(environment.get("ODOO_WORKERS") or ODOO_DEFAULT_WORKERS)
     except ValueError:
@@ -249,17 +248,19 @@ def render_odoo_raw_compose_file(
         web_command = json.dumps(web_command)
     if workers is not None and workers < 0:
         raise click.ClickException("Odoo workers cannot be negative.")
-    # With workers, only Odoo's evented port can bind a websocket; threaded Odoo
-    # serves it on the HTTP port. None means the compose's own ODOO_WORKERS default.
-    effective_workers = ODOO_DEFAULT_WORKERS if workers is None else workers
-    evented_backend_port = runtime_port if effective_workers == 0 else PREVIEW_EVENTED_PORT
+    odoo_serves_websocket_on_evented_port = (
+        ODOO_DEFAULT_WORKERS if workers is None else workers
+    ) != 0
+    evented_backend_port = (
+        PREVIEW_EVENTED_PORT if odoo_serves_websocket_on_evented_port else runtime_port
+    )
     web_route_labels = _render_odoo_web_traefik_labels(
         domain_hosts=domain_hosts,
         runtime_port=runtime_port,
         domain_certificate_type=domain_certificate_type,
         isolated_testing=isolated_testing,
         evented_port=PREVIEW_EVENTED_PORT
-        if preview_identity is not None or effective_workers
+        if preview_identity is not None or odoo_serves_websocket_on_evented_port
         else None,
     )
     web_host_ports = ""

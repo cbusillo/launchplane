@@ -2725,7 +2725,6 @@ def execute_odoo_stable_target_replacement_apply(
             runtime_port=profile.runtime_port,
             published_copy=published_copy,
             generation=generation,
-            # The provider keeps ODOO_WORKERS only from the site's records, below.
             workers=dokploy_compose.lane_odoo_workers(runtime_environment_values),
         )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))

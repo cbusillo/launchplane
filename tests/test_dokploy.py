@@ -4789,7 +4789,6 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
                 if line.strip().startswith('- "traefik.http.')
             )
             prefix = "traefik.http.routers."
-            # The port each websecure router sends a /websocket request to, through its service.
             return {
                 labels[
                     f"traefik.http.services.{labels[key[: -len('.rule')] + '.service']}"
