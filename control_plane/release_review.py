@@ -545,7 +545,6 @@ def build_release_review(
         except FileNotFoundError:
             pass
     first_live_origin = ""
-    # The Director's standing acceptance releases a prelaunch product without going live.
     if profile.driver_id == "odoo" and profile.production_use == "prelaunch" and not standing:
         from control_plane.odoo_website_indexing import production_origin
 

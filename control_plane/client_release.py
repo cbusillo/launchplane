@@ -1416,11 +1416,11 @@ def _record_standing_acceptance(
     candidate = release_version(store=store, profile=profile, instance="testing")
     if production == candidate:
         return
-    # A prelaunch release starts only from the Director's request for these exact versions.
-    requested = profile.production_use == "prelaunch" or requires_initial_settings_request(
-        production, candidate
+    needs_director_request = (
+        profile.production_use == "prelaunch"
+        or requires_initial_settings_request(production, candidate)
     )
-    if requested:
+    if needs_director_request:
         request = profile.release_request
         if request is None or request.production != production or request.candidate != candidate:
             return
@@ -1467,9 +1467,8 @@ def _record_standing_acceptance(
         checklist is None
         or checklist.production == checklist.candidate
         or not review.checklist_complete
-        # Testing or production may change between reads; accept only what was requested.
-        or requested
-        and (checklist.production, checklist.candidate) != (production, candidate)
+        or needs_director_request
+        and not _director_requested(profile, checklist)
     ):
         return
     existing = review.latest_decision

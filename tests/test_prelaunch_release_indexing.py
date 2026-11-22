@@ -466,7 +466,6 @@ class PrelaunchReleaseTests(release.ClientReleaseFixture):
         self.store.write_release_review_decision_record(accepted)
         candidate = accepted.checklist.candidate.artifact_id
         production = accepted.checklist.production.artifact_id
-        # Backup, promotion, drill rollback, second backup, repromotion.
         for artifact in ("", candidate, production, "", candidate):
             (operation,) = self.advance()
             self.finish(operation)
