@@ -1343,6 +1343,7 @@ def _render_replacement_compose(
     runtime_port: int,
     published_copy: TestingPublicationRecord | None,
     generation: FreshOdooTestingGeneration | None,
+    workers: int | None = None,
 ) -> str:
     if published_copy is not None:
         return render_maintained_testing_copy(
@@ -1359,6 +1360,7 @@ def _render_replacement_compose(
         mount_workflow_ssh=generation is None,
         isolated_testing=generation is not None,
         domain_certificate_type=generation.certificate_type if generation is not None else "none",
+        workers=workers,
     )
 
 
@@ -1869,6 +1871,7 @@ def build_odoo_stable_target_replacement_plan(
                         runtime_port=profile.runtime_port,
                         published_copy=published_copy,
                         generation=generation,
+                        workers=dokploy_compose.lane_odoo_workers(recorded_runtime_values),
                     )
                     current_target.compose_matches_generated = _provider_compose_matches_generated(
                         live_target_payload, rendered_compose
@@ -2722,6 +2725,8 @@ def execute_odoo_stable_target_replacement_apply(
             runtime_port=profile.runtime_port,
             published_copy=published_copy,
             generation=generation,
+            # The provider keeps ODOO_WORKERS only from the site's records, below.
+            workers=dokploy_compose.lane_odoo_workers(runtime_environment_values),
         )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
         current_identity = _runtime_identity_map(current_env_map)

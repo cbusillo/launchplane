@@ -2463,6 +2463,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             mount_workflow_ssh=True,
             isolated_testing=False,
             domain_certificate_type="none",
+            workers=2,  # the site records above set ODOO_WORKERS=2
         )
         sync_source.assert_called_once()
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")

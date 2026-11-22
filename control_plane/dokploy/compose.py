@@ -65,6 +65,16 @@ def discard_unused_dokploy_network(actual: dict[str, Any], *, expected: dict[str
 
 
 ODOO_DEFAULT_WORKERS = 6
+
+
+def lane_odoo_workers(environment: dict[str, str]) -> int:
+    """The Odoo worker count a lane runs with when its compose gets this environment."""
+    try:
+        return int(environment.get("ODOO_WORKERS") or ODOO_DEFAULT_WORKERS)
+    except ValueError:
+        raise click.ClickException("ODOO_WORKERS must be an integer.") from None
+
+
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
 ODOO_DATABASE_DATA_DIRECTORY = "/var/lib/postgresql/data"
 ODOO_DATABASE_IMAGE = "postgres:17"

@@ -4783,11 +4783,23 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
                 domain_hosts=("tk.example.test",),
                 workers=workers,
             )
-            marker = "-websocket-websecure.loadbalancer.server.port="
-            return {
-                line.rsplit("=", 1)[1].rstrip('"')
+            labels = dict(
+                line.strip().removeprefix('- "').removesuffix('"').split("=", 1)
                 for line in compose_file.splitlines()
-                if marker in line
+                if line.strip().startswith('- "traefik.http.')
+            )
+            prefix = "traefik.http.routers."
+            # The port each websecure router sends a /websocket request to, through its service.
+            return {
+                labels[
+                    f"traefik.http.services.{labels[key[: -len('.rule')] + '.service']}"
+                    + ".loadbalancer.server.port"
+                ]
+                for key, rule in labels.items()
+                if key.startswith(prefix)
+                and key.endswith("-websecure.rule")
+                and "Path(`/websocket`)" in rule
+                and rule.startswith("Host(`tk.example.test`)")
             }
 
         self.assertEqual(websocket_ports(), {"8072"})
