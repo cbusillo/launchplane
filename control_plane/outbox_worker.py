@@ -209,7 +209,6 @@ def run_outbox_worker_loop(
             isinstance(record_store, PostgresRecordStore)
             and time.monotonic() - last_addon_scan >= ADDON_RUNNER_SCAN_SECONDS
         ):
-            last_addon_scan = time.monotonic()
             try:
                 request_addon_runner_containers(record_store, control_plane_root=control_plane_root)
             except (
@@ -223,6 +222,9 @@ def run_outbox_worker_loop(
                 _LOGGER.warning(
                     "Addon runner dispatch scan unavailable (%s).", type(error).__name__
                 )
+            # Count from the scan's end so a slow scan never limits deliveries,
+            # including the dispatches it just queued, to one per scan.
+            last_addon_scan = time.monotonic()
         try:
             result = run_outbox_worker_once(
                 record_store=record_store,

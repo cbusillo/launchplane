@@ -81,7 +81,8 @@ and commands belong to the product. Runs from `push`, `pull_request`,
 repositories, `pull_request_target`, old job attempts, and mismatched recipe
 sources are refused.
 
-The existing outbox worker scans queued addon jobs every minute. It uses the
+The existing outbox worker scans queued addon jobs a minute after its previous
+scan ends and sends outbox deliveries in between. It uses the
 Runner Lifecycle App's existing repository-scoped Actions read permission to
 verify the job source, then queues the retained lifecycle workflow
 once per job through the existing outbox. Its dispatch source comes from the
@@ -92,17 +93,19 @@ Dispatch observation matches the original job's unique workflow run title.
 The scan verifies job/source identity; only the executor downloads the recipe.
 The executor verifies its artifact digest and same-source identity before building.
 
-The scan observes outstanding launcher records even after the tenant run finishes.
+The scan observes each launcher until its run completes, even after the tenant
+run finishes, and never reads a completed launcher again, so a scan's cost does
+not grow with launcher history.
 The existing outbox record projects terminal launcher failure into failed
 operations; its stored external URL retains the original run link. The inspection
 surface supplies the tenant job/run IDs in routing inputs. It does not silently
 register a replacement. Inspect that original run and its cleanup receipt:
 after correcting the failure and confirming cleanup, use the existing failed-run
 recovery on that same workflow run. An uncertain cleanup must first reconcile
-the original receipt through its always-step or `--cleanup-only`. A successful
-recovery of that original run clears the outbox failure. The queued tenant job
-can still be waiting while its launcher is failed; the operations record is the
-failure signal, not a claim that the tenant test ran.
+the original receipt through its always-step or `--cleanup-only`. The outbox
+record stays failed after such a recovery; the recovered run is the evidence.
+The queued tenant job can still be waiting while its launcher is failed; the
+operations record is the failure signal, not a claim that the tenant test ran.
 If dispatch failed before any launcher run existed, correct the reported
 dispatch failure, then cancel and **Re-run all jobs** on the tenant workflow.
 That explicit new workflow attempt has new job identities. Never delete the
