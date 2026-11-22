@@ -139,8 +139,6 @@ def runner_lifecycle_workflow_source(store: object) -> tuple[str, str]:
 def request_addon_runner_containers(
     store: AddonRunnerDispatchStore, *, control_plane_root: Path
 ) -> tuple[str, ...]:
-    # A launcher whose run completed is settled. Re-reading every past launcher
-    # each scan grew without bound and delayed new dispatches for hours.
     for record in store.list_outbox_delivery_records(
         states=("delivered",),
         kind="github_workflow_dispatch",
