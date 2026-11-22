@@ -545,7 +545,10 @@ def _covering_decision(
     if (
         profile.production_use == "prelaunch"
         and not decision.checklist.first_live_origin
-        and decision.acceptance_source != "director_standing"
+        and not (
+            decision.acceptance_source == "director_standing"
+            and (recovering or _director_requested(profile, decision.checklist))
+        )
     ):
         return None
     if (
@@ -584,6 +587,17 @@ def _covering_decision(
     ):
         return None
     return profile, decision
+
+
+def _director_requested(
+    profile: LaunchplaneProductProfileRecord, checklist: ReleaseChecklist
+) -> bool:
+    request = profile.release_request
+    return (
+        request is not None
+        and request.production == checklist.production
+        and request.candidate == checklist.candidate
+    )
 
 
 def accepted_release_can_start(store: object, decision: ReleaseReviewDecisionRecord) -> bool:
@@ -1403,9 +1417,10 @@ def _record_standing_acceptance(
     if production == candidate:
         return
     # A prelaunch release starts only from the Director's request for these exact versions.
-    if profile.production_use == "prelaunch" or requires_initial_settings_request(
+    requested = profile.production_use == "prelaunch" or requires_initial_settings_request(
         production, candidate
-    ):
+    )
+    if requested:
         request = profile.release_request
         if request is None or request.production != production or request.candidate != candidate:
             return
@@ -1452,6 +1467,9 @@ def _record_standing_acceptance(
         checklist is None
         or checklist.production == checklist.candidate
         or not review.checklist_complete
+        # Testing or production may change between reads; accept only what was requested.
+        or requested
+        and (checklist.production, checklist.candidate) != (production, candidate)
     ):
         return
     existing = review.latest_decision
