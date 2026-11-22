@@ -522,6 +522,7 @@ def build_release_review(
     profile: LaunchplaneProductProfileRecord,
     read: GitHubRead,
     initial_version_test_notes: InitialVersionTestNotes | None = None,
+    standing: bool = False,
 ) -> ReleaseReviewStatus:
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
@@ -544,7 +545,8 @@ def build_release_review(
         except FileNotFoundError:
             pass
     first_live_origin = ""
-    if profile.driver_id == "odoo" and profile.production_use == "prelaunch":
+    # The Director's standing acceptance releases a prelaunch product without going live.
+    if profile.driver_id == "odoo" and profile.production_use == "prelaunch" and not standing:
         from control_plane.odoo_website_indexing import production_origin
 
         first_live_origin = production_origin(store, profile)
@@ -880,11 +882,12 @@ def current_release_review(
     record_store: object,
     profile: LaunchplaneProductProfileRecord,
     include_prelaunch: bool = False,
+    standing: bool = False,
     trace_id: str = "",
     initial_version_test_notes: InitialVersionTestNotes | None = None,
 ) -> ReleaseReviewStatus:
     with ExitStack() as credentials:
-        if profile.prelaunch_bootstrap_authorized and not include_prelaunch:
+        if profile.prelaunch_bootstrap_authorized and not (include_prelaunch or standing):
             return ReleaseReviewStatus(required=False, approved=True)
         try:
             lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
@@ -917,6 +920,7 @@ def current_release_review(
                 profile=profile,
                 read=read,
                 initial_version_test_notes=initial_version_test_notes,
+                standing=standing,
             )
         # Provider errors may contain private URLs: log and return only the fixed code.
         except ReleaseEvidenceUnavailable as error:

@@ -232,6 +232,29 @@ class ReleaseEvidenceReasonTests(unittest.TestCase):
         self.assertFalse(review.approved)
         self.assertIn("reload", " ".join(review.blockers).casefold())
 
+    def test_standing_review_of_an_explicit_prelaunch_odoo_product_never_binds_going_live(
+        self,
+    ) -> None:
+        prelaunch = profile().model_copy(update={"production_use": "prelaunch"})
+        self.assertTrue(prelaunch.prelaunch_bootstrap_authorized)
+        with patch(
+            "control_plane.odoo_website_indexing.production_origin",
+            return_value="https://example.test",
+        ):
+            exempt = current_release_review(
+                control_plane_root=self.root, record_store=self.store, profile=prelaunch
+            )
+            standing = current_release_review(
+                control_plane_root=self.root,
+                record_store=self.store,
+                profile=prelaunch,
+                standing=True,
+            )
+        self.assertIsNone(exempt.checklist)
+        assert standing.checklist is not None, standing.blockers
+        self.assertEqual(standing.checklist.first_live_origin, "")
+        self.assertEqual(standing.checklist.candidate.source_commit, HEAD)
+
 
 if __name__ == "__main__":
     unittest.main()

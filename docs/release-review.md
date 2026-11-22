@@ -782,7 +782,11 @@ When the product's recorded Client accepts an eligible Odoo or generic-web
 release that is not held, the decision stores `release_start`, fixed at that
 moment. A prelaunch Odoo checklist additionally binds `first_live_origin` and
 tells the Client that acceptance establishes live use after success. Old
-acceptances without that binding cannot start a prelaunch release. Generic-web
+acceptances without that binding cannot start a prelaunch release. Under
+`director_standing`, a recorded Director release request
+(`POST /v1/release-review/requests`) for the exact versions starts the ordinary
+gated release from standing acceptance instead; its checklist binds no
+`first_live_origin`, so indexing and `production_use` stay prelaunch. Generic-web
 prelaunch behavior is unchanged. Recording it starts nothing by itself. Launchplane's Odoo stable worker
 checks about every 30 seconds and queues the same operations the admin's
 Release panel queues:
@@ -824,8 +828,8 @@ rewrite the checklist and audit fields.
 The Client's decision route uses the same creation and publication operations,
 so a Client retry cannot upsert a stale unpublished snapshot over the worker's
 publication. An already published winner needs no further source-control lookup.
-Missing notes, missing lane identities or a Client, a held or prelaunch product,
-and a request for changes or admin override on that checklist start nothing.
+Missing notes, missing lane identities or a Client, a held product, a prelaunch
+product without that request, and a request for changes or admin override on that checklist start nothing.
 After a stopped release, a ready candidate receives a fresh standing acceptance,
 including when its checklist is unchanged, once its normal testing deployment
 has qualified it again after the failure. Run the supported testing deployment

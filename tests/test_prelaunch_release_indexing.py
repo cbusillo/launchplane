@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, cast
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from collections.abc import Callable
 from unittest.mock import patch
@@ -426,4 +426,55 @@ class PrelaunchReleaseTests(release.ClientReleaseFixture):
             )
         )
         self.assertEqual(self.advance(), ())
+        self.assertTrue(self.protected)
+
+    def test_director_request_releases_prelaunch_through_the_gate_without_going_live(self) -> None:
+        from control_plane.release_request import record_release_request
+        from control_plane.release_review import ReleaseReviewStore, build_release_review
+
+        self.switch("director_standing")
+        current = self.store.read_product_profile_record(PRODUCT)
+        self.assertTrue(current.prelaunch_bootstrap_authorized)
+        with patch("control_plane.client_release.publish_release_decision") as publish:
+            self.assertEqual(self.advance(), ())
+            publish.assert_not_called()
+        self.assertEqual(self.store.list_release_review_decision_records(product=PRODUCT), ())
+        store = cast(ReleaseReviewStore, cast(object, self.store))
+        review = build_release_review(store=store, profile=current, read=self.review_read)
+        record_release_request(
+            store=store,
+            profile=current,
+            review=review,
+            source="director_request",
+            reason="Release the new look while staying prelaunch.",
+            decision_reference="https://github.com/example/site/issues/1#issuecomment-1",
+            actor="director",
+        )
+        with patch("control_plane.client_release.publish_release_decision") as publish:
+            self.assertEqual(self.advance(), ())
+            publish.assert_called_once()
+        (accepted,) = self.store.list_release_review_decision_records(product=PRODUCT)
+        self.assertEqual(accepted.acceptance_source, "director_standing")
+        self.assertEqual(accepted.checklist.first_live_origin, "")
+        accepted = accepted.model_copy(
+            update={"release_issue_url": "https://github.com/example/site/issues/2"}
+        )
+        self.store.write_release_review_decision_record(accepted)
+        candidate = accepted.checklist.candidate.artifact_id
+        production = accepted.checklist.production.artifact_id
+        # Backup, promotion, drill rollback, second backup, repromotion.
+        for artifact in ("", candidate, production, "", candidate):
+            (operation,) = self.advance()
+            self.finish(operation)
+            if artifact:
+                self.set_prod(artifact)
+        self.assertEqual(self.advance(), ())
+        run = read_client_release_run(
+            store=self.store,
+            profile=self.store.read_product_profile_record(PRODUCT),
+            decision=accepted,
+        )
+        assert run is not None
+        self.assertEqual(run.state, "passed")
+        self.assertEqual(self.production_use(), "prelaunch")
         self.assertTrue(self.protected)

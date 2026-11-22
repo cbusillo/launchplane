@@ -88,9 +88,9 @@ def record_release_request(
         and review.checklist.initial_version is not None
     ):
         initial_notes = profile.release_request.initial_version_review
-    standing_settings_request = (
-        profile.release_on_acceptance == "director_standing"
-        and review.checklist is not None
+    standing_request = profile.release_on_acceptance == "director_standing" and (
+        profile.production_use == "prelaunch"
+        or review.checklist is not None
         and (
             review.checklist.initial_version is not None
             or requires_initial_settings_request(
@@ -98,11 +98,9 @@ def record_release_request(
             )
         )
     )
-    if not _client_release_requests_enabled(
-        profile, include_director_standing=standing_settings_request
-    ):
+    if not _client_release_requests_enabled(profile, include_director_standing=standing_request):
         raise ValueError("This product does not request Client releases.")
-    if not _ready(review, profile):
+    if not _ready(review, profile, standing=standing_request):
         raise ValueError("The release is not ready for a Client request.")
     assert review.checklist is not None
     with store.release_review_publication_lock(record_id=f"invitation:{profile.product}"):

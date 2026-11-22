@@ -542,7 +542,11 @@ def _covering_decision(
     if not latest:
         return None
     decision = latest[0]
-    if profile.production_use == "prelaunch" and not decision.checklist.first_live_origin:
+    if (
+        profile.production_use == "prelaunch"
+        and not decision.checklist.first_live_origin
+        and decision.acceptance_source != "director_standing"
+    ):
         return None
     if (
         (decision_record_id and decision.record_id != decision_record_id)
@@ -1390,6 +1394,7 @@ def _record_standing_acceptance(
         or not profile.is_active
         or not profile.owner.is_set
         or profile.production_use == "prelaunch"
+        and profile.driver_id != "odoo"
     ):
         return
     _require_standing_release_available(store, profile.product)
@@ -1397,7 +1402,10 @@ def _record_standing_acceptance(
     candidate = release_version(store=store, profile=profile, instance="testing")
     if production == candidate:
         return
-    if requires_initial_settings_request(production, candidate):
+    # A prelaunch release starts only from the Director's request for these exact versions.
+    if profile.production_use == "prelaunch" or requires_initial_settings_request(
+        production, candidate
+    ):
         request = profile.release_request
         if request is None or request.production != production or request.candidate != candidate:
             return
@@ -1437,7 +1445,7 @@ def _record_standing_acceptance(
     # newer than this standing decision even if its DB write finishes first.
     decided_at = datetime.now(UTC).isoformat()
     review = current_release_review(
-        control_plane_root=control_plane_root, record_store=store, profile=profile
+        control_plane_root=control_plane_root, record_store=store, profile=profile, standing=True
     )
     checklist = review.checklist
     if (
@@ -2026,7 +2034,10 @@ def _require_current_release(
         if candidate != checklist.candidate:
             raise ClientReleaseNotReady("release_changed")
     review = current_release_review(
-        control_plane_root=control_plane_root, record_store=store, profile=profile
+        control_plane_root=control_plane_root,
+        record_store=store,
+        profile=profile,
+        standing=decision.acceptance_source == "director_standing",
     )
     if profile.driver_id == "generic-web":
         if (

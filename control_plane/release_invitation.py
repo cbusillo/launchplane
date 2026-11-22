@@ -73,7 +73,11 @@ def _client_release_requests_enabled(
 ) -> bool:
     return (
         profile.is_active
-        and profile.production_use != "prelaunch"
+        and (
+            profile.production_use != "prelaunch"
+            or include_director_standing
+            and profile.driver_id == "odoo"
+        )
         and profile.owner.is_set
         and (include_director_standing or profile.release_on_acceptance != "director_standing")
     )
@@ -365,10 +369,12 @@ def _release_invitation_markers(product: str, candidate: ReleaseVersion) -> set[
     }
 
 
-def _ready(review: ReleaseReviewStatus, profile: LaunchplaneProductProfileRecord) -> bool:
+def _ready(
+    review: ReleaseReviewStatus, profile: LaunchplaneProductProfileRecord, *, standing: bool = False
+) -> bool:
     checklist = review.checklist
     return bool(
-        review.required
+        (review.required or standing)
         and not review.approved
         and review.latest_decision is None
         and review.unavailable_reason is None
