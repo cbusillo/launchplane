@@ -29,7 +29,7 @@ COPY control_plane /app/control_plane
 COPY frontend /app/frontend
 RUN pnpm build
 
-FROM mirror.gcr.io/library/golang:1.27.3-bookworm AS artifact-scanner
+FROM mirror.gcr.io/library/golang:1.27.4-bookworm AS artifact-scanner
 
 ARG TRIVY_VERSION=v0.76.0
 ARG TRIVY_GO_JOSE_VERSION=v4.1.6
