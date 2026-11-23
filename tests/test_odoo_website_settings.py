@@ -611,7 +611,6 @@ class WebsiteSettingsTests(unittest.TestCase):
             )
 
     def test_forward_release_resolves_indexing_after_module_update(self) -> None:
-        # The candidate adds a stored website column; its code cannot load website before update.
         for adds_website_field, rollback, refusal in (
             (True, False, ""),
             (False, False, ""),
