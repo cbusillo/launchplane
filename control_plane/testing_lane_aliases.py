@@ -205,10 +205,9 @@ def require_names_available(
     bindings = store.list_route_binding_records()
     claimed = {retained_hostname_identity(host) for host in store.retained_disposable_hostnames()}
     for other in bindings:
-        # Each other native lane's served names, whether recorded here or baked in by a rebuild.
         if (other.product, other.context) != (product, context):
-            route = retained_testing_route(store, other)
-            claimed.update(route.aliases if route else ())
+            other_lane_served_route = retained_testing_route(store, other)
+            claimed.update(other_lane_served_route.aliases if other_lane_served_route else ())
     for name in names:
         if name in claimed:
             raise ValueError("Another lane or retained custody already holds this hostname.")
@@ -358,7 +357,6 @@ class TestingLaneAliasesAdapter:
     ) -> ProviderObservation:
         if reconciliation_key != self.plan.digest:
             return ProviderObservation("unknown")
-        # Publication and commit both settle from their own evidence on a repeat.
         return ProviderObservation("absent", retry_safe=True, preserve_effect_checkpoint=True)
 
     def require_reviewed_lane(self) -> RuntimeIdentity:
@@ -391,14 +389,13 @@ class TestingLaneAliasesAdapter:
 
         assert isinstance(lease, ProviderEvidenceLease)
         try:
-            # Hold the lane's own lock so no deploy or rebuild sees the file and record apart.
             with self.store.testing_verification_lane_guard(
                 product=self.plan.product, context=self.plan.context
-            ) as lane_checkpoint:
+            ) as lane_lock_held:
                 identity = self.require_reviewed_lane()
 
                 def checkpoint(phase: str) -> None:
-                    lane_checkpoint()
+                    lane_lock_held()
                     lease.checkpoint_effect(phase)
 
                 publish_testing_copy_route(
@@ -411,7 +408,7 @@ class TestingLaneAliasesAdapter:
                     route=self.plan.route_after,
                     preimage=self.plan.route_current,
                 )
-                lane_checkpoint()
+                lane_lock_held()
                 lease.assert_current()
                 commit_lane_aliases(self.store, self.plan)
         except (ValueError, FileNotFoundError) as error:

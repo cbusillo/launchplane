@@ -18,7 +18,6 @@ from control_plane.dokploy.traefik_cutover import http_route_payload
 from control_plane.preview_gateway import PREVIEW_EVENTED_PORT
 
 type TestingRouteHost = Annotated[str, Field(pattern=r"^[a-zA-Z0-9.-]+$")]
-# The remote route writer repeats this bound in its own program text.
 MAX_TESTING_ROUTE_ALIASES = 8
 
 

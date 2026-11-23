@@ -82,7 +82,9 @@ def _route_current(plan: TestingLaneRoute, frame: dict[str, Any], workers: int) 
     return owned == route_document(plan, plan.new_backend, evented=bool(workers))
 
 
-def _observes(route: TestingLaneRoute, raw: dict[str, Any], document: dict[str, Any]) -> bool:
+def _proxy_still_serves(
+    route: TestingLaneRoute, raw: dict[str, Any], document: dict[str, Any]
+) -> bool:
     try:
         return observe_testing_route(route, raw, document) == route.new_backend
     except ValueError:
@@ -158,9 +160,8 @@ def publish_testing_copy_route(
         try:
             return _route_current(plan, frame, workers)
         except TestingRouteAuthorityChanged:
-            # The proxy may still apply the served rule for a moment after the new file lands.
             if preimage is None or not any(
-                _observes(preimage, frame["raw"], document) for document in served
+                _proxy_still_serves(preimage, frame["raw"], document) for document in served
             ):
                 raise
             raise TestingRoutePending("The proxy has not loaded the new host names yet.") from None
