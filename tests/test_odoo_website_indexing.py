@@ -10,6 +10,7 @@ from control_plane.odoo_website_indexing import (
     WebsiteIndexingAdapter,
     WebsiteIndexingExecution,
     WebsiteIndexingRequest,
+    WebsiteIndexingUnknown,
 )
 from tests.test_product_topology_read_model import (
     _TopologyStore as TopologyStore,
@@ -214,11 +215,17 @@ class WebsiteIndexingBindingTests(unittest.TestCase):
             },
         }
 
-    def test_conversion_preflight_checks_binding_without_opening_the_old_database(self) -> None:
+    def test_forward_preflight_checks_containers_without_loading_the_old_database(self) -> None:
+        self.native.side_effect = lambda **kwargs: {"status": "bound"}
         request = self.execution.observe(prepare_for_data_workflow=True)
         self.assertEqual(request["database_uuid"], self.runtime.database_uuid)
         self.assertEqual(request["indexing"]["public_origin"], self.execution.request.public_origin)
-        self.native.assert_not_called()
+        self.assertIs(self.native.call_args.kwargs["check_only"], True)
+        self.native.side_effect = lambda **kwargs: {"status": "refused", "reason": "runner_active"}
+        with self.assertRaises(WebsiteIndexingUnknown) as refused:
+            self.execution.observe(prepare_for_data_workflow=True)
+        self.assertEqual(refused.exception.evidence["website_indexing_reason"], "runner_active")
+        self.native.reset_mock()
         self.store.route_binding = None
         with self.assertRaises(ValueError):
             self.execution.observe(prepare_for_data_workflow=True)
@@ -458,7 +465,6 @@ class WebsiteIndexingBindingTests(unittest.TestCase):
     def test_interrupted_native_result_reconciles_before_after_or_unknown_without_writes(
         self,
     ) -> None:
-        from control_plane.odoo_website_indexing import WebsiteIndexingUnknown
 
         plan = self.execution.observe()
         adapter = WebsiteIndexingAdapter(self.execution, plan, "synthetic")
