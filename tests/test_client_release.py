@@ -587,14 +587,19 @@ class ClientReleaseTests(ClientReleaseFixture):
                 )
             )
             settings = OdooWebsiteSettings.model_validate(payload["website_settings"])
-            self.assertEqual(
-                payload["website_indexing"],
-                {
-                    "website_id": settings.website_id,
-                    "public_origin": settings.public_origin,
-                    "production_use": "live",
-                },
-            )
+            deferred = kwargs["deferred_website_indexing"]
+            if deferred is None:
+                self.assertEqual(
+                    payload["website_indexing"],
+                    {
+                        "website_id": settings.website_id,
+                        "public_origin": settings.public_origin,
+                        "production_use": "live",
+                    },
+                )
+            else:
+                self.assertIsNone(payload.get("website_indexing"))
+                self.assertEqual(deferred["indexing"]["production_use"], "live")
             applied.append(settings)
             return _module_update_evidence(
                 website_settings_sha256=settings.digest, website_indexing_production_use="live"
@@ -604,11 +609,12 @@ class ClientReleaseTests(ClientReleaseFixture):
             patch(
                 "control_plane.odoo_website_indexing.WebsiteIndexingExecution.observe",
                 return_value={
+                    "indexing": {"production_use": "live"},
                     "native": {
                         "website_id": settings.settings.website_id,
                         "public_origin": settings.settings.public_origin,
                         "production_use": "live",
-                    }
+                    },
                 },
             ),
             patch(

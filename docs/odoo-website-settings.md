@@ -152,13 +152,14 @@ adds or removes only its managed noindex element in native `custom_code_head`,
 preserving other head content, robots rules and the canonical domain. A tag
 proves neither search-result nor sitemap removal; crawlers must be able to fetch it.
 
-For a forward release whose recorded source and candidate Odoo majors differ,
-control-plane, runtime and route checks still run before maintenance. Native
-indexing resolution runs after database conversion in the existing website
-settings receiver, while web is stopped. It verifies the database UUID, resolves
-the website by origin, applies the required indexing state and verifies readback
-before web starts. Accepted website settings must select that same website and
-origin. Same-major releases and rollback retain observation before maintenance.
+For a forward release, control-plane, runtime and route checks still run before
+maintenance. Native indexing resolution runs after the module update or database
+conversion in the existing website settings receiver, while web is stopped, so a
+candidate that adds stored `website` fields is never loaded against columns that
+do not exist yet. It verifies the database UUID, resolves the website by origin,
+applies the required indexing state and verifies readback before web starts.
+Accepted website settings must select that same website and origin. Rollback
+retains observation before maintenance.
 
 A first release to an empty database uses that same deferred path. Its web
 installs the database when the provider starts it and holds Odoo's registry

@@ -421,30 +421,8 @@ def execute_odoo_post_deploy(
                     desired_state="prelaunch" if initial_decision is not None else None,
                     initial_release_decision=initial_decision,
                 )
-                from control_plane.contracts.odoo_stable_target_replacement import (
-                    artifact_odoo_version,
-                )
-
-                source_version = candidate_version = ""
-                if artifact_id and initial_decision is None and not rollback:
-                    candidate_version = artifact_odoo_version(
-                        getattr(record_store, "read_artifact_manifest")(artifact_id)
-                    )
-                    if candidate_version:
-                        source_tuple = getattr(record_store, "read_release_tuple_record")(
-                            context_name=request.context, channel_name="prod"
-                        )
-                        source_version = artifact_odoo_version(
-                            getattr(record_store, "read_artifact_manifest")(
-                                source_tuple.artifact_id
-                            )
-                        )
                 first_release_setup = initial_decision is not None
-                if first_release_setup or (
-                    source_version
-                    and candidate_version
-                    and source_version.split(".")[0] != candidate_version.split(".")[0]
-                ):
+                if first_release_setup or not rollback:
                     deferred_indexing = indexing_execution.observe(prepare_for_data_workflow=True)
                     indexing_state = str(deferred_indexing["indexing"]["production_use"])
                 else:
