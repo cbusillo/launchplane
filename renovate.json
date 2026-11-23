@@ -1,6 +1,10 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>cbusillo/odoo-devkit//renovate/default"],
+  "extends": [
+    "github>cbusillo/odoo-devkit//renovate/default",
+    ":dependencyDashboard",
+    ":dependencyDashboardApproval"
+  ],
   "packageRules": [
     {
       "description": "Ruff and mypy updates can change lint results, so each gets its own pull request.",
