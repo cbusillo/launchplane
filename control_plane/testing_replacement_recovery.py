@@ -4,7 +4,6 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 import hashlib
 import logging
-import re
 from pathlib import Path
 from typing import Protocol, cast
 from time import monotonic
@@ -340,7 +339,6 @@ _SYNCHRONOUS_PATHS = frozenset(
     }
 )
 _TERMINAL_PROVIDER_STATUSES = frozenset({"done", "error"})
-_PUBLIC_EFFECT_PATH = re.compile(r"(?:/[A-Za-z0-9_.-]{1,64}){1,3}|[a-z_]{1,64}")
 
 
 def _queue_idle_for(jobs: api.JsonValue, target_id: str) -> bool:
@@ -356,14 +354,20 @@ def _queue_idle_for(jobs: api.JsonValue, target_id: str) -> bool:
 
 
 def _unproven_effect_paths(journal: TestingReplacementRecoveryJournal) -> str:
+    known_paths = _SYNCHRONOUS_PATHS | {
+        "/api/compose.deploy",
+        "/api/compose.redeploy",
+        "/api/schedule.runManually",
+        "records_commit",
+    }
     paths = sorted(
         {
-            effect.path
+            effect.path if effect.path in known_paths else "unlisted"
             for effect in journal.effects
-            if not _outcome_provable(effect) and _PUBLIC_EFFECT_PATH.fullmatch(effect.path)
+            if not _outcome_provable(effect)
         }
     )
-    return f"Unacknowledged effects: {', '.join(paths) or 'unnamed'}."
+    return f"Unacknowledged effects: {', '.join(paths)}."
 
 
 def _outcome_provable(effect: TestingReplacementEffect) -> bool:

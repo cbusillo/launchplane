@@ -1072,17 +1072,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
     def test_unacknowledged_refusal_names_each_effect_path_but_no_reference(self) -> None:
         for store, root in self.stores():
             operation = self.running(store)
-            with guard_testing_replacement(store, operation, "worker", lambda _: None):
-                with patch.object(api, "_dokploy_request", side_effect=TimeoutError):
-                    with self.assertRaises(TimeoutError):
-                        api.dokploy_request(
-                            host="https://provider.test",
-                            token="fixture-token",
-                            path="/api/compose.update",
-                            method="POST",
-                            payload={"composeId": "compose-123"},
-                        )
-            fenced = self.fence(store)
+            fenced = self.lose_compose_update_reply(store, operation)
             diagnostics: list[str] = []
             with patch.object(api, "dokploy_request") as provider_read:
                 view = testing_replacement_recovery_read(
@@ -1236,6 +1226,21 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
         return fenced
 
     @contextmanager
+    def lose_compose_update_reply(
+        self, store: TestingRecoveryStore, operation: OdooStableTargetReplacementOperationRecord
+    ) -> OdooStableTargetReplacementOperationRecord:
+        with guard_testing_replacement(store, operation, "worker", lambda _: None):
+            with patch.object(api, "_dokploy_request", side_effect=TimeoutError):
+                with self.assertRaises(TimeoutError):
+                    api.dokploy_request(
+                        host="https://provider.test",
+                        token="fixture-token",
+                        path="/api/compose.update",
+                        method="POST",
+                        payload={"composeId": "compose-123"},
+                    )
+        return self.fence(store)
+
     def provider(
         self,
         history: Sequence[api.JsonObject] | None = None,
@@ -1405,17 +1410,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
     def test_dispatch_intent_survives_timeout_and_cannot_be_replayed(self) -> None:
         for store, root in self.stores():
             operation = self.running(store)
-            with guard_testing_replacement(store, operation, "worker", lambda _: None):
-                with patch.object(api, "_dokploy_request", side_effect=TimeoutError):
-                    with self.assertRaises(TimeoutError):
-                        api.dokploy_request(
-                            host="https://provider.test",
-                            token="fixture-token",
-                            path="/api/compose.update",
-                            method="POST",
-                            payload={"composeId": "compose-123"},
-                        )
-            fenced = self.fence(store)
+            fenced = self.lose_compose_update_reply(store, operation)
             assert fenced.recovery_journal is not None
             self.assertFalse(fenced.recovery_journal.effects[0].acknowledged)
             with self.provider():
