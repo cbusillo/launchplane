@@ -825,12 +825,12 @@ class OdooRehearsalAdapter:
         complete = True
         candidates = []
         for deployment in deployments:
-            created = api._deployment_created_at(deployment)
+            created = api.deployment_created_at(deployment)
             if created is None:
                 complete = False
             elif (
                 created
-                >= checkpoint_time.timestamp() - api._DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS
+                >= checkpoint_time.timestamp() - api.DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS
             ):
                 candidates.append((created, deployment))
         if len(candidates) > 32:

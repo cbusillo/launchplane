@@ -1719,6 +1719,84 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 "cancelled",
             )
 
+    def test_lost_schedule_trigger_reply_settles_only_on_the_one_run_it_started(self) -> None:
+        for store, root in self.stores():
+            operation = self.running(store).model_copy(update={"started_at": stamp(-600)})
+            getattr(store, "write_odoo_stable_target_replacement_operation_record")(operation)
+            with guard_testing_replacement(store, operation, "worker", lambda _: None):
+                with patch.object(api, "_dokploy_request", side_effect=TimeoutError):
+                    with self.assertRaises(TimeoutError):
+                        api.dokploy_request(
+                            host="https://provider.test",
+                            token="fixture-token",
+                            path="/api/schedule.runManually",
+                            method="POST",
+                            payload={"scheduleId": "data-workflow"},
+                        )
+            fenced = self.fence(store)
+            assert fenced.recovery_journal is not None
+            self.assertFalse(fenced.recovery_journal.effects[0].acknowledged)
+            earlier: api.JsonObject = {
+                "deploymentId": "earlier-deploy",
+                "status": "done",
+                "createdAt": stamp(-3600),
+            }
+            started: api.JsonObject = {
+                "deploymentId": "this-trigger",
+                "status": "error",
+                "createdAt": stamp(),
+            }
+
+            @contextmanager
+            def schedule(runs: list[api.JsonObject], *, enabled: bool = False) -> Iterator[None]:
+                def read(**kwargs: object) -> api.JsonValue:
+                    query = cast(dict[str, str], kwargs.get("query") or {})
+                    if kwargs["path"] == "/api/compose.one":
+                        return {"composeId": "compose-123"}
+                    if kwargs["path"] == "/api/schedule.one":
+                        return {"scheduleId": "data-workflow", "enabled": enabled}
+                    if kwargs["path"] == "/api/deployment.allByType":
+                        return cast(api.JsonValue, runs if query["type"] == "schedule" else [])
+                    if kwargs["path"] == "/api/deployment.queueList":
+                        return []
+                    raise AssertionError(f"Unexpected provider read: {cast(str, kwargs['path'])}")
+
+                with (
+                    patch(
+                        "control_plane.testing_replacement_recovery.source.read_dokploy_config",
+                        return_value=("https://provider.test", "fixture-token"),
+                    ),
+                    patch.object(api, "dokploy_request", side_effect=read),
+                ):
+                    yield
+
+            unsettled: tuple[tuple[list[api.JsonObject], bool], ...] = (
+                ([earlier], False),
+                ([earlier, started, {**started, "deploymentId": "another"}], False),
+                ([{**earlier, "createdAt": ""}, started], False),
+                ([{**earlier, "createdAt": stamp(-200)}], False),
+                ([{**earlier, "createdAt": ""}], False),
+                ([earlier, started, {"status": "done", "createdAt": stamp()}], False),
+                ([earlier, {**started, "status": "running"}], False),
+                ([earlier, started], True),
+            )
+            for history, timer_enabled in unsettled:
+                with schedule(history, enabled=timer_enabled):
+                    self.assertIsNone(inspect_testing_replacement(fenced, root))
+                    self.assertEqual(recover_stranded_testing_replacements(store, root), ())
+            with schedule([earlier, started]):
+                too_soon = fenced.model_copy(update={"started_at": stamp(-200)})
+                self.assertIsNone(inspect_testing_replacement(too_soon, root))
+                self.assertEqual(
+                    recover_stranded_testing_replacements(store, root), (operation.operation_id,)
+                )
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(
+                    operation.operation_id
+                ).status,
+                "cancelled",
+            )
+
     def test_missing_journal_stays_fenced_and_opens_visible_incident(self) -> None:
         for store, root in self.stores():
             self.running(store)
