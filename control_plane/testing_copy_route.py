@@ -13,6 +13,8 @@ from control_plane.dokploy.native_copy_stream import (
 )
 from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
+    TestingRouteAuthorityChanged,
+    TestingRoutePending,
     observe_testing_route,
     route_document,
     route_document_variants,
@@ -78,6 +80,13 @@ def _route_current(plan: TestingLaneRoute, frame: dict[str, Any], workers: int) 
     if observe_testing_route(plan, frame["raw"], owned) != plan.new_backend:
         raise ValueError("The current testing route selected another copy.")
     return owned == route_document(plan, plan.new_backend, evented=bool(workers))
+
+
+def _observes(route: TestingLaneRoute, raw: dict[str, Any], document: dict[str, Any]) -> bool:
+    try:
+        return observe_testing_route(route, raw, document) == route.new_backend
+    except ValueError:
+        return False
 
 
 def testing_copy_route_current(
@@ -146,7 +155,15 @@ def publish_testing_copy_route(
         owned = json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None
         if owned is not None and owned in served:
             return False
-        return _route_current(plan, frame, workers)
+        try:
+            return _route_current(plan, frame, workers)
+        except TestingRouteAuthorityChanged:
+            # The proxy may still apply the served rule for a moment after the new file lands.
+            if preimage is None or not any(
+                _observes(preimage, frame["raw"], document) for document in served
+            ):
+                raise
+            raise TestingRoutePending("The proxy has not loaded the new host names yet.") from None
 
     prior = store.read_idempotency_record(
         scope=REBUILD_SCOPE, route_path=COPY_ROUTE_EFFECT, idempotency_key=operation_id

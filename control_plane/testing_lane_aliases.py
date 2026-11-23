@@ -15,11 +15,13 @@ from control_plane.contracts.prepared_public_site import FrozenRecord
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.public_hosts import normalize_public_hosts, retained_hostname_identity
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.testing_publication import TestingPublicationRecord
 from control_plane.dokploy.testing_route import TestingLaneRoute, amend_testing_route_aliases
 from control_plane.provider_operations import (
     ProviderEvidenceLease,
     ProviderMutationOutcome,
+    ProviderMutationRejectedError,
     ProviderObservation,
     ProviderOperationLease,
     provider_operation_response_payload,
@@ -193,6 +195,7 @@ def require_names_available(
 ) -> None:
     """Refuse a name another lane, its extra names or retained custody already owns."""
     from control_plane.dokploy_testing_domain import require_testing_hostname_claims_available
+    from control_plane.testing_publication_storage import retained_testing_route
 
     if not names:
         return
@@ -202,10 +205,10 @@ def require_names_available(
     bindings = store.list_route_binding_records()
     claimed = {retained_hostname_identity(host) for host in store.retained_disposable_hostnames()}
     for other in bindings:
-        key = other.source.source_versions.get("testing_aliases")
-        if key and (other.product, other.context) != (product, context):
-            record = read_lane_aliases(store, key)
-            claimed.update(record.route_after.aliases if record else ())
+        # Each other native lane's served names, whether recorded here or baked in by a rebuild.
+        if (other.product, other.context) != (product, context):
+            route = retained_testing_route(store, other)
+            claimed.update(route.aliases if route else ())
     for name in names:
         if name in claimed:
             raise ValueError("Another lane or retained custody already holds this hostname.")
@@ -358,10 +361,7 @@ class TestingLaneAliasesAdapter:
         # Publication and commit both settle from their own evidence on a repeat.
         return ProviderObservation("absent", retry_safe=True, preserve_effect_checkpoint=True)
 
-    def apply(
-        self, provider_operation_key: str, lease: ProviderOperationLease
-    ) -> ProviderMutationOutcome:
-        from control_plane.testing_copy_route import publish_testing_copy_route
+    def require_reviewed_lane(self) -> RuntimeIdentity:
         from control_plane.testing_publication_storage import read_snapshot
 
         publication, _binding, current, _base = _current_authority(
@@ -372,28 +372,52 @@ class TestingLaneAliasesAdapter:
             self.plan.route_after,
         ):
             raise ValueError("The testing route changed since its host names were reviewed.")
+        require_names_available(
+            self.store,
+            product=self.plan.product,
+            context=self.plan.context,
+            names=set(self.plan.route_after.aliases) - set(self.plan.route_current.aliases),
+        )
         snapshot = read_snapshot(self.store, product=self.plan.product, context=self.plan.context)
         identity = snapshot.inventory.runtime_identity if snapshot.inventory else None
         if identity is None:
             raise ValueError("The testing runtime identity is unavailable.")
+        return identity
+
+    def apply(
+        self, provider_operation_key: str, lease: ProviderOperationLease
+    ) -> ProviderMutationOutcome:
+        from control_plane.testing_copy_route import publish_testing_copy_route
+
         assert isinstance(lease, ProviderEvidenceLease)
-        # Hold the lane's own lock so no deploy or rebuild sees the file and record apart.
-        with self.store.testing_verification_lane_guard(
-            product=self.plan.product, context=self.plan.context
-        ) as lane_checkpoint:
-            publish_testing_copy_route(
-                root=self.root,
-                store=self.store,
-                identity=identity,
-                checkpoint=lease.checkpoint_effect,
-                operation_id="testing-aliases:" + self.plan.digest,
-                lease_owner=lease.evidence_reservation().lease_owner,
-                route=self.plan.route_after,
-                preimage=self.plan.route_current,
-            )
-            lane_checkpoint()
-            lease.assert_current()
-            commit_lane_aliases(self.store, self.plan)
+        try:
+            # Hold the lane's own lock so no deploy or rebuild sees the file and record apart.
+            with self.store.testing_verification_lane_guard(
+                product=self.plan.product, context=self.plan.context
+            ) as lane_checkpoint:
+                identity = self.require_reviewed_lane()
+
+                def checkpoint(phase: str) -> None:
+                    lane_checkpoint()
+                    lease.checkpoint_effect(phase)
+
+                publish_testing_copy_route(
+                    root=self.root,
+                    store=self.store,
+                    identity=identity,
+                    checkpoint=checkpoint,
+                    operation_id="testing-aliases:" + self.plan.digest,
+                    lease_owner=lease.evidence_reservation().lease_owner,
+                    route=self.plan.route_after,
+                    preimage=self.plan.route_current,
+                )
+                lane_checkpoint()
+                lease.assert_current()
+                commit_lane_aliases(self.store, self.plan)
+        except (ValueError, FileNotFoundError) as error:
+            if not lease.evidence_reservation().provider_effect_started_at:
+                raise ProviderMutationRejectedError(error) from error
+            raise
         return ProviderMutationOutcome(
             202,
             provider_operation_response_payload(
