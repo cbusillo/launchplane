@@ -247,7 +247,7 @@ def _request_addon_runner(
         earlier = None
     relaunches = _launcher_relaunches(earlier)
     if earlier is not None and (
-        earlier.error_code != ADDON_LAUNCHER_FAILED or relaunches >= ADDON_LAUNCHER_RELAUNCHES
+        not _launcher_failed(earlier) or relaunches >= ADDON_LAUNCHER_RELAUNCHES
     ):
         return ""
     if job.status != "queued":
@@ -285,6 +285,16 @@ def _request_addon_runner(
         ADDON_LAUNCHER_RELAUNCHES,
     )
     return earlier.delivery_id
+
+
+def _launcher_failed(record: OutboxDeliveryRecord) -> bool:
+    if record.error_code == ADDON_LAUNCHER_FAILED:
+        return True
+    return (
+        record.state == "delivered"
+        and record.payload.get("run_status") == "completed"
+        and record.payload.get("run_conclusion") != "success"
+    )
 
 
 def _launcher_relaunches(record: OutboxDeliveryRecord | None) -> int:

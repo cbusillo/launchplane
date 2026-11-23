@@ -174,11 +174,15 @@ class LifecycleWorkflowSourceTests(TestCase):
         stored = {
             original.delivery_id: original.model_copy(
                 update={
-                    "state": "failed",
-                    "error_code": "ephemeral_addon_launcher_failed",
+                    "state": "delivered",
+                    "action": "dispatched_workflow",
                     "external_id": "78",
                     "provider_operation_key": "original-dispatch-marker",
-                    "payload": {**original.payload, "run_status": "completed"},
+                    "payload": {
+                        **original.payload,
+                        "run_status": "completed",
+                        "run_conclusion": "failure",
+                    },
                 }
             )
         }
@@ -189,8 +193,8 @@ class LifecycleWorkflowSourceTests(TestCase):
         store.list_outbox_delivery_records.return_value = ()
         store.read_outbox_delivery_record.side_effect = lambda delivery_id: stored[delivery_id]
 
-        def write(record: OutboxDeliveryRecord) -> None:
-            stored[record.delivery_id] = record
+        def write(written: OutboxDeliveryRecord) -> None:
+            stored[written.delivery_id] = written
 
         store.write_outbox_delivery_record.side_effect = write
         queued_job = build_runner_queue_wait_job(

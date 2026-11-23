@@ -364,6 +364,7 @@ class EphemeralLauncherFailureOutputTests(unittest.TestCase):
             patch.dict(os.environ, {"LAUNCHPLANE_SERVICE_TOKEN": "synthetic-bearer"}),
             patch.object(runner_lane_service_client, "build_opener", return_value=opener),
         ):
+            # noinspection PyTypeChecker
             result = CliRunner().invoke(
                 cli_runner_lanes.runner_lane_ephemeral,
                 [
