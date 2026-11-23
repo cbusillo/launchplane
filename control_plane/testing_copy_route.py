@@ -147,7 +147,7 @@ def publish_testing_copy_route(
         checkpoint("testing_route_maintenance")
 
     served: tuple[dict[str, Any], ...] = ()
-    if preimage is not None and preimage != plan:
+    if isinstance(preimage, TestingLaneRoute) and preimage.digest != plan.digest:
         served = route_document_variants(preimage, preimage.new_backend)
 
     def present() -> bool:
