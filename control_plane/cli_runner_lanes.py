@@ -219,13 +219,16 @@ def runner_lane_ephemeral(
 def _launcher_failure_cause(error: Exception) -> str:
     parts = [type(error).__name__]
     if isinstance(error, MergeTrainGitHubError):
-        # The service client builds this message from bounded fields only.
-        parts.append(str(error).strip())
+        parts.append(_bounded_service_client_message(error))
         if error.status_code is not None:
             parts.append(f"HTTP {error.status_code}")
     if error.__cause__ is not None:
         parts.append(f"caused by {type(error.__cause__).__name__}")
     return "; ".join(part for part in parts if part)
+
+
+def _bounded_service_client_message(error: MergeTrainGitHubError) -> str:
+    return str(error).strip()
 
 
 @click.command("runner-inventory")
