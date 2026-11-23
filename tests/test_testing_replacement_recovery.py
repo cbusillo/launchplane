@@ -1785,7 +1785,6 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                     self.assertIsNone(inspect_testing_replacement(fenced, root))
                     self.assertEqual(recover_stranded_testing_replacements(store, root), ())
             with schedule([earlier, started]):
-                # A run from just before this operation could sit inside the window.
                 too_soon = fenced.model_copy(update={"started_at": stamp(-200)})
                 self.assertIsNone(inspect_testing_replacement(too_soon, root))
                 self.assertEqual(

@@ -393,38 +393,52 @@ def _timestamp(value: str) -> float | None:
         return None
 
 
-def _lost_trigger_run_settled(
+_JOURNAL_STAMP_RESOLUTION_SECONDS = 1
+
+
+def _only_trigger_to_its_schedule(
+    journal: TestingReplacementRecoveryJournal, effect: TestingReplacementEffect
+) -> bool:
+    return [item.schedule_id for item in journal.effects if item.path == effect.path].count(
+        effect.schedule_id
+    ) == 1
+
+
+def _trigger_window_starts_after_operation_with_ahead_provider_clock(
+    operation: OdooStableTargetReplacementOperationRecord, effect: TestingReplacementEffect
+) -> bool:
+    dispatched_at = _timestamp(effect.dispatched_at)
+    started_at = _timestamp(operation.started_at)
+    if dispatched_at is None or started_at is None:
+        return False
+    return (
+        dispatched_at
+        - 2 * api.DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS
+        - _JOURNAL_STAMP_RESOLUTION_SECONDS
+        >= started_at
+    )
+
+
+def _every_run_identified_and_dated(history: list[api.JsonObject]) -> bool:
+    return all(
+        api.deployment_key(run) and api.deployment_created_at(run) is not None for run in history
+    )
+
+
+def _lost_trigger_started_exactly_one_run(
     operation: OdooStableTargetReplacementOperationRecord,
     effect: TestingReplacementEffect,
     history: list[api.JsonObject],
 ) -> bool:
-    """Attribute a lost `runManually` reply to the one run it can have started.
-
-    Dokploy holds the trigger open until the job ends, so a long job loses the
-    reply. The journal keeps no pre-trigger run ids. Instead, the trigger must
-    come at least two clock allowances after this operation started: a run
-    stamped inside the live read-back's window, even by a provider clock that
-    runs ahead, then started during this operation, which sent exactly one
-    trigger to the schedule. No run, or several, keeps the fence.
-    """
     assert operation.recovery_journal is not None
-    triggers = [
-        item
-        for item in operation.recovery_journal.effects
-        if item.path == effect.path and item.schedule_id == effect.schedule_id
-    ]
-    dispatched_at = _timestamp(effect.dispatched_at)
-    started_at = _timestamp(operation.started_at)
-    if len(triggers) != 1 or dispatched_at is None or started_at is None:
-        return False
-    # Journal stamps drop sub-second time; one more second covers that.
-    if dispatched_at - 2 * api.DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS - 1 < started_at:
-        return False
-    # An unidentified or undated row could be either run; never guess.
-    if any(
-        not api.deployment_key(run) or api.deployment_created_at(run) is None for run in history
+    if not (
+        _only_trigger_to_its_schedule(operation.recovery_journal, effect)
+        and _trigger_window_starts_after_operation_with_ahead_provider_clock(operation, effect)
+        and _every_run_identified_and_dated(history)
     ):
         return False
+    dispatched_at = _timestamp(effect.dispatched_at)
+    assert dispatched_at is not None
     candidates = api.triggered_schedule_deployment_candidates(
         deployments=history, before_keys=set(), trigger_started_at=dispatched_at
     )
@@ -506,7 +520,9 @@ def inspect_testing_replacement(
             if effect.path == "/api/schedule.runManually" and not raw:
                 return None
             runs = [item for item in raw if isinstance(item, dict)]
-            if not effect.acknowledged and not _lost_trigger_run_settled(operation, effect, runs):
+            if not effect.acknowledged and not _lost_trigger_started_exactly_one_run(
+                operation, effect, runs
+            ):
                 return None
             inspection[effect.reference] = f"schedule:{effect.schedule_id}:terminal"
         elif effect.path not in _SYNCHRONOUS_PATHS:
