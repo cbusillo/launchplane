@@ -341,6 +341,26 @@ _SYNCHRONOUS_PATHS = frozenset(
 _TERMINAL_PROVIDER_STATUSES = frozenset({"done", "error"})
 
 
+def _queue_idle_for(jobs: api.JsonValue, target_id: str) -> bool:
+    if not isinstance(jobs, list):
+        return False
+    for job in jobs:
+        if not isinstance(job, dict) or not isinstance(job.get("data"), dict):
+            return False
+        data = cast(api.JsonObject, job["data"])
+        if data.get("composeId") == target_id and job.get("state") not in {"completed", "failed"}:
+            return False
+    return True
+
+
+def _outcome_provable(effect: TestingReplacementEffect) -> bool:
+    if effect.acknowledged:
+        return True
+    return effect.path in {"/api/compose.deploy", "/api/compose.redeploy"} and bool(
+        effect.deployment_title
+    )
+
+
 def inspect_testing_replacement(
     operation: OdooStableTargetReplacementOperationRecord,
     root: Path,
@@ -352,7 +372,7 @@ def inspect_testing_replacement(
         return None
     if source_exceeds_current_capacity(journal):
         return None
-    if any(not effect.acknowledged for effect in journal.effects):
+    if not all(_outcome_provable(effect) for effect in journal.effects):
         return None
     host, token = source.read_dokploy_config(control_plane_root=root)
     if journal.effects and journal.provider_fingerprint != recovery_binding_fingerprint(
@@ -380,6 +400,10 @@ def inspect_testing_replacement(
         return None
     history = cast(list[api.JsonObject], raw_history)
     if any(api.deployment_status(item) not in _TERMINAL_PROVIDER_STATUSES for item in history):
+        return None
+    if not all(effect.acknowledged for effect in journal.effects) and not _queue_idle_for(
+        read("/api/deployment.queueList", {}), journal.target_id
+    ):
         return None
     inspection = {"target_id": journal.target_id, "state": "quiescent_safe_to_retry"}
     for effect in journal.effects:
@@ -506,7 +530,7 @@ def testing_replacement_recovery_read(
             )
             if not view["binding_matches"]:
                 return refuse("recovery_binding_changed")
-            if not view["effects_acknowledged"]:
+            if not all(_outcome_provable(effect) for effect in journal.effects):
                 return refuse("recovery_dispatch_unacknowledged")
             if any(
                 effect.path

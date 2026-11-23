@@ -1,6 +1,7 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from http.client import HTTPException
 import logging
 from pathlib import Path
@@ -67,6 +68,9 @@ from control_plane.runtime_environments import (
 SERVICE_CONTEXT = "launchplane"
 RUNNER_LANE_SERVICE_ROUTE = "/v1/service/runner-lanes/operation"
 RUNNER_LANE_LIFECYCLE_WORKFLOW_PATH = ".github/workflows/runner-lane-registration.yml"
+ADDON_LAUNCHER_RELAUNCHES = 3
+ADDON_LAUNCHER_FAILED = "ephemeral_addon_launcher_failed"
+ADDON_LAUNCHER_RELAUNCH_DELAY_SECONDS = 120
 _LOGGER = logging.getLogger(__name__)
 CredentialStage = Literal["identity", "repository_inventory", "token_mint"]
 
@@ -238,10 +242,14 @@ def _request_addon_runner(
     )
     delivery = _addon_runner_delivery(request, source_repository, source_ref)
     try:
-        store.read_outbox_delivery_record(delivery.delivery_id)
-        return ""
+        earlier = store.read_outbox_delivery_record(delivery.delivery_id)
     except FileNotFoundError:
-        pass
+        earlier = None
+    relaunches = _launcher_relaunches(earlier)
+    if earlier is not None and (
+        not _launcher_failed(earlier) or relaunches >= ADDON_LAUNCHER_RELAUNCHES
+    ):
+        return ""
     if job.status != "queued":
         return ""
     observed = read_addon_job(
@@ -252,10 +260,46 @@ def _request_addon_runner(
     )
     if observed.get("status") != "queued":
         return ""
-    stored = store.enqueue_outbox_delivery_with_idempotency(
-        OutboxWithIdempotencyRequest(delivery=delivery)
+    if earlier is None:
+        stored = store.enqueue_outbox_delivery_with_idempotency(
+            OutboxWithIdempotencyRequest(delivery=delivery)
+        )
+        return stored.delivery_id
+    relaunches += 1
+    store.write_outbox_delivery_record(
+        delivery.model_copy(
+            update={
+                "created_at": earlier.created_at,
+                "next_attempt_at": (
+                    datetime.now(UTC)
+                    + timedelta(seconds=ADDON_LAUNCHER_RELAUNCH_DELAY_SECONDS * relaunches)
+                ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "payload": {**delivery.payload, "launcher_relaunches": relaunches},
+            }
+        )
     )
-    return stored.delivery_id
+    _LOGGER.warning(
+        "Addon launcher %s failed while its job is queued; relaunch %d of %d.",
+        earlier.delivery_id,
+        relaunches,
+        ADDON_LAUNCHER_RELAUNCHES,
+    )
+    return earlier.delivery_id
+
+
+def _launcher_failed(record: OutboxDeliveryRecord) -> bool:
+    if record.error_code == ADDON_LAUNCHER_FAILED:
+        return True
+    return (
+        record.state == "delivered"
+        and record.payload.get("run_status") == "completed"
+        and record.payload.get("run_conclusion") != "success"
+    )
+
+
+def _launcher_relaunches(record: OutboxDeliveryRecord | None) -> int:
+    value = record.payload.get("launcher_relaunches", 0) if record is not None else 0
+    return value if isinstance(value, int) else ADDON_LAUNCHER_RELAUNCHES
 
 
 def observe_addon_launcher(
@@ -297,7 +341,7 @@ def observe_addon_launcher(
         return
     success = run.get("conclusion") == "success"
     state = "delivered" if success else "failed"
-    error_code = "" if success else "ephemeral_addon_launcher_failed"
+    error_code = "" if success else ADDON_LAUNCHER_FAILED
     store.write_outbox_delivery_record(
         record.model_copy(
             update={

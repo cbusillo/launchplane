@@ -98,14 +98,19 @@ run finishes, and never reads a completed launcher again, so a scan's cost does
 not grow with launcher history.
 The existing outbox record projects terminal launcher failure into failed
 operations; its stored external URL retains the original run link. The inspection
-surface supplies the tenant job/run IDs in routing inputs. It does not silently
-register a replacement. Inspect that original run and its cleanup receipt:
-after correcting the failure and confirming cleanup, use the existing failed-run
-recovery on that same workflow run. An uncertain cleanup must first reconcile
-the original receipt through its always-step or `--cleanup-only`. The outbox
-record stays failed after such a recovery; the recovered run is the evidence.
-The queued tenant job can still be waiting while its launcher is failed; the
-operations record is the failure signal, not a claim that the tenant test ran.
+surface supplies the tenant job/run IDs in routing inputs. While the tenant job
+is still queued, the scan dispatches a fresh launcher for it up to three times,
+two, four and six minutes after each failure, and logs each relaunch. Only a
+launcher run that completed and failed is relaunched; each run's always-step
+cleans up its own resources, and a new launcher refuses while an earlier
+registration remains. After the last relaunch fails, the record stays failed:
+inspect the latest run and its cleanup receipt, and after correcting the failure
+and confirming cleanup, use the existing failed-run recovery on that run. An
+uncertain cleanup must first reconcile the original receipt through its
+always-step or `--cleanup-only`. The queued tenant job can still be waiting while
+its launcher is failed; the operations record is the failure signal, not a claim
+that the tenant test ran. A failed launcher prints the service's HTTP status,
+error code, trace id and stage.
 If dispatch failed before any launcher run existed, correct the reported
 dispatch failure, then cancel and **Re-run all jobs** on the tenant workflow.
 That explicit new workflow attempt has new job identities. Never delete the
