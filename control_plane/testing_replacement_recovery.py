@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
+from datetime import UTC, datetime
 import hashlib
 import logging
 import re
@@ -378,9 +379,50 @@ def _unproven_effect_paths(journal: TestingReplacementRecoveryJournal) -> str:
 def _outcome_provable(effect: TestingReplacementEffect) -> bool:
     if effect.acknowledged:
         return True
+    if effect.path == "/api/schedule.runManually":
+        return bool(effect.schedule_id)
     return effect.path in {"/api/compose.deploy", "/api/compose.redeploy"} and bool(
         effect.deployment_title
     )
+
+
+def _timestamp(value: str) -> float | None:
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
+    except ValueError:
+        return None
+
+
+def _lost_trigger_run_settled(
+    operation: OdooStableTargetReplacementOperationRecord,
+    effect: TestingReplacementEffect,
+    history: list[api.JsonObject],
+) -> bool:
+    """Attribute a lost `runManually` reply to the one run it can have started.
+
+    Dokploy holds the trigger open until the job ends, so a long job loses the
+    reply. The journal keeps no pre-trigger run ids. Instead, the trigger must
+    come at least two clock allowances after this operation started: a run
+    stamped inside the live read-back's window, even by a provider clock that
+    runs ahead, then started during this operation, which sent exactly one
+    trigger to the schedule. No run, or several, keeps the fence.
+    """
+    assert operation.recovery_journal is not None
+    triggers = [
+        item
+        for item in operation.recovery_journal.effects
+        if item.path == effect.path and item.schedule_id == effect.schedule_id
+    ]
+    dispatched_at = _timestamp(effect.dispatched_at)
+    started_at = _timestamp(operation.started_at)
+    if len(triggers) != 1 or dispatched_at is None or started_at is None:
+        return False
+    if dispatched_at - 2 * api.DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS < started_at:
+        return False
+    candidates = api.triggered_schedule_deployment_candidates(
+        deployments=history, before_keys=set(), trigger_started_at=dispatched_at
+    )
+    return len(candidates) == 1
 
 
 def inspect_testing_replacement(
@@ -456,6 +498,9 @@ def inspect_testing_replacement(
             ):
                 return None
             if effect.path == "/api/schedule.runManually" and not raw:
+                return None
+            runs = [item for item in raw if isinstance(item, dict)]
+            if not effect.acknowledged and not _lost_trigger_run_settled(operation, effect, runs):
                 return None
             inspection[effect.reference] = f"schedule:{effect.schedule_id}:terminal"
         elif effect.path not in _SYNCHRONOUS_PATHS:

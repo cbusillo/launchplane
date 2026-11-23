@@ -41,7 +41,7 @@ _DOKPLOY_SCHEDULE_READBACK_INTERVAL_SECONDS = 3
 _DOKPLOY_SCHEDULE_OBSERVATION_INTERVAL_SECONDS = 10
 # Tolerated clock difference between Launchplane and the provider when matching
 # a provider deployment to the trigger that started it.
-_DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS = 120
+DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS = 120
 MAX_DOKPLOY_LOG_LINE_COUNT = 1000
 # Logical recovery effect; the fixed writer uses /terminal on its registered server.
 NATIVE_TESTING_CHUNK_UPLOAD_PATH = "/terminal/native-testing-chunk"
@@ -1657,7 +1657,7 @@ def _read_back_triggered_schedule_deployment(
                     "The trigger was not retried."
                 ),
             ) from trigger_error
-        candidates = _triggered_schedule_deployment_candidates(
+        candidates = triggered_schedule_deployment_candidates(
             deployments=deployments,
             before_keys=before_keys,
             trigger_started_at=trigger_started_at,
@@ -1681,7 +1681,7 @@ def _read_back_triggered_schedule_deployment(
         time.sleep(interval_seconds)
 
 
-def _triggered_schedule_deployment_candidates(
+def triggered_schedule_deployment_candidates(
     *,
     deployments: list[JsonObject],
     before_keys: set[str],
@@ -1692,7 +1692,7 @@ def _triggered_schedule_deployment_candidates(
         for deployment in deployments
         if deployment_key(deployment) and deployment_key(deployment) not in before_keys
     ]
-    earliest_start = trigger_started_at - _DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS
+    earliest_start = trigger_started_at - DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS
     dated = [(deployment, _deployment_created_at(deployment)) for deployment in new_deployments]
     # Missing timestamps cannot eliminate an unseen job or resolve ambiguity.
     return [
