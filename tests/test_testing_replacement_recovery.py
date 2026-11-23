@@ -1225,7 +1225,6 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
         self.assertEqual(fenced.status, "reconciliation_required")
         return fenced
 
-    @contextmanager
     def lose_compose_update_reply(
         self, store: TestingRecoveryStore, operation: OdooStableTargetReplacementOperationRecord
     ) -> OdooStableTargetReplacementOperationRecord:
@@ -1241,6 +1240,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                     )
         return self.fence(store)
 
+    @contextmanager
     def provider(
         self,
         history: Sequence[api.JsonObject] | None = None,
