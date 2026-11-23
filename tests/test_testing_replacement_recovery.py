@@ -1641,6 +1641,47 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             with self.provider([{"deploymentId": "deploy-1", "title": title, "status": "done"}]):
                 self.assertIsNotNone(inspect_testing_replacement(fenced, root))
 
+    def test_lost_deploy_reply_settles_only_on_its_exact_terminal_deployment(self) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            with guard_testing_replacement(store, operation, "worker", lambda _: None):
+                with patch.object(api, "_dokploy_request", side_effect=TimeoutError):
+                    with self.assertRaises(TimeoutError):
+                        api.trigger_deployment(
+                            host="https://provider.test",
+                            token="fixture-token",
+                            target_type="compose",
+                            target_id="compose-123",
+                            no_cache=False,
+                        )
+            fenced = self.fence(store)
+            assert fenced.recovery_journal is not None
+            effect = fenced.recovery_journal.effects[0]
+            self.assertFalse(effect.acknowledged)
+            title = effect.deployment_title
+            for history in (
+                [],
+                [{"deploymentId": "deploy-1", "title": title, "status": "running"}],
+                [
+                    {"deploymentId": "deploy-1", "title": title, "status": "done"},
+                    {"deploymentId": "deploy-2", "title": title, "status": "done"},
+                ],
+            ):
+                with self.provider(history):
+                    self.assertIsNone(inspect_testing_replacement(fenced, root))
+                    self.assertEqual(recover_stranded_testing_replacements(store, root), ())
+            with self.provider([{"deploymentId": "deploy-1", "title": title, "status": "error"}]):
+                self.assertEqual(
+                    recover_stranded_testing_replacements(store, root),
+                    (operation.operation_id,),
+                )
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(
+                    operation.operation_id
+                ).status,
+                "cancelled",
+            )
+
     def test_missing_journal_stays_fenced_and_opens_visible_incident(self) -> None:
         for store, root in self.stores():
             self.running(store)
