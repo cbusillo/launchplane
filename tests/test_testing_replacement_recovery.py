@@ -1080,7 +1080,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 )
             provider_read.assert_not_called()
             self.assertEqual(view["reason"], "recovery_dispatch_unacknowledged")
-            self.assertEqual(diagnostics, ["Unacknowledged effects: /api/compose.update."])
+            self.assertEqual(diagnostics, ["Unacknowledged effects: api_compose_update."])
             assert fenced.recovery_journal is not None
             self.assertNotIn(fenced.recovery_journal.effects[0].reference, diagnostics[0])
 

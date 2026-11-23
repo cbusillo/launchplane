@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import Protocol, cast
 from time import monotonic
@@ -353,6 +354,10 @@ def _queue_idle_for(jobs: api.JsonValue, target_id: str) -> bool:
     return True
 
 
+def _effect_code(path: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", path).strip("_")
+
+
 def _unproven_effect_paths(journal: TestingReplacementRecoveryJournal) -> str:
     known_paths = _SYNCHRONOUS_PATHS | {
         "/api/compose.deploy",
@@ -362,7 +367,7 @@ def _unproven_effect_paths(journal: TestingReplacementRecoveryJournal) -> str:
     }
     paths = sorted(
         {
-            effect.path if effect.path in known_paths else "unlisted"
+            _effect_code(effect.path) if effect.path in known_paths else "unlisted"
             for effect in journal.effects
             if not _outcome_provable(effect)
         }
