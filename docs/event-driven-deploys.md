@@ -1020,7 +1020,7 @@ quiescent observation remains evidence, not release permission.
 A journaled compose deploy whose reply was lost is settled by its own unique
 deployment title: recovery requires exactly one terminal deployment with that
 title in a complete terminal history, the same proof an acknowledged deploy
-needs. Every other unacknowledged effect, including a schedule run, a
+needs, and no queued or running job for the target in Dokploy's queue. Every other unacknowledged effect, including a schedule run, a
 configuration write and an untitled deploy, keeps the fence held.
 
 Only a proved-quiescent attempt is cancelled with the existing timestamped

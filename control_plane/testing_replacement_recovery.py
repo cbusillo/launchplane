@@ -341,6 +341,18 @@ _SYNCHRONOUS_PATHS = frozenset(
 _TERMINAL_PROVIDER_STATUSES = frozenset({"done", "error"})
 
 
+def _queue_idle_for(jobs: api.JsonValue, target_id: str) -> bool:
+    if not isinstance(jobs, list):
+        return False
+    for job in jobs:
+        if not isinstance(job, dict) or not isinstance(job.get("data"), dict):
+            return False
+        data = cast(api.JsonObject, job["data"])
+        if data.get("composeId") == target_id and job.get("state") not in {"completed", "failed"}:
+            return False
+    return True
+
+
 def _outcome_provable(effect: TestingReplacementEffect) -> bool:
     if effect.acknowledged:
         return True
@@ -388,6 +400,10 @@ def inspect_testing_replacement(
         return None
     history = cast(list[api.JsonObject], raw_history)
     if any(api.deployment_status(item) not in _TERMINAL_PROVIDER_STATUSES for item in history):
+        return None
+    if not all(effect.acknowledged for effect in journal.effects) and not _queue_idle_for(
+        read("/api/deployment.queueList", {}), journal.target_id
+    ):
         return None
     inspection = {"target_id": journal.target_id, "state": "quiescent_safe_to_retry"}
     for effect in journal.effects:

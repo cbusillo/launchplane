@@ -1211,12 +1211,18 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
         return fenced
 
     @contextmanager
-    def provider(self, history: Sequence[api.JsonObject] | None = None) -> Iterator[None]:
+    def provider(
+        self,
+        history: Sequence[api.JsonObject] | None = None,
+        queue: Sequence[api.JsonObject] = (),
+    ) -> Iterator[None]:
         def read(**kwargs: object) -> api.JsonValue:
             if kwargs["path"] == "/api/compose.one":
                 return {"composeId": "compose-123"}
             if kwargs["path"] == "/api/deployment.allByType":
                 return [cast(api.JsonValue, item) for item in (history or [])]
+            if kwargs["path"] == "/api/deployment.queueList":
+                return [cast(api.JsonValue, item) for item in queue]
             raise AssertionError(f"Unexpected provider read: {kwargs['path']}")
 
         with (
@@ -1674,6 +1680,13 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 with self.provider(history):
                     self.assertIsNone(inspect_testing_replacement(fenced, root))
                     self.assertEqual(recover_stranded_testing_replacements(store, root), ())
+            pending_target_job: api.JsonObject = {
+                "state": "waiting",
+                "data": {"composeId": "compose-123"},
+            }
+            with self.provider(settled, queue=[pending_target_job]):
+                self.assertIsNone(inspect_testing_replacement(fenced, root))
+                self.assertEqual(recover_stranded_testing_replacements(store, root), ())
             with self.provider(settled):
                 self.assertEqual(
                     recover_stranded_testing_replacements(store, root),
