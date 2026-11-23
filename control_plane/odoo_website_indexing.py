@@ -332,20 +332,19 @@ class WebsiteIndexingExecution:
             else runtime.database_uuid,
         }
         if prepare_for_data_workflow:
-            if self.initial_release_decision is not None:
-                bound = run_native_indexing(
-                    host=host,
-                    token=token,
-                    server_id=str(payload["serverId"]),
-                    binding=transport_binding,
-                    request=native_request,
-                    check_only=True,
+            bound = run_native_indexing(
+                host=host,
+                token=token,
+                server_id=str(payload["serverId"]),
+                binding=transport_binding,
+                request=native_request,
+                check_only=True,
+            )
+            if bound.get("status") != "bound":
+                raise WebsiteIndexingUnknown(
+                    "Native indexing binding is unverified.",
+                    evidence=indexing_failure_evidence(bound),
                 )
-                if bound.get("status") != "bound":
-                    raise WebsiteIndexingUnknown(
-                        "Native indexing binding is unverified.",
-                        evidence=indexing_failure_evidence(bound),
-                    )
             return native_request
         if reviewed is not None:
             native_request["reviewed_native"] = reviewed["native"]
