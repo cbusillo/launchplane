@@ -353,6 +353,23 @@ def _queue_idle_for(jobs: api.JsonValue, target_id: str) -> bool:
     return True
 
 
+def _unproven_effect_paths(journal: TestingReplacementRecoveryJournal) -> str:
+    known_paths = _SYNCHRONOUS_PATHS | {
+        "/api/compose.deploy",
+        "/api/compose.redeploy",
+        "/api/schedule.runManually",
+        "records_commit",
+    }
+    paths = sorted(
+        {
+            effect.path if effect.path in known_paths else "unlisted"
+            for effect in journal.effects
+            if not _outcome_provable(effect)
+        }
+    )
+    return f"Unacknowledged effects: {', '.join(paths)}."
+
+
 def _outcome_provable(effect: TestingReplacementEffect) -> bool:
     if effect.acknowledged:
         return True
@@ -531,6 +548,8 @@ def testing_replacement_recovery_read(
             if not view["binding_matches"]:
                 return refuse("recovery_binding_changed")
             if not all(_outcome_provable(effect) for effect in journal.effects):
+                if diagnostics is not None:
+                    diagnostics.append(_unproven_effect_paths(journal))
                 return refuse("recovery_dispatch_unacknowledged")
             if any(
                 effect.path
