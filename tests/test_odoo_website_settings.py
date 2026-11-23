@@ -23,6 +23,7 @@ from control_plane.contracts.odoo_website_settings import (
     OdooWebsiteSettingsIntent,
 )
 from control_plane.dokploy.source import DokployTargetDefinition
+from control_plane.odoo_website_indexing import WebsiteIndexingUnknown
 from control_plane.odoo_website_settings import (
     OdooWebsiteSettingsRequest,
     OdooWebsiteSettingsStale,
@@ -609,33 +610,25 @@ class WebsiteSettingsTests(unittest.TestCase):
                 changed.checklist.website_settings, accepted.checklist.website_settings
             )
 
-    def test_major_release_observes_converted_database_and_recovery_keeps_its_order(self) -> None:
-        for source_version, candidate_version, rollback, native_failure in (
-            ("19.0", "20.0", False, False),
-            ("19.0", "19.1", False, False),
-            ("20.0", "19.0", True, False),
-            ("19.0", "20.0", False, True),
-            ("20.0", "19.0", True, True),
+    def test_forward_release_resolves_indexing_after_module_update(self) -> None:
+        for adds_website_field, rollback, refusal in (
+            (True, False, ""),
+            (False, False, ""),
+            (False, False, "receiver"),
+            (False, False, "readback"),
+            (False, True, ""),
+            (False, True, "receiver"),
         ):
             with (
                 self.subTest(
-                    candidate_version=candidate_version,
-                    rollback=rollback,
-                    native_failure=native_failure,
+                    adds_website_field=adds_website_field, rollback=rollback, refusal=refusal
                 ),
                 TemporaryDirectory() as directory,
             ):
                 store = FilesystemRecordStore(state_dir=Path(directory))
                 seed(store)
-                for artifact_id, version in (
-                    ("artifact-prod", source_version),
-                    ("artifact-testing", candidate_version),
-                ):
-                    manifest = store.read_artifact_manifest(artifact_id)
-                    manifest.build_flags.values["odoo_version"] = version
-                    store.write_artifact_manifest(manifest)
                 events: list[str] = []
-                deferred = candidate_version == "20.0" and not rollback
+                columns_updated = [False]
 
                 native_request: dict[str, Any] = {
                     "mode": "dry-run",
@@ -646,19 +639,25 @@ class WebsiteSettingsTests(unittest.TestCase):
                     "database_uuid": "fixture-database",
                 }
 
+                def load_website() -> None:
+                    if adds_website_field and not columns_updated[0]:
+                        raise WebsiteIndexingUnknown("Native indexing did not prove its outcome.")
+                    if refusal == "receiver":
+                        raise WebsiteIndexingUnknown("Native indexing did not prove its outcome.")
+
                 def observe(*, prepare_for_data_workflow: bool = False) -> dict[str, Any]:
                     if prepare_for_data_workflow:
                         events.append("preflight")
                         return native_request
                     events.append("observe")
-                    if native_failure:
-                        raise RuntimeError("Native indexing did not prove its outcome.")
+                    load_website()
                     return {"native": {**native_request["indexing"], "website_id": 1}}
 
                 def apply(**kwargs: Any) -> dict[str, str]:
                     from control_plane.dokploy.post_deploy import OdooPostDeployReadbackFailure
 
                     events.append("data-workflow")
+                    columns_updated[0] = True
                     payload = json.loads(
                         base64.b64decode(
                             kwargs["workflow_environment_overrides"][
@@ -666,16 +665,20 @@ class WebsiteSettingsTests(unittest.TestCase):
                             ]
                         )
                     )
-                    self.assertEqual(payload.get("website_indexing") is None, deferred)
-                    if deferred:
-                        self.assertEqual(kwargs["deferred_website_indexing"], native_request)
-                        if native_failure:
-                            raise OdooPostDeployReadbackFailure(
-                                "Native indexing failed.", evidence={}
-                            )
-                    else:
+                    self.assertEqual(payload.get("website_indexing") is None, not rollback)
+                    if rollback:
                         self.assertIsNone(kwargs["deferred_website_indexing"])
-                    return _module_update_evidence(website_indexing_production_use="live")
+                    else:
+                        self.assertEqual(kwargs["deferred_website_indexing"], native_request)
+                        try:
+                            load_website()
+                        except WebsiteIndexingUnknown as error:
+                            raise OdooPostDeployReadbackFailure(str(error), evidence={}) from error
+                    return _module_update_evidence(
+                        website_indexing_production_use="prelaunch"
+                        if refusal == "readback"
+                        else "live"
+                    )
 
                 with (
                     patch(
@@ -708,15 +711,13 @@ class WebsiteSettingsTests(unittest.TestCase):
                         rollback=rollback,
                     )
                 self.assertEqual(
-                    result.post_deploy_status,
-                    "fail" if native_failure else "pass",
+                    result.post_deploy_status, "fail" if refusal else "pass", result.error_message
                 )
-                self.assertEqual(
-                    events,
-                    ["preflight", "data-workflow"]
-                    if deferred
-                    else (["observe"] if native_failure else ["observe", "data-workflow"]),
-                )
+                if rollback:
+                    expected = ["observe"] if refusal else ["observe", "data-workflow"]
+                else:
+                    expected = ["preflight", "data-workflow"]
+                self.assertEqual(events, expected)
 
     def test_release_renderer_uses_accepted_snapshot_and_rollback_clears_forward_settings(
         self,
@@ -725,11 +726,12 @@ class WebsiteSettingsTests(unittest.TestCase):
             patch(
                 "control_plane.odoo_website_indexing.WebsiteIndexingExecution.observe",
                 return_value={
+                    "indexing": {"production_use": "live"},
                     "native": {
                         "website_id": intent().settings.website_id,
                         "public_origin": intent().settings.public_origin,
                         "production_use": "live",
-                    }
+                    },
                 },
             )
         )
