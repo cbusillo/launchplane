@@ -22,6 +22,7 @@ from control_plane.contracts.disposable_lane import (
 from control_plane.merge_train_policy_operations import MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
 from control_plane.testing_generation_retirement import ROUTE as TESTING_GENERATION_RETIREMENT_ROUTE
 from control_plane.testing_address import ROUTE as TESTING_ADDRESS_ROUTE
+from control_plane.testing_lane_aliases import ROUTE as TESTING_LANE_ALIASES_ROUTE
 from control_plane.generic_web_deploy_recovery_http import (
     GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE,
     GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE,
@@ -377,6 +378,15 @@ OPERATION_SPECS = (
         "Amend the current native Odoo testing lane's canonical hostname from exact retained custody, preserving its copy, original hostname and operation fences; verify both public runtime identities before publishing canonical metadata. Cancel an unpublished amendment under its original request and key to restore the route preimage.",
         ("service_api",),
         ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
+    OperationSpec(
+        "POST",
+        TESTING_LANE_ALIASES_ROUTE,
+        "Set the extra host names a native Odoo testing lane serves beside its canonical host; apply publishes the reviewed route on the current copy and records it, and every later deploy keeps it. An empty list removes them.",
+        ("service_api", "generic_caller"),
+        ("dry-run", "apply"),
         "apply",
         ("reviewed_plan_sha256",),
     ),

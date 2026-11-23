@@ -17,7 +17,7 @@ from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_candidate_allocation import candidate_resources
 from control_plane.testing_candidate_runtime import candidate_runtime_fences
-from control_plane.testing_address_storage import effective_testing_route, read_testing_address
+from control_plane.testing_address_storage import effective_testing_authority, read_testing_address
 from control_plane.testing_publication_storage import (
     read_publication,
     read_snapshot,
@@ -58,7 +58,7 @@ def published_testing_copy(
     if record is None or record.state != "applied":
         raise ValueError("Serving testing copy publication is unavailable.")
     plan = record.plan
-    route = effective_testing_route(store, record)
+    route, expected_binding = effective_testing_authority(store, record)
     address_key = binding.source.source_versions.get("testing_address", "") if binding else ""
     address = read_testing_address(store, address_key) if address_key else None
     candidate = plan.candidate
@@ -100,9 +100,7 @@ def published_testing_copy(
         or binding is None
         or binding.source.source_versions.get("testing_route") != route.digest
         or candidate_custody != candidate
-        or not testing_binding_matches_route(
-            binding, address.plan.binding_after if address else plan.after.binding, route
-        )
+        or not testing_binding_matches_route(binding, expected_binding, route)
         or snapshot.runtime is None
     ):
         raise ValueError("Serving testing copy no longer matches its publication custody.")

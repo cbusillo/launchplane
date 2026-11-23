@@ -18,6 +18,8 @@ from control_plane.dokploy.traefik_cutover import http_route_payload
 from control_plane.preview_gateway import PREVIEW_EVENTED_PORT
 
 type TestingRouteHost = Annotated[str, Field(pattern=r"^[a-zA-Z0-9.-]+$")]
+# The remote route writer repeats this bound in its own program text.
+MAX_TESTING_ROUTE_ALIASES = 8
 
 
 def testing_route_rule(host: str, aliases: tuple[str, ...] = ()) -> str:
@@ -158,7 +160,7 @@ class TestingLaneRoute(FrozenRecord):
     context: str = Field(min_length=1)
     host: TestingRouteHost
     aliases: tuple[TestingRouteHost, ...] = Field(
-        default=(), max_length=1, exclude_if=lambda value: not value
+        default=(), max_length=MAX_TESTING_ROUTE_ALIASES, exclude_if=lambda value: not value
     )
     address_only: bool = Field(default=False, exclude_if=lambda value: not value)
     route_id: str = Field(pattern=r"^lp-testing-route-[a-f0-9]{32}$")
@@ -264,6 +266,19 @@ def amend_testing_route_address(before: TestingLaneRoute, hostname: str) -> Test
         router["rule"] = testing_route_rule(hostname, (before.host,))
         if "tls" in router:
             router["tls"]["domains"] = [{"main": hostname}, {"main": before.host}]
+    return TestingLaneRoute.model_validate(payload)
+
+
+def amend_testing_route_aliases(
+    before: TestingLaneRoute, aliases: tuple[str, ...]
+) -> TestingLaneRoute:
+    """Replace only the extra host names; the canonical host, backend and ingress stay."""
+    payload = before.model_dump(mode="json")
+    payload["aliases"] = list(aliases)
+    for router in payload["template"]["http"]["routers"].values():
+        router["rule"] = testing_route_rule(before.host, aliases)
+        if "tls" in router and (aliases or "domains" in router["tls"]):
+            router["tls"]["domains"] = [{"main": name} for name in (before.host, *aliases)]
     return TestingLaneRoute.model_validate(payload)
 
 

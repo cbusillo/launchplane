@@ -15,6 +15,7 @@ from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
     observe_testing_route,
     route_document,
+    route_document_variants,
 )
 from control_plane.dokploy.testing_route_execution import (
     TestingRouteExecutionIntent,
@@ -35,8 +36,9 @@ def _read_copy_route(
     store: PostgresRecordStore,
     identity: RuntimeIdentity,
     publication: TestingPublicationRecord,
+    route: TestingLaneRoute | None = None,
 ) -> tuple[TestingLaneRoute, DokployTestingRouteTransport, dict[str, Any], int]:
-    plan = effective_testing_route(store, publication)
+    plan = route or effective_testing_route(store, publication)
     candidate = publication.plan.candidate
     host, token = source.read_dokploy_config(
         control_plane_root=root, database_url=store.database_url
@@ -114,14 +116,17 @@ def publish_testing_copy_route(
     checkpoint: Callable[[str], None],
     operation_id: str,
     lease_owner: str,
+    route: TestingLaneRoute | None = None,
+    preimage: TestingLaneRoute | None = None,
 ) -> None:
+    """Publish the effective route, or a reviewed replacement of the served preimage."""
     if not operation_id or not lease_owner:
         raise ValueError("Testing route maintenance requires its durable service operation lease.")
     publication = published_testing_copy(store, product=identity.product, context=identity.context)
     if publication is None or identity.instance != "testing":
         raise ValueError("Route maintenance requires its applied native testing publication.")
     plan, transport, _frame, workers = _read_copy_route(
-        root=root, store=store, identity=identity, publication=publication
+        root=root, store=store, identity=identity, publication=publication, route=route
     )
 
     def guard() -> None:
@@ -132,8 +137,16 @@ def publish_testing_copy_route(
             raise ValueError("The maintained testing publication changed.")
         checkpoint("testing_route_maintenance")
 
+    served: tuple[dict[str, Any], ...] = ()
+    if preimage is not None and preimage != plan:
+        served = route_document_variants(preimage, preimage.new_backend)
+
     def present() -> bool:
-        return _route_current(plan, transport.read(), workers)
+        frame = transport.read()
+        owned = json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None
+        if owned is not None and owned in served:
+            return False
+        return _route_current(plan, frame, workers)
 
     prior = store.read_idempotency_record(
         scope=REBUILD_SCOPE, route_path=COPY_ROUTE_EFFECT, idempotency_key=operation_id
@@ -166,6 +179,7 @@ def publish_testing_copy_route(
             execution=execution,
             execution_key=attempt.key,
             writer_attempt=attempt,
+            route_preimage=preimage if preimage != plan else None,
         )
 
     effects = TestingRouteEffects(

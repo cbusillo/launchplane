@@ -901,6 +901,36 @@
         "method": "POST",
         "modes": [
           "dry-run",
+          "apply"
+        ],
+        "operation_id": "set_native_testing_lane_aliases",
+        "path": "/v1/products/{product}/testing-aliases",
+        "purpose": "Set the extra host names a native Odoo testing lane serves beside its canonical host; apply publishes the reviewed route on the current copy and records it, and every later deploy keeps it. An empty list removes them.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "a484005b81889e3f7b7d3c5fa1be9cedd2aa735760b908dc894d7d3703c7e2a9",
+        "supported_surfaces": [
+          "service_api",
+          "generic_caller"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
           "apply",
           "readback",
           "inspect"
@@ -1596,8 +1626,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "f7b0710d7115454b8231c1316bac620099faa0e1"
+    "source_commit_sha": "003dfb8d508af8103346c016c1a2bf03fcd90044"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "be81d9bee78f513c72bd3340ce925059df681a9e50ceca89090d9d37e1227e16"
+  "semantic_digest_sha256": "c763bf013bff80ac9c251feaad0e88500481f81e8b97c5d5b642729d32ef5eb9"
 }
