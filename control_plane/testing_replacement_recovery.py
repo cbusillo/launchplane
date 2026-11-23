@@ -417,7 +417,13 @@ def _lost_trigger_run_settled(
     started_at = _timestamp(operation.started_at)
     if len(triggers) != 1 or dispatched_at is None or started_at is None:
         return False
-    if dispatched_at - 2 * api.DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS < started_at:
+    # Journal stamps drop sub-second time; one more second covers that.
+    if dispatched_at - 2 * api.DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS - 1 < started_at:
+        return False
+    # An unidentified or undated row could be either run; never guess.
+    if any(
+        not api.deployment_key(run) or api.deployment_created_at(run) is None for run in history
+    ):
         return False
     candidates = api.triggered_schedule_deployment_candidates(
         deployments=history, before_keys=set(), trigger_started_at=dispatched_at

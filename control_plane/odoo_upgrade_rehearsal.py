@@ -825,7 +825,7 @@ class OdooRehearsalAdapter:
         complete = True
         candidates = []
         for deployment in deployments:
-            created = api._deployment_created_at(deployment)
+            created = api.deployment_created_at(deployment)
             if created is None:
                 complete = False
             elif (

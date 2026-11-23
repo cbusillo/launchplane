@@ -1693,7 +1693,7 @@ def triggered_schedule_deployment_candidates(
         if deployment_key(deployment) and deployment_key(deployment) not in before_keys
     ]
     earliest_start = trigger_started_at - DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS
-    dated = [(deployment, _deployment_created_at(deployment)) for deployment in new_deployments]
+    dated = [(deployment, deployment_created_at(deployment)) for deployment in new_deployments]
     # Missing timestamps cannot eliminate an unseen job or resolve ambiguity.
     return [
         deployment
@@ -1717,7 +1717,7 @@ def _read_schedule_deployments(*, host: str, token: str, schedule_id: str) -> li
     return deployments
 
 
-def _deployment_created_at(deployment: JsonObject) -> float | None:
+def deployment_created_at(deployment: JsonObject) -> float | None:
     for key_name in ("createdAt", "created_at", "startedAt", "started_at"):
         raw_value = deployment.get(key_name)
         if not isinstance(raw_value, str) or not raw_value.strip():

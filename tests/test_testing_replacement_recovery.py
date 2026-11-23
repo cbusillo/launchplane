@@ -1774,6 +1774,9 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 ([earlier], False),
                 ([earlier, started, {**started, "deploymentId": "another"}], False),
                 ([{**earlier, "createdAt": ""}, started], False),
+                ([{**earlier, "createdAt": stamp(-200)}], False),
+                ([{**earlier, "createdAt": ""}], False),
+                ([earlier, started, {"status": "done", "createdAt": stamp()}], False),
                 ([earlier, {**started, "status": "running"}], False),
                 ([earlier, started], True),
             )
