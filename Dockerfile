@@ -1,4 +1,4 @@
-FROM mirror.gcr.io/library/python:3.14-slim AS python-base
+FROM mirror.gcr.io/library/python:3.15-slim AS python-base
 
 FROM mirror.gcr.io/library/node:22-bookworm-slim AS frontend-node
 
