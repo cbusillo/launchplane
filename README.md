@@ -51,6 +51,10 @@ module selection, the Q778 focused PR pilot and the full candidate merge gate.
 
 Follow [AGENTS.md](AGENTS.md) for source delivery and DIRECTION.md for merge and release authority.
 
+During the [Launchplane freeze](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#freeze),
+select an update in the Renovate Dependency Dashboard issue to open a routine
+dependency PR. Renovate opens vulnerability remediation PRs automatically.
+
 ## Service and runtime records
 
 The service exposes authenticated HTTP APIs and the browser UI at `/` and `/ui`.
