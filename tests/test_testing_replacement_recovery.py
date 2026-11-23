@@ -1069,6 +1069,31 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 )
                 self.assertNotIn("private", str(view))
 
+    def test_unacknowledged_refusal_names_each_effect_path_but_no_reference(self) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            with guard_testing_replacement(store, operation, "worker", lambda _: None):
+                with patch.object(api, "_dokploy_request", side_effect=TimeoutError):
+                    with self.assertRaises(TimeoutError):
+                        api.dokploy_request(
+                            host="https://provider.test",
+                            token="fixture-token",
+                            path="/api/compose.update",
+                            method="POST",
+                            payload={"composeId": "compose-123"},
+                        )
+            fenced = self.fence(store)
+            diagnostics: list[str] = []
+            with patch.object(api, "dokploy_request") as provider_read:
+                view = testing_replacement_recovery_read(
+                    store, fenced, root, diagnostics=diagnostics
+                )
+            provider_read.assert_not_called()
+            self.assertEqual(view["reason"], "recovery_dispatch_unacknowledged")
+            self.assertEqual(diagnostics, ["Unacknowledged effects: /api/compose.update."])
+            assert fenced.recovery_journal is not None
+            self.assertNotIn(fenced.recovery_journal.effects[0].reference, diagnostics[0])
+
     def test_recovery_preserves_stored_preview_transport_compatibility(self) -> None:
         for mode, command in (("none", ""), ("bootstrap", "/app/seed")):
             for store, root in self.stores():

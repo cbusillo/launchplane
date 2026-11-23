@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import Protocol, cast
 from time import monotonic
@@ -339,6 +340,7 @@ _SYNCHRONOUS_PATHS = frozenset(
     }
 )
 _TERMINAL_PROVIDER_STATUSES = frozenset({"done", "error"})
+_PUBLIC_EFFECT_PATH = re.compile(r"(?:/[A-Za-z0-9_.-]{1,64}){1,3}|[a-z_]{1,64}")
 
 
 def _queue_idle_for(jobs: api.JsonValue, target_id: str) -> bool:
@@ -351,6 +353,17 @@ def _queue_idle_for(jobs: api.JsonValue, target_id: str) -> bool:
         if data.get("composeId") == target_id and job.get("state") not in {"completed", "failed"}:
             return False
     return True
+
+
+def _unproven_effect_paths(journal: TestingReplacementRecoveryJournal) -> str:
+    paths = sorted(
+        {
+            effect.path
+            for effect in journal.effects
+            if not _outcome_provable(effect) and _PUBLIC_EFFECT_PATH.fullmatch(effect.path)
+        }
+    )
+    return f"Unacknowledged effects: {', '.join(paths) or 'unnamed'}."
 
 
 def _outcome_provable(effect: TestingReplacementEffect) -> bool:
@@ -531,6 +544,8 @@ def testing_replacement_recovery_read(
             if not view["binding_matches"]:
                 return refuse("recovery_binding_changed")
             if not all(_outcome_provable(effect) for effect in journal.effects):
+                if diagnostics is not None:
+                    diagnostics.append(_unproven_effect_paths(journal))
                 return refuse("recovery_dispatch_unacknowledged")
             if any(
                 effect.path
