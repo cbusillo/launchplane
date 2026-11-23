@@ -168,6 +168,79 @@ class LifecycleWorkflowSourceTests(TestCase):
             self.assertTrue(all(call.kwargs["method"] == "GET" for call in api.call_args_list))
         store.enqueue_outbox_delivery_with_idempotency.assert_not_called()
 
+    def test_failed_launcher_for_a_queued_job_is_relaunched_until_the_bound(self) -> None:
+        request = AddonRunnerRequest(repository="example/repo", run_id=12, run_attempt=1, job_id=35)
+        original = service._addon_runner_delivery(request, "example/control", "refs/heads/main")
+        stored = {
+            original.delivery_id: original.model_copy(
+                update={
+                    "state": "delivered",
+                    "action": "dispatched_workflow",
+                    "external_id": "78",
+                    "provider_operation_key": "original-dispatch-marker",
+                    "payload": {
+                        **original.payload,
+                        "run_status": "completed",
+                        "run_conclusion": "failure",
+                    },
+                }
+            )
+        }
+        store: Any = Mock()
+        store.list_product_profile_records.return_value = (
+            SimpleNamespace(is_active=True, repository="example/repo"),
+        )
+        store.list_outbox_delivery_records.return_value = ()
+        store.read_outbox_delivery_record.side_effect = lambda delivery_id: stored[delivery_id]
+
+        def write(written: OutboxDeliveryRecord) -> None:
+            stored[written.delivery_id] = written
+
+        store.write_outbox_delivery_record.side_effect = write
+        queued_job = build_runner_queue_wait_job(
+            github_id=35,
+            run_id=12,
+            repository="example/repo",
+            workflow_name="Build",
+            job_name="addon-validation",
+            status="queued",
+            labels=("self-hosted", "lp-addon-12-1"),
+        )
+        reader = Mock()
+        reader.read_runner_queue_wait.side_effect = lambda *, workflow_status, **_: SimpleNamespace(
+            jobs=(queued_job,) if workflow_status == "queued" else ()
+        )
+        relaunched: list[tuple[str, ...]] = []
+        with (
+            patch.object(service, "read_active_authz_policy_record", return_value=self.policy()),
+            patch.object(
+                service,
+                "runner_lifecycle_token",
+                return_value=nullcontext(SimpleNamespace(token=installation_token())),
+            ),
+            patch.object(service, "GitHubRunnerQueueWaitReader", return_value=reader),
+            patch.object(service, "read_addon_job", return_value={"status": "queued"}),
+            self.assertLogs(service.__name__, level="WARNING"),
+        ):
+            for _ in range(service.ADDON_LAUNCHER_RELAUNCHES + 1):
+                relaunched.append(
+                    service.request_addon_runner_containers(store, control_plane_root=Path("."))
+                )
+                record = stored[original.delivery_id]
+                if record.state == "pending":
+                    self.assertEqual(record.provider_operation_key, "")
+                    self.assertEqual(record.external_id, "")
+                    self.assertNotIn("run_status", record.payload)
+                    self.assertGreater(record.next_attempt_at, record.updated_at)
+                    stored[original.delivery_id] = record.model_copy(
+                        update={"state": "failed", "error_code": "ephemeral_addon_launcher_failed"}
+                    )
+        self.assertEqual(
+            relaunched,
+            [(original.delivery_id,)] * service.ADDON_LAUNCHER_RELAUNCHES + [()],
+        )
+        store.enqueue_outbox_delivery_with_idempotency.assert_not_called()
+
     def test_a_missing_recipe_does_not_block_another_job_and_existing_dispatch_is_reused(
         self,
     ) -> None:
