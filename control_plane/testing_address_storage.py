@@ -489,6 +489,16 @@ def effective_testing_route(
     *,
     binding: EnvironmentRouteBindingRecord | None = None,
 ) -> TestingLaneRoute:
+    return effective_testing_authority(store, publication, binding=binding)[0]
+
+
+def effective_testing_authority(
+    store: PostgresRecordStore,
+    publication: TestingPublicationRecord,
+    *,
+    binding: EnvironmentRouteBindingRecord | None = None,
+) -> tuple[TestingLaneRoute, EnvironmentRouteBindingRecord]:
+    """The served route and the binding it expects: publication, then address, then aliases."""
     binding = (
         binding
         if binding is not None
@@ -500,6 +510,7 @@ def effective_testing_route(
     )
     key = binding.source.source_versions.get("testing_address")
     route = publication.plan.route
+    expected = publication.plan.after.binding
     record = read_testing_address(store, key) if key else None
     if key and (
         record is None
@@ -511,15 +522,28 @@ def effective_testing_route(
     ):
         raise ValueError("The testing address has no applied original publication receipt.")
     if record is not None:
-        route = record.plan.route_after
+        route, expected = record.plan.route_after, record.plan.binding_after
+    aliases_key = binding.source.source_versions.get("testing_aliases")
+    if aliases_key:
+        from control_plane.testing_lane_aliases import read_lane_aliases
+
+        aliases = read_lane_aliases(store, aliases_key)
+        if (
+            aliases is None
+            or aliases.publication_key != publication.plan.key
+            or aliases.route_before != route
+        ):
+            raise ValueError("The testing host names have no applied receipt for this route.")
+        route, expected = aliases.route_after, aliases.binding_after
     if (
-        (binding.product, binding.context, binding.instance)
+        expected is None
+        or (binding.product, binding.context, binding.instance)
         != (publication.plan.candidate.product, publication.plan.candidate.context, "testing")
         or binding.source.source_versions.get("testing_publication") != publication.plan.key
         or binding.source.source_versions.get("testing_route") != route.digest
     ):
         raise ValueError("The testing binding does not belong to its published route.")
-    return route
+    return route, expected
 
 
 def amended_testing_maintenance_overrides(

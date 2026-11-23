@@ -34,7 +34,17 @@ from control_plane.testing_address_storage import (
     save_address_plan,
     settled_testing_address,
 )
+from control_plane.contracts.public_hosts import normalize_public_hosts
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+from control_plane.testing_lane_aliases import (
+    ROUTE as ALIASES_ROUTE,
+    TestingLaneAliasesAdapter,
+    TestingLaneAliasesRequest,
+    lane_aliases_result,
+    plan_lane_aliases,
+    read_lane_aliases_plan,
+    save_lane_aliases_plan,
+)
 
 
 def register_testing_address_routes(
@@ -222,6 +232,108 @@ def register_testing_address_routes(
         response_model_exclude_none=True,
         operation_id="amend_native_testing_address",
         summary="Amend a native testing lane's canonical address while preserving its original hostname and copy",
+        responses={
+            code: {"model": dependencies.error_response_model} for code in (400, 401, 403, 409, 503)
+        },
+    )
+
+    async def set_aliases(
+        product: Annotated[str, PathParameter(min_length=1, pattern=r"^\S+$")],
+        body: TestingLaneAliasesRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(mutation_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace = dependencies.next_trace_id()
+
+        def refuse(
+            status: int, code: str, message: str, *, cause: BaseException | None = None
+        ) -> NoReturn:
+            raise dependencies.http_error(
+                status_code=status, trace_id=trace, code=code, message=message
+            ) from cause
+
+        if not director_agent_identity(identity):
+            refuse(403, "authorization_denied", "Testing host names require the Director agent.")
+        if not isinstance(record_store, PostgresRecordStore):
+            refuse(503, "database_storage_required", "Testing host names require database records.")
+        assert isinstance(record_store, PostgresRecordStore)
+        database_store = record_store
+        if body.mode == "apply" and not body.reviewed_plan_sha256:
+            refuse(400, "review_required", "Keep the reviewed testing host names plan.")
+        if body.mode == "apply" and not idempotency_key.strip():
+            refuse(400, "idempotency_key_required", "Keep the testing host names operation key.")
+
+        def prepare() -> dict[str, object]:
+            draft = plan_lane_aliases(
+                database_store,
+                product=product,
+                context=body.context,
+                hostnames=body.hostnames,
+                reason=body.reason,
+            )
+            save_lane_aliases_plan(database_store, draft)
+            return lane_aliases_result(draft, applied=False)
+
+        try:
+            if body.mode == "dry-run":
+                return accepted_evidence_response(
+                    trace_id=trace, records={}, result=await run_in_worker_thread(prepare)
+                )
+            plan = await run_in_worker_thread(
+                lambda: read_lane_aliases_plan(database_store, body.reviewed_plan_sha256)
+            )
+            if (plan.product, plan.context, plan.route_after.aliases, plan.reason) != (
+                product,
+                body.context,
+                normalize_public_hosts(list(body.hostnames)),
+                body.reason,
+            ):
+                raise ValueError("The reviewed host names belong to another request.")
+            return await run_provider_mutation(
+                record_store=database_store,
+                identity=identity,
+                route_path=ALIASES_ROUTE.format(product=product),
+                idempotency_key=idempotency_key.strip(),
+                request_fingerprint=request_fingerprint(
+                    {"product": product, **body.model_dump(mode="json", exclude={"mode"})}
+                ),
+                trace_id=trace,
+                adapter=TestingLaneAliasesAdapter(root, database_store, plan, trace),
+                original_intent={"testing_aliases_plan": plan.model_dump(mode="json")},
+                in_progress_message="Testing host names are running under their original key.",
+                reconcile_message="Testing host names need observation with the original plan and key.",
+            )
+        except NativeSourceAuthorizationDenied as error:
+            refuse(
+                403,
+                "authorization_denied",
+                "The existing provider identity denied the testing route read.",
+                cause=error,
+            )
+        except (
+            ValueError,
+            FileNotFoundError,
+            RuntimeError,
+            OSError,
+            click.ClickException,
+        ) as error:
+            refuse(
+                409,
+                "testing_aliases_unverified",
+                "The testing host names are unverified. Keep the reviewed plan and key, and read the lane again before retrying.",
+                cause=error,
+            )
+
+    app.add_api_route(
+        ALIASES_ROUTE,
+        set_aliases,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="set_native_testing_lane_aliases",
+        summary="Set the extra host names a native testing lane serves beside its canonical host",
         responses={
             code: {"model": dependencies.error_response_model} for code in (400, 401, 403, 409, 503)
         },

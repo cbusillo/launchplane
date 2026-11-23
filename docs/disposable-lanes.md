@@ -1714,6 +1714,31 @@ and behavior. They never acquire an unreviewed write. The operation does not
 replace the current copy, restore data, start a retained recipient or delete an
 application.
 
+### Extra host names on a native testing lane
+
+`POST /v1/products/{product}/testing-aliases` sets the extra host names a
+published Odoo testing lane serves beside its canonical host, for example one
+address per website in a multi-website database. The Director agent sends
+`context`, `hostnames` (every extra name; an empty list removes them) and
+`reason`. Use `mode: dry-run` first; it saves the plan and returns `plan_sha256`
+with the names before and after. Apply the same request with
+`reviewed_plan_sha256` and one stable `Idempotency-Key`. The generic caller
+supports this operation.
+
+Apply holds the lane's own lock, so it waits for no deploy or rebuild and
+none starts mid-write. It publishes the reviewed route on the current copy
+through the lane's fenced route writer, then records it, so drift checks and
+every later deploy and rebuild serve the same names. The canonical host, copy, backend and ingress
+stay as they were; the binding's domains and health checks still name only the
+canonical host. Planning and the final record write both refuse a name that
+another lane, another lane's extra names, retained custody or the canonical
+host already claims, and the writer refuses before writing if an applied router
+already answers for a new name. While an address change's record applies, the
+name it kept must stay in the list, and an address change waits until the
+extra names are removed. A rebuild carries every current name into the new
+copy's route as an ordinary name. TLS and the edge proxy for each name are outside this
+operation.
+
 ## Native testing worker integration
 
 The existing durable target-replacement action accepts testing-only

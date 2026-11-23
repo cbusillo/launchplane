@@ -327,6 +327,8 @@ def plan_testing_address(
     before = read_snapshot(store, product=product, context=context)
     if before.target.policies.staff_testing_hold is not None or before.binding is None:
         raise ValueError("The testing copy is held or has no route binding.")
+    if "testing_aliases" in before.binding.source.source_versions:
+        raise ValueError("Remove the lane's extra host names before changing its address.")
     with store._session_factory() as session:
         reservations = tuple(
             item

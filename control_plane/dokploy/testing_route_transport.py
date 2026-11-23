@@ -61,6 +61,7 @@ from control_plane.dokploy.testing_route import (
     testing_route_rule,
     testing_route_https_redirect,
     amend_testing_route_address,
+    amend_testing_route_aliases,
     possible_lane_routers,
     testing_worker_route_template,
 )
@@ -445,7 +446,7 @@ def main(spec):
     if not re.fullmatch(r'lp-testing-route-[a-f0-9]{32}',spec['route_id']) or not re.fullmatch(r'[a-zA-Z0-9.-]+',spec['host']):
         raise RuntimeError('Testing route identity is invalid')
     public_aliases=spec.get('aliases',[])
-    if not isinstance(public_aliases,list) or len(public_aliases)>1 or any(not isinstance(alias,str) or not re.fullmatch(r'[a-zA-Z0-9.-]+',alias) for alias in public_aliases) or len({host.casefold() for host in [spec['host'],*public_aliases]})!=1+len(public_aliases):
+    if not isinstance(public_aliases,list) or len(public_aliases)>8 or any(not isinstance(alias,str) or not re.fullmatch(r'[a-zA-Z0-9.-]+',alias) for alias in public_aliases) or len({host.casefold() for host in [spec['host'],*public_aliases]})!=1+len(public_aliases):
         raise RuntimeError('Testing route aliases are invalid')
     identifiers=docker('ps','-aq','--no-trunc').decode().splitlines()
     containers=json.loads(docker('inspect',*identifiers)) if identifiers else []
@@ -1077,6 +1078,7 @@ class DokployTestingRouteTransport:
         desired_compose_project: str | None = None,
         address_preimage: TestingLaneRoute | None = None,
         address_inverse: bool = False,
+        route_preimage: TestingLaneRoute | None = None,
     ) -> Literal["applied", "excluded", "busy", "unknown", "superseded"]:
         if plan.unavailable_preimage is None and self.old_runtime_identity is None:
             raise ValueError("Publication requires the originally observed retained runtime.")
@@ -1104,6 +1106,12 @@ class DokployTestingRouteTransport:
             raise ValueError("Address publication changed its original backend or route topology.")
         if address_inverse and address_preimage is None:
             raise ValueError("An address inverse requires its original route.")
+        if route_preimage is not None and (
+            not same_copy
+            or amend_testing_route_aliases(route_preimage, plan.aliases)
+            != amend_testing_route_aliases(plan, plan.aliases)
+        ):
+            raise ValueError("A served route may differ from its replacement only in host names.")
         document_plan = address_preimage if address_inverse else plan
         assert document_plan is not None
         if desired_runtime_identity is None:
@@ -1180,16 +1188,24 @@ class DokployTestingRouteTransport:
             ):
                 raise ValueError("The inverse cannot overwrite a foreign testing route file.")
         else:
-            admitted = (
-                address_preimage
-                if address_preimage is not None
-                and owned in route_document_variants(address_preimage, address_preimage.new_backend)
-                else plan
+            admitted = next(
+                (
+                    preimage
+                    for preimage in (address_preimage, route_preimage)
+                    if preimage is not None
+                    and owned in route_document_variants(preimage, preimage.new_backend)
+                ),
+                plan,
             )
             if admitted is address_preimage and possible_lane_routers(
                 frame["raw"], plan.host, plan.public_entrypoints
             ):
                 raise ValueError("The requested canonical hostname acquired an applied router.")
+            added = set(plan.aliases) - set(route_preimage.aliases if route_preimage else ())
+            if admitted is route_preimage and any(
+                possible_lane_routers(frame["raw"], name, plan.public_entrypoints) for name in added
+            ):
+                raise ValueError("A requested host name already has an applied router.")
             observed = observe_testing_route(admitted, frame["raw"], owned)
             if observed not in {expected_backend, backend}:
                 raise ValueError("Testing route no longer identifies its admitted previous copy.")
