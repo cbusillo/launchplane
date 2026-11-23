@@ -282,7 +282,7 @@ jobs:
     concurrency:
       group: launchplane-authz-policy
       cancel-in-progress: false
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-authz-apply.yml@a0061958570f6ce24ab22ab9bdd903efad8b79d5 # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-authz-apply.yml@4d8acc29a156a3f3dbf4609151cba783d1ded19f # main
     with:
       product: ${{ needs.plan.outputs.product }}
       plan_sha256: ${{ needs.plan.outputs.plan_sha256 }}
