@@ -1659,18 +1659,22 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             effect = fenced.recovery_journal.effects[0]
             self.assertFalse(effect.acknowledged)
             title = effect.deployment_title
-            for history in (
+            unsettled: tuple[list[api.JsonObject], ...] = (
                 [],
                 [{"deploymentId": "deploy-1", "title": title, "status": "running"}],
                 [
                     {"deploymentId": "deploy-1", "title": title, "status": "done"},
                     {"deploymentId": "deploy-2", "title": title, "status": "done"},
                 ],
-            ):
+            )
+            settled: list[api.JsonObject] = [
+                {"deploymentId": "deploy-1", "title": title, "status": "error"}
+            ]
+            for history in unsettled:
                 with self.provider(history):
                     self.assertIsNone(inspect_testing_replacement(fenced, root))
                     self.assertEqual(recover_stranded_testing_replacements(store, root), ())
-            with self.provider([{"deploymentId": "deploy-1", "title": title, "status": "error"}]):
+            with self.provider(settled):
                 self.assertEqual(
                     recover_stranded_testing_replacements(store, root),
                     (operation.operation_id,),
