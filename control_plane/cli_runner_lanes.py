@@ -209,11 +209,20 @@ def runner_lane_ephemeral(
         )
     except (OSError, ValueError, MergeTrainGitHubError) as error:
         raise click.ClickException(
-            f"Ephemeral addon lifecycle failed ({type(error).__name__})."
+            f"Ephemeral addon lifecycle failed ({_launcher_failure_cause(error)})."
         ) from error
     click.echo(json.dumps(result, indent=2))
     if result["status"] not in {"completed", "not_queued"}:
         raise click.ClickException("Ephemeral addon job or cleanup did not complete.")
+
+
+def _launcher_failure_cause(error: Exception) -> str:
+    parts = [type(error).__name__, str(error).strip()]
+    if isinstance(error, MergeTrainGitHubError) and error.status_code is not None:
+        parts.append(f"HTTP {error.status_code}")
+    if error.__cause__ is not None:
+        parts.append(f"caused by {type(error.__cause__).__name__}")
+    return "; ".join(part for part in parts if part)
 
 
 @click.command("runner-inventory")

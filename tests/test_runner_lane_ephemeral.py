@@ -322,3 +322,64 @@ class NativeRunnerStreamTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EphemeralLauncherFailureOutputTests(unittest.TestCase):
+    def test_failed_launch_names_status_code_trace_and_stage(self) -> None:
+        from email.message import Message
+        from io import BytesIO
+        from unittest.mock import Mock
+        from urllib.error import HTTPError
+
+        from click.testing import CliRunner
+
+        from control_plane import cli_runner_lanes
+        from control_plane.workflows import runner_lane_service_client
+
+        error = HTTPError(
+            "https://service.invalid",
+            503,
+            "synthetic-sensitive-http-message",
+            Message(),
+            BytesIO(
+                json.dumps(
+                    {
+                        "trace_id": "test-trace",
+                        "error": {
+                            "code": "runner_lifecycle_unavailable",
+                            "message": "synthetic-sensitive-body",
+                            "reason": "addon_job",
+                        },
+                    }
+                ).encode()
+            ),
+        )
+        opener = Mock()
+        opener.open.side_effect = error
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(cli_runner_lanes, "validate_runner_registration_environment"),
+            patch.object(cli_runner_lanes, "install_cancellation_handlers"),
+            patch("socket.gethostname", return_value="runner-host"),
+            patch.dict(os.environ, {"LAUNCHPLANE_SERVICE_TOKEN": "synthetic-bearer"}),
+            patch.object(runner_lane_service_client, "build_opener", return_value=opener),
+        ):
+            result = CliRunner().invoke(
+                cli_runner_lanes.runner_lane_ephemeral,
+                [
+                    "--repository=example/repo",
+                    "--run-id=12",
+                    "--run-attempt=1",
+                    "--job-id=35",
+                    "--host-name=runner-host",
+                    "--execution-lane=addon",
+                    "--service-user=runner",
+                    "--service-url=https://service.invalid",
+                    f"--output={temporary}/out",
+                    "--mutate",
+                ],
+            )
+        self.assertNotEqual(result.exit_code, 0)
+        for expected in ("HTTP 503", "runner_lifecycle_unavailable", "test-trace", "addon_job"):
+            self.assertIn(expected, result.output)
+        self.assertNotIn("synthetic-sensitive", result.output)
