@@ -1725,15 +1725,18 @@ with the names before and after. Apply the same request with
 `reviewed_plan_sha256` and one stable `Idempotency-Key`. The generic caller
 supports this operation.
 
-Apply publishes the reviewed route on the current copy through the lane's
-fenced route writer, then records it, so drift checks and every later deploy
-and rebuild serve the same names. The canonical host, copy, backend and ingress
+Apply holds the lane's own lock, so it waits for no deploy or rebuild and
+none starts mid-write. It publishes the reviewed route on the current copy
+through the lane's fenced route writer, then records it, so drift checks and
+every later deploy and rebuild serve the same names. The canonical host, copy, backend and ingress
 stay as they were; the binding's domains and health checks still name only the
-canonical host. Planning refuses a name that another lane, retained custody or
-the canonical host already claims, and the writer refuses before writing if an
-applied router already answers for a new name. A name kept by an earlier
-address change must stay in the list, and an address change waits until the
-extra names are removed. TLS and the edge proxy for each name are outside this
+canonical host. Planning and the final record write both refuse a name that
+another lane, another lane's extra names, retained custody or the canonical
+host already claims, and the writer refuses before writing if an applied router
+already answers for a new name. While an address change's record applies, the
+name it kept must stay in the list, and an address change waits until the
+extra names are removed. A rebuild carries every current name into the new
+copy's route as an ordinary name. TLS and the edge proxy for each name are outside this
 operation.
 
 ## Native testing worker integration

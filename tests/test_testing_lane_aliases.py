@@ -216,3 +216,39 @@ class TestingLaneAliasesTests(unittest.TestCase):
         with scoped_agent_transport():
             response = post()
         self.assertEqual(response.status_code, 403, response.text)
+
+    def test_removal_is_published_over_the_served_names(self) -> None:
+        added = self.plan(NAMES)
+        self.publish(added)
+        commit_lane_aliases(self.store, added)
+        removal = self.plan(())
+        self.assertEqual(
+            self.publish(removal),
+            route_document(removal.route_after, removal.route_after.new_backend),
+        )
+        commit_lane_aliases(self.store, removal)
+        self.assertEqual(effective_testing_route(self.store, self.publication).aliases, ())
+
+    def test_a_hold_placed_after_review_refuses_the_commit(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+
+        plan = self.plan(NAMES)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(
+                update={
+                    "policies": target.policies.model_copy(
+                        update={
+                            "staff_testing_hold": DokployTargetStaffTestingHold(
+                                reason="Staff trial"
+                            )
+                        }
+                    )
+                }
+            )
+        )
+        with self.assertRaises(ValueError):
+            commit_lane_aliases(self.store, plan)
+        self.assertEqual(effective_testing_route(self.store, self.publication).aliases, ())

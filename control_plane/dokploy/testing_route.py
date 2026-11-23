@@ -277,8 +277,10 @@ def amend_testing_route_aliases(
     payload["aliases"] = list(aliases)
     for router in payload["template"]["http"]["routers"].values():
         router["rule"] = testing_route_rule(before.host, aliases)
-        if "tls" in router and (aliases or "domains" in router["tls"]):
+        if "tls" in router and aliases:
             router["tls"]["domains"] = [{"main": name} for name in (before.host, *aliases)]
+        elif "tls" in router:
+            router["tls"].pop("domains", None)
     return TestingLaneRoute.model_validate(payload)
 
 

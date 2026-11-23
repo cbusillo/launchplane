@@ -188,6 +188,38 @@ def _current_authority(
     return publication, binding, current, base
 
 
+def require_names_available(
+    store: PostgresRecordStore, *, product: str, context: str, names: set[str]
+) -> None:
+    """Refuse a name another lane, its extra names or retained custody already owns."""
+    from control_plane.dokploy_testing_domain import require_testing_hostname_claims_available
+
+    if not names:
+        return
+    target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+    if target.policies.staff_testing_hold is not None:
+        raise ValueError("The testing copy is held.")
+    bindings = store.list_route_binding_records()
+    claimed = {retained_hostname_identity(host) for host in store.retained_disposable_hostnames()}
+    for other in bindings:
+        key = other.source.source_versions.get("testing_aliases")
+        if key and (other.product, other.context) != (product, context):
+            record = read_lane_aliases(store, key)
+            claimed.update(record.route_after.aliases if record else ())
+    for name in names:
+        if name in claimed:
+            raise ValueError("Another lane or retained custody already holds this hostname.")
+        require_testing_hostname_claims_available(
+            product=product,
+            target=target,
+            domain=name,
+            targets=store.list_dokploy_target_records(),
+            profiles=store.list_product_profile_records(),
+            bindings=bindings,
+            allow_current_binding=True,
+        )
+
+
 def plan_lane_aliases(
     store: PostgresRecordStore,
     *,
@@ -196,7 +228,6 @@ def plan_lane_aliases(
     hostnames: tuple[str, ...],
     reason: str,
 ) -> TestingLaneAliasesPlan:
-    from control_plane.dokploy_testing_domain import require_testing_hostname_claims_available
     from control_plane.testing_address_storage import read_testing_address
 
     publication, binding, current, base = _current_authority(store, product, context)
@@ -207,20 +238,9 @@ def plan_lane_aliases(
     address = read_testing_address(store, address_key) if address_key else None
     if address is not None and address.plan.route_before.host not in names:
         raise ValueError("The original hostname kept by the address change must stay.")
-    target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
-    reserved = {retained_hostname_identity(host) for host in store.retained_disposable_hostnames()}
-    for name in set(names) - set(base.aliases) - set(current.aliases):
-        if name in reserved:
-            raise ValueError("A hostname remains reserved by retained testing custody.")
-        require_testing_hostname_claims_available(
-            product=product,
-            target=target,
-            domain=name,
-            targets=store.list_dokploy_target_records(),
-            profiles=store.list_product_profile_records(),
-            bindings=store.list_route_binding_records(),
-            allow_current_binding=True,
-        )
+    require_names_available(
+        store, product=product, context=context, names=set(names) - set(current.aliases)
+    )
     after = base if names == base.aliases else amend_testing_route_aliases(base, names)
     return TestingLaneAliasesPlan(
         product=product,
@@ -286,6 +306,12 @@ def commit_lane_aliases(store: PostgresRecordStore, plan: TestingLaneAliasesPlan
             != plan.publication_sha256
         ):
             raise ValueError("The testing route changed before its host names were recorded.")
+        require_names_available(
+            store,
+            product=plan.product,
+            context=plan.context,
+            names=set(plan.route_after.aliases) - set(plan.route_current.aliases),
+        )
         if plan.route_after != plan.route_before:
             _save(store, session, ALIASES_RECORD_ROUTE, plan.key, plan)
         stamp = datetime.now(UTC).isoformat()
@@ -351,18 +377,23 @@ class TestingLaneAliasesAdapter:
         if identity is None:
             raise ValueError("The testing runtime identity is unavailable.")
         assert isinstance(lease, ProviderEvidenceLease)
-        publish_testing_copy_route(
-            root=self.root,
-            store=self.store,
-            identity=identity,
-            checkpoint=lease.checkpoint_effect,
-            operation_id="testing-aliases:" + self.plan.digest,
-            lease_owner=lease.evidence_reservation().lease_owner,
-            route=self.plan.route_after,
-            preimage=self.plan.route_current,
-        )
-        lease.assert_current()
-        commit_lane_aliases(self.store, self.plan)
+        # Hold the lane's own lock so no deploy or rebuild sees the file and record apart.
+        with self.store.testing_verification_lane_guard(
+            product=self.plan.product, context=self.plan.context
+        ) as lane_checkpoint:
+            publish_testing_copy_route(
+                root=self.root,
+                store=self.store,
+                identity=identity,
+                checkpoint=lease.checkpoint_effect,
+                operation_id="testing-aliases:" + self.plan.digest,
+                lease_owner=lease.evidence_reservation().lease_owner,
+                route=self.plan.route_after,
+                preimage=self.plan.route_current,
+            )
+            lane_checkpoint()
+            lease.assert_current()
+            commit_lane_aliases(self.store, self.plan)
         return ProviderMutationOutcome(
             202,
             provider_operation_response_payload(
