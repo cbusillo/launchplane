@@ -25,7 +25,11 @@ class OutboxInspectionTests(unittest.IsolatedAsyncioTestCase):
             store.ensure_schema()
             delivery = _workflow_delivery()
             destination = direct_outbox.DirectNotificationOutboxTests._destination("email")
-            store.write_public_ingress_notification_policy_record(_notification_policy(destination))
+            store.write_public_ingress_notification_policy_record(
+                _notification_policy(destination).model_copy(
+                    update={"reminder_interval_seconds": 3600}
+                )
+            )
             store.write_outbox_delivery_record(delivery)
             store.write_outbox_delivery_record(
                 delivery.model_copy(
@@ -69,6 +73,10 @@ class OutboxInspectionTests(unittest.IsolatedAsyncioTestCase):
                 workflow["routing"]["credential_context"], delivery.payload["credential_context"]
             )
             self.assertEqual(workflow["routing"]["inputs"], delivery.payload["inputs"])
+            # A replacement policy copies the live cadence from this read.
+            self.assertEqual(
+                inspection["notification_policies"][0]["reminder_interval_seconds"], 3600
+            )
             projected = inspection["notification_policies"][0]["destinations"][0]
             self.assertEqual(projected["email_to"], list(destination.email_to))
             self.assertNotIn(destination.smtp_host, response.text)
