@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Protocol
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
-from control_plane.contracts.public_hosts import retained_hostname_identity
+from control_plane.contracts.public_hosts import normalize_public_hosts, retained_hostname_identity
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -22,6 +24,7 @@ from control_plane.contracts.route_binding_record import (
     route_binding_record_sha256,
 )
 from control_plane.contracts.text_fields import require_text
+from control_plane.outbound_http import public_url_error
 from control_plane.route_binding_reconcile import (
     RouteBindingExpectedCurrent,
     RouteBindingReconcileFinding,
@@ -46,6 +49,35 @@ class ExternalRouteBindingReconcileStore(Protocol):
         context_name: str,
         instance_name: str,
     ) -> EnvironmentRouteBindingRecord: ...
+
+
+class ProductionAddress(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    base_url: str = Field(min_length=1)
+    health_url: str
+
+    @field_validator("base_url", "health_url")
+    @classmethod
+    def _public_url(cls, value: str) -> str:
+        if not value:
+            return value
+        if public_url_error(value) or "?" in value or "#" in value:
+            raise ValueError("Use a public URL without credentials, queries, or fragments.")
+        normalize_public_hosts((retained_hostname_identity(value),))
+        return value
+
+
+@dataclass(frozen=True)
+class ExternalProductionAddressChange:
+    expected_profile: LaunchplaneProductProfileRecord
+    replacement_profile: LaunchplaneProductProfileRecord
+    provider_target: ProviderTargetRecord
+    before: dict[str, str]
+    after: ProductionAddress
+
+    def diff(self) -> dict[str, object]:
+        return {"before": self.before, "after": self.after.model_dump(mode="json")}
 
 
 class ExternalRouteBindingReconcileRequest(BaseModel):
@@ -95,12 +127,30 @@ class ExternalRouteBindingReconcilePlan(BaseModel):
     candidate_record_sha256: str = ""
     current_record: EnvironmentRouteBindingRecord | None = Field(default=None, exclude=True)
     record: EnvironmentRouteBindingRecord | None = Field(default=None, exclude=True)
+    address_change: ExternalProductionAddressChange | None = Field(default=None, exclude=True)
+
+    def address_review_sha256(self, *, reason: str) -> str:
+        change = self.address_change
+        if change is None or self.record is None:
+            return ""
+        return canonical_json_sha256(
+            {
+                "profile": change.expected_profile.model_dump(mode="json"),
+                "provider_target": change.provider_target.model_dump(mode="json"),
+                "current_route_sha256": self.current_record_sha256,
+                "address": change.after.model_dump(mode="json"),
+                "route": _route_binding_authority_projection(self.record),
+                "operation": self.operation,
+                "reason": reason,
+            }
+        )
 
 
 def plan_external_route_binding_reconcile(
     *,
     record_store: ExternalRouteBindingReconcileStore,
     request: ExternalRouteBindingReconcileRequest,
+    production_address: ProductionAddress | None = None,
 ) -> ExternalRouteBindingReconcilePlan:
     current_record = _read_current_record(record_store=record_store, request=request)
     current_record_sha256 = (
@@ -138,6 +188,79 @@ def plan_external_route_binding_reconcile(
             current_record=current_record,
             current_record_sha256=current_record_sha256,
         )
+    if production_address is None:
+        return _plan_active_binding(
+            request=request,
+            profile=profile,
+            lane=lane,
+            provider_target=provider_target,
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
+    if (
+        request.instance != "prod"
+        or profile.lifecycle_state != "active"
+        or current_record is None
+        or current_record.status != "active"
+        or not _is_external_operator_binding(current_record)
+    ):
+        return _conflict_plan(
+            code="production_address_requires_active_external_route",
+            detail="The product needs an active, externally owned production route.",
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
+    before = {"base_url": lane.base_url, "health_url": lane.health_url}
+    after = production_address.model_dump(mode="json")
+    updated_lane = lane.model_copy(update=after)
+    replacement_profile = profile
+    if after != before:
+        replacement_profile = LaunchplaneProductProfileRecord.model_validate(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        updated_lane if item is lane else item for item in profile.lanes
+                    ),
+                    "updated_at": request.evaluated_at,
+                }
+            ).model_dump(mode="json")
+        ).validate_write_contract()
+    plan = _plan_active_binding(
+        request=request.model_copy(update={"source_label": current_record.source.source_label}),
+        profile=replacement_profile,
+        lane=updated_lane,
+        provider_target=provider_target,
+        current_record=current_record,
+        current_record_sha256=current_record_sha256,
+    )
+    if plan.record is None:
+        return plan
+    if plan.record.provider_target != current_record.provider_target:
+        return _conflict_plan(
+            code="production_address_target_mismatch",
+            detail="Production address changes must preserve the external route target.",
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
+    return plan.model_copy(
+        update={
+            "address_change": ExternalProductionAddressChange(
+                profile, replacement_profile, provider_target, before, production_address
+            )
+        }
+    )
+
+
+def _plan_active_binding(
+    *,
+    request: ExternalRouteBindingReconcileRequest,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    provider_target: ProviderTargetRecord,
+    current_record: EnvironmentRouteBindingRecord | None,
+    current_record_sha256: str,
+) -> ExternalRouteBindingReconcilePlan:
+    findings: list[RouteBindingReconcileFinding] = []
     domains = _external_domains(profile=profile, lane=lane, findings=findings)
     if not domains or findings:
         return _blocked_plan(

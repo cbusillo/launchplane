@@ -1269,6 +1269,8 @@ expires. Workflow concurrency prevents overlapping controller runs while the
 service's parent reservation and per-binding locks remain the authoritative
 serialization boundary.
 
+### External route binding reconcile
+
 Use the `External Route Binding Reconcile` workflow when the public TLS
 terminator or reverse proxy is owned outside Launchplane and no provider API is
 available. This path adds external authority; it does not replace managed route
@@ -1285,6 +1287,20 @@ host id, certificate id, upstream, edge address, or other internal provider
 evidence. Dry-run requires `route_binding.external.plan`; apply requires the
 separate exact-instance `route_binding.external.apply` action and confirmation
 `APPLY EXTERNAL ROUTE BINDING RECONCILE`.
+
+To change an existing external production address, the signed-in administrator
+uses the same `POST /v1/route-bindings/external/reconcile` endpoint from a
+[same-origin browser session](service-boundary.md#browser-mutation-boundary).
+Send `mode: "dry-run"`, the product and context, `instance: "prod"`,
+`expected_current` with the current binding digest, a reason, and
+`production_address: {"base_url": "...", "health_url": "..."}`.
+Review `result.address_diff`, `result.current_domains`, and
+`result.record.domains`. To apply, send the same inputs with `mode: "apply"`,
+`reviewed_plan_sha256` from `result.plan_sha256`, and an `Idempotency-Key`.
+The apply updates the profile URLs and external route record in one database
+transaction. The route keeps its target and external ownership. The proxy is
+operated separately. To reverse the change, read the current binding digest
+and review the saved original URLs through the same flow.
 
 After external apply, run `Public Ingress Monitor` and read product topology.
 The route binding is the recorded admin authority; it is not proof of proxy

@@ -618,6 +618,7 @@ from control_plane.service_human_auth import (
     LaunchplaneHumanSession,
 )
 from control_plane.storage import landing_authority
+from control_plane.route_binding_external_reconcile import ExternalProductionAddressChange
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductContextOwnershipError,
@@ -30624,6 +30625,7 @@ class PostgresRecordStore(HumanSessionStore):
         reviewed_sources: RouteBindingReviewSources | None = None,
         reviewed_product: str = "",
         native_sources: TestingRouteRefreshSources | None = None,
+        address_change: ExternalProductionAddressChange | None = None,
     ) -> RouteBindingReconcileWriteResult:
         if native_sources is not None and (
             expected_record is None
@@ -30660,7 +30662,11 @@ class PostgresRecordStore(HumanSessionStore):
         reservation_insert_error: IntegrityError | None = None
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            if reviewed_sources is not None or native_sources is not None:
+            if (
+                reviewed_sources is not None
+                or native_sources is not None
+                or address_change is not None
+            ):
                 self._lock_product_authority_bundle_write(session)
             self._lock_route_binding_write(
                 session,
@@ -30698,11 +30704,16 @@ class PostgresRecordStore(HumanSessionStore):
                     reviewed_sources=reviewed_sources,
                     reviewed_product=reviewed_product,
                     native_sources=native_sources,
+                    address_change=address_change,
                 )
 
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            if reviewed_sources is not None or native_sources is not None:
+            if (
+                reviewed_sources is not None
+                or native_sources is not None
+                or address_change is not None
+            ):
                 self._lock_product_authority_bundle_write(session)
             self._lock_route_binding_write(
                 session,
@@ -30788,6 +30799,7 @@ class PostgresRecordStore(HumanSessionStore):
                 reviewed_sources=reviewed_sources,
                 reviewed_product=reviewed_product,
                 native_sources=native_sources,
+                address_change=address_change,
             )
 
     def _reconcile_route_binding_locked(
@@ -30803,6 +30815,7 @@ class PostgresRecordStore(HumanSessionStore):
         reviewed_sources: RouteBindingReviewSources | None = None,
         reviewed_product: str = "",
         native_sources: TestingRouteRefreshSources | None = None,
+        address_change: ExternalProductionAddressChange | None = None,
     ) -> RouteBindingReconcileWriteResult:
         if native_sources is not None:
             from control_plane.native_testing_route_refresh import (
@@ -30854,6 +30867,17 @@ class PostgresRecordStore(HumanSessionStore):
                 current_record=current_record,
             )
 
+        if address_change is not None:
+            try:
+                self._apply_reviewed_external_production_address(session, address_change)
+            except (
+                RouteBindingSourceChanged,
+                ProductContextOwnershipError,
+                ProductProfileConflictError,
+            ):
+                session.delete(reservation_row)
+                session.commit()
+                return RouteBindingReconcileWriteResult(status="changed")
         if row is None:
             session.add(self._route_binding_row(replacement_record))
             status: RouteBindingReconcileWriteStatus = "created"
@@ -30877,6 +30901,41 @@ class PostgresRecordStore(HumanSessionStore):
             current_record=replacement_record,
             idempotency_record=completion,
         )
+
+    def _apply_reviewed_external_production_address(
+        self, session: Session, change: ExternalProductionAddressChange
+    ) -> None:
+        product = change.expected_profile.product
+        target = change.provider_target
+        self._lock_landing_authority(session, landing_authority.product_profile(product))
+        profile_row = session.get(LaunchplaneProductProfileRow, product, with_for_update=True)
+        if (
+            profile_row is None
+            or self._read_product_profile_payload(profile_row.payload) != change.expected_profile
+        ):
+            raise RouteBindingSourceChanged("The reviewed production product profile changed.")
+        target_row = session.get(
+            LaunchplaneProviderTargetRow, (target.context, target.instance), with_for_update=True
+        )
+        if (
+            target_row is None
+            or self._read_payload(model_type=ProviderTargetRecord, payload=target_row.payload)
+            != target
+        ):
+            raise RouteBindingSourceChanged("The reviewed production provider target changed.")
+        require_bundle_context_owner(
+            ProductAuthorityBundle(
+                required_context_owner=(product, target.context),
+                required_product_config_target=(product, target.context, target.instance),
+            ),
+            (
+                self._read_product_profile_payload(row.payload)
+                for row in session.scalars(select(LaunchplaneProductProfileRow))
+            ),
+        )
+        if change.replacement_profile != change.expected_profile:
+            profile_row.updated_at = change.replacement_profile.updated_at
+            profile_row.payload = self._payload_dict(change.replacement_profile)
 
     def _check_browser_route_binding_sources(
         self,

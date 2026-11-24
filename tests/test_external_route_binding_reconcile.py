@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal
+from typing import Any, Literal
 from unittest.mock import patch
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -28,8 +28,16 @@ from control_plane.route_binding_external_reconcile import (
 )
 from control_plane.route_binding_reconcile import RouteBindingExpectedCurrent
 from control_plane.service_auth import LaunchplaneAuthzPolicy
-from control_plane.storage.postgres import PostgresRecordStore
-from tests.http_app_test_support import _asgi_get, _asgi_request
+from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
+from control_plane.storage.postgres import PostgresRecordStore, RouteBindingReconcileWriteResult
+from tests.http_app_test_support import (
+    _asgi_get,
+    _asgi_request,
+    _browser_mutation_headers,
+    _github_human_identity,
+    _github_oauth_config,
+    _local_operator_bearer_config,
+)
 from tests.support.auth import _StubVerifier, _identity
 from tests.support.stores import _sqlite_database_url
 
@@ -366,6 +374,206 @@ def _payload(
 
 
 class ExternalRouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_signed_in_admin_can_review_apply_and_reverse_production_address(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            profile = _profile()
+            testing = profile.lanes[0]
+            original = profile.model_copy(
+                update={
+                    "lanes": (
+                        testing,
+                        testing.model_copy(
+                            update={"instance": "prod", "health_url": testing.base_url + "/health"}
+                        ),
+                    ),
+                },
+            )
+            store.write_product_profile_record(original)
+            target = _provider_target().model_copy(update={"instance": "prod"})
+            store.write_provider_target_record(target)
+            record = _external_record()
+            record = record.model_copy(
+                update={
+                    "instance": "prod",
+                    "provider_target": record.provider_target.model_copy(
+                        update={"provider_evidence": {"target_record": "example-testing:prod"}}
+                    ),
+                }
+            )
+            store.write_route_binding_record(record)
+            sessions = HumanSessionManager(
+                config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+            )
+            admin = sessions.issue(_github_human_identity())
+            reader = sessions.issue(_github_human_identity(role="read_only"))
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "github_humans": [
+                        {
+                            "github_ids": [admin.identity.github_id],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        }
+                    ],
+                }
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                bearer_identity_config=_local_operator_bearer_config(),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+                human_session_manager=sessions,
+            )
+            route = "/v1/route-bindings/external/reconcile"
+
+            def read_binding() -> EnvironmentRouteBindingRecord:
+                return store.read_route_binding_record(
+                    product=record.product,
+                    context_name=record.context,
+                    instance_name=record.instance,
+                )
+
+            for index, base_url in enumerate(("https://new.example.test", testing.base_url)):
+                health_url = base_url + "/health"
+                previous_profile = store.read_product_profile_record(original.product)
+                previous_binding = read_binding()
+                payload = {
+                    **_payload(mode="dry-run", instance="prod", current_record=previous_binding),
+                    "production_address": {"base_url": base_url, "health_url": health_url},
+                    "reason": "Move the public production address.",
+                }
+                planned = await _asgi_request(
+                    app,
+                    "POST",
+                    route,
+                    headers=_browser_mutation_headers(sessions, admin),
+                    payload=payload,
+                )
+                self.assertEqual(planned.status_code, 202, planned.text)
+                result = planned.json()["result"]
+                self.assertEqual(
+                    result["address_diff"]["before"]["base_url"], previous_profile.lanes[1].base_url
+                )
+                self.assertEqual(result["address_diff"]["after"], payload["production_address"])
+                self.assertEqual(
+                    store.read_product_profile_record(original.product), previous_profile
+                )
+                self.assertEqual(read_binding(), previous_binding)
+                apply = {
+                    **payload,
+                    "mode": "apply",
+                    "reviewed_plan_sha256": result["plan_sha256"],
+                }
+                if index == 0:
+                    for invalid_url in ("https://[2606:4700:4700::1111]", "https://127.0.0.1"):
+                        invalid = await _asgi_request(
+                            app,
+                            "POST",
+                            route,
+                            headers=_browser_mutation_headers(sessions, admin),
+                            payload={
+                                **payload,
+                                "production_address": {
+                                    "base_url": invalid_url,
+                                    "health_url": health_url,
+                                },
+                            },
+                        )
+                        self.assertEqual(invalid.status_code, 400, invalid.text)
+                    for headers in (
+                        _browser_mutation_headers(sessions, reader),
+                        {"Authorization": "Bearer local-operator-token"},
+                        {"Authorization": "Bearer valid-token"},
+                        {"Cookie": sessions.session_cookie_header(admin)},
+                    ):
+                        for request in (payload, apply):
+                            denied = await _asgi_request(
+                                app,
+                                "POST",
+                                route,
+                                headers={**headers, "Idempotency-Key": "denied"},
+                                payload=request,
+                            )
+                            self.assertEqual(denied.status_code, 403, denied.text)
+                    stale_traces = []
+                    for _ in range(2):
+                        stale = await _asgi_request(
+                            app,
+                            "POST",
+                            route,
+                            headers={
+                                **_browser_mutation_headers(sessions, admin),
+                                "Idempotency-Key": "stale",
+                            },
+                            payload={**apply, "reason": "Changed after review."},
+                        )
+                        self.assertEqual(stale.status_code, 409, stale.text)
+                        stale_traces.append(stale.json()["trace_id"])
+                    self.assertEqual(stale_traces[0], stale_traces[1])
+
+                    commit_binding = store.reconcile_route_binding_record
+
+                    def move_target_before_commit(
+                        **kwargs: Any,
+                    ) -> RouteBindingReconcileWriteResult:
+                        store.write_provider_target_record(
+                            target.model_copy(update={"target_id": "replacement"})
+                        )
+                        return commit_binding(**kwargs)
+
+                    with patch.object(
+                        store,
+                        "reconcile_route_binding_record",
+                        side_effect=move_target_before_commit,
+                    ):
+                        raced = await _asgi_request(
+                            app,
+                            "POST",
+                            route,
+                            headers={
+                                **_browser_mutation_headers(sessions, admin),
+                                "Idempotency-Key": "target-drift",
+                            },
+                            payload=apply,
+                        )
+                    self.assertEqual(raced.status_code, 409, raced.text)
+                    self.assertEqual(store.read_product_profile_record(original.product), original)
+                    self.assertEqual(read_binding(), record)
+                    store.write_provider_target_record(target)
+
+                for _ in range(2):
+                    applied = await _asgi_request(
+                        app,
+                        "POST",
+                        route,
+                        headers={
+                            **_browser_mutation_headers(sessions, admin),
+                            "Idempotency-Key": f"address-{index}",
+                        },
+                        payload=apply,
+                    )
+                    self.assertEqual(applied.status_code, 202, applied.text)
+                stored = store.read_product_profile_record(original.product)
+                self.assertEqual(stored.lanes[1].base_url, base_url)
+                self.assertEqual(stored.lanes[1].health_url, health_url)
+                stored_binding = read_binding()
+                self.assertEqual(
+                    stored_binding.domains[0].domain_name, base_url.removeprefix("https://")
+                )
+                self.assertEqual(stored_binding.provider_target, record.provider_target)
+                self.assertEqual(stored_binding.tls, record.tls)
+            self.assertEqual(
+                stored.model_copy(update={"updated_at": original.updated_at}), original
+            )
+
     async def test_external_dry_run_uses_separate_plan_action(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
