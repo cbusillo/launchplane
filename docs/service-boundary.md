@@ -358,7 +358,7 @@ remaining domain and storage removal is tracked in #2437.
     confirmation text.
   - The separate [remaining-stable controller contract](records.md) covers
     active bindings outside the testing controller's slice.
-  - `POST /v1/route-bindings/external/reconcile`, requiring exclusively
+  - `POST /v1/route-bindings/external/reconcile`. Bearer calls require
     instance-scoped `route_binding.external.plan` for `dry-run` and
     `route_binding.external.apply` for `apply`. The request supplies only the
     product/context/instance tuple, desired active or disabled authority state,
@@ -371,6 +371,9 @@ remaining domain and storage removal is tracked in #2437.
     boundary as managed reconciliation. Setting `desired_status = "disabled"`
     explicitly relinquishes external authority; only then may managed reconcile
     replace it with service-owned provider evidence.
+    The signed-in administrator can also [review and change an external
+    production address](operations.md#external-route-binding-reconcile) on the
+    same route. Its exact reviewed plan binds both profile URLs and the binding.
 - native FastAPI ingress route apply write:
   - `POST /v1/drivers/ingress/route-apply`, requiring `ingress_route.plan` for
     `dry-run` and `ingress_route.apply` for `apply`, resolving optional edge

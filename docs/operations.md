@@ -1269,6 +1269,8 @@ expires. Workflow concurrency prevents overlapping controller runs while the
 service's parent reservation and per-binding locks remain the authoritative
 serialization boundary.
 
+### External route binding reconcile
+
 Use the `External Route Binding Reconcile` workflow when the public TLS
 terminator or reverse proxy is owned outside Launchplane and no provider API is
 available. This path adds external authority; it does not replace managed route

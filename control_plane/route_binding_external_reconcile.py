@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
-from control_plane.contracts.public_hosts import retained_hostname_identity
+from control_plane.contracts.public_hosts import normalize_public_hosts, retained_hostname_identity
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -64,6 +64,7 @@ class ProductionAddress(BaseModel):
             return value
         if public_url_error(value) or "?" in value or "#" in value:
             raise ValueError("Use a public URL without credentials, queries, or fragments.")
+        normalize_public_hosts((retained_hostname_identity(value),))
         return value
 
 

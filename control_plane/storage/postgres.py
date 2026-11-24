@@ -30870,7 +30870,11 @@ class PostgresRecordStore(HumanSessionStore):
         if address_change is not None:
             try:
                 self._apply_reviewed_external_production_address(session, address_change)
-            except (RouteBindingSourceChanged, ProductContextOwnershipError):
+            except (
+                RouteBindingSourceChanged,
+                ProductContextOwnershipError,
+                ProductProfileConflictError,
+            ):
                 session.delete(reservation_row)
                 session.commit()
                 return RouteBindingReconcileWriteResult(status="changed")

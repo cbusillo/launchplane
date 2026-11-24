@@ -22843,7 +22843,7 @@ def create_launchplane_fastapi_app(
         identity: Annotated[LaunchplaneIdentity, Depends(read_external_route_reconcile_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
+    ) -> AcceptedEvidenceResponse | JSONResponse:
         trace_id = next_trace_id()
         authorization_action = (
             "route_binding.external.apply"
@@ -22887,48 +22887,6 @@ def create_launchplane_fastapi_app(
         normalized_key = idempotency_key.strip()
         payload_fingerprint = ""
 
-        def replay_external_apply() -> AcceptedEvidenceResponse | None:
-            if mutation_store is None:
-                return None
-            preflight = mutation_store.prepare_db_only_mutation(
-                scope=idempotency_scope(identity),
-                route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
-                idempotency_key=normalized_key,
-                request_fingerprint=payload_fingerprint,
-            )
-            if preflight.status in {"missing", "released"}:
-                return None
-            if preflight.record is None:
-                raise RuntimeError("External route binding mutation preflight requires evidence.")
-            if preflight.status == "replayed":
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=preflight.record,
-                    route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
-                )
-            failures = {
-                "conflict": (
-                    "idempotency_key_reused",
-                    "Idempotency-Key was already used for a different Launchplane request payload on this route.",
-                ),
-                "in_progress": (
-                    "mutation_in_progress",
-                    "A matching external route binding mutation is already running. Retry with the same Idempotency-Key.",
-                ),
-                "reconcile_required": (
-                    "mutation_reconciliation_required",
-                    "The external route binding mutation requires reconciliation before retry.",
-                ),
-            }
-            if preflight.status not in failures:
-                raise RuntimeError(
-                    f"Unsupported external route binding preflight status: {preflight.status}"
-                )
-            code, message = failures[preflight.status]
-            raise _launchplane_http_error(
-                status_code=409, trace_id=trace_id, code=code, message=message
-            )
-
         if binding_request.mode == "apply":
             try:
                 mutation_store = require_external_route_binding_mutation_store(record_store)
@@ -22939,13 +22897,74 @@ def create_launchplane_fastapi_app(
                     code="database_storage_required",
                     message=str(error),
                 ) from error
+            raw_payload = await request.json()
             payload_fingerprint = idempotency_request_fingerprint(
                 route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
-                payload=await request.json(),
+                payload=raw_payload,
             )
-            replayed = replay_external_apply()
-            if replayed is not None:
-                return replayed
+            preflight = mutation_store.prepare_db_only_mutation(
+                scope=idempotency_scope(identity),
+                route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint=payload_fingerprint,
+            )
+            if preflight.status not in {"missing", "released"}:
+                if preflight.record is None:
+                    raise RuntimeError(
+                        "External route binding mutation preflight requires evidence."
+                    )
+                if preflight.status == "replayed":
+                    return binding_repair_replay(
+                        trace_id=trace_id,
+                        stored_record=preflight.record,
+                        route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
+                    )
+                if preflight.status == "conflict":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different "
+                            "Launchplane request payload on this route."
+                        ),
+                    )
+                if preflight.status == "in_progress":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_in_progress",
+                        message=(
+                            "A matching external route binding mutation is already running. "
+                            "Retry with the same Idempotency-Key."
+                        ),
+                    )
+                if preflight.status == "reconcile_required":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_reconciliation_required",
+                        message=(
+                            "The external route binding mutation requires reconciliation "
+                            "before retry."
+                        ),
+                    )
+                raise RuntimeError(
+                    "Unsupported external route binding mutation preflight status: "
+                    f"{preflight.status}"
+                )
+
+        def settle_address_stale() -> AcceptedEvidenceResponse | JSONResponse:
+            assert isinstance(record_store, PostgresRecordStore)
+            return settle_browser_route_repair_stale(
+                database_store=record_store,
+                identity=identity,
+                route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
+                idempotency_key=normalized_key,
+                fingerprint=payload_fingerprint,
+                trace_id=trace_id,
+                message="The production address plan changed. Run the review again.",
+            )
 
         try:
             reconcile_plan = control_plane_route_binding_external_reconcile.plan_external_route_binding_reconcile(
@@ -22976,15 +22995,7 @@ def create_launchplane_fastapi_app(
             binding_request.reviewed_plan_sha256
             and binding_request.reviewed_plan_sha256 != plan_sha256
         ):
-            replayed = replay_external_apply()
-            if replayed is not None:
-                return replayed
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="stale",
-                message="The production address plan changed. Run the review again.",
-            )
+            return settle_address_stale()
 
         def reconcile_response(*, route_binding_status: str) -> AcceptedEvidenceResponse:
             result_payload = reconcile_plan.model_dump(mode="json", exclude_none=True)
@@ -23065,7 +23076,7 @@ def create_launchplane_fastapi_app(
         if mutation_result.status == "replayed":
             if mutation_result.idempotency_record is None:
                 raise RuntimeError("Replayed external route binding reconcile requires evidence.")
-            return replay_idempotent_response(
+            return binding_repair_replay(
                 trace_id=trace_id,
                 stored_record=mutation_result.idempotency_record,
                 route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
@@ -23090,6 +23101,8 @@ def create_launchplane_fastapi_app(
                 ),
             )
         if mutation_result.status in {"changed", "missing"}:
+            if address_change is not None:
+                return settle_address_stale()
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,

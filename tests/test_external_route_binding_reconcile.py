@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal
+from typing import Any, Literal
 from unittest.mock import patch
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -29,7 +29,7 @@ from control_plane.route_binding_external_reconcile import (
 from control_plane.route_binding_reconcile import RouteBindingExpectedCurrent
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import PostgresRecordStore, RouteBindingReconcileWriteResult
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -473,10 +473,26 @@ class ExternalRouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
                     "reviewed_plan_sha256": result["plan_sha256"],
                 }
                 if index == 0:
+                    for invalid_url in ("https://[2606:4700:4700::1111]", "https://127.0.0.1"):
+                        invalid = await _asgi_request(
+                            app,
+                            "POST",
+                            route,
+                            headers=_browser_mutation_headers(sessions, admin),
+                            payload={
+                                **payload,
+                                "production_address": {
+                                    "base_url": invalid_url,
+                                    "health_url": health_url,
+                                },
+                            },
+                        )
+                        self.assertEqual(invalid.status_code, 400, invalid.text)
                     for headers in (
                         _browser_mutation_headers(sessions, reader),
                         {"Authorization": "Bearer local-operator-token"},
                         {"Authorization": "Bearer valid-token"},
+                        {"Cookie": sessions.session_cookie_header(admin)},
                     ):
                         for request in (payload, apply):
                             denied = await _asgi_request(
@@ -487,19 +503,51 @@ class ExternalRouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
                                 payload=request,
                             )
                             self.assertEqual(denied.status_code, 403, denied.text)
-                    stale = await _asgi_request(
-                        app,
-                        "POST",
-                        route,
-                        headers={
-                            **_browser_mutation_headers(sessions, admin),
-                            "Idempotency-Key": "stale",
-                        },
-                        payload={**apply, "reason": "Changed after review."},
-                    )
-                    self.assertEqual(stale.status_code, 409, stale.text)
+                    stale_traces = []
+                    for _ in range(2):
+                        stale = await _asgi_request(
+                            app,
+                            "POST",
+                            route,
+                            headers={
+                                **_browser_mutation_headers(sessions, admin),
+                                "Idempotency-Key": "stale",
+                            },
+                            payload={**apply, "reason": "Changed after review."},
+                        )
+                        self.assertEqual(stale.status_code, 409, stale.text)
+                        stale_traces.append(stale.json()["trace_id"])
+                    self.assertEqual(stale_traces[0], stale_traces[1])
+
+                    commit_binding = store.reconcile_route_binding_record
+
+                    def move_target_before_commit(
+                        **kwargs: Any,
+                    ) -> RouteBindingReconcileWriteResult:
+                        store.write_provider_target_record(
+                            target.model_copy(update={"target_id": "replacement"})
+                        )
+                        return commit_binding(**kwargs)
+
+                    with patch.object(
+                        store,
+                        "reconcile_route_binding_record",
+                        side_effect=move_target_before_commit,
+                    ):
+                        raced = await _asgi_request(
+                            app,
+                            "POST",
+                            route,
+                            headers={
+                                **_browser_mutation_headers(sessions, admin),
+                                "Idempotency-Key": "target-drift",
+                            },
+                            payload=apply,
+                        )
+                    self.assertEqual(raced.status_code, 409, raced.text)
                     self.assertEqual(store.read_product_profile_record(original.product), original)
                     self.assertEqual(read_binding(), record)
+                    store.write_provider_target_record(target)
 
                 for _ in range(2):
                     applied = await _asgi_request(
