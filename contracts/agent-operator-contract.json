@@ -1294,6 +1294,32 @@
         ]
       },
       {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_outbox_inspection",
+        "path": "/v1/outbox/inspection",
+        "purpose": "Read pending and failed outbox deliveries and enabled notification policies with destination references, never secret values.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "a7eefb4b6d85a59eed7dcd5c1b4fe29c384067e57c5053199ee1e47c77314392",
+        "supported_surfaces": [
+          "service_api",
+          "generic_caller"
+        ]
+      },
+      {
         "idempotency": "apply",
         "identity_dependencies": [
           "read_write_identity"
@@ -1654,8 +1680,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "0d251c711fde3e0003f057c09b76679c0bdf2d64"
+    "source_commit_sha": "2f7bc605ab17be48c2dcde4724ca641f9bf7b954"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "74b3715e02ad7548d95edefbd26dda526b7d25eea5bbf5b5af93dd222afc4df1"
+  "semantic_digest_sha256": "4cad5d11c0c949c086d7a6613077e75ef8d94f12b6e0510e04b1e7b96f5e7a1d"
 }

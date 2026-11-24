@@ -499,6 +499,15 @@ OPERATION_SPECS = (
         (),
     ),
     OperationSpec(
+        "GET",
+        "/v1/outbox/inspection",
+        "Read pending and failed outbox deliveries and enabled notification policies with destination references, never secret values.",
+        ("service_api", "generic_caller"),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
         "POST",
         ODOO_WEBSITE_SETTINGS_ROUTE,
         "Prepare artifact-bound website intent without changing the Odoo database.",
