@@ -970,13 +970,11 @@ class TestingDrillTests(TestingDrillScenario):
             )
         )
 
-    def test_discord_uses_existing_lane_destination_and_omits_private_errors(self) -> None:
+    def test_discord_uses_production_policy_destination_and_omits_private_errors(self) -> None:
         self.store.write_public_ingress_notification_policy_record(
             PublicIngressNotificationPolicyRecord(
                 policy_id="fixture-discord",
-                product=self.profile.product,
-                context=self.context,
-                instance="testing",
+                instance="prod",
                 destinations=(
                     PublicIngressNotificationDestination(
                         destination_id="existing-discord",
@@ -1170,7 +1168,7 @@ class TestingDrillTests(TestingDrillScenario):
                 policy_id="fixture-partial",
                 product=self.profile.product,
                 context=self.context,
-                instance="testing",
+                instance="prod",
                 destinations=destinations,
                 created_at=self.profile.updated_at,
                 updated_at=self.profile.updated_at,
