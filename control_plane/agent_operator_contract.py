@@ -491,6 +491,15 @@ OPERATION_SPECS = (
     ),
     OperationSpec(
         "POST",
+        "/v1/public-ingress/notification-policies/apply",
+        "Dry-run or apply one health-alert notification policy record; a policy ID keeps its original scope.",
+        ("service_api", "generic_caller"),
+        ("dry-run", "apply"),
+        "optional",
+        (),
+    ),
+    OperationSpec(
+        "POST",
         ODOO_WEBSITE_SETTINGS_ROUTE,
         "Prepare artifact-bound website intent without changing the Odoo database.",
         ("service_api",),

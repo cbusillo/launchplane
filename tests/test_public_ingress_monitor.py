@@ -4087,6 +4087,53 @@ class PublicIngressMonitorTests(unittest.TestCase):
             },
         )
 
+    def test_lane_name_policy_pages_only_that_lane_in_every_product(self) -> None:
+        # Breaks if an instance-only policy is refused or ignores the lane name.
+        for instance, expected_posts in (("testing", 0), ("prod", 1)):
+            with self.subTest(instance=instance):
+                lane = ProductLaneProfile(
+                    instance=instance,
+                    context="example-site",
+                    base_url="https://example.test",
+                    health_monitoring=_public_health_monitoring(),
+                )
+                store = _Store((_profile(lane=lane),))
+                store.notification_policies.append(
+                    PublicIngressNotificationPolicyRecord(
+                        policy_id="prod-discord",
+                        instance="prod",
+                        destinations=(
+                            PublicIngressNotificationDestination(
+                                destination_id="discord",
+                                kind="discord",
+                                discord_webhook_secret="discord-webhook",
+                            ),
+                        ),
+                        created_at="2026-05-29T12:00:00Z",
+                        updated_at="2026-05-29T12:00:00Z",
+                        source="test",
+                    )
+                )
+                discord_posts: list[str] = []
+                drivers = PublicIngressNotificationDriverSet(
+                    discord_sender=lambda webhook_url, _payload: discord_posts.append(webhook_url),  # noqa: B023
+                    secret_resolver=lambda _name: "https://discord.com/api/webhooks/1/hook",
+                )
+
+                result = run_public_ingress_monitor_once(
+                    record_store=store,
+                    checked_at="2026-05-29T12:25:00Z",
+                    http_get=lambda _url, _timeout: HttpObservation(
+                        status_code=503,
+                        final_url="https://example.test",
+                        redirect_count=0,
+                    ),
+                    notification_drivers=drivers,
+                )
+
+                self.assertEqual(result.open_incident_count, 1)
+                self.assertEqual(len(discord_posts), expected_posts)
+
     def test_policy_delivery_failures_are_recorded_per_destination(self) -> None:
         store = _Store((_profile(),))
         store.notification_policies.append(

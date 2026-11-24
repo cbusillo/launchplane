@@ -1709,7 +1709,8 @@ but detail remains anchored to the lane-owned incident occurrence.
 Public ingress notification policy records are DB-backed Launchplane records
 under `launchplane_public_ingress_notification_policies`. They select enabled
 destinations for incident events by product, context, and instance and store a
-bounded reminder cadence. The generic default is six hours; accepted policy
+bounded reminder cadence. An empty field matches every value, so an instance
+alone, such as `prod`, matches that lane name in every product. The generic default is six hours; accepted policy
 values are 15 minutes through seven days. The initial destination drivers are
 GitHub issues, email, and Discord. Policies store routing intent and managed
 secret references only; they must not store Discord webhook URLs, SMTP

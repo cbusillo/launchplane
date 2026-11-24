@@ -1266,6 +1266,34 @@
         ]
       },
       {
+        "idempotency": "optional",
+        "identity_dependencies": [
+          "read_write_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply"
+        ],
+        "operation_id": "apply_public_ingress_notification_policy",
+        "path": "/v1/public-ingress/notification-policies/apply",
+        "purpose": "Dry-run or apply one health-alert notification policy record; a policy ID keeps its original scope.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "34424c73a744bc5f2d4df237863dcaf544a80dc30d1c10a54e54e9fa48818522",
+        "supported_surfaces": [
+          "service_api",
+          "generic_caller"
+        ]
+      },
+      {
         "idempotency": "apply",
         "identity_dependencies": [
           "read_write_identity"
@@ -1626,8 +1654,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "003dfb8d508af8103346c016c1a2bf03fcd90044"
+    "source_commit_sha": "0d251c711fde3e0003f057c09b76679c0bdf2d64"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "c763bf013bff80ac9c251feaad0e88500481f81e8b97c5d5b642729d32ef5eb9"
+  "semantic_digest_sha256": "74b3715e02ad7548d95edefbd26dda526b7d25eea5bbf5b5af93dd222afc4df1"
 }
