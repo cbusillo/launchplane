@@ -73,7 +73,6 @@ class OutboxInspectionTests(unittest.IsolatedAsyncioTestCase):
                 workflow["routing"]["credential_context"], delivery.payload["credential_context"]
             )
             self.assertEqual(workflow["routing"]["inputs"], delivery.payload["inputs"])
-            # A replacement policy copies the live cadence from this read.
             self.assertEqual(
                 inspection["notification_policies"][0]["reminder_interval_seconds"], 3600
             )

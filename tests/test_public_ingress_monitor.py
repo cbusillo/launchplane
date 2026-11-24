@@ -4088,7 +4088,6 @@ class PublicIngressMonitorTests(unittest.TestCase):
         )
 
     def test_lane_name_policy_pages_only_that_lane_in_every_product(self) -> None:
-        # Breaks if an instance-only policy is refused or ignores the lane name.
         for instance, expected_posts in (("testing", 0), ("prod", 1)):
             with self.subTest(instance=instance):
                 lane = ProductLaneProfile(
