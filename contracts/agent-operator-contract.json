@@ -1266,6 +1266,60 @@
         ]
       },
       {
+        "idempotency": "optional",
+        "identity_dependencies": [
+          "read_write_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply"
+        ],
+        "operation_id": "apply_public_ingress_notification_policy",
+        "path": "/v1/public-ingress/notification-policies/apply",
+        "purpose": "Dry-run or apply one health-alert notification policy record; a policy ID keeps its original scope.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "34424c73a744bc5f2d4df237863dcaf544a80dc30d1c10a54e54e9fa48818522",
+        "supported_surfaces": [
+          "service_api",
+          "generic_caller"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_outbox_inspection",
+        "path": "/v1/outbox/inspection",
+        "purpose": "Read pending and failed outbox deliveries and enabled notification policies with destination references, never secret values.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "a7eefb4b6d85a59eed7dcd5c1b4fe29c384067e57c5053199ee1e47c77314392",
+        "supported_surfaces": [
+          "service_api",
+          "generic_caller"
+        ]
+      },
+      {
         "idempotency": "apply",
         "identity_dependencies": [
           "read_write_identity"
@@ -1626,8 +1680,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "003dfb8d508af8103346c016c1a2bf03fcd90044"
+    "source_commit_sha": "2f7bc605ab17be48c2dcde4724ca641f9bf7b954"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "c763bf013bff80ac9c251feaad0e88500481f81e8b97c5d5b642729d32ef5eb9"
+  "semantic_digest_sha256": "4cad5d11c0c949c086d7a6613077e75ef8d94f12b6e0510e04b1e7b96f5e7a1d"
 }

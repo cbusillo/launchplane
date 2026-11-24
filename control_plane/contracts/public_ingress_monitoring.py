@@ -958,10 +958,6 @@ class PublicIngressNotificationPolicyRecord(BaseModel):
         destination_ids = [destination.destination_id for destination in self.destinations]
         if len(set(destination_ids)) != len(destination_ids):
             raise ValueError("public ingress notification destination ids must be unique")
-        if self.instance and not self.context:
-            raise ValueError(
-                "public ingress notification policy with instance scope requires context"
-            )
         if self.check_name and not self.instance:
             raise ValueError(
                 "public ingress notification policy with check_name scope requires instance"

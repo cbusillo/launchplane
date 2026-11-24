@@ -729,9 +729,8 @@ class OdooTestingDrillScheduler:
             managed_notification_secret_value,
         )
 
-        # Use existing lane alert policy/managed secrets; no sender, person or token catalog.
         policies = self.store.list_public_ingress_notification_policy_records(
-            product=product, context_name=context, instance_name="testing", status="enabled"
+            product=product, context_name=context, instance_name="prod", status="enabled"
         )
         destinations = {
             destination.destination_id: destination

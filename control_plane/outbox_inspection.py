@@ -132,6 +132,7 @@ def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspect
                 "context": policy.context,
                 "instance": policy.instance,
                 "purpose": policy.purpose,
+                "reminder_interval_seconds": policy.reminder_interval_seconds,
                 "destinations": [
                     {
                         key: value
