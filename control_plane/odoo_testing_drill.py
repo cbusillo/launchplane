@@ -729,7 +729,6 @@ class OdooTestingDrillScheduler:
             managed_notification_secret_value,
         )
 
-        # Use the production alert policy and managed secrets; no sender, person or token catalog.
         policies = self.store.list_public_ingress_notification_policy_records(
             product=product, context_name=context, instance_name="prod", status="enabled"
         )
