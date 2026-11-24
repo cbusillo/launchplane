@@ -2772,6 +2772,10 @@ class ExternalRouteBindingReconcileEnvelope(BaseModel):
     source_label: str = "operator-external-reconcile"
     reason: str = ""
     confirmation: str = ""
+    production_address: control_plane_route_binding_external_reconcile.ProductionAddress | None = (
+        None
+    )
+    reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[0-9a-f]{64})?$")
 
     @model_validator(mode="after")
     def _validate_envelope(self) -> "ExternalRouteBindingReconcileEnvelope":
@@ -2789,7 +2793,22 @@ class ExternalRouteBindingReconcileEnvelope(BaseModel):
             )
         if not self.source_label:
             raise ValueError("External route binding reconcile requires source_label")
-        if self.mode == "apply":
+        if self.production_address is not None:
+            if (
+                self.instance != "prod"
+                or self.desired_status != "active"
+                or self.expected_current.state != "present"
+                or not self.reason
+                or self.confirmation
+            ):
+                raise ValueError(
+                    "Production address changes require an existing active production route and a reason."
+                )
+            if (self.mode == "apply") != bool(self.reviewed_plan_sha256):
+                raise ValueError("Apply requires the production address dry-run plan digest.")
+        elif self.reviewed_plan_sha256:
+            raise ValueError("A production address review requires production_address.")
+        elif self.mode == "apply":
             if not self.reason:
                 raise ValueError("External route binding reconcile apply requires a reason")
             if self.confirmation != "APPLY EXTERNAL ROUTE BINDING RECONCILE":
@@ -2983,6 +3002,8 @@ class _ExternalRouteBindingMutationStore(_ExternalRouteBindingReconcileStore, Pr
         expected_record: EnvironmentRouteBindingRecord | None,
         replacement_record: EnvironmentRouteBindingRecord,
         mutation: DbOnlyMutationRequest,
+        address_change: control_plane_route_binding_external_reconcile.ExternalProductionAddressChange
+        | None = None,
     ) -> RouteBindingReconcileWriteResult: ...
 
 
@@ -5376,6 +5397,27 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Browser route repair requires the signed-in administrator.",
             )
+
+    def read_external_route_reconcile_identity(
+        request: Request,
+        response: Response,
+        binding_request: ExternalRouteBindingReconcileEnvelope,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        if binding_request.production_address is None:
+            return read_write_identity(authorization=authorization)
+        identity = require_github_human_identity(
+            resolve_browser_mutation_identity(
+                request=request,
+                response=response,
+                authorization=authorization,
+                cookie=cookie,
+                allow_owner=False,
+            )
+        )
+        require_route_repair_administrator(identity)
+        return identity
 
     def read_target_setup_identity(
         request: Request,
@@ -22798,7 +22840,7 @@ def create_launchplane_fastapi_app(
     async def reconcile_external_route_binding(
         request: Request,
         binding_request: ExternalRouteBindingReconcileEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_external_route_reconcile_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -22808,15 +22850,23 @@ def create_launchplane_fastapi_app(
             if binding_request.mode == "apply"
             else "route_binding.external.plan"
         )
-        ensure_route_binding_allowed(
-            identity=identity,
-            trace_id=trace_id,
-            action=authorization_action,
-            product=binding_request.product,
-            context_name=binding_request.context,
-            instance_name=binding_request.instance,
-            message="Workflow cannot reconcile external route bindings for the requested lane.",
-        )
+        if binding_request.production_address is None:
+            ensure_route_binding_allowed(
+                identity=identity,
+                trace_id=trace_id,
+                action=authorization_action,
+                product=binding_request.product,
+                context_name=binding_request.context,
+                instance_name=binding_request.instance,
+                message="Workflow cannot reconcile external route bindings for the requested lane.",
+            )
+        elif not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Production address changes require Launchplane database storage.",
+            )
         if binding_request.mode == "apply" and not idempotency_key.strip():
             raise _launchplane_http_error(
                 status_code=400,
@@ -22836,6 +22886,49 @@ def create_launchplane_fastapi_app(
         mutation_store: _ExternalRouteBindingMutationStore | None = None
         normalized_key = idempotency_key.strip()
         payload_fingerprint = ""
+
+        def replay_external_apply() -> AcceptedEvidenceResponse | None:
+            if mutation_store is None:
+                return None
+            preflight = mutation_store.prepare_db_only_mutation(
+                scope=idempotency_scope(identity),
+                route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint=payload_fingerprint,
+            )
+            if preflight.status in {"missing", "released"}:
+                return None
+            if preflight.record is None:
+                raise RuntimeError("External route binding mutation preflight requires evidence.")
+            if preflight.status == "replayed":
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=preflight.record,
+                    route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
+                )
+            failures = {
+                "conflict": (
+                    "idempotency_key_reused",
+                    "Idempotency-Key was already used for a different Launchplane request payload on this route.",
+                ),
+                "in_progress": (
+                    "mutation_in_progress",
+                    "A matching external route binding mutation is already running. Retry with the same Idempotency-Key.",
+                ),
+                "reconcile_required": (
+                    "mutation_reconciliation_required",
+                    "The external route binding mutation requires reconciliation before retry.",
+                ),
+            }
+            if preflight.status not in failures:
+                raise RuntimeError(
+                    f"Unsupported external route binding preflight status: {preflight.status}"
+                )
+            code, message = failures[preflight.status]
+            raise _launchplane_http_error(
+                status_code=409, trace_id=trace_id, code=code, message=message
+            )
+
         if binding_request.mode == "apply":
             try:
                 mutation_store = require_external_route_binding_mutation_store(record_store)
@@ -22846,75 +22939,52 @@ def create_launchplane_fastapi_app(
                     code="database_storage_required",
                     message=str(error),
                 ) from error
-            raw_payload = await request.json()
             payload_fingerprint = idempotency_request_fingerprint(
                 route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
-                payload=raw_payload,
+                payload=await request.json(),
             )
-            preflight = mutation_store.prepare_db_only_mutation(
-                scope=idempotency_scope(identity),
-                route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
-                idempotency_key=normalized_key,
-                request_fingerprint=payload_fingerprint,
-            )
-            if preflight.status not in {"missing", "released"}:
-                if preflight.record is None:
-                    raise RuntimeError(
-                        "External route binding mutation preflight requires evidence."
-                    )
-                if preflight.status == "replayed":
-                    return replay_idempotent_response(
-                        trace_id=trace_id,
-                        stored_record=preflight.record,
-                        route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
-                    )
-                if preflight.status == "conflict":
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="idempotency_key_reused",
-                        message=(
-                            "Idempotency-Key was already used for a different "
-                            "Launchplane request payload on this route."
-                        ),
-                    )
-                if preflight.status == "in_progress":
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="mutation_in_progress",
-                        message=(
-                            "A matching external route binding mutation is already running. "
-                            "Retry with the same Idempotency-Key."
-                        ),
-                    )
-                if preflight.status == "reconcile_required":
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="mutation_reconciliation_required",
-                        message=(
-                            "The external route binding mutation requires reconciliation "
-                            "before retry."
-                        ),
-                    )
-                raise RuntimeError(
-                    "Unsupported external route binding mutation preflight status: "
-                    f"{preflight.status}"
-                )
+            replayed = replay_external_apply()
+            if replayed is not None:
+                return replayed
 
-        reconcile_plan = control_plane_route_binding_external_reconcile.plan_external_route_binding_reconcile(
-            record_store=route_binding_store,
-            request=control_plane_route_binding_external_reconcile.ExternalRouteBindingReconcileRequest(
-                product=binding_request.product,
-                context=binding_request.context,
-                instance=binding_request.instance,
-                expected_current=binding_request.expected_current,
-                desired_status=binding_request.desired_status,
-                source_label=binding_request.source_label,
-                evaluated_at=utc_now_timestamp(),
-            ),
-        )
+        try:
+            reconcile_plan = control_plane_route_binding_external_reconcile.plan_external_route_binding_reconcile(
+                record_store=route_binding_store,
+                request=control_plane_route_binding_external_reconcile.ExternalRouteBindingReconcileRequest(
+                    product=binding_request.product,
+                    context=binding_request.context,
+                    instance=binding_request.instance,
+                    expected_current=binding_request.expected_current,
+                    desired_status=binding_request.desired_status,
+                    source_label=binding_request.source_label,
+                    evaluated_at=utc_now_timestamp(),
+                ),
+                production_address=binding_request.production_address,
+            )
+        except ValueError as error:
+            if binding_request.production_address is None:
+                raise
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_production_address",
+                message="The proposed production address failed product profile validation.",
+            ) from error
+        address_change = reconcile_plan.address_change
+        plan_sha256 = reconcile_plan.address_review_sha256(reason=binding_request.reason)
+        if (
+            binding_request.reviewed_plan_sha256
+            and binding_request.reviewed_plan_sha256 != plan_sha256
+        ):
+            replayed = replay_external_apply()
+            if replayed is not None:
+                return replayed
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message="The production address plan changed. Run the review again.",
+            )
 
         def reconcile_response(*, route_binding_status: str) -> AcceptedEvidenceResponse:
             result_payload = reconcile_plan.model_dump(mode="json", exclude_none=True)
@@ -22924,7 +22994,16 @@ def create_launchplane_fastapi_app(
             result_payload["source_label"] = binding_request.source_label
             result_payload["desired_status"] = binding_request.desired_status
             result_payload["route_binding_status"] = route_binding_status
+            if address_change is not None and reconcile_plan.current_record is not None:
+                result_payload["address_diff"] = address_change.diff()
+                result_payload["current_domains"] = [
+                    domain.model_dump(mode="json")
+                    for domain in reconcile_plan.current_record.domains
+                ]
+                result_payload["plan_sha256"] = plan_sha256
             if reconcile_plan.record is not None:
+                if address_change is not None:
+                    result_payload["source_label"] = reconcile_plan.record.source.source_label
                 result_payload["record"] = redacted_route_binding_record(
                     reconcile_plan.record
                 ).model_dump(mode="json")
@@ -22964,6 +23043,7 @@ def create_launchplane_fastapi_app(
         mutation_result = mutation_store.reconcile_route_binding_record(
             expected_record=reconcile_plan.current_record,
             replacement_record=reconcile_plan.record,
+            address_change=address_change,
             mutation=DbOnlyMutationRequest(
                 scope=idempotency_scope(identity),
                 route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
