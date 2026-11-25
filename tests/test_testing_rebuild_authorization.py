@@ -64,15 +64,18 @@ class DirectorTestingRebuildAuthorizationTests(unittest.TestCase):
         )
 
     def test_standing_capture_refuses_other_callers_and_non_native_destinations(self) -> None:
+        in_place = self.original.request.model_copy(
+            update={"strategy": "recreate-in-place", "data_source_mode": "existing"}
+        )
         for identity, request, context in (
             (
                 replace(self.identity, director_agent=False),
-                self.original.request,
+                in_place,
                 self.original.context,
             ),
             (
                 self.identity,
-                self.original.request.model_copy(update={"instance": "prod"}),
+                in_place.model_copy(update={"instance": "prod"}),
                 self.original.context,
             ),
             (

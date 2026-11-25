@@ -11103,7 +11103,9 @@ def create_launchplane_fastapi_app(
                 request_fingerprint=build_request_fingerprint(raw_payload),
                 created_at=created_at,
                 authorization=operation_authorization,
-                native_preflight=native_testing_preflight if director_rebuild else None,
+                native_preflight=native_testing_preflight
+                if director_rebuild and apply_request.replacement.strategy == "replace-and-cutover"
+                else None,
             )
         except NativeSourceAuthorizationDenied as error:
             raise _launchplane_http_error(

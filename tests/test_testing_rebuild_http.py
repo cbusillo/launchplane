@@ -1059,6 +1059,71 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
 
+    async def test_director_can_redeploy_existing_odoo_testing_data_in_exclusive_context(
+        self,
+    ) -> None:
+        from control_plane.testing_rebuild_authorization import (
+            director_testing_rebuild_authorization_allows,
+        )
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        config = _local_operator_bearer_config()
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=self.policy,
+            bearer_identity_config=config,
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.fixture.root,
+        )
+        headers = {"Authorization": "Bearer local-operator-token", "Idempotency-Key": "redeploy"}
+        payload = {
+            "product": self.product,
+            "replacement": {
+                "product": self.product,
+                "instance": "testing",
+                "strategy": "recreate-in-place",
+                "data_source_mode": "existing",
+                "artifact_id": self.manifest.artifact_id,
+                "source_git_ref": self.manifest.source_commit,
+            },
+        }
+        self.store.write_artifact_manifest(self.manifest)
+        accepted = await request(
+            app,
+            "POST",
+            admission.ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+            headers=headers,
+            payload=payload,
+        )
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        (operation,) = self.store.list_odoo_stable_target_replacement_operation_records(
+            idempotency_key=headers["Idempotency-Key"]
+        )
+        authorization = operation.authorization
+        assert authorization is not None
+        self.assertTrue(
+            director_testing_rebuild_authorization_allows(
+                authorization=authorization, operation=operation, store=self.store, config=config
+            )
+        )
+        profile = self.store.read_product_profile_record(self.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"product": "another-product"})
+        )
+        self.assertFalse(
+            director_testing_rebuild_authorization_allows(
+                authorization=authorization, operation=operation, store=self.store, config=config
+            )
+        )
+        refused = await request(
+            app,
+            "POST",
+            admission.ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+            headers=headers,
+            payload=payload,
+        )
+        self.assertEqual(refused.status_code, 403, refused.text)
+
     async def test_director_agent_cannot_queue_odoo_through_product_native_route(self) -> None:
         from tests.http_app_test_support import _local_operator_bearer_config
 

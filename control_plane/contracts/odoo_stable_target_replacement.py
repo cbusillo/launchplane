@@ -164,6 +164,14 @@ class OdooStableTargetReplacementApplyRequest(OdooStableTargetReplacementRequest
     timeout_seconds: int | None = Field(default=None, ge=1)
     health_timeout_seconds: int | None = Field(default=None, ge=1)
 
+    @property
+    def is_existing_testing_redeploy(self) -> bool:
+        return (
+            self.instance == "testing"
+            and self.strategy == "recreate-in-place"
+            and self.data_source_mode == "existing"
+        )
+
     @model_validator(mode="after")
     def _validate_apply_request(self) -> "OdooStableTargetReplacementApplyRequest":
         if self.strategy == "replace-and-cutover":
