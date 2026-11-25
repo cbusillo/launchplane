@@ -27,6 +27,7 @@ from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.http_app import LaunchplaneErrorDetail
 from control_plane.odoo_testing_usage import (
     MAX_CREDENTIAL_CANDIDATES,
+    MAX_CREDENTIAL_VALUE_LENGTH,
     ODOO_USAGE_REASON_CODES,
     OdooTestingUsage,
     credential_digest,
@@ -937,12 +938,15 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         self.remote.side_effect = read_parameters
         for rows, reason in (
             (
-                [unset, ["another.setting", collision]],
+                [unset, ["another.setting", collision], ["another.setting", "local-value"]],
                 "preview_production_credential_separation_unproven:SERVICE_SECRET",
             ),
             ([[None, None]], "credential_inventory_shape"),
             ([["private-key", 17]], "credential_inventory_shape"),
-            ([["private-key", "x" * (1024 * 1024 + 1)]], "credential_inventory_value_size"),
+            (
+                [["private-key", "x" * (MAX_CREDENTIAL_VALUE_LENGTH + 1)]],
+                "credential_inventory_value_size",
+            ),
             (
                 [[str(n), f"value-{n}"] for n in range(MAX_CREDENTIAL_CANDIDATES + 1)],
                 "credential_inventory_count",

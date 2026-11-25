@@ -339,6 +339,7 @@ ODOO_TESTING_USAGE_CONTAINER_PROGRAM = odoo_usage_container_program("testing")
 
 
 MAX_CREDENTIAL_CANDIDATES = 4096
+MAX_CREDENTIAL_VALUE_LENGTH = 1024 * 1024
 
 
 def credential_digest(nonce: str, value: str) -> str:
@@ -382,7 +383,7 @@ def credential_candidates(values: dict[str, str]) -> set[tuple[str, str]]:
             value = scalar
         if not isinstance(value, str) or not value or (name, value) in candidates:
             continue
-        if len(value) > 1024 * 1024:
+        if len(value) > MAX_CREDENTIAL_VALUE_LENGTH:
             raise CredentialValueTooLarge
         candidates.add((name, value))
         try:
@@ -408,6 +409,7 @@ def credential_candidates(values: dict[str, str]) -> set[tuple[str, str]]:
 ODOO_TESTING_USAGE_HOST_PROGRAM = (
     COPY_RUNTIME_INSPECTION_LIBRARY
     + f"MAX_CREDENTIAL_CANDIDATES={MAX_CREDENTIAL_CANDIDATES}\n"
+    + f"MAX_CREDENTIAL_VALUE_LENGTH={MAX_CREDENTIAL_VALUE_LENGTH}\n"
     + inspect.getsource(credential_digest)
     + inspect.getsource(credential_child_name)
     + inspect.getsource(credential_scalar_text)
@@ -517,7 +519,6 @@ def preview_resources():
         raise UsageUnavailable('credential_inventory_shape')
     if not isinstance(parameters,list):
         raise UsageUnavailable('credential_inventory_shape')
-    values={}
     for row in parameters:
         if not isinstance(row,list) or len(row)!=2 or not isinstance(row[0],str):
             raise UsageUnavailable('credential_inventory_shape')
@@ -526,8 +527,7 @@ def preview_resources():
             continue
         if not isinstance(value,str):
             raise UsageUnavailable('credential_inventory_shape')
-        values[key]=value
-    add_credential_candidates(candidates,values)
+        add_credential_candidates(candidates,{key:value})
     hashes=sorted(credential_digest(resource_spec['credential_nonce'],value) for value in candidates)
     return snapshots,hashes
 
