@@ -913,6 +913,58 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             )
         )
 
+    async def test_preview_parameter_inventory_qualifies_only_after_complete_comparison(
+        self,
+    ) -> None:
+        from tests.test_preview_clean_snapshot import PreviewCleanSnapshotTests
+
+        host = PreviewCleanSnapshotTests()
+        self.addCleanup(host.doCleanups)
+        host.setUp()
+        collision = "private-production-password"
+        self.production["SERVICE_SECRET"] = collision
+        unset = ["unused.setting", None]
+        rows: object
+
+        def read_parameters(**kwargs: Any) -> None:
+            kwargs["receive"](
+                host.preview_usage(
+                    parameters=rows,
+                    credential_nonce=kwargs["payload"]["preview_spec"]["credential_nonce"],
+                )
+            )
+
+        self.remote.side_effect = read_parameters
+        for rows, reason in (
+            (
+                [unset, ["another.setting", collision]],
+                "preview_production_credential_separation_unproven:SERVICE_SECRET",
+            ),
+            ([[None, None]], "credential_inventory_shape"),
+            ([["private-key", 17]], "credential_inventory_shape"),
+            ([["private-key", "x" * (1024 * 1024 + 1)]], "credential_inventory_value_size"),
+            (
+                [[str(n), f"value-{n}"] for n in range(MAX_CREDENTIAL_CANDIDATES + 1)],
+                "credential_inventory_count",
+            ),
+        ):
+            with self.subTest(reason=reason):
+                response = await self.collect()
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertTrue(response.json()["error"]["message"].endswith(reason), response.text)
+                self.assertNotIn(collision, response.text)
+                self.assertNotIn("private-key", response.text)
+                self.assertIsNone(
+                    self.store.read_disposable_lane_safety(
+                        self.profile.product, "cm", self.issued.preview_slug
+                    )
+                )
+
+        rows = [unset]
+        response = await self.collect()
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["result"]["production_resources"], "isolated")
+
     async def test_production_url_password_in_preview_standalone_value_refuses(self) -> None:
         self.production["SMTP_URL"] = "smtps://sender:private-production-token@mail.example.invalid"
         self.preview_candidates = ["private-production-token"]

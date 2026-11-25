@@ -37,7 +37,10 @@ ODOO_USAGE_PROBE_REASON_CODES = frozenset(
         "container_identity_changed",
         "container_inventory_unavailable",
         "container_probe_unavailable",
+        "credential_inventory_count",
+        "credential_inventory_shape",
         "credential_inventory_unavailable",
+        "credential_inventory_value_size",
         "database_cleanup_unavailable",
         "database_connection_unavailable",
         "database_driver_unavailable",
@@ -350,6 +353,10 @@ def credential_scalar_text(value: bool | int | float) -> tuple[str, str]:
     return str(value), json.dumps(value)
 
 
+class CredentialValueTooLarge(ValueError):
+    pass
+
+
 def credential_candidates(values: dict[str, str]) -> set[tuple[str, str]]:
     candidates: set[tuple[str, str]] = set()
     pending: list[tuple[str, object]] = list(values.items())
@@ -376,7 +383,7 @@ def credential_candidates(values: dict[str, str]) -> set[tuple[str, str]]:
         if not isinstance(value, str) or not value or (name, value) in candidates:
             continue
         if len(value) > 1024 * 1024:
-            raise ValueError("credential_inventory_unavailable")
+            raise CredentialValueTooLarge
         candidates.add((name, value))
         try:
             address = urlsplit(value)
@@ -404,6 +411,7 @@ ODOO_TESTING_USAGE_HOST_PROGRAM = (
     + inspect.getsource(credential_digest)
     + inspect.getsource(credential_child_name)
     + inspect.getsource(credential_scalar_text)
+    + inspect.getsource(CredentialValueTooLarge)
     + inspect.getsource(credential_candidates)
     + r"""
 import base64,hashlib,json,subprocess,sys
@@ -472,6 +480,16 @@ def one_inspection(identifier):
         raise UsageUnavailable('container_inventory_unavailable')
     return rows[0]
 
+def add_credential_candidates(candidates,values):
+    try:
+        candidates.update(value for _,value in credential_candidates(values))
+    except CredentialValueTooLarge:
+        raise UsageUnavailable('credential_inventory_value_size')
+    except ValueError:
+        raise UsageUnavailable('credential_inventory_unavailable')
+    if len(candidates)>MAX_CREDENTIAL_CANDIDATES:
+        raise UsageUnavailable('credential_inventory_count')
+
 def preview_resources():
     resource_spec=spec['preview_spec']
     inspected=inspect_copy_runtime(resource_spec,expected_instance='preview')
@@ -482,12 +500,7 @@ def preview_resources():
     snapshots={}
     for service,(_,container) in inspected.items():
         environment=dict(item.split('=',1) for item in container['Config']['Env'] if '=' in item)
-        try:
-            candidates.update(value for _,value in credential_candidates(environment))
-            if len(candidates)>MAX_CREDENTIAL_CANDIDATES:
-                raise ValueError('credential_inventory_unavailable')
-        except ValueError:
-            raise UsageUnavailable('credential_inventory_unavailable')
+        add_credential_candidates(candidates,environment)
         if any(environment.get(key) for key in resource_spec['forbidden_credential_keys']):
             raise CopyReadbackRefused(ReadbackPredicate.CREDENTIALS)
         if service!='database' and json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))!=resource_spec['runtime_identity']:
@@ -498,15 +511,23 @@ def preview_resources():
     try:
         output=docker('exec','-i',database_id,'sh','-c','psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"','_',resource_spec['database_name'],stdin=sql.encode())
         parameters=json.loads(output)
-        if not isinstance(parameters,list) or any(not isinstance(row,list) or len(row)!=2 or not all(isinstance(value,str) for value in row) for row in parameters):
-            raise ValueError('credential_inventory_unavailable')
-        candidates.update(value for _,value in credential_candidates(dict(parameters)))
-        if len(candidates)>MAX_CREDENTIAL_CANDIDATES:
-            raise ValueError('credential_inventory_unavailable')
     except subprocess.SubprocessError:
         raise CopyReadbackRefused(ReadbackPredicate.DATABASE_READ)
     except ValueError:
-        raise UsageUnavailable('credential_inventory_unavailable')
+        raise UsageUnavailable('credential_inventory_shape')
+    if not isinstance(parameters,list):
+        raise UsageUnavailable('credential_inventory_shape')
+    values={}
+    for row in parameters:
+        if not isinstance(row,list) or len(row)!=2 or not isinstance(row[0],str):
+            raise UsageUnavailable('credential_inventory_shape')
+        key,value=row
+        if value is None:
+            continue
+        if not isinstance(value,str):
+            raise UsageUnavailable('credential_inventory_shape')
+        values[key]=value
+    add_credential_candidates(candidates,values)
     hashes=sorted(credential_digest(resource_spec['credential_nonce'],value) for value in candidates)
     return snapshots,hashes
 
