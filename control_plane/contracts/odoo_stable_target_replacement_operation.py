@@ -223,9 +223,10 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
             if (
                 self.authorization.grant == "director_testing_rebuild"
                 and not self.is_native_testing_rebuild
+                and not self.request.is_existing_testing_redeploy
             ):
                 raise ValueError(
-                    "Director testing rebuild provenance requires the native lifecycle."
+                    "Director testing provenance requires a testing rebuild or existing-data redeploy."
                 )
             if self.schema_version != 2:
                 raise ValueError(

@@ -40,12 +40,15 @@ def director_testing_rebuild_allowed(
         not isinstance(identity, LocalOperatorIdentity)
         or not director_agent_identity(identity)
         or request.instance != "testing"
-        or request.strategy != "replace-and-cutover"
         or not isinstance(store, PostgresRecordStore)
     ):
         return False
     try:
         profile = store.read_product_profile_record(request.product)
+        if request.strategy != "replace-and-cutover" and not (
+            profile.driver_id == "odoo" and request.is_existing_testing_redeploy
+        ):
+            return False
         if profile.driver_id == "odoo":
             return (
                 profile.is_active
