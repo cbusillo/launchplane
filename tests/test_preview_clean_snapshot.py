@@ -62,7 +62,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         changed: bool = False,
         health_tick: bool = False,
         stopped: bool = False,
-        parameters: dict[str, str] | None = None,
+        parameters: object = (),
+        credential_nonce: str = "fixture-nonce",
     ) -> dict[str, Any]:
         from control_plane.dokploy.compose import ODOO_WEB_START_COMMAND
         from control_plane.odoo_testing_usage import ODOO_TESTING_USAGE_HOST_PROGRAM
@@ -104,7 +105,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 },
                 "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
                 "runtime_identity": identity,
-                "credential_nonce": "fixture-nonce",
+                "credential_nonce": credential_nonce,
                 "forbidden_credential_keys": [],
                 "integration_spec": "fixture-policy",
                 "integration_program": "fixture-integrations",
@@ -119,7 +120,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             if arguments[1] != "exec":
                 return self.command(arguments, **kwargs)
             if "psql" in " ".join(arguments):
-                frame_bytes = json.dumps(list((parameters or {}).items())).encode()
+                frame_bytes = json.dumps(parameters).encode()
             elif kwargs.get("input") == b"fixture-integrations":
                 frame_bytes = (
                     b"integration_readback_ok=true\n"
@@ -210,7 +211,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
     def test_preview_parameter_values_are_inventoried_only_on_the_pinned_database_image(
         self,
     ) -> None:
-        result = self.preview_usage(parameters={"custom.api_token": "private-production-password"})
+        result = self.preview_usage(
+            parameters=[["custom.api_token", "private-production-password"]]
+        )
         self.assertIn(
             credential_digest("fixture-nonce", "private-production-password"),
             result["credential_hashes"],
@@ -228,9 +231,11 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 f"VALUE_{number}=fixture-{index}-{number}"
                 for number in range(MAX_CREDENTIAL_CANDIDATES // 3)
             )
-        result = self.preview_usage(parameters={"custom.api_token": "private-production-password"})
+        result = self.preview_usage(
+            parameters=[["custom.api_token", "private-production-password"]]
+        )
         self.assertTrue(result["unavailable"])
-        self.assertEqual(result["reason_code"], "credential_inventory_unavailable")
+        self.assertEqual(result["reason_code"], "credential_inventory_count")
 
     def setUp(self) -> None:
         temporary = self.enterContext(TemporaryDirectory())

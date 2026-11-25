@@ -56,8 +56,10 @@ it matches the preview, including public fields of two structured secrets.
 That leaves credential separation unproven until its purpose is established;
 URL or scalar shape alone cannot supply that fact.
 Database parameters are read in a read-only transaction through the pinned
-database image; the production database is not inventoried. Preview parameters
-are compared only against known managed and provider production values. This
+database image; the production database is not inventoried. A named preview parameter with a SQL NULL value contributes no candidate.
+Malformed parameter data, an oversized candidate value, and an excessive combined
+candidate count each refuse qualification with a distinct value-free reason.
+Preview parameters are compared only against known managed and provider production values. This
 does not establish that `database.secret`, VAPID keys or other database-only
 production secrets have been rotated; sanitation proof
 belongs to the sanitized-copy work. Other tables, such as user API keys, are
